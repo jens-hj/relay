@@ -31,6 +31,7 @@
             "clippy"
           ];
         };
+        relayCodex = pkgs.callPackage ./nix/codex.nix { };
         tools = with pkgs; [
           rust
           bash
@@ -38,7 +39,7 @@
           pkg-config
           git
           gh
-          codex
+          relayCodex
           curl
           jq
           openssl
