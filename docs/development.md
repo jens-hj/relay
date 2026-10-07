@@ -24,6 +24,8 @@ Closing a desktop leaves the server and worker running. Reopen `just client` to 
 
 Worker turns run in their own Git worktrees using Codex's workspace-write sandbox. Session details show the thread, branch, base commit, worktree, latest measured token usage, and a bounded diff including untracked files. A completed turn still needs review against its source issue. Review changes and validation evidence before integrating; Relay does not merge, push, deploy, or change GitHub board status automatically. Cached input token counts describe the completed turn; they do not predict cache expiry or the cost of the next message. Compact/reset actions remain unavailable in this milestone.
 
+Use the [worker review checklist](review-checklist.md) before integrating a completed turn.
+
 Mosaic tools are available separately through `nix run .#mosaic-fmt` and `nix run .#mosaic-cli`, so entering the shell does not build editor or packaging tools. Use `nix fmt` to format the flake.
 
 `nix develop .#ui-test` also supplies Linux native-window verification tools: Xvfb, xdotool, ImageMagick, xclip, and Mesa. These stay out of the default shell. The desktop still needs a display; use Xvfb and Mesa software Vulkan when testing without a physical screen.
