@@ -1,6 +1,6 @@
 # Development
 
-Relay requires access to the private Mosaic repository on GitLab. Configure your normal Git HTTPS credential helper before resolving dependencies; credentials are never embedded in the manifests or lockfiles. Mosaic and the Nix input are pinned to the same published commit.
+Relay requires SSH access to the private Mosaic repository on GitLab. Both Cargo and Nix use `ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git`, pinned to the same published commit. They use your normal SSH configuration and agent; Cargo is configured to fetch through Git's CLI. Verify access with `git ls-remote git@gitlab.com:unincorporated/mosaic/mosaic.git HEAD`. Credentials are never embedded in the manifests or lockfiles.
 
 ## Local startup
 

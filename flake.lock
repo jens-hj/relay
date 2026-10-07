@@ -27,16 +27,17 @@
       "locked": {
         "lastModified": 1791212157,
         "narHash": "sha256-pGJ6sF0p/piejWKQE/4Kc+QBeagaL5P7tY2gOxVyO5I=",
-        "ref": "refs/heads/main",
+        "ref": "main",
         "rev": "658ccfa168fcdccea790b81d591ff263e555ce61",
         "revCount": 613,
         "type": "git",
-        "url": "https://gitlab.com/unincorporated/mosaic/mosaic.git"
+        "url": "ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git"
       },
       "original": {
+        "ref": "main",
         "rev": "658ccfa168fcdccea790b81d591ff263e555ce61",
         "type": "git",
-        "url": "https://gitlab.com/unincorporated/mosaic/mosaic.git"
+        "url": "ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git"
       }
     },
     "nixpkgs": {

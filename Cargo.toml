@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 relay-core = { path = "crates/relay-core" }
-mosaic = { git = "https://gitlab.com/unincorporated/mosaic/mosaic.git", rev = "658ccfa168fcdccea790b81d591ff263e555ce61" }
+mosaic = { git = "ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git", rev = "658ccfa168fcdccea790b81d591ff263e555ce61" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
