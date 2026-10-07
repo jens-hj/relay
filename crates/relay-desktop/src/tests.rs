@@ -48,6 +48,31 @@ fn mount(light: bool, width: f32) -> Mounted {
 }
 
 #[test]
+fn approval_control_scales_with_its_label_and_keeps_the_existing_approval() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.receive(NetworkState {
+        snapshot: live_snapshot(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+    mounted.click("Open issue #2");
+    let before = mounted.rect("Approve implementation for this turn");
+    mounted.model.worker_approval.set(true);
+    mounted.model.preferences.update(|p| p.scale = 1.5);
+    mounted.settle();
+    let after = mounted.rect("Approve implementation for this turn");
+    assert!((after.size.height / before.size.height - 1.5).abs() < 0.05);
+    assert!(mounted.model.worker_approval.get_untracked());
+    mounted.focus("Approve implementation for this turn");
+    mounted.key(Key::Space, false);
+    assert!(!mounted.model.worker_approval.get_untracked());
+}
+
+#[test]
 fn display_settings_persist_validate_and_preserve_existing_file_on_failure() {
     use crate::settings::{Preferences, ThemeMode};
     let directory = std::env::temp_dir().join(format!("relay-settings-{}", uuid::Uuid::new_v4()));

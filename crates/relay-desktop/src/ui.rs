@@ -1001,6 +1001,44 @@ fn palette_action(model: Model, index: usize) {
 }
 
 #[component]
+fn WorkerApproval(model: Model) -> Element {
+    let root = view! {
+        col height:min-content {}
+    };
+    root.switch(
+        move || {
+            use mosaic::core::theme::{color, scalar};
+            (
+                scalar(ui_scale),
+                color(surface),
+                color(accent),
+                color(edge),
+                color(base),
+            )
+        },
+        move |parent, &(scale, fill, accent_color, edge_color, mark)| {
+            mosaic::widgets::checkbox_styled(
+                parent,
+                model.worker_approval,
+                Some("Approve implementation for this turn"),
+                CheckboxStyle {
+                    fill,
+                    fill_checked: accent_color,
+                    stroke: edge_color,
+                    mark,
+                    focus: accent_color,
+                    size: 18.0 * scale,
+                    radius: 5.0 * scale,
+                    label: TextStyle::inherited(),
+                    gap: 8.0 * scale,
+                },
+            );
+        },
+    );
+    root
+}
+
+#[component]
 fn WorkerForm(model: Model, continuation: bool) -> Element {
     view! {
         col height:min-content gap:{px(10.0)}px {
@@ -1025,12 +1063,7 @@ fn WorkerForm(model: Model, continuation: bool) -> Element {
             input #input-field label:"Worker prompt" placeholder:"Prompt for this turn…"
                 model.worker_prompt
             if model.worker_profile(continuation).is_ok_and(|(p, _)| p.permissions.get(&Task::Implement) == Some(&Permission::Ask)) {
-                checkbox label:"Approve implementation for this turn" model.worker_approval as approval
-                {
-                    if let Some(label) = approval.label() { label.inherit_font_size(); }
-                    approval.root().style_dyn(move || Style::row().height(Dimension::MinContent).gap(px(8.0)).shrink(0.0));
-                    approval.indicator().style_dyn(move || Style::stack().width(px(18.0)).height(px(18.0)).shrink(0.0));
-                }
+                WorkerApproval model:(model)
             }
             text font-size:{px(11.0)}px font-color:muted
                 { model.worker_gate(continuation).err().unwrap_or_else(|| "Ready · server rechecks policy and revision".into()) }
