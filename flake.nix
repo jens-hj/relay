@@ -33,6 +33,8 @@
         };
         tools = with pkgs; [
           rust
+          bash
+          just
           pkg-config
           git
           curl

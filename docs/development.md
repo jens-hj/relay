@@ -4,20 +4,27 @@ Relay requires access to the private Mosaic repository on GitLab. Configure your
 
 ## Local startup
 
-The project's [flake.nix](../flake.nix) declares Relay's development environment. Enter `nix develop`, or use `direnv allow` with the checked-in `.envrc` to load it automatically. The default shell supplies Rust 1.89 with rustfmt, Clippy, rust-analyzer and Rust sources; Git, pkg-config, curl, jq, OpenSSL and SQLite; and Linux graphics/windowing libraries. `nix develop .#server` provides the server environment without desktop libraries. Inputs are pinned in `flake.lock`, with shared dependency pins following Mosaic.
+The project's [flake.nix](../flake.nix) declares Relay's development environment. Enter `nix develop`, or use `direnv allow` with the checked-in `.envrc` to load it automatically. The default shell supplies Rust 1.89 with rustfmt, Clippy, rust-analyzer and Rust sources; Bash, just, Git, pkg-config, curl, jq, OpenSSL and SQLite; and Linux graphics/windowing libraries. `nix develop .#server` provides the server environment without desktop libraries. Inputs are pinned in `flake.lock`, with shared dependency pins following Mosaic.
 
 Mosaic tools are available separately through `nix run .#mosaic-fmt` and `nix run .#mosaic-cli`, so entering the shell does not build editor or packaging tools. Use `nix fmt` to format the flake.
 
 ```sh
-export RELAY_TOKEN="$(openssl rand -hex 32)"
-cargo run --locked -p relay-server
+nix develop --command just dev
 ```
 
-In another development shell, set the same `RELAY_TOKEN` and run:
+`just dev` builds the workspace, generates a random token unless `RELAY_TOKEN` is already set, starts a loopback server, waits for it to be ready, and opens the desktop with the same token. Closing the desktop or pressing Ctrl+C stops the processes it started. It leaves the database intact. Use `just dev 7440` to choose another local port. This recipe sets `RELAY_BIND` and `RELAY_ENDPOINT` for the local pair; use `just server` and `just client` for separate or remote processes.
+
+For separate terminals, enter the development shell in each and supply the same token:
 
 ```sh
+# First terminal:
+export RELAY_TOKEN="$(openssl rand -hex 32)"
+just server
+
+# Second terminal, using the first terminal's token:
+export RELAY_TOKEN="<same token>"
 export RELAY_NAME="Your name"
-cargo run --locked -p relay-desktop
+just client
 ```
 
 The default server address is `127.0.0.1:7331`. Both processes require the token. Tokens must contain at least 16 printable ASCII characters with no spaces; use a randomly generated token. The token grants access to the entire workspace. Comment author names are display labels, not authenticated identities.
@@ -32,7 +39,7 @@ The default server address is `127.0.0.1:7331`. Both processes require the token
 | `RELAY_NAME` | Client | `Teammate`; editable in the comment composer |
 | `RELAY_THEME` | Client | `system`; optionally `light` or `dark` |
 
-Keep tokens in your shell/session environment or an external secret manager. `.env` and database files are ignored by Git; Relay does not automatically load `.env`. The bundled reusable template is [profiles/default.toml](../profiles/default.toml); set `RELAY_DEFAULT_PROFILE` to your own complete template when starting a new workspace.
+Keep tokens in your shell/session environment or an external secret manager. `just` also loads an optional `.env` file, allowing separate terminals to share your local configuration. `.env` and database files are ignored by Git; the binaries do not load `.env` themselves. The bundled reusable template is [profiles/default.toml](../profiles/default.toml); set `RELAY_DEFAULT_PROFILE` to your own complete template when starting a new workspace.
 
 ## Remote server
 
@@ -60,11 +67,10 @@ Conflicting saves do not overwrite newer server state. `Review latest state` ret
 ## Checks
 
 ```sh
-cargo test --locked --workspace
-cargo clippy --locked --workspace --all-targets -- -D warnings
-cargo fmt --all -- --check
-nix run .#mosaic-fmt -- --check crates/relay-desktop/src
+nix develop --command just check
 ```
+
+`just` lists available recipes. Individual commands include `just build`, `just test`, `just lint`, `just fmt`, `just fmt-check`, and `just nix-check`.
 
 Tests cover server persistence, idempotency, authentication, profile inheritance, validation, conflicts, event synchronization, and headless UI interactions. A native Linux window is also required for graphics, windowing, and clipboard verification. macOS and Windows verification remains separate from Linux validation.
 

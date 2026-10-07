@@ -10,11 +10,10 @@ The project declares its local development environment in [flake.nix](flake.nix)
 
 ```sh
 nix develop
-export RELAY_TOKEN="$(openssl rand -hex 32)"
-cargo run -p relay-server
-# In a second terminal with the same token:
-cargo run -p relay-desktop
+just dev
 ```
+
+`just dev` builds both processes, shares a fresh workspace token, and stops the server when you close the app or press Ctrl+C. Run `just` to list commands; `just check` runs the project's checks. With direnv enabled, run `just dev` directly.
 
 The server seeds a clearly labeled demo project. Boards and transcripts are fixtures; director profiles and contextual comments are real, persisted server data. No coding agent is started. Codex and Claude Code execution, provider synchronization, and context controls are later integrations.
 
