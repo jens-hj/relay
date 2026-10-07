@@ -998,3 +998,39 @@ async fn profile_changed_after_reservation_is_enforced_before_process_launch() {
             .contains("denies implementation")
     );
 }
+#[test]
+fn codex_jsonl_tolerates_unknown_events_items_and_extra_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = live();
+    let w = workspace(&dir.path().join("db"), &s, config());
+    let (mut s, _) = w
+        .store
+        .lock()
+        .unwrap()
+        .apply(env(s.revision, start(&s)), &w.config)
+        .unwrap();
+    let id = s.sessions.last().unwrap().id.clone();
+    runtime::event(&mut s, &id, &serde_json::json!({"type":"thread.started","thread_id":"recorded-thread","future_metadata":{"version":2}})).unwrap();
+    let before = s.clone();
+    assert!(
+        !runtime::event(
+            &mut s,
+            &id,
+            &serde_json::json!({"type":"future.event","new_field":true})
+        )
+        .unwrap()
+    );
+    assert!(!runtime::event(&mut s, &id, &serde_json::json!({"type":"item.completed","item":{"id":"new-item","type":"future_item","payload":{"new":true}}})).unwrap());
+    assert_eq!(s, before);
+    runtime::event(&mut s, &id, &serde_json::json!({"type":"item.completed","future_field":1,"item":{"id":"message","type":"agent_message","text":"Compatible response","future_field":[1,2,3]}})).unwrap();
+    assert_eq!(s.messages.last().unwrap().body, "Compatible response");
+    assert!(runtime::event(&mut s, &id, &serde_json::json!({"type":"turn.completed","future_field":{},"usage":{"input_tokens":9,"cached_input_tokens":2,"output_tokens":4,"future_tokens":7}})).unwrap());
+    assert_eq!(
+        s.sessions.last().unwrap().worker.as_ref().unwrap().usage,
+        Some(TokenUsage {
+            input_tokens: 9,
+            cached_input_tokens: 2,
+            output_tokens: 4
+        })
+    );
+}
