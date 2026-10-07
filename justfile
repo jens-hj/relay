@@ -6,6 +6,45 @@ set positional-arguments
 default:
     @just --list
 
+# Check the installed tools and server-side GitHub/Codex authentication.
+doctor:
+    cargo --version
+    git --version
+    gh --version
+    codex --version
+    gh auth status
+    codex login status
+
+# Create a persistent local workspace token; preserve existing configuration.
+setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -f .env ]]; then
+        printf '.env already exists; preserving your configuration.\n'
+        exit 0
+    fi
+    (umask 077; set -o noclobber; printf 'RELAY_TOKEN=%s\n' "${RELAY_TOKEN:-$(openssl rand -hex 32)}" > .env)
+    printf 'Created .env with a local workspace token.\n'
+
+# Serve Relay's live GitHub board. Run just client in another terminal.
+dogfood repo="jens-hj/relay" owner="jens-hj" board="5":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "${RELAY_TOKEN:-}" ]]; then
+        if [[ -f .env ]]; then
+            printf 'Set RELAY_TOKEN in .env or your environment before starting the live server.\n' >&2
+            exit 1
+        fi
+        just setup
+        exec just dogfood "$1" "$2" "$3"
+    fi
+    export RELAY_GITHUB_REPO="$1"
+    export RELAY_GITHUB_PROJECT_OWNER="$2"
+    export RELAY_GITHUB_PROJECT_NUMBER="$3"
+    export RELAY_REPO_PATH="${RELAY_REPO_PATH:-$PWD}"
+    export RELAY_DATABASE="${RELAY_DATABASE:-data/dogfood.sqlite3}"
+    exec cargo run --locked -p relay-server
+
 # Build and launch the local server and desktop; optionally choose another port.
 dev port="7331":
     #!/usr/bin/env bash

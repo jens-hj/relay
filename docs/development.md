@@ -4,7 +4,25 @@ Relay requires SSH access to the private Mosaic repository on GitLab. Both Cargo
 
 ## Local startup
 
-The project's [flake.nix](../flake.nix) declares Relay's development environment. Enter `nix develop`, or use `direnv allow` with the checked-in `.envrc` to load it automatically. The default shell supplies Rust 1.89 with rustfmt, Clippy, rust-analyzer and Rust sources; Bash, just, Git, pkg-config, curl, jq, OpenSSL and SQLite; and Linux graphics/windowing libraries. `nix develop .#server` provides the server environment without desktop libraries. Inputs are pinned in `flake.lock`, with shared dependency pins following Mosaic.
+The project's [flake.nix](../flake.nix) declares Relay's development environment. Enter `nix develop`, or use `direnv allow` with the checked-in `.envrc` to load it automatically. The default shell supplies Rust 1.89 with rustfmt, Clippy, rust-analyzer and Rust sources; Bash, just, Git, GitHub CLI, Codex CLI, pkg-config, curl, jq, OpenSSL and SQLite; and Linux graphics/windowing libraries. `nix develop .#server` provides the server environment without desktop libraries. Inputs are pinned in `flake.lock`, with shared dependency pins following Mosaic.
+
+## Work on Relay through Relay
+
+Authenticate on the server machine using `gh auth login` and `codex login`. GitHub board reads require `read:project` access in addition to repository access; if an existing CLI login lacks that scope, use `gh auth refresh --scopes read:project`. Existing CLI authentication and configured Codex model/provider are reused; Relay never copies credentials into its database. See [GitHub's Projects API authentication](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-api-to-manage-projects#authentication).
+
+```sh
+nix develop
+just doctor
+just dogfood
+```
+
+Keep this server terminal running. In a second terminal, enter the same project's dev environment and run `just client`. `just dogfood` creates a random shared token in a Git-ignored, owner-readable `.env` when one does not exist; existing configuration is preserved. It connects `jens-hj/relay` to [GitHub Project 5](https://github.com/users/jens-hj/projects/5), uses the current repository as the server-owned source checkout, and defaults to `data/dogfood.sqlite3`. Supply another board with `just dogfood owner/repo owner NUMBER`; set `RELAY_REPO_PATH` to its matching local Git checkout.
+
+Choose the live project, sync its board, select an issue, and start a worker under a director. The default implementation permission is Ask, so starting or continuing a turn requires explicit approval in the form. Scope, harness, implementation permission, and active-worker limits are checked by the server. The first harness is Codex; a Claude Code profile cannot start a run yet.
+
+Closing a desktop leaves the server and worker running. Reopen `just client` to reconnect, or use another machine with the same token and an SSH tunnel. Stopping the server interrupts active runs; they remain in history and must be continued explicitly after restart. `just dev` is a short-lived demo convenience: it stops its server when its desktop closes, so use separate server/client processes to exercise durable remote execution.
+
+Worker turns run in their own Git worktrees using Codex's workspace-write sandbox. Session details show the thread, branch, base commit, worktree, latest measured token usage, and a bounded diff including untracked files. A completed turn still needs review against its source issue. Review changes and validation evidence before integrating; Relay does not merge, push, deploy, or change GitHub board status automatically. Cached input token counts describe the completed turn; they do not predict cache expiry or the cost of the next message. Compact/reset actions remain unavailable in this milestone.
 
 Mosaic tools are available separately through `nix run .#mosaic-fmt` and `nix run .#mosaic-cli`, so entering the shell does not build editor or packaging tools. Use `nix fmt` to format the flake.
 
@@ -35,6 +53,10 @@ The default server address is `127.0.0.1:7331`. Both processes require the token
 | `RELAY_BIND` | Server | `127.0.0.1:7331` |
 | `RELAY_DATABASE` | Server | `data/relay.sqlite3` |
 | `RELAY_DEFAULT_PROFILE` | Server | Optional path to a complete TOML profile; used to seed a new database only |
+| `RELAY_GITHUB_REPO` | Server | Live repository, `owner/repo`; omitted for demo mode |
+| `RELAY_GITHUB_PROJECT_OWNER` | Server | GitHub user or organization that owns the board |
+| `RELAY_GITHUB_PROJECT_NUMBER` | Server | Projects v2 number from the board URL |
+| `RELAY_REPO_PATH` | Server | Matching local Git checkout; never supplied by a client |
 | `RELAY_ENDPOINT` | Client | `http://127.0.0.1:7331/` |
 | `RELAY_NAME` | Client | `Teammate`; editable in the comment composer |
 | `RELAY_THEME` | Client | `system`; optionally `light` or `dark` |

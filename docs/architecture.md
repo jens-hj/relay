@@ -12,7 +12,11 @@ Execution belongs on the server. Clients can disconnect, reconnect, and share se
 
 `relay-core` defines the domain, profile resolution/validation, fixture seed, and protocol. `relay-server` owns storage, authorization, mutations, and event publication. `relay-desktop` contains the Mosaic interface and a background network runtime. Reactive UI objects never cross worker threads; Mosaic's state channel delivers network updates to the UI thread.
 
-The seed board and transcripts are immutable fixtures. Profiles and comments are real workspace data. Every fixture implementation session links to a provider-qualified issue reference. Issues can have multiple director and worker sessions. No subprocesses, LLM calls, remote board writes, merges, or deployment actions exist in this foundation. All execution is therefore unavailable regardless of a profile's configured permissions.
+The demo board and transcripts are immutable fixtures. Profiles and comments are real workspace data. A configured live GitHub Projects v2 board supplies ordered Status columns and repository issue items. Explicit synchronization keeps the last successful board on failure and preserves remote issue identity. Draft issues and pull requests are excluded. GitHub remains authoritative; local worker state does not move remote items.
+
+Live implementation sessions require an issue and a director. The server checks the director's current effective scope, Codex harness, implementation permission, and worker limit before starting each turn. Ask requires explicit approval; Deny is not overridable. The server creates an isolated worktree and owns the Codex process, independently of clients. Codex JSONL events provide immutable transcript messages, thread identity, lifecycle state, and measured turn usage. Follow-ups resume the exact saved thread in the same worktree. Completed means the turn ended, not independent acceptance of the issue's requirements. A bounded diff and worktree provenance support human review; merging, pushing, deploying, and remote status writes are not exposed by Relay.
+
+The first implementation boundary is Codex's workspace-write sandbox plus server-enforced launch policy. Other profile responsibilities and completion criteria remain workflow configuration; Relay does not yet turn every configured action into a separately enforceable harness tool permission. Context compaction/reset and predictive cache warnings require a later harness integration. Cached token counts are measurements from completed turns, not a cache-expiry estimate.
 
 One server process owns one SQLite database. Its schema is versioned with `PRAGMA user_version`; schema versions newer than the server are rejected. The initial schema stores a serialized workspace snapshot plus durable command receipts. This keeps the first contract small; future growth can migrate entities to dedicated tables without changing their stable IDs. Every mutation and receipt is committed in one transaction before publishing the snapshot. Run one server per database; horizontal scaling is not supported.
 
@@ -26,7 +30,7 @@ All routes require `Authorization: Bearer <token>`, including WebSocket upgrade.
 | `POST /v1/commands` | Typed command envelope; returns committed snapshot |
 | `GET /v1/events` | WebSocket: initial snapshot followed by committed snapshots |
 
-Command envelopes carry `request_id` (UUID), `expected_revision`, and a tagged command. Supported commands update project defaults, create/update directors, and add comments. Stale revisions return HTTP 409. Invalid references/configuration return 422; invalid credentials return 401. Unexpected storage failures return a sanitized 500 response. Reusing an ID for a different command is rejected.
+Command envelopes carry `request_id` (UUID), `expected_revision`, and a tagged command. Supported commands update project defaults, create/update directors, add comments, synchronize a configured project, and start/send/stop workers. Stale revisions return HTTP 409. Invalid references/configuration return 422; invalid credentials return 401. Unexpected storage failures return a sanitized 500 response. Reusing an ID for a different command is rejected. Execution and provider commands are server runtime operations, not pure domain mutations; durable command receipts prevent duplicate launch on deliberate retry.
 
 Event delivery uses a watch channel: intermediate snapshots may coalesce, but each event is complete state. Client revision checks prevent late responses from replacing newer snapshots. Reconnection reads authoritative state and resubscribes. Writes are not retried automatically. Durable receipts make deliberate retries idempotent.
 
@@ -40,8 +44,8 @@ Profiles configure Codex or Claude Code, whole-project or selected-issue scope, 
 
 ## Next milestones
 
-1. Connect an authoritative GitHub or GitLab board, preserving provider-specific board identity and semantics.
-2. Integrate Codex and Claude Code with persistent server execution, capability reporting, issue-gated work, and enforceable director permissions.
+1. Expand the first GitHub/Codex loop to GitLab and Claude Code, preserving provider-specific board identity and semantics.
+2. Add autonomous director delegation, richer harness capability reporting, and enforceable permissions for additional actions.
 3. Add identities, membership, review permissions, and shared-session handoff.
 4. Implement full transcript cursor navigation, richer review anchors, and the three context lifecycle actions with actual harness support.
 5. Add reliable usage/cache reporting, then validate macOS/Windows and consider the browser client.

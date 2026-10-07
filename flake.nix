@@ -37,6 +37,8 @@
           just
           pkg-config
           git
+          gh
+          codex
           curl
           jq
           openssl
