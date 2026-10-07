@@ -58,6 +58,8 @@ fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig) -> Workspa
     store.save(snapshot).unwrap();
     let (snapshots, _) = watch::channel(snapshot.clone());
     Workspace {
+        transport_shutdown: watch::channel(false).0,
+        transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         store: Arc::new(Mutex::new(store)),
         snapshots,
         token: "test-token".into(),
@@ -1226,12 +1228,50 @@ async fn stop_cancel_and_shutdown_terminate_owned_descendants() {
                 w.store.lock().unwrap().controls[&id].send_replace(true);
             }
             "cancel" => task.abort(),
-            "shutdown" => Shutdown {
-                workspace: w.clone(),
+            "shutdown" => {
+                use futures_util::StreamExt;
+                use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let app = Router::new()
+                    .route("/events", get(events))
+                    .with_state(w.clone());
+                let (signal, received) = tokio::sync::oneshot::channel::<()>();
+                let shutdown = Shutdown {
+                    workspace: w.clone(),
+                };
+                let server = tokio::spawn(async move {
+                    axum::serve(listener, app)
+                        .with_graceful_shutdown(async move {
+                            received.await.unwrap();
+                            shutdown.shutdown().await.unwrap();
+                        })
+                        .await
+                        .unwrap();
+                });
+                let mut request = format!("ws://{address}/events")
+                    .into_client_request()
+                    .unwrap();
+                request
+                    .headers_mut()
+                    .insert("authorization", "Bearer test-token".parse().unwrap());
+                let (mut client, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+                assert!(client.next().await.unwrap().unwrap().is_text());
+                signal.send(()).unwrap();
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        match client.next().await {
+                            Some(Ok(message)) if message.is_close() => break,
+                            None => break,
+                            Some(Err(error)) => panic!("socket shutdown: {error}"),
+                            _ => {}
+                        }
+                    }
+                    server.await.unwrap();
+                })
+                .await
+                .unwrap();
             }
-            .shutdown()
-            .await
-            .unwrap(),
             _ => unreachable!(),
         }
         let _ = tokio::time::timeout(Duration::from_secs(10), task)
@@ -1942,4 +1982,102 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
             .id,
         new_id
     );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn hard_crash_kills_codex_parent_before_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "tests::hard_crash_child"])
+        .env("RELAY_CRASH_TEST_DIRECTORY", dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let db = dir.path().join("db");
+    let pid_file = dir.path().join("pid");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if pid_file.exists() && db.exists() {
+                let store = Store::open(&db, DirectorProfile::default()).unwrap();
+                if store
+                    .snapshot()
+                    .unwrap()
+                    .sessions
+                    .last()
+                    .unwrap()
+                    .worker
+                    .as_ref()
+                    .unwrap()
+                    .thread_id
+                    .is_some()
+                {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let pid: u32 = std::fs::read_to_string(pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let alive = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .is_some_and(|stat| {
+                    stat.rsplit_once(')').unwrap().1.split_whitespace().next() != Some("Z")
+                });
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let (_router, shutdown) = router_with_shutdown(
+        &db,
+        "crash-test-valid-token".into(),
+        DirectorProfile::default(),
+        RuntimeConfig::default(),
+    )
+    .unwrap();
+    let snapshot = shutdown.workspace.store.lock().unwrap().snapshot().unwrap();
+    let worker = snapshot.sessions.last().unwrap().worker.as_ref().unwrap();
+    assert_eq!(worker.status, WorkerStatus::Interrupted);
+    assert_eq!(worker.thread_id.as_deref(), Some("crash-thread"));
+    assert!(worker.worktree.is_some());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn hard_crash_child() {
+    let Some(directory) = std::env::var_os("RELAY_CRASH_TEST_DIRECTORY") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(directory);
+    let repo = review_repo(&dir);
+    let bin = dir.join("codex");
+    script(
+        &bin,
+        &format!(
+            "cat >/dev/null\necho $$ > '{}'\nprintf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"crash-thread\"}}'\nexec sleep 60",
+            dir.join("pid").display()
+        ),
+    );
+    let mut c = config();
+    c.repository = Some(repo);
+    c.codex = bin;
+    let s = live();
+    let w = workspace(&dir.join("db"), &s, c);
+    let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
+    runtime::run(w, id, run, prompt, rx).await;
 }

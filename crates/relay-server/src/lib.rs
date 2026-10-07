@@ -346,6 +346,8 @@ impl Store {
 
 #[derive(Clone)]
 struct Workspace {
+    transport_shutdown: watch::Sender<bool>,
+    transports: Arc<std::sync::atomic::AtomicUsize>,
     store: Arc<Mutex<Store>>,
     snapshots: watch::Sender<Snapshot>,
     token: Arc<str>,
@@ -593,6 +595,7 @@ pub struct Shutdown {
 }
 impl Shutdown {
     pub async fn shutdown(&self) -> Result<(), Error> {
+        self.workspace.transport_shutdown.send_replace(true);
         {
             let mut store = self.workspace.store.lock().map_err(Error::internal)?;
             store.closing = true;
@@ -623,7 +626,13 @@ impl Shutdown {
                     })
                     .collect::<Result<_, Error>>()?
             };
-            if unfinished.is_empty() {
+            if unfinished.is_empty()
+                && self
+                    .workspace
+                    .transports
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    == 0
+            {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
@@ -754,6 +763,8 @@ pub fn router_with_shutdown(
     }
     let (snapshots, _) = watch::channel(initial);
     let workspace = Workspace {
+        transport_shutdown: watch::channel(false).0,
+        transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         store: Arc::new(Mutex::new(store)),
         snapshots,
         token: token.into(),
@@ -850,12 +861,58 @@ async fn events(
 ) -> Result<Response, Error> {
     workspace.authorize(&headers)?;
     let receiver = workspace.snapshots.subscribe();
+    let shutdown = workspace.transport_shutdown.subscribe();
+    let store = workspace.store.lock().map_err(Error::internal)?;
+    if store.closing || *shutdown.borrow() {
+        return Err(Error::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shutdown",
+            "Server is shutting down",
+        ));
+    }
+    let transport = Transport(workspace.transports.clone());
+    transport
+        .0
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    drop(store);
     Ok(upgrade
         .max_message_size(64 * 1024)
-        .on_upgrade(move |socket| stream(socket, receiver)))
+        .on_upgrade(move |socket| async move {
+            let _transport = transport;
+            stream(socket, receiver, shutdown).await;
+        }))
 }
 
-async fn stream(mut socket: WebSocket, mut receiver: watch::Receiver<Snapshot>) {
+struct Transport(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for Transport {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+async fn stream(
+    mut socket: WebSocket,
+    mut receiver: watch::Receiver<Snapshot>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    tokio::select! {
+        biased;
+        _ = async {
+            while !*shutdown.borrow_and_update() {
+                if shutdown.changed().await.is_err() { break; }
+            }
+        } => {},
+        _ = stream_snapshots(&mut socket, &mut receiver) => return,
+    }
+    // A stalled client must not hold shutdown open indefinitely.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        socket.send(WsMessage::Close(None)),
+    )
+    .await;
+}
+
+async fn stream_snapshots(socket: &mut WebSocket, receiver: &mut watch::Receiver<Snapshot>) {
     loop {
         let snapshot = receiver.borrow_and_update().clone();
         let Ok(json) = serde_json::to_string(&snapshot) else {

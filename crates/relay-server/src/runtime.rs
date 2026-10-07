@@ -662,6 +662,23 @@ async fn execute(
     {
         cmd.process_group(0);
     }
+    #[cfg(target_os = "linux")]
+    {
+        let parent = unsafe { libc::getpid() };
+        // Only async-signal-safe operations between fork and exec. Checking the
+        // parent closes the race where it dies before PR_SET_PDEATHSIG is set.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != parent {
+                    libc::_exit(127);
+                }
+                Ok(())
+            });
+        }
+    }
     // Launch and stop reservation are serialized by the same store lock.
     let mut child = {
         let store = workspace.store.lock().map_err(Error::internal)?;
