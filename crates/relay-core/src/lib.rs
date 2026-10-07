@@ -36,6 +36,17 @@ pub struct Project {
     pub fixture: bool,
     pub columns: Vec<BoardColumn>,
     pub defaults: DirectorProfile,
+    #[serde(default)]
+    pub github: Option<GitHubProject>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitHubProject {
+    pub owner: String,
+    pub number: u64,
+    pub url: String,
+    pub last_synced_at: Option<u64>,
+    pub sync_error: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +85,45 @@ pub struct Session {
     pub title: String,
     pub role: SessionRole,
     pub fixture: bool,
+    #[serde(default)]
+    pub worker: Option<WorkerRun>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeSet {
+    pub files: Vec<String>,
+    pub diff: String,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerRun {
+    pub status: WorkerStatus,
+    pub thread_id: Option<String>,
+    pub worktree: Option<String>,
+    pub branch: Option<String>,
+    pub base_commit: Option<String>,
+    pub error: Option<String>,
+    pub usage: Option<TokenUsage>,
+    pub changes: Option<ChangeSet>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +169,23 @@ pub struct CommandEnvelope {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    SyncProject {
+        project_id: String,
+    },
+    StartWorker {
+        issue_id: String,
+        director_id: String,
+        prompt: String,
+        approve_implementation: bool,
+    },
+    SendWorker {
+        session_id: String,
+        prompt: String,
+        approve_implementation: bool,
+    },
+    StopWorker {
+        session_id: String,
+    },
     UpdateProjectDefaults {
         project_id: String,
         profile: DirectorProfile,
@@ -185,6 +252,12 @@ impl Snapshot {
     /// Apply only to a candidate snapshot: the server commits it atomically after validation.
     pub fn apply(&mut self, command: Command, id: &str, now: u64) -> Result<(), String> {
         match command {
+            Command::SyncProject { .. }
+            | Command::StartWorker { .. }
+            | Command::SendWorker { .. }
+            | Command::StopWorker { .. } => {
+                return Err("This command requires the server runtime".into());
+            }
             Command::UpdateProjectDefaults {
                 project_id,
                 profile,

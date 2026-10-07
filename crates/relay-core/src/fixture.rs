@@ -18,6 +18,7 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
         })
         .collect(),
         defaults,
+        github: None,
     };
     let issues = [
         ("issue-1", 1, "Connect the project board", "backlog", "integration", "Mirror the authoritative remote board and preserve its column order and issue identity. Relay adds agent activity alongside the existing workflow.", None),
@@ -61,6 +62,7 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
             title: "Profile design".into(),
             role: SessionRole::Director,
             fixture: true,
+            worker: None,
         },
         Session {
             id: "session-worker".into(),
@@ -70,6 +72,7 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
             title: "Profile validation".into(),
             role: SessionRole::Worker,
             fixture: true,
+            worker: None,
         },
         Session {
             id: "session-review".into(),
@@ -79,6 +82,7 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
             title: "Contextual review".into(),
             role: SessionRole::Director,
             fixture: true,
+            worker: None,
         },
     ];
     let messages = [
