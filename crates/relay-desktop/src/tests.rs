@@ -587,3 +587,122 @@ fn live_initial_selection_and_dynamic_columns_metadata_remain_reactive() {
     mounted.rect("Updated body");
     mounted.rect("Start worker");
 }
+
+#[test]
+fn removed_board_items_keep_history_but_block_new_turns_until_restored() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = live_snapshot();
+    let issue = snapshot
+        .issues
+        .iter_mut()
+        .find(|i| i.id == "issue-2")
+        .unwrap();
+    let previous_column = issue.column_id.clone();
+    issue.column_id = "github-removed-from-board".into();
+    let director_id = snapshot.directors[0].id.clone();
+    let session = &mut snapshot.sessions[0];
+    session.issue_id = Some("issue-2".into());
+    session.director_id = director_id;
+    session.fixture = false;
+    session.worker = Some(WorkerRun {
+        status: WorkerStatus::Completed,
+        thread_id: Some("recorded-thread".into()),
+        worktree: Some("/repo/worktree".into()),
+        branch: None,
+        base_commit: None,
+        error: None,
+        usage: None,
+        changes: None,
+    });
+    let session_id = session.id.clone();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted
+        .model
+        .worker_prompt
+        .set("Continue implementation".into());
+    mounted.model.worker_approval.set(true);
+    mounted.model.issue.set(Some("issue-2".into()));
+    mounted.settle();
+    mounted.rect("Issue removed from board");
+    assert!(
+        mounted
+            .model
+            .worker_gate(false)
+            .unwrap_err()
+            .contains("no longer")
+    );
+    mounted.model.open_session(session_id);
+    mounted.model.worker_approval.set(true);
+    mounted.settle();
+    mounted.rect("Session issue removed from board");
+    assert!(
+        mounted
+            .model
+            .worker_gate(true)
+            .unwrap_err()
+            .contains("no longer")
+    );
+    // Board membership changes do not stop an already active turn.
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Running);
+    mounted.settle();
+    mounted.focus("Stop worker");
+    mounted.click("Stop worker");
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::StopWorker { .. }
+    ));
+    mounted.model.busy.set(false);
+    mounted.model.snapshot.update(|s| {
+        s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed;
+        s.issues
+            .iter_mut()
+            .find(|i| i.id == "issue-2")
+            .unwrap()
+            .column_id = previous_column;
+    });
+    assert!(mounted.model.worker_gate(true).is_ok());
+    mounted.model.issue.set(None);
+    mounted.model.page.set(Page::Board);
+    mounted.settle();
+    mounted.rect("Open issue #2");
+    mounted.model.snapshot.update(|s| {
+        s.issues
+            .iter_mut()
+            .find(|i| i.id == "issue-2")
+            .unwrap()
+            .column_id = "github-removed-from-board".into()
+    });
+    mounted.settle();
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Open issue #2"))
+    );
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Column github-removed-from-board"))
+    );
+    assert!(
+        mounted
+            .model
+            .snapshot
+            .get_untracked()
+            .issues
+            .iter()
+            .any(|i| i.id == "issue-2")
+    );
+}

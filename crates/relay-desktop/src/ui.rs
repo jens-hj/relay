@@ -158,7 +158,13 @@ fn Board(model: Model, narrow: Derived<bool>) -> Element {
             .projects
             .iter()
             .find(|p| p.id == model.project.get())
-            .map(|p| p.columns.clone())
+            .map(|p| {
+                p.columns
+                    .iter()
+                    .filter(|c| c.id != "github-removed-from-board")
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default()
     });
     view! {
@@ -294,6 +300,10 @@ fn IssueDetail(model: Model) -> Element {
                         text font-size:14px label:{ current.get().body } { current.get().body }
                         text font-size:11px font-color:muted
                             { if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "Fixture issue · execution unavailable".to_string() } else { current.get().reference.url } }
+                        if model.snapshot.get().projects.iter().find(|p| p.id == current.get().project_id).is_some_and(|p| !p.columns.iter().any(|c| c.id == current.get().column_id)) {
+                            text font-size:12px font-color:muted label:"Issue removed from board"
+                                "No longer on this board · history retained. Restore and sync before starting or continuing a worker. Active turns may finish or be stopped."
+                        }
                         WorkerForm model:(model) continuation:false
                         text font-size:12px font-weight:650 "LINKED SESSIONS"
                         for (_, session) in { model.snapshot.get().sessions.into_iter().filter(|s| s.issue_id.as_ref() == Some(&detail_id.get())).map(|s| (s.id.clone(), s)).collect::<Vec<_>>() } {
@@ -818,11 +828,33 @@ fn WorkerPanel(model: Model) -> Element {
             .find(|s| s.id == model.session.get())
             .and_then(|s| s.worker)
     });
+    let removed = Derived::new(move || {
+        let snapshot = model.snapshot.get();
+        snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == model.session.get())
+            .and_then(|s| {
+                snapshot
+                    .issues
+                    .iter()
+                    .find(|i| Some(&i.id) == s.issue_id.as_ref())
+            })
+            .is_some_and(|issue| {
+                snapshot
+                    .project(&issue.project_id)
+                    .is_ok_and(|project| !project.columns.iter().any(|c| c.id == issue.column_id))
+            })
+    });
     view! {
           col height:min-content {
             if worker.get().is_some() {
                 scroll {
                     col height:min-content gap:10px {
+                        if removed.get() {
+                            text font-size:12px font-color:muted label:"Session issue removed from board"
+                                "Issue no longer on this board. Active turns may finish or be stopped; new turns require restoration and sync."
+                        }
                         text font-size:13px font-weight:650 { format!("Worker: {:?}", worker.get().unwrap().status) }
                         text font-size:12px font-color:muted { worker.get().unwrap().error.unwrap_or_default() }
                         if worker.get().is_some_and(|w| matches!(w.status, WorkerStatus::Running | WorkerStatus::Queued)) {

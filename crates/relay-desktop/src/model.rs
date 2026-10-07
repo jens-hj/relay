@@ -369,8 +369,16 @@ impl Model {
             .iter()
             .find(|i| i.id == issue_id)
             .ok_or("Issue is unavailable")?;
-        if snapshot.project(&issue.project_id)?.fixture {
+        let project = snapshot.project(&issue.project_id)?;
+        if project.fixture {
             return Err("Fixture issue: execution unavailable".into());
+        }
+        if !project
+            .columns
+            .iter()
+            .any(|column| column.id == issue.column_id)
+        {
+            return Err("Issue is no longer on this board. Restore it and sync before starting or continuing.".into());
         }
         let director = snapshot
             .directors
