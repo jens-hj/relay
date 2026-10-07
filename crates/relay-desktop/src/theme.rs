@@ -5,6 +5,8 @@ mosaic::scheme! {
         base:Color, sidebar:Color, surface:Color, raised:Color,
         ink:Color, muted:Color, edge:Color, accent:Color, accent-soft:Color,
         danger:Color, ui-scale:Scalar = 1,
+        tree-chevron-right:Svg, tree-chevron-down:Svg, board-icon:Svg,
+        director-icon:Svg, worker-icon:Svg, gear-icon:Svg, plus-icon:Svg, sliders-icon:Svg,
     }
 }
 
@@ -57,10 +59,20 @@ pub fn configured_palette(light: bool, alternate: bool, scale: f32) -> RelayThem
         base:base_color, sidebar:sidebar_color, surface:surface_color, raised:raised_color,
         ink:ink_color, muted:muted_color, edge:edge_color, accent:accent_color,
         accent-soft:accent_soft_color, danger:danger_color, ui-scale:scale,
+        tree-chevron-right:"assets/icons/chevron-right.svg", tree-chevron-down:"assets/icons/chevron-down.svg",
+        board-icon:"assets/icons/board.svg", director-icon:"assets/icons/director.svg",
+        worker-icon:"assets/icons/worker.svg", gear-icon:"assets/icons/gear.svg",
+        plus-icon:"assets/icons/plus.svg", sliders-icon:"assets/icons/sliders.svg",
     } }
 }
 
 mosaic::style! {
+    pub #tree-control height:{px(34.0)}px min-width:0px shrink:0 justify:center radius:{px(5.0)}px
+        pad:0px fill:(Color::TRANSPARENT) font-color:muted font-size:{px(12.0)}px
+        hover { fill:raised } focused { stroke:(width:{px(2.0)} color:accent offset:{px(-2.0)}) }
+    pub #tree-label width:1fr height:{px(34.0)}px align:center clip
+    pub #tree-tooltip fill:surface font-color:ink font-size:{px(12.0)}px max-width:{px(320.0)}px
+        pad:{px(9.0)}px radius:{px(6.0)}px stroke:(width:{px(1.0)} color:edge)
     pub #action width:max-content height:min-content shrink:0 radius:{px(7.0)}px pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px) fill:raised font-color:ink font-size:{px(13.0)}px
         hover { fill:accent-soft } focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) }
         disabled { opacity:0.45 }

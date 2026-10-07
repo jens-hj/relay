@@ -3,6 +3,7 @@ mod fonts;
 mod model;
 mod network;
 mod settings;
+mod sidebar;
 #[cfg(test)]
 mod tests;
 mod theme;

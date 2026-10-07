@@ -1,6 +1,7 @@
 use crate::network::NetworkState;
 use mosaic::prelude::*;
 use relay_core::*;
+use std::collections::BTreeSet;
 use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +41,8 @@ pub struct Model {
     pub busy: State<bool>,
     pub page: State<Page>,
     pub project: State<String>,
+    pub expanded_projects: State<BTreeSet<String>>,
+    pub expanded_directors: State<BTreeSet<String>>,
     pub issue: State<Option<String>>,
     pub session: State<String>,
     pub focused_message: State<String>,
@@ -82,6 +85,8 @@ impl Model {
             busy: State::new(false),
             page: State::new(Page::Board),
             project: State::new(String::new()),
+            expanded_projects: State::new(BTreeSet::new()),
+            expanded_directors: State::new(BTreeSet::new()),
             issue: State::new(None),
             session: State::new(String::new()),
             focused_message: State::new(String::new()),
@@ -368,6 +373,9 @@ impl Model {
         self.page.set(Page::Directors);
     }
     pub fn select_project(&self, id: String) {
+        self.expanded_projects.update(|ids| {
+            ids.insert(id.clone());
+        });
         self.project.set(id.clone());
         self.issue.set(None);
         self.worker_director.set(
@@ -400,6 +408,12 @@ impl Model {
             .find(|session| session.id == id)
         {
             self.project.set(session.project_id.clone());
+            self.expanded_projects.update(|ids| {
+                ids.insert(session.project_id.clone());
+            });
+            self.expanded_directors.update(|ids| {
+                ids.insert(session.director_id.clone());
+            });
             self.worker_director.set(session.director_id.clone());
             self.issue.set(session.issue_id.clone());
         }
@@ -409,6 +423,34 @@ impl Model {
         self.page.set(Page::Sessions);
         self.search.set(String::new());
         self.focused_message.set(String::new());
+    }
+    pub fn open_director(&self, id: String) {
+        let snapshot = self.snapshot.get_untracked();
+        let Some(director) = snapshot.directors.iter().find(|d| d.id == id) else {
+            return;
+        };
+        if let Some(session) = snapshot.sessions.iter().rev().find(|s| {
+            s.project_id == director.project_id
+                && s.director_id == id
+                && s.role == SessionRole::Director
+        }) {
+            self.open_session(session.id.clone());
+        } else {
+            self.open_director_profile(id);
+        }
+    }
+    pub fn open_director_profile(&self, id: String) {
+        let snapshot = self.snapshot.get_untracked();
+        let Some(director) = snapshot.directors.iter().find(|d| d.id == id) else {
+            return;
+        };
+        if self.project.get_untracked() != director.project_id {
+            self.select_project(director.project_id.clone());
+        }
+        self.expanded_projects.update(|ids| {
+            ids.insert(director.project_id.clone());
+        });
+        self.open_profile(EditTarget::Director(id));
     }
     fn clear_worker_draft(&self, body: &str) {
         if self.worker_prompt.get_untracked() == body {

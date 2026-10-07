@@ -15,6 +15,12 @@ struct Mounted {
     size: Size,
 }
 
+impl Drop for Mounted {
+    fn drop(&mut self) {
+        self._scope.dispose();
+    }
+}
+
 fn mount(light: bool, width: f32) -> Mounted {
     mosaic::core::builtins::install();
     install_theme(&theme::palette(light));
@@ -46,6 +52,250 @@ fn mount(light: bool, width: f32) -> Mounted {
     };
     mounted.settle();
     mounted
+}
+
+#[test]
+fn sidebar_tree_disclosure_keyboard_and_secondary_actions_are_independent() {
+    let mounted = mount(false, 1380.0);
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+    let focused_label = || {
+        let focused = mounted.ui.focused().unwrap().id();
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .find(|n| n.id == focused)
+            .unwrap()
+            .label
+            .unwrap()
+    };
+    mounted.focus("Toggle project Relay · demo");
+    mounted.key(Key::ArrowLeft, false);
+    assert!(
+        !mounted
+            .model
+            .expanded_projects
+            .get_untracked()
+            .contains("demo")
+    );
+    mounted.key(Key::ArrowRight, false);
+    mounted.key(Key::ArrowRight, false);
+    assert_eq!(focused_label(), "Open director Project director");
+    mounted.key(Key::ArrowRight, false);
+    mounted.key(Key::ArrowRight, false);
+    assert_eq!(focused_label(), "Open worker Profile validation");
+    mounted.key(Key::Enter, false);
+    assert_eq!(mounted.model.session.get_untracked(), "session-worker");
+    assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
+    mounted.key(Key::ArrowLeft, false);
+    assert_eq!(focused_label(), "Open director Project director");
+    mounted.key(Key::ArrowLeft, false);
+    assert!(
+        !mounted
+            .model
+            .expanded_directors
+            .get_untracked()
+            .contains("director-main")
+    );
+    mounted.key(Key::ArrowLeft, false);
+    assert_eq!(focused_label(), "Toggle project Relay · demo");
+    mounted.key(Key::End, false);
+    assert_eq!(focused_label(), "Open director Review director");
+    mounted.key(Key::ArrowUp, false);
+    assert_eq!(focused_label(), "Open director Project director");
+    mounted.key(Key::Home, false);
+    assert_eq!(focused_label(), "Toggle project Relay · demo");
+    mounted.click("Toggle project Relay · demo");
+    assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
+    assert_eq!(mounted.model.session.get_untracked(), "session-worker");
+    mounted.model.open_session("session-worker".into());
+    mounted.settle();
+    assert!(
+        mounted
+            .model
+            .expanded_projects
+            .get_untracked()
+            .contains("demo")
+    );
+    assert!(
+        mounted
+            .model
+            .expanded_directors
+            .get_untracked()
+            .contains("director-main")
+    );
+    mounted.rect("Open worker Profile validation");
+    mounted.click("Profile for Project director");
+    assert_eq!(mounted.model.page.get_untracked(), Page::Directors);
+    assert_eq!(
+        mounted.model.editor.get_untracked(),
+        EditTarget::Director("director-main".into())
+    );
+    mounted.click("Open director Project director");
+    assert_eq!(mounted.model.session.get_untracked(), "session-plan");
+    mounted.click("Open board for Relay · demo");
+    assert_eq!(mounted.model.page.get_untracked(), Page::Board);
+    assert!(mounted.model.issue.get_untracked().is_none());
+    // A profile/transcript viewport's scale binding must die with that view.
+    mounted.click("Settings");
+    mounted.click("Theme: Light");
+    mounted.click("Increase interface scale");
+    let snapshot = mounted.ui.inspection_snapshot();
+    let sidebar = snapshot
+        .nodes
+        .iter()
+        .find(|n| n.label.as_deref() == Some("Sidebar"))
+        .unwrap()
+        .id;
+    for node in snapshot.nodes.iter().filter(|n| n.role == Role::Button) {
+        let mut parent = node.parent;
+        let mut button_ancestor = false;
+        while let Some(id) = parent {
+            if id == sidebar {
+                assert!(!button_ancestor, "Nested sidebar control: {:?}", node.label);
+                break;
+            }
+            let ancestor = snapshot.nodes.iter().find(|n| n.id == id).unwrap();
+            button_ancestor |= ancestor.role == Role::Button;
+            parent = ancestor.parent;
+        }
+    }
+}
+
+#[test]
+fn sidebar_tree_groups_by_project_and_director_and_reacts_without_losing_expansion() {
+    for light in [false, true] {
+        let mounted = mount(light, 820.0);
+        mounted.click("Toggle director Project director");
+        let mut snapshot = mounted.model.snapshot.get_untracked();
+        let mut project = snapshot.projects[0].clone();
+        project.id = "other".into();
+        project.name = "Other project".into();
+        snapshot.projects.push(project);
+        let mut director = snapshot.directors[0].clone();
+        director.id = "director-other".into();
+        director.project_id = "other".into();
+        director.name = "Other director".into();
+        snapshot.directors.push(director);
+        let mut worker = snapshot.sessions[1].clone();
+        worker.id = "other-worker".into();
+        worker.project_id = "other".into();
+        worker.director_id = "director-other".into();
+        worker.title = "Other worker".into();
+        snapshot.sessions.push(worker);
+        mounted.model.receive(NetworkState {
+            snapshot: snapshot.clone(),
+            connected: true,
+            ..Default::default()
+        });
+        mounted.settle();
+        mounted.rect("Open worker Profile validation");
+        assert!(
+            !mounted
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .iter()
+                .any(|n| n.label.as_deref() == Some("Open director Other director"))
+        );
+        mounted.click("Toggle project Other project");
+        assert_eq!(mounted.model.project.get_untracked(), "demo");
+        mounted.click("Toggle director Other director");
+        mounted.rect("Open worker Other worker");
+        snapshot.directors[0].name = "Renamed director".into();
+        snapshot.sessions[1].title = "Renamed worker".into();
+        snapshot.projects.reverse();
+        snapshot.revision += 1;
+        mounted.model.receive(NetworkState {
+            snapshot,
+            connected: true,
+            ..Default::default()
+        });
+        mounted.settle();
+        let project = mounted.rect("Toggle project Relay · demo");
+        let director = mounted.rect("Open director Renamed director");
+        let worker = mounted.rect("Open worker Renamed worker");
+        assert!(project.origin.x < director.origin.x && director.origin.x < worker.origin.x);
+        assert!(project.origin.y < director.origin.y && director.origin.y < worker.origin.y);
+        let review = mounted.rect("Open director Review director");
+        assert!(worker.origin.y < review.origin.y);
+        mounted.click("Open worker Other worker");
+        assert_eq!(mounted.model.project.get_untracked(), "other");
+        assert_eq!(mounted.model.session.get_untracked(), "other-worker");
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Move,
+            position: mounted.rect("Open worker Other worker").center(),
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+        mounted.ui.tick(Duration::from_millis(600));
+        mounted.settle();
+        assert!(
+            mounted
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .iter()
+                .any(|n| n.role == Role::Tooltip && n.label.as_deref() == Some("Worker"))
+        );
+        mounted.click("Open director Other director");
+        assert_eq!(mounted.model.page.get_untracked(), Page::Directors);
+        assert_eq!(
+            mounted.model.editor.get_untracked(),
+            EditTarget::Director("director-other".into())
+        );
+        mounted.click("Create director in Relay · demo");
+        assert_eq!(mounted.model.project.get_untracked(), "demo");
+        assert_eq!(mounted.model.editor.get_untracked(), EditTarget::New);
+        mounted.click("Project defaults for Other project");
+        assert_eq!(mounted.model.project.get_untracked(), "other");
+        assert_eq!(mounted.model.editor.get_untracked(), EditTarget::Defaults);
+    }
+}
+
+#[test]
+fn sidebar_footer_stays_fixed_while_large_trees_scroll_and_scale() {
+    let mut mounted = mount(false, 820.0);
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+    mounted.size = Size::new(820.0, 360.0);
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    for i in 0..30 {
+        let mut director = snapshot.directors[0].clone();
+        director.id = format!("extra-{i}");
+        director.name = format!("Director {i}");
+        snapshot.directors.push(director);
+    }
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    let before = mounted.rect("Settings");
+    assert!(before.origin.y > 300.0 && before.origin.y + before.size.height <= 360.0);
+    mounted.focus("Open director Director 29");
+    assert_eq!(mounted.rect("Settings"), before);
+    mounted.focus("Settings");
+    mounted.key(Key::Enter, false);
+    assert_eq!(mounted.model.page.get_untracked(), Page::Settings);
+    mounted.model.preferences.update(|p| {
+        p.scale = 1.5;
+        p.sidebar_width = 160.0;
+    });
+    mounted.settle();
+    let settings = mounted.rect("Settings");
+    let sidebar = mounted.rect("Sidebar");
+    assert!((settings.size.height / before.size.height - 1.5).abs() < 0.05);
+    assert!(settings.origin.y + settings.size.height <= 360.0);
+    assert!(settings.origin.x + settings.size.width <= sidebar.size.width);
+    mounted.click("Settings");
+    assert_eq!(mounted.model.page.get_untracked(), Page::Settings);
 }
 
 #[test]

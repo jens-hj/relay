@@ -1,6 +1,7 @@
 use crate::{
     controls::{ButtonStyle, button},
     model::{EditTarget, Model, Page},
+    sidebar::{Sidebar, SidebarProps},
     theme::*,
 };
 use mosaic::prelude::*;
@@ -278,49 +279,6 @@ pub fn shell(model: Model) -> Element {
         }
     });
     root
-}
-
-#[component]
-fn Sidebar(model: Model) -> Element {
-    let edges = State::new(ResizeEdges::RIGHT);
-    view! {
-        col width:{px(model.preferences.get().sidebar_width)}px min-width:{px(160.0)}
-            max-width:{px(360.0)} fill:sidebar pad:{px(18.0)}px gap:{px(12.0)}px shrink:0 clip
-            resizable:($edges) label:"Sidebar"
-            @resize:{ move |event: &ResizeEvent, _| if event.phase == ResizePhase::End {
-                model.preferences.update(|p| p.sidebar_width = (event.size.width / p.scale).clamp(160.0, 360.0));
-            } } {
-            text font-size:{px(26.0)}px font-weight:750 font-family:sans-serif font-color:accent
-                "Relay"
-            scroll height:1fr {
-                col height:min-content gap:{px(12.0)}px {
-                    text font-size:{px(11.0)}px font-weight:650 font-family:sans-serif
-                        font-color:muted "Projects"
-                    for (_, project) in { model.snapshot.get().projects.into_iter().map(|p| (p.id.clone(), p)) } {
-                        let id = State::new(project.id.clone());
-                        button #action @click:{ model.select_project(id.get_untracked()); }
-                            width:fill
-                            label:{ model.snapshot.get().projects.iter().find(|p| p.id == id.get()).map(|p| format!("Open {}", p.name)).unwrap_or_default() }
-                            { model.snapshot.get().projects.iter().find(|p| p.id == id.get()).map(|p| p.name.clone()).unwrap_or_default() }
-                    }
-                    el height:{px(8.0)}px {}
-                    for (label, page) in [("Board", Page::Board), ("Sessions", Page::Sessions), ("Directors", Page::Directors), ("Settings", Page::Settings)] {
-                        button #action
-                            @click:{
-                                if page == Page::Directors { model.open_profile(EditTarget::Defaults); }
-                                else { model.page.set(page); }
-                            }
-                            width:fill
-                            fill:if model.page.get() == page { accent-soft } else { sidebar }
-                            label:(label.to_string()) (label)
-                    }
-                }
-            }
-            text font-size:{px(12.0)}px shrink:0
-                font-color:if model.connected.get() { { mosaic::core::theme::color(accent) } } else { { mosaic::core::theme::color(danger) } }
-                { model.status.get() }
-        }
-    }
 }
 
 #[component]
@@ -746,7 +704,7 @@ fn Profiles(model: Model) -> Element {
                         label:"Create director" "+ Director"
                 }
             } as tabs
-            { Effect::new(move || { tabs.root().style(Style::stack().width(Dimension::Fill).height(px(42.0)).basis(px(42.0)).shrink(0.0)); }); }
+            { tabs.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(px(42.0)).basis(px(42.0)).shrink(0.0)); }
             scroll {
                 col height:min-content gap:{px(20.0)}px {
                     text font-size:{px(20.0)}px font-weight:650 font-family:sans-serif
@@ -1154,7 +1112,7 @@ fn WorkerPanel(model: Model) -> Element {
                         }
                     }
                 } as panel
-                { Effect::new(move || { panel.root().style(Style::stack().width(Dimension::Fill).height(px(280.0)).shrink(0.0)); }); }
+                { panel.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(px(280.0)).shrink(0.0)); }
             }
         }
     }
