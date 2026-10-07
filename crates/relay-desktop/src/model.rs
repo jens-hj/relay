@@ -19,6 +19,9 @@ pub enum EditTarget {
 pub enum Saved {
     Comment(String),
     Profile,
+    Start(String),
+    Send(String),
+    Action,
 }
 #[derive(Clone)]
 struct Pending {
@@ -54,6 +57,10 @@ pub struct Model {
     pub editor_revision: State<u64>,
     pub toml: State<String>,
     pub advanced: State<bool>,
+    pub worker_prompt: State<String>,
+    pub worker_director: State<String>,
+    pub worker_approval: State<bool>,
+    pub review_changes: State<bool>,
     pub ui: State<Ui>,
     commands: State<UnboundedSender<CommandEnvelope>>,
     pending: State<Option<Pending>>,
@@ -69,9 +76,9 @@ impl Model {
             notice: State::new(String::new()),
             busy: State::new(false),
             page: State::new(Page::Board),
-            project: State::new("demo".into()),
+            project: State::new(String::new()),
             issue: State::new(None),
-            session: State::new("session-plan".into()),
+            session: State::new(String::new()),
             focused_message: State::new(String::new()),
             search: State::new(String::new()),
             searching: State::new(false),
@@ -89,6 +96,10 @@ impl Model {
             editor_revision: State::new(0),
             toml: State::new(String::new()),
             advanced: State::new(false),
+            worker_prompt: State::new(String::new()),
+            worker_director: State::new(String::new()),
+            worker_approval: State::new(false),
+            review_changes: State::new(false),
             ui: State::new(ui.clone()),
             commands: State::new(commands),
             pending: State::new(None),
@@ -96,7 +107,23 @@ impl Model {
         }
     }
     pub fn receive(&self, update: NetworkState) {
+        let select = !update
+            .snapshot
+            .projects
+            .iter()
+            .any(|p| p.id == self.project.get_untracked());
         self.snapshot.set(update.snapshot);
+        if select {
+            let snapshot = self.snapshot.get_untracked();
+            if let Some(project) = snapshot
+                .projects
+                .iter()
+                .find(|p| !p.fixture)
+                .or(snapshot.projects.first())
+            {
+                self.select_project(project.id.clone());
+            }
+        }
         self.connected.set(update.connected);
         self.status.set(update.status);
         if update.outcome_serial <= self.outcome_serial.get_untracked() {
@@ -125,6 +152,12 @@ impl Model {
                             self.comment_target.set(String::new());
                         }
                     }
+                    Saved::Start(body) => {
+                        self.clear_worker_draft(&body);
+                        self.open_session(format!("session-{id}"));
+                    }
+                    Saved::Send(body) => self.clear_worker_draft(&body),
+                    Saved::Action => {}
                     Saved::Profile => {
                         if self.editor.get_untracked() == EditTarget::New {
                             self.editor
@@ -135,7 +168,7 @@ impl Model {
                     }
                 }
                 self.pending.set(None);
-                self.notice.set("Saved to the workspace".into());
+                self.notice.set("Server acknowledged the request.".into());
             }
             Err(message) => self.notice.set(message),
         }
@@ -166,18 +199,57 @@ impl Model {
             saved,
         }));
         self.busy.set(true);
-        self.notice.set("Saving…".into());
+        self.notice.set("Awaiting server acknowledgement…".into());
         if self.commands.get_untracked().send(envelope).is_err() {
             self.busy.set(false);
             self.notice
                 .set("Network worker stopped. Your draft is retained.".into());
         }
     }
+    pub fn can_retry(&self) -> bool {
+        self.pending.get().is_some() && !self.busy.get()
+    }
+    pub fn retry_pending(&self) {
+        let Some(pending) = self.pending.get_untracked() else {
+            return;
+        };
+        if let Saved::Start(body) | Saved::Send(body) = &pending.saved {
+            let approved = match &pending.envelope.command {
+                Command::StartWorker {
+                    approve_implementation,
+                    ..
+                }
+                | Command::SendWorker {
+                    approve_implementation,
+                    ..
+                } => *approve_implementation,
+                _ => false,
+            };
+            if self.worker_prompt.get_untracked() != *body
+                || self.worker_approval.get_untracked() != approved
+            {
+                self.notice.set(
+                    "Worker draft changed. Review and submit it from the form as a new request."
+                        .into(),
+                );
+                return;
+            }
+        }
+        self.submit(
+            pending.envelope.command,
+            pending.envelope.expected_revision,
+            pending.saved,
+        );
+    }
     pub fn review_latest(&self) {
         if self.busy.get_untracked() {
             return;
         }
-        self.pending.set(None);
+        self.pending.update(|pending| {
+            if let Some(pending) = pending {
+                pending.envelope.expected_revision = self.snapshot.get_untracked().revision;
+            }
+        });
         let snapshot = self.snapshot.get_untracked();
         self.editor_revision.set(snapshot.revision);
         if let Ok(project) = snapshot.project(&self.project.get_untracked()) {
@@ -229,6 +301,16 @@ impl Model {
     pub fn select_project(&self, id: String) {
         self.project.set(id.clone());
         self.issue.set(None);
+        self.worker_director.set(
+            self.snapshot
+                .get_untracked()
+                .directors
+                .iter()
+                .find(|d| d.project_id == id)
+                .map(|d| d.id.clone())
+                .unwrap_or_default(),
+        );
+        self.worker_approval.set(false);
         let snapshot = self.snapshot.get_untracked();
         self.session.set(
             snapshot
@@ -241,10 +323,184 @@ impl Model {
         self.page.set(Page::Board);
     }
     pub fn open_session(&self, id: String) {
+        self.worker_approval.set(false);
+        self.review_changes.set(false);
         self.session.set(id);
         self.page.set(Page::Sessions);
         self.search.set(String::new());
         self.focused_message.set(String::new());
+    }
+    fn clear_worker_draft(&self, body: &str) {
+        if self.worker_prompt.get_untracked() == body {
+            self.worker_prompt.set(String::new());
+        }
+        self.worker_approval.set(false);
+    }
+    pub fn worker_profile(&self, continuation: bool) -> Result<(DirectorProfile, usize), String> {
+        let snapshot = self.snapshot.get();
+        let (director_id, issue_id) = if continuation {
+            let session = snapshot
+                .sessions
+                .iter()
+                .find(|s| s.id == self.session.get())
+                .ok_or("Select a session")?;
+            let worker = session
+                .worker
+                .as_ref()
+                .ok_or("Fixture sessions cannot run workers")?;
+            if matches!(worker.status, WorkerStatus::Running | WorkerStatus::Queued) {
+                return Err("Worker is active; stop or wait before continuing".into());
+            }
+            if worker.thread_id.is_none() || worker.worktree.is_none() {
+                return Err("No recorded thread/worktree to resume".into());
+            }
+            (
+                session.director_id.clone(),
+                session.issue_id.clone().ok_or("Session has no issue")?,
+            )
+        } else {
+            (
+                self.worker_director.get(),
+                self.issue.get().ok_or("Select an issue")?,
+            )
+        };
+        let issue = snapshot
+            .issues
+            .iter()
+            .find(|i| i.id == issue_id)
+            .ok_or("Issue is unavailable")?;
+        if snapshot.project(&issue.project_id)?.fixture {
+            return Err("Fixture issue: execution unavailable".into());
+        }
+        let director = snapshot
+            .directors
+            .iter()
+            .find(|d| d.id == director_id && d.project_id == issue.project_id)
+            .ok_or("Select a project director")?;
+        let profile = snapshot.effective_profile(director)?;
+        let active = snapshot
+            .sessions
+            .iter()
+            .filter(|s| {
+                s.director_id == director_id
+                    && s.worker.as_ref().is_some_and(|w| {
+                        matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running)
+                    })
+            })
+            .count();
+        Ok((profile, active))
+    }
+    pub fn worker_gate(&self, continuation: bool) -> Result<(), String> {
+        let (profile, active) = self.worker_profile(continuation)?;
+        if profile.harness != Harness::Codex {
+            return Err("Select a Codex director".into());
+        }
+        if !profile.responsibilities.contains(&Task::Implement) {
+            return Err("Director cannot implement".into());
+        }
+        let issue_id = if continuation {
+            self.snapshot
+                .get()
+                .sessions
+                .iter()
+                .find(|s| s.id == self.session.get())
+                .and_then(|s| s.issue_id.clone())
+        } else {
+            self.issue.get()
+        };
+        if matches!(&profile.scope, DirectorScope::Issues { issue_ids } if !issue_id.is_some_and(|id| issue_ids.contains(&id)))
+        {
+            return Err("Issue is outside director scope".into());
+        }
+        match profile
+            .permissions
+            .get(&Task::Implement)
+            .copied()
+            .unwrap_or(Permission::Deny)
+        {
+            Permission::Deny => return Err("Implementation denied by effective profile".into()),
+            Permission::Ask if !self.worker_approval.get() => {
+                return Err("Approve implementation for this turn".into());
+            }
+            _ => {}
+        }
+        if active >= usize::from(profile.max_workers) {
+            return Err("No worker slots available".into());
+        }
+        if self.worker_prompt.get().trim().is_empty() {
+            return Err("Enter a prompt".into());
+        }
+        if self.busy.get() || !self.connected.get() {
+            return Err("Wait for a connected, idle client".into());
+        }
+        Ok(())
+    }
+    pub fn run_worker(&self, continuation: bool) {
+        if let Err(error) = self.worker_gate(continuation) {
+            self.notice.set(error);
+            return;
+        }
+        let prompt = self.worker_prompt.get_untracked();
+        let command = if continuation {
+            Command::SendWorker {
+                session_id: self.session.get_untracked(),
+                prompt: prompt.clone(),
+                approve_implementation: self.worker_approval.get_untracked(),
+            }
+        } else {
+            Command::StartWorker {
+                issue_id: self.issue.get_untracked().unwrap(),
+                director_id: self.worker_director.get_untracked(),
+                prompt: prompt.clone(),
+                approve_implementation: self.worker_approval.get_untracked(),
+            }
+        };
+        self.submit(
+            command,
+            self.snapshot.get_untracked().revision,
+            if continuation {
+                Saved::Send(prompt)
+            } else {
+                Saved::Start(prompt)
+            },
+        );
+    }
+    pub fn sync_project(&self) {
+        if !self
+            .snapshot
+            .get_untracked()
+            .projects
+            .iter()
+            .any(|p| p.id == self.project.get_untracked() && p.github.is_some())
+        {
+            self.notice.set("Select a remote project to sync.".into());
+            return;
+        }
+        self.submit(
+            Command::SyncProject {
+                project_id: self.project.get_untracked(),
+            },
+            self.snapshot.get_untracked().revision,
+            Saved::Action,
+        );
+    }
+    pub fn stop_worker(&self) {
+        if !self.snapshot.get_untracked().sessions.iter().any(|s| {
+            s.id == self.session.get_untracked()
+                && s.worker.as_ref().is_some_and(|w| {
+                    matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running)
+                })
+        }) {
+            self.notice.set("Select an active worker to stop.".into());
+            return;
+        }
+        self.submit(
+            Command::StopWorker {
+                session_id: self.session.get_untracked(),
+            },
+            self.snapshot.get_untracked().revision,
+            Saved::Action,
+        );
     }
     pub fn start_comment(&self, message: &Message) {
         if !self.comment_body.get_untracked().trim().is_empty()
