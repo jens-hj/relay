@@ -28,11 +28,19 @@ pub fn shell(model: Model) -> Element {
                     if !model.notice.get().is_empty() {
                         row height:min-content fill:accent-soft pad:12px gap:12px align:center
                             shrink:0 {
-                            text width:1fr font-size:12px { model.notice.get() }
+                            col width:1fr height:min-content gap:4px {
+                                text font-size:12px { model.notice.get() }
+                                if model.can_retry() {
+                                    text font-size:11px { model.retry_summary() }
+                                }
+                            }
                             button #action @click:{ model.review_latest(); }
                                 disabled:{ model.busy.get() } "Review latest state"
+                            if model.can_rebase() {
+                                button #action @click:{ model.rebase_conflict(); } label:"Review conflict for new request" "Review conflict / new request"
+                            }
                             if model.can_retry() {
-                                button #action @click:{ model.retry_pending(); } label:"Retry unchanged request" "Retry unchanged request"
+                                button #action @click:{ model.retry_pending(); } label:"Retry original request" "Retry original request"
                             }
                             button #action @click:{ model.notice.set(String::new()); } "Dismiss"
                         }

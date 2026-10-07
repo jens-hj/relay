@@ -64,6 +64,8 @@ pub struct Model {
     pub ui: State<Ui>,
     commands: State<UnboundedSender<CommandEnvelope>>,
     pending: State<Option<Pending>>,
+    pending_conflict: State<bool>,
+    pending_ambiguous: State<bool>,
     outcome_serial: State<u64>,
 }
 
@@ -103,6 +105,8 @@ impl Model {
             ui: State::new(ui.clone()),
             commands: State::new(commands),
             pending: State::new(None),
+            pending_conflict: State::new(false),
+            pending_ambiguous: State::new(false),
             outcome_serial: State::new(0),
         }
     }
@@ -126,6 +130,7 @@ impl Model {
         }
         self.connected.set(update.connected);
         self.status.set(update.status);
+        self.reconcile_pending();
         if update.outcome_serial <= self.outcome_serial.get_untracked() {
             return;
         }
@@ -144,33 +149,70 @@ impl Model {
         self.busy.set(false);
         match result {
             Ok(()) => {
-                match pending.saved {
-                    Saved::Comment(body) => {
-                        if self.comment_body.get_untracked() == body {
-                            self.comment_body.set(String::new());
-                            self.comment_quote.set(String::new());
-                            self.comment_target.set(String::new());
-                        }
-                    }
-                    Saved::Start(body) => {
-                        self.clear_worker_draft(&body);
-                        self.open_session(format!("session-{id}"));
-                    }
-                    Saved::Send(body) => self.clear_worker_draft(&body),
-                    Saved::Action => {}
-                    Saved::Profile => {
-                        if self.editor.get_untracked() == EditTarget::New {
-                            self.editor
-                                .set(EditTarget::Director(format!("director-{id}")));
-                        }
-                        self.editor_revision
-                            .set(self.snapshot.get_untracked().revision);
-                    }
-                }
-                self.pending.set(None);
+                self.acknowledge(pending, &id);
                 self.notice.set("Server acknowledged the request.".into());
             }
-            Err(message) => self.notice.set(message),
+            Err(message) => {
+                self.pending_conflict.set(update.outcome_conflict);
+                self.pending_ambiguous.set(update.outcome_ambiguous);
+                self.notice.set(message);
+            }
+        }
+    }
+    fn acknowledge(&self, pending: Pending, id: &str) {
+        match pending.saved {
+            Saved::Comment(body) => {
+                if self.comment_body.get_untracked() == body {
+                    self.comment_body.set(String::new());
+                    self.comment_quote.set(String::new());
+                    self.comment_target.set(String::new());
+                }
+            }
+            Saved::Start(body) => {
+                self.clear_worker_draft(&body);
+                self.open_session(format!("session-{id}"));
+            }
+            Saved::Send(body) => self.clear_worker_draft(&body),
+            Saved::Action => {}
+            Saved::Profile => {
+                if self.editor.get_untracked() == EditTarget::New {
+                    self.editor
+                        .set(EditTarget::Director(format!("director-{id}")));
+                }
+                self.editor_revision
+                    .set(self.snapshot.get_untracked().revision);
+            }
+        }
+        self.pending.set(None);
+        self.pending_conflict.set(false);
+        self.pending_ambiguous.set(false);
+        self.busy.set(false);
+    }
+    fn reconcile_pending(&self) {
+        let Some(pending) = self.pending.get_untracked() else {
+            return;
+        };
+        let id = pending.envelope.request_id.clone();
+        let snapshot = self.snapshot.get_untracked();
+        let applied = match &pending.saved {
+            Saved::Start(_) => snapshot
+                .sessions
+                .iter()
+                .any(|s| s.id == format!("session-{id}")),
+            Saved::Send(_) => snapshot
+                .messages
+                .iter()
+                .any(|m| m.id == format!("prompt-{id}")),
+            Saved::Comment(_) => snapshot
+                .comments
+                .iter()
+                .any(|c| c.id == format!("comment-{id}")),
+            _ => false,
+        };
+        if applied {
+            self.acknowledge(pending, &id);
+            self.notice
+                .set("Request confirmed by the workspace snapshot.".into());
         }
     }
     pub fn submit(&self, command: Command, revision: u64, saved: Saved) {
@@ -184,6 +226,14 @@ impl Model {
         }
         let previous = self.pending.get_untracked();
         let command_json = serde_json::to_string(&command).unwrap();
+        if self.pending_ambiguous.get_untracked()
+            && previous.as_ref().is_some_and(|p| {
+                serde_json::to_string(&p.envelope.command).unwrap() != command_json
+            })
+        {
+            self.notice.set("An earlier request is unconfirmed. Retry its exact envelope before submitting another action; your draft is retained.".into());
+            return;
+        }
         let envelope = match previous {
             Some(p) if serde_json::to_string(&p.envelope.command).unwrap() == command_json => {
                 p.envelope
@@ -194,6 +244,8 @@ impl Model {
                 command,
             },
         };
+        self.pending_conflict.set(false);
+        self.pending_ambiguous.set(false);
         self.pending.set(Some(Pending {
             envelope: envelope.clone(),
             saved,
@@ -209,47 +261,61 @@ impl Model {
     pub fn can_retry(&self) -> bool {
         self.pending.get().is_some() && !self.busy.get()
     }
+    pub fn retry_summary(&self) -> String {
+        self.pending
+            .get()
+            .map(|p| {
+                let content = match p.envelope.command {
+                    Command::StartWorker {
+                        prompt,
+                        approve_implementation,
+                        ..
+                    }
+                    | Command::SendWorker {
+                        prompt,
+                        approve_implementation,
+                        ..
+                    } => format!(
+                        "Prompt: {prompt} · implementation approval: {approve_implementation}"
+                    ),
+                    Command::AddComment { body, .. } => format!("Comment: {body}"),
+                    _ => "Original workspace action".into(),
+                };
+                format!(
+                    "Original request at revision {} · {}",
+                    p.envelope.expected_revision,
+                    content.chars().take(180).collect::<String>()
+                )
+            })
+            .unwrap_or_default()
+    }
     pub fn retry_pending(&self) {
         let Some(pending) = self.pending.get_untracked() else {
             return;
         };
-        if let Saved::Start(body) | Saved::Send(body) = &pending.saved {
-            let approved = match &pending.envelope.command {
-                Command::StartWorker {
-                    approve_implementation,
-                    ..
-                }
-                | Command::SendWorker {
-                    approve_implementation,
-                    ..
-                } => *approve_implementation,
-                _ => false,
-            };
-            if self.worker_prompt.get_untracked() != *body
-                || self.worker_approval.get_untracked() != approved
-            {
-                self.notice.set(
-                    "Worker draft changed. Review and submit it from the form as a new request."
-                        .into(),
-                );
-                return;
-            }
-        }
         self.submit(
             pending.envelope.command,
             pending.envelope.expected_revision,
             pending.saved,
         );
     }
+    pub fn can_rebase(&self) -> bool {
+        self.pending_conflict.get() && self.can_retry()
+    }
+    pub fn rebase_conflict(&self) {
+        if !self.can_rebase() {
+            return;
+        }
+        self.review_latest();
+        self.pending.set(None);
+        self.pending_conflict.set(false);
+        self.pending_ambiguous.set(false);
+        self.notice.set("Conflict reviewed. Draft retained; submit from the form to create a new request at the latest revision.".into());
+    }
     pub fn review_latest(&self) {
         if self.busy.get_untracked() {
             return;
         }
-        self.pending.update(|pending| {
-            if let Some(pending) = pending {
-                pending.envelope.expected_revision = self.snapshot.get_untracked().revision;
-            }
-        });
         let snapshot = self.snapshot.get_untracked();
         self.editor_revision.set(snapshot.revision);
         if let Ok(project) = snapshot.project(&self.project.get_untracked()) {
@@ -402,9 +468,6 @@ impl Model {
         let (profile, active) = self.worker_profile(continuation)?;
         if profile.harness != Harness::Codex {
             return Err("Select a Codex director".into());
-        }
-        if !profile.responsibilities.contains(&Task::Implement) {
-            return Err("Director cannot implement".into());
         }
         let issue_id = if continuation {
             self.snapshot

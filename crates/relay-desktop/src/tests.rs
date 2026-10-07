@@ -310,21 +310,6 @@ fn live_snapshot() -> Snapshot {
         last_synced_at: None,
         sync_error: None,
     });
-    snapshot.projects[0].defaults.harness = Harness::Codex;
-    if !snapshot.projects[0]
-        .defaults
-        .responsibilities
-        .contains(&Task::Implement)
-    {
-        snapshot.projects[0]
-            .defaults
-            .responsibilities
-            .push(Task::Implement);
-    }
-    snapshot.projects[0]
-        .defaults
-        .permissions
-        .insert(Task::Implement, Permission::Ask);
     snapshot.directors[0].overrides = ProfileOverrides::default();
     snapshot
 }
@@ -523,7 +508,23 @@ fn worker_running_stop_completed_review_and_continue_use_recorded_session() {
     assert_eq!(mounted.model.worker_prompt.get_untracked(), "Review result");
     mounted.model.worker_prompt.set("Changed prompt".into());
     mounted.model.retry_pending();
-    assert!(mounted.commands.try_recv().is_err());
+    let exact = mounted.commands.try_recv().unwrap();
+    assert_eq!(
+        serde_json::to_value(&exact).unwrap(),
+        serde_json::to_value(&send).unwrap()
+    );
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        outcome: Some((exact.request_id, Ok(()))),
+        outcome_serial: 3,
+        ..Default::default()
+    });
+    assert_eq!(
+        mounted.model.worker_prompt.get_untracked(),
+        "Changed prompt"
+    );
+    mounted.model.worker_approval.set(true);
     for status in [
         WorkerStatus::Failed,
         WorkerStatus::Stopped,
@@ -554,6 +555,10 @@ fn live_initial_selection_and_dynamic_columns_metadata_remain_reactive() {
     for director in &mut snapshot.directors {
         director.project_id = "remote-project".into();
     }
+    let mut historical = snapshot.projects[0].clone();
+    historical.id = "historical-remote".into();
+    historical.github.as_mut().unwrap().number = 6;
+    snapshot.projects.push(historical);
     snapshot.projects.insert(0, fixture);
     mounted.model.project.set(String::new());
     mounted.model.receive(NetworkState {
@@ -705,4 +710,233 @@ fn removed_board_items_keep_history_but_block_new_turns_until_restored() {
             .iter()
             .any(|i| i.id == "issue-2")
     );
+}
+
+#[test]
+fn unmodified_default_director_can_delegate_after_explicit_approval() {
+    let mut mounted = mount(false, 1380.0);
+    let snapshot = live_snapshot();
+    assert_eq!(snapshot.projects[0].defaults, DirectorProfile::default());
+    assert!(
+        !snapshot.projects[0]
+            .defaults
+            .responsibilities
+            .contains(&Task::Implement)
+    );
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.issue.set(Some("issue-2".into()));
+    mounted
+        .model
+        .worker_prompt
+        .set("Delegate this issue".into());
+    assert!(
+        mounted
+            .model
+            .worker_gate(false)
+            .unwrap_err()
+            .contains("Approve")
+    );
+    mounted.model.worker_approval.set(true);
+    assert!(mounted.model.worker_gate(false).is_ok());
+    mounted.model.run_worker(false);
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::StartWorker {
+            approve_implementation: true,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn ambiguous_retry_preserves_entire_envelope_after_review_and_revision_changes() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(live_snapshot());
+    mounted.model.issue.set(Some("issue-2".into()));
+    mounted.model.worker_prompt.set("Original prompt".into());
+    mounted.model.worker_approval.set(true);
+    mounted.model.run_worker(false);
+    let original = mounted.commands.try_recv().unwrap();
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot.revision += 9;
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        outcome: Some((original.request_id.clone(), Err("Response lost".into()))),
+        outcome_serial: 1,
+        outcome_ambiguous: true,
+        ..Default::default()
+    });
+    assert!(!mounted.model.can_rebase());
+    mounted.model.review_latest();
+    mounted.model.rebase_conflict();
+    mounted.model.retry_pending();
+    let retry = mounted.commands.try_recv().unwrap();
+    assert_eq!(
+        serde_json::to_value(&retry).unwrap(),
+        serde_json::to_value(&original).unwrap()
+    );
+    assert_eq!(
+        mounted.model.worker_prompt.get_untracked(),
+        "Original prompt"
+    );
+}
+
+#[test]
+fn known_conflict_requires_explicit_new_request_rebase_and_retains_draft() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(live_snapshot());
+    mounted.model.issue.set(Some("issue-2".into()));
+    mounted.model.worker_prompt.set("Reviewed prompt".into());
+    mounted.model.worker_approval.set(true);
+    mounted.model.run_worker(false);
+    let original = mounted.commands.try_recv().unwrap();
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot.revision += 1;
+    let revision = snapshot.revision;
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        outcome: Some((original.request_id.clone(), Err("Revision conflict".into()))),
+        outcome_serial: 1,
+        outcome_conflict: true,
+        ..Default::default()
+    });
+    mounted.model.review_latest();
+    mounted.model.retry_pending();
+    let exact = mounted.commands.try_recv().unwrap();
+    assert_eq!(
+        serde_json::to_value(&exact).unwrap(),
+        serde_json::to_value(&original).unwrap()
+    );
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        outcome: Some((exact.request_id, Err("Revision conflict".into()))),
+        outcome_serial: 2,
+        outcome_conflict: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    mounted.focus("Review conflict for new request");
+    mounted.click("Review conflict for new request");
+    assert_eq!(
+        mounted.model.worker_prompt.get_untracked(),
+        "Reviewed prompt"
+    );
+    assert!(mounted.commands.try_recv().is_err());
+    mounted.model.run_worker(false);
+    let rebased = mounted.commands.try_recv().unwrap();
+    assert_ne!(rebased.request_id, original.request_id);
+    assert_eq!(rebased.expected_revision, revision);
+    assert_eq!(
+        serde_json::to_value(&rebased.command).unwrap(),
+        serde_json::to_value(&original.command).unwrap()
+    );
+}
+
+#[test]
+fn ambiguous_start_is_reconciled_from_snapshot_without_duplicate_launch() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(live_snapshot());
+    mounted.model.issue.set(Some("issue-2".into()));
+    mounted.model.worker_prompt.set("Original prompt".into());
+    mounted.model.worker_approval.set(true);
+    mounted.model.run_worker(false);
+    let original = mounted.commands.try_recv().unwrap();
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        outcome: Some((original.request_id.clone(), Err("Response lost".into()))),
+        outcome_serial: 1,
+        outcome_ambiguous: true,
+        ..Default::default()
+    });
+    mounted.model.worker_prompt.set("Next draft".into());
+    mounted.model.run_worker(false);
+    assert!(mounted.commands.try_recv().is_err());
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    let mut session = snapshot.sessions[0].clone();
+    session.id = format!("session-{}", original.request_id);
+    session.issue_id = Some("issue-2".into());
+    snapshot.sessions.push(session);
+    snapshot.revision += 1;
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    assert_eq!(
+        mounted.model.session.get_untracked(),
+        format!("session-{}", original.request_id)
+    );
+    assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
+    assert_eq!(mounted.model.worker_prompt.get_untracked(), "Next draft");
+    assert!(!mounted.model.can_retry());
+    mounted.model.retry_pending();
+    assert!(mounted.commands.try_recv().is_err());
+}
+
+#[test]
+fn snapshot_prompt_and_comment_ids_confirm_ambiguous_writes() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.comment_target.set("m1".into());
+    mounted.model.comment_body.set("Original comment".into());
+    mounted.model.save_comment();
+    let original = mounted.commands.try_recv().unwrap();
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        outcome: Some((original.request_id.clone(), Err("Response lost".into()))),
+        outcome_serial: 1,
+        outcome_ambiguous: true,
+        ..Default::default()
+    });
+    mounted.model.comment_body.set("Edited comment".into());
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot
+        .apply(original.command, &original.request_id, 1)
+        .unwrap();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    assert_eq!(mounted.model.comment_body.get_untracked(), "Edited comment");
+    assert!(!mounted.model.can_retry());
+    let prompt = "Continue exact session".to_string();
+    mounted.model.worker_prompt.set(prompt.clone());
+    mounted.model.submit(
+        Command::SendWorker {
+            session_id: "session-plan".into(),
+            prompt: prompt.clone(),
+            approve_implementation: true,
+        },
+        mounted.model.snapshot.get_untracked().revision,
+        crate::model::Saved::Send(prompt),
+    );
+    let send = mounted.commands.try_recv().unwrap();
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        outcome: Some((send.request_id.clone(), Err("Response lost".into()))),
+        outcome_serial: 2,
+        outcome_ambiguous: true,
+        ..Default::default()
+    });
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot.messages.push(Message {
+        id: format!("prompt-{}", send.request_id),
+        session_id: "session-plan".into(),
+        author: "User".into(),
+        kind: "prompt".into(),
+        body: "Continue exact session".into(),
+    });
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    assert!(!mounted.model.can_retry());
+    assert!(mounted.model.worker_prompt.get_untracked().is_empty());
 }

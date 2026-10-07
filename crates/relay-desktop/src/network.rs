@@ -48,12 +48,14 @@ pub struct NetworkState {
     pub status: String,
     pub outcome: Option<(String, Result<(), String>)>,
     pub outcome_serial: u64,
+    pub outcome_conflict: bool,
+    pub outcome_ambiguous: bool,
 }
 
 enum Event {
     Snapshot(Snapshot),
     Status(bool, String),
-    Outcome(String, Result<Snapshot, String>),
+    Outcome(String, Result<Snapshot, String>, bool, bool),
 }
 
 pub fn start(
@@ -87,7 +89,9 @@ pub fn start(
                         state.connected = connected;
                         state.status = status;
                     }
-                    Event::Outcome(id, result) => {
+                    Event::Outcome(id, result, conflict, ambiguous) => {
+                        state.outcome_conflict = conflict;
+                        state.outcome_ambiguous = ambiguous;
                         state.outcome_serial += 1;
                         state.outcome = Some((
                             id,
@@ -203,9 +207,14 @@ async fn write(
     events: mpsc::UnboundedSender<Event>,
 ) {
     while let Some(command) = commands.recv().await {
-        let result = match client.post(config.url("v1/commands")).bearer_auth(&config.token).json(&command).send().await {
-            Ok(response) => decode(response).await,
-            Err(_) => Err("Save could not be confirmed. Your draft is retained; retry uses the same request ID.".into()),
+        let (result, conflict, ambiguous) = match client.post(config.url("v1/commands")).bearer_auth(&config.token).json(&command).send().await {
+            Ok(response) => {
+                let status = response.status();
+                let result = decode(response).await;
+                let ambiguous = result.is_err() && (status.is_success() || status.is_server_error());
+                (result, status == reqwest::StatusCode::CONFLICT, ambiguous)
+            }
+            Err(_) => (Err("Request could not be confirmed. Your draft is retained; exact retry preserves the original request ID and revision.".into()), false, true),
         };
         if result.is_err()
             && let Ok(snapshot) = read(&client, &config).await
@@ -213,7 +222,12 @@ async fn write(
             let _ = events.send(Event::Snapshot(snapshot));
         }
         if events
-            .send(Event::Outcome(command.request_id, result))
+            .send(Event::Outcome(
+                command.request_id,
+                result,
+                conflict,
+                ambiguous,
+            ))
             .is_err()
         {
             break;
@@ -241,5 +255,84 @@ mod tests {
             },
         );
         assert_eq!(state.snapshot.revision, 8);
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+
+    #[tokio::test]
+    async fn writer_distinguishes_conflict_rejection_and_ambiguous_acknowledgements() {
+        for (status, conflict, ambiguous) in [
+            (Some(409), true, false),
+            (Some(400), false, false),
+            (Some(500), false, true),
+            (Some(200), false, true),
+            (None, false, true),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                for first in [true, false] {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                        let mut buffer = [0; 1024];
+                        let length = socket.read(&mut buffer).unwrap();
+                        assert_ne!(length, 0);
+                        request.extend_from_slice(&buffer[..length]);
+                    }
+                    if first && status.is_none() {
+                        continue;
+                    }
+                    let code = if first { status.unwrap() } else { 200 };
+                    let body = if first {
+                        "invalid or rejected response".into()
+                    } else {
+                        serde_json::to_string(&Snapshot::default()).unwrap()
+                    };
+                    write!(socket, "HTTP/1.1 {code} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }
+            });
+            let config = Config {
+                endpoint: reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
+                token: "test-only".into(),
+            };
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap();
+            let (commands, receiver) = mpsc::unbounded_channel();
+            commands
+                .send(CommandEnvelope {
+                    request_id: "request-test".into(),
+                    expected_revision: 4,
+                    command: relay_core::Command::SyncProject {
+                        project_id: "project-test".into(),
+                    },
+                })
+                .unwrap();
+            drop(commands);
+            let (events, mut updates) = mpsc::unbounded_channel();
+            write(config, client, receiver, events).await;
+            assert!(matches!(updates.recv().await, Some(Event::Snapshot(_))));
+            let Some(Event::Outcome(id, result, actual_conflict, actual_ambiguous)) =
+                updates.recv().await
+            else {
+                panic!("Missing classified outcome")
+            };
+            assert_eq!(id, "request-test");
+            assert!(result.is_err());
+            assert_eq!((actual_conflict, actual_ambiguous), (conflict, ambiguous));
+            server.join().unwrap();
+        }
     }
 }
