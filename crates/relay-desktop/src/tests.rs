@@ -381,6 +381,48 @@ fn live_worker_approval_failure_retry_and_ack_open_exact_session() {
 }
 
 #[test]
+fn delayed_start_acknowledgement_opens_the_sessions_own_project() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = live_snapshot();
+    let mut other = snapshot.projects[0].clone();
+    other.id = "other-project".into();
+    other.repository = "team/other".into();
+    snapshot.projects.push(other);
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.issue.set(Some("issue-2".into()));
+    mounted
+        .model
+        .worker_prompt
+        .set("Implement this issue".into());
+    mounted.model.worker_approval.set(true);
+    mounted.model.run_worker(false);
+    let request = mounted.commands.try_recv().unwrap();
+    mounted.model.select_project("other-project".into());
+    let mut session = snapshot.sessions[0].clone();
+    session.id = format!("session-{}", request.request_id);
+    snapshot.sessions.push(session.clone());
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        outcome: Some((request.request_id, Ok(()))),
+        outcome_serial: 1,
+        ..Default::default()
+    });
+    assert_eq!(mounted.model.project.get_untracked(), session.project_id);
+    assert_eq!(mounted.model.session.get_untracked(), session.id);
+    assert_eq!(
+        mounted.model.worker_director.get_untracked(),
+        session.director_id
+    );
+    assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
+    assert!(!mounted.model.worker_approval.get_untracked());
+}
+
+#[test]
 fn deny_scope_harness_and_capacity_cannot_be_overridden() {
     let mounted = mount(false, 1380.0);
     mounted.model.snapshot.set(live_snapshot());

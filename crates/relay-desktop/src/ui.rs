@@ -83,10 +83,13 @@ pub fn shell(model: Model) -> Element {
                             button #action @click:{ model.review_latest(); }
                                 disabled:{ model.busy.get() } "Review latest state"
                             if model.can_rebase() {
-                                button #action @click:{ model.rebase_conflict(); } label:"Review conflict for new request" "Review conflict / new request"
+                                button #action @click:{ model.rebase_conflict(); }
+                                    label:"Review conflict for new request"
+                                    "Review conflict / new request"
                             }
                             if model.can_retry() {
-                                button #action @click:{ model.retry_pending(); } label:"Retry original request" "Retry original request"
+                                button #action @click:{ model.retry_pending(); }
+                                    label:"Retry original request" "Retry original request"
                             }
                             button #action @click:{ model.notice.set(String::new()); } "Dismiss"
                         }
@@ -179,7 +182,8 @@ fn Sidebar(model: Model, narrow: Derived<bool>) -> Element {
             for (_, project) in { model.snapshot.get().projects.into_iter().map(|p| (p.id.clone(), p)) } {
                 let id = State::new(project.id.clone());
                 button #action @click:{ model.select_project(id.get_untracked()); }
-                    label:{ model.snapshot.get().projects.iter().find(|p| p.id == id.get()).map(|p| format!("Open {}", p.name)).unwrap_or_default() } { model.snapshot.get().projects.iter().find(|p| p.id == id.get()).map(|p| p.name.clone()).unwrap_or_default() }
+                    label:{ model.snapshot.get().projects.iter().find(|p| p.id == id.get()).map(|p| format!("Open {}", p.name)).unwrap_or_default() }
+                    { model.snapshot.get().projects.iter().find(|p| p.id == id.get()).map(|p| p.name.clone()).unwrap_or_default() }
             }
             el height:8px {}
             for (label, page) in [("Board", Page::Board), ("Sessions", Page::Sessions), ("Directors", Page::Directors)] {
@@ -197,7 +201,6 @@ fn Sidebar(model: Model, narrow: Derived<bool>) -> Element {
                     font-color:if model.connected.get() { { mosaic::core::theme::color(accent) } } else { { mosaic::core::theme::color(danger) } }
                     { model.status.get() }
                 text font-size:11px font-color:muted "Shared workspace"
-
             }
         }
     }
@@ -223,14 +226,16 @@ fn Board(model: Model, narrow: Derived<bool>) -> Element {
     });
     view! {
         col width:1fr pad:(horizontal:24px vertical:8px) gap:12px {
-            text font-size:12px font-color:muted {
+            text font-size:12px font-color:muted
+                {
                 model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| match &p.github {
                     Some(g) => format!("{} · board {} #{} · {}\n{}", g.url, g.owner, g.number, sync_label(g.last_synced_at), g.sync_error.clone().unwrap_or_default()),
                     None => "Fixture board · no remote synchronization".into()
                 }).unwrap_or_default()
             }
             button #action @click:{ model.sync_project(); } label:"Sync project"
-                disabled:{ model.busy.get() || !model.connected.get() || !model.snapshot.get().projects.iter().any(|p| p.id == model.project.get() && p.github.is_some()) } "Sync project"
+                disabled:{ model.busy.get() || !model.connected.get() || !model.snapshot.get().projects.iter().any(|p| p.id == model.project.get() && p.github.is_some()) }
+                "Sync project"
             scroll {
                 if narrow.get() {
                     col height:min-content gap:18px {
@@ -270,7 +275,8 @@ fn BoardColumnView(model: Model, column: BoardColumn) -> Element {
     view! {
         col height:min-content width:1fr gap:12px {
             row height:min-content justify:between align:center pad:(horizontal:4px vertical:10px) {
-                text font-size:13px font-weight:650 label:{ format!("Column {}", column_id.get()) } { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).and_then(|p| p.columns.iter().find(|c| c.id == column_id.get())).map(|c| c.title.clone()).unwrap_or_default() }
+                text font-size:13px font-weight:650 label:{ format!("Column {}", column_id.get()) }
+                    { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).and_then(|p| p.columns.iter().find(|c| c.id == column_id.get())).map(|c| c.title.clone()).unwrap_or_default() }
                 text font-size:12px font-color:muted { issues.get().len().to_string() }
             }
             for (_, issue) in { issues.get().into_iter().map(|i| (i.id.clone(), i)) } {
@@ -304,14 +310,15 @@ fn IssueCard(model: Model, issue: Issue) -> Element {
             .count()
     });
     view! {
-        button @click:{ model.issue.set(Some(id.clone())); model.worker_approval.set(false); } width:fill height:min-content
-            fill:surface radius:10px pad:16px
-            label:{ format!("Open issue #{}", current.get().reference.number) } hover { fill:raised }
-            focused { stroke:(width:2px color:accent offset:2px) } {
+        button @click:{ model.issue.set(Some(id.clone())); model.worker_approval.set(false); }
+            width:fill height:min-content fill:surface radius:10px pad:16px
+            label:{ format!("Open issue #{}", current.get().reference.number) }
+            hover { fill:raised } focused { stroke:(width:2px color:accent offset:2px) } {
             col height:min-content gap:14px align:start {
                 text font-size:11px font-color:muted
                     { format!("#{} · {}", current.get().reference.number, if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "FIXTURE" } else { "GITHUB" }) }
-                text font-size:15px font-weight:600 font-color:ink label:{ current.get().title } { current.get().title }
+                text font-size:15px font-weight:600 font-color:ink label:{ current.get().title }
+                    { current.get().title }
                 for (_, label) in { current.get().labels.into_iter().map(|label| (label.clone(), label)) } {
                     text font-size:11px font-color:accent (label.clone())
                 }
@@ -350,7 +357,8 @@ fn IssueDetail(model: Model) -> Element {
                     col height:min-content gap:18px selectable {
                         text font-size:12px font-color:accent
                             (format!("{} #{}", current.get().reference.repository, current.get().reference.number))
-                        text font-size:21px font-weight:650 label:{ current.get().title } { current.get().title }
+                        text font-size:21px font-weight:650 label:{ current.get().title }
+                            { current.get().title }
                         text font-size:14px label:{ current.get().body } { current.get().body }
                         text font-size:11px font-color:muted
                             { if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "Fixture issue · execution unavailable".to_string() } else { current.get().reference.url } }
@@ -843,26 +851,31 @@ fn palette_action(model: Model, index: usize) {
 fn WorkerForm(model: Model, continuation: bool) -> Element {
     view! {
         col height:min-content gap:10px {
-            text font-size:13px font-weight:650 { if continuation { "Continue this session" } else { "Start issue worker" } }
+            text font-size:13px font-weight:650
+                { if continuation { "Continue this session" } else { "Start issue worker" } }
             if !continuation {
                 for (_, director) in { model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
                     let id = State::new(director.id.clone());
-                    button #action @click:{ model.worker_director.set(id.get_untracked()); model.worker_approval.set(false); }
+                    button #action
+                        @click:{ model.worker_director.set(id.get_untracked()); model.worker_approval.set(false); }
                         fill:if model.worker_director.get() == id.get() { accent-soft } else { raised }
                         { model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| format!("Director: {}", d.name)).unwrap_or_default() }
                 }
             }
-            text font-size:12px font-color:muted {
+            text font-size:12px font-color:muted
+                {
                 match model.worker_profile(continuation) {
                     Ok((p, active)) => format!("{} · Implementation: {} · {} · {} / {} workers active", match p.harness { Harness::Codex => "Codex", Harness::ClaudeCode => "Claude Code" }, p.permissions.get(&Task::Implement).copied().unwrap_or(Permission::Deny).label(), scope_label(&p.scope, &model.snapshot.get()), active, p.max_workers),
                     Err(error) => error
                 }
             }
-            input #input-field label:"Worker prompt" placeholder:"Prompt for this turn…" model.worker_prompt
+            input #input-field label:"Worker prompt" placeholder:"Prompt for this turn…"
+                model.worker_prompt
             if model.worker_profile(continuation).is_ok_and(|(p, _)| p.permissions.get(&Task::Implement) == Some(&Permission::Ask)) {
                 checkbox label:"Approve implementation for this turn" model.worker_approval
             }
-            text font-size:11px font-color:muted { model.worker_gate(continuation).err().unwrap_or_else(|| "Ready · server rechecks policy and revision".into()) }
+            text font-size:11px font-color:muted
+                { model.worker_gate(continuation).err().unwrap_or_else(|| "Ready · server rechecks policy and revision".into()) }
             button #action @click:{ model.run_worker(continuation); }
                 label:if continuation { "Send worker prompt" } else { "Start worker" }
                 disabled:{ model.worker_gate(continuation).is_err() }
@@ -901,18 +914,23 @@ fn WorkerPanel(model: Model) -> Element {
             })
     });
     view! {
-          col height:min-content {
+        col height:min-content {
             if worker.get().is_some() {
                 scroll {
                     col height:min-content gap:10px {
                         if removed.get() {
-                            text font-size:12px font-color:muted label:"Session issue removed from board"
+                            text font-size:12px font-color:muted
+                                label:"Session issue removed from board"
                                 "Issue no longer on this board. Active turns may finish or be stopped; new turns require restoration and sync."
                         }
-                        text font-size:13px font-weight:650 { format!("Worker: {:?}", worker.get().unwrap().status) }
-                        text font-size:12px font-color:muted { worker.get().unwrap().error.unwrap_or_default() }
+                        text font-size:13px font-weight:650
+                            { format!("Worker: {:?}", worker.get().unwrap().status) }
+                        text font-size:12px font-color:muted
+                            { worker.get().unwrap().error.unwrap_or_default() }
                         if worker.get().is_some_and(|w| matches!(w.status, WorkerStatus::Running | WorkerStatus::Queued)) {
-                            button #action @click:{ model.stop_worker(); } label:"Stop worker" disabled:{ model.busy.get() || !model.connected.get() } "Stop worker"
+                            button #action @click:{ model.stop_worker(); } label:"Stop worker"
+                                disabled:{ model.busy.get() || !model.connected.get() }
+                                "Stop worker"
                         } else if worker.get().is_some_and(|w| w.thread_id.is_some() && w.worktree.is_some()) {
                             WorkerForm model:(model) continuation:true
                         } else {
@@ -923,18 +941,24 @@ fn WorkerPanel(model: Model) -> Element {
                                 disabled:{ !model.snapshot.get().sessions.iter().any(|s| s.id == model.session.get() && s.issue_id.as_ref().is_some_and(|id| model.snapshot.get().issues.iter().any(|i| &i.id == id))) }
                                 "Open issue / start new worker"
                         }
-                        text font-size:11px font-color:muted "Completed means the harness turn ended; issue acceptance still needs review."
-                        text font-size:12px font-color:muted {
+                        text font-size:11px font-color:muted
+                            "Completed means the harness turn ended; issue acceptance still needs review."
+                        text font-size:12px font-color:muted
+                            {
                             worker.get().unwrap().usage.map(|u| format!("Latest measured turn · input {} · cached input {} · output {} tokens", u.input_tokens, u.cached_input_tokens, u.output_tokens)).unwrap_or_else(|| "Latest turn usage unavailable".into())
                         }
-                        button #action @click:{ model.review_changes.set(!model.review_changes.get_untracked()); } label:"Toggle change review" "Changes and provenance"
+                        button #action
+                            @click:{ model.review_changes.set(!model.review_changes.get_untracked()); }
+                            label:"Toggle change review" "Changes and provenance"
                         if model.review_changes.get() {
                             col height:min-content gap:8px selectable {
-                                text font-size:12px {
+                                text font-size:12px
+                                    {
                                     let w = worker.get().unwrap();
                                     format!("Branch: {}\nBase: {}\nWorktree: {}\nThread: {}", w.branch.unwrap_or_else(|| "unavailable".into()), w.base_commit.unwrap_or_else(|| "unavailable".into()), w.worktree.unwrap_or_else(|| "unavailable".into()), w.thread_id.unwrap_or_else(|| "unavailable".into()))
                                 }
-                                text font-size:12px {
+                                text font-size:12px
+                                    {
                                     worker.get().unwrap().changes.map(|c| format!("Files: {}\n{}\n{}", c.files.join(", "), if c.truncated { "Review truncated by server" } else { "Bounded review" }, c.diff)).unwrap_or_else(|| "Change review unavailable".into())
                                 }
                             }

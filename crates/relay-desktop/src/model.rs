@@ -389,6 +389,17 @@ impl Model {
         self.page.set(Page::Board);
     }
     pub fn open_session(&self, id: String) {
+        if let Some(session) = self
+            .snapshot
+            .get_untracked()
+            .sessions
+            .iter()
+            .find(|session| session.id == id)
+        {
+            self.project.set(session.project_id.clone());
+            self.worker_director.set(session.director_id.clone());
+            self.issue.set(session.issue_id.clone());
+        }
         self.worker_approval.set(false);
         self.review_changes.set(false);
         self.session.set(id);
