@@ -21,15 +21,23 @@ fn graphql(config: &RuntimeConfig, query: &str, variables: Value) -> Result<Valu
                 ));
         }
     }
-    let output = cmd.output().map_err(|_| {
-        Error::invalid("Cannot execute gh; install gh and authenticate with gh auth login")
-    })?;
+    let output = crate::process::capture(
+        &mut cmd,
+        16 * 1024 * 1024,
+        std::time::Duration::from_secs(30),
+        "GitHub gh request",
+    )?;
+    if output.truncated {
+        return Err(Error::invalid(
+            "GitHub response exceeds 16 MiB limit; last good board retained",
+        ));
+    }
     if !output.status.success() {
         return Err(Error::invalid(
             "GitHub request failed; check gh authentication, project read access, and network",
         ));
     }
-    let value: Value = serde_json::from_slice(&output.stdout)
+    let value: Value = serde_json::from_slice(&output.bytes)
         .map_err(|_| Error::invalid("Invalid GitHub JSON response"))?;
     if value.get("errors").is_some() {
         return Err(Error::invalid(
@@ -69,22 +77,28 @@ pub(crate) struct Board {
 pub(crate) fn sync(config: &RuntimeConfig, project_id: &str) -> Result<Board, Error> {
     let remote = config.remote.as_ref().ok_or_else(|| Error::invalid("Configure RELAY_GITHUB_REPO, RELAY_GITHUB_PROJECT_OWNER and RELAY_GITHUB_PROJECT_NUMBER"))?;
     // GitHub emits NOT_FOUND for the owner kind that does not exist; resolve owner first.
-    let owner = Command::new(&config.gh)
-        .env_remove("RELAY_TOKEN")
-        .args([
+    let owner = crate::process::capture(
+        Command::new(&config.gh).args([
             "api",
             "--hostname",
             "github.com",
             &format!("users/{}", remote.owner),
-        ])
-        .output()
-        .map_err(|_| Error::invalid("Cannot execute gh; install gh and authenticate"))?;
+        ]),
+        128 * 1024,
+        std::time::Duration::from_secs(30),
+        "GitHub owner lookup",
+    )?;
+    if owner.truncated {
+        return Err(Error::invalid(
+            "GitHub owner response exceeds 128 KiB limit",
+        ));
+    }
     if !owner.status.success() {
         return Err(Error::invalid(
             "GitHub owner lookup failed; check gh authentication and project owner",
         ));
     }
-    let owner: Value = serde_json::from_slice(&owner.stdout)
+    let owner: Value = serde_json::from_slice(&owner.bytes)
         .map_err(|_| Error::invalid("Invalid GitHub owner response"))?;
     let kind = if owner["type"] == "Organization" {
         "organization"

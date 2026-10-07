@@ -1336,7 +1336,7 @@ fn removed_board_items_keep_linked_identity_without_becoming_active() {
     w.synchronize("demo", "sync");
     let removed = w.snapshots.borrow().clone();
     let historic = removed.issues.iter().find(|i| i.id == issue_id).unwrap();
-    assert_eq!(historic.column_id, "github-removed");
+    assert_eq!(historic.column_id, "github-removed-from-board");
     assert_eq!(removed.projects[0].columns.len(), 1);
     assert_eq!(removed.projects[0].columns[0].title, "No status");
     assert!(
@@ -1462,4 +1462,105 @@ async fn concurrent_runtime_events_publish_monotonic_committed_revisions() {
     assert_eq!(published.revision, initial + 50);
     assert_eq!(published.messages.len(), initial_messages + 50);
     assert!(published.revision >= revision);
+}
+#[test]
+fn capture_limits_bytes_and_times_out_both_output_and_process_waits() {
+    use std::time::Instant;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("tool");
+    script(&bin, "head -c 1000000 /dev/zero\nsleep 60");
+    let started = Instant::now();
+    let result = crate::process::capture(
+        &mut std::process::Command::new(&bin),
+        1024,
+        Duration::from_secs(2),
+        "test tool",
+    )
+    .unwrap();
+    assert_eq!(result.bytes.len(), 1024);
+    assert!(result.truncated);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    for closed in [false, true] {
+        let pid_file = dir.path().join("pid");
+        let close = if closed { "exec 1>&-" } else { "" };
+        script(
+            &bin,
+            &format!(
+                "{close}\nsleep 60 &\necho $! > '{}'\nwait",
+                pid_file.display()
+            ),
+        );
+        let started = Instant::now();
+        let error = crate::process::capture(
+            &mut std::process::Command::new(&bin),
+            1024,
+            Duration::from_millis(150),
+            "test tool",
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let alive = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .is_some_and(|stat| {
+                    stat.rsplit_once(')').unwrap().1.split_whitespace().next() != Some("Z")
+                });
+            if !alive {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    script(
+        &bin,
+        "echo useful-output\necho secret-diagnostic >&2\nexit 7",
+    );
+    let output = crate::process::capture(
+        &mut std::process::Command::new(&bin),
+        1024,
+        Duration::from_secs(1),
+        "test tool",
+    )
+    .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    assert!(!output.truncated);
+    assert_eq!(output.bytes, b"useful-output\n");
+}
+#[test]
+fn oversized_github_capture_reports_error_without_destroying_last_good_board() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("gh");
+    script(&bin, "head -c 131073 /dev/zero");
+    let mut c = config();
+    c.gh = bin;
+    let s = live();
+    let w = workspace(&dir.path().join("db"), &s, c);
+    w.store
+        .lock()
+        .unwrap()
+        .connection
+        .execute("INSERT INTO syncs VALUES('demo','sync')", [])
+        .unwrap();
+    w.synchronize("demo", "sync");
+    let failed = w.snapshots.borrow().clone();
+    assert_eq!(failed.issues, s.issues);
+    assert_eq!(failed.projects[0].columns, s.projects[0].columns);
+    let remote = failed.projects[0].github.as_ref().unwrap();
+    assert_eq!(remote.last_synced_at, Some(1));
+    assert!(
+        remote
+            .sync_error
+            .as_ref()
+            .unwrap()
+            .contains("exceeds 128 KiB")
+    );
 }

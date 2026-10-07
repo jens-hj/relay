@@ -12,6 +12,7 @@ use axum::{
 };
 use relay_core::*;
 mod github;
+mod process;
 mod runtime;
 pub use runtime::{RemoteConfig, RuntimeConfig};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -511,7 +512,7 @@ impl Workspace {
                             || snapshot.directors.iter().any(|d| snapshot.effective_profile(d).ok().is_some_and(|p| matches!(p.scope, DirectorScope::Issues { issue_ids } if issue_ids.contains(&old.id))));
                         if linked {
                             let mut historic = old.clone();
-                            historic.column_id = "github-removed".into();
+                            historic.column_id = "github-removed-from-board".into();
                             retained.push(historic);
                         }
                     }

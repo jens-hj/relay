@@ -1,7 +1,6 @@
 use crate::{Error, Workspace};
 use relay_core::*;
 use std::{
-    io::Read,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
 };
@@ -171,19 +170,21 @@ pub(crate) fn authorize_turn(
     Ok(())
 }
 fn git(path: &Path, args: &[&str]) -> Result<Vec<u8>, Error> {
-    let output = ProcessCommand::new("git")
-        .env_remove("RELAY_TOKEN")
-        .arg("-C")
-        .arg(path)
-        .args(args)
-        .output()
-        .map_err(|_| Error::invalid("Cannot execute git"))?;
+    let output = crate::process::capture(
+        ProcessCommand::new("git").arg("-C").arg(path).args(args),
+        1024 * 1024,
+        std::time::Duration::from_secs(60),
+        "Git",
+    )?;
+    if output.truncated {
+        return Err(Error::invalid("Git metadata output exceeds 1 MiB limit"));
+    }
     if !output.status.success() {
         return Err(Error::invalid(
             "Git operation failed; check repository/worktree availability",
         ));
     }
-    Ok(output.stdout)
+    Ok(output.bytes)
 }
 pub(crate) fn prepare(
     config: &RuntimeConfig,
@@ -220,34 +221,18 @@ pub(crate) fn prepare(
 }
 const DIFF_LIMIT: usize = 128 * 1024;
 fn diff_output(command: &mut ProcessCommand, limit: usize) -> Result<(Vec<u8>, bool), Error> {
-    let mut child = command
-        .env_remove("RELAY_TOKEN")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| Error::invalid("Cannot capture Git diff"))?;
-    let mut bytes = Vec::new();
-    let read = child
-        .stdout
-        .take()
-        .unwrap()
-        .take((limit + 1) as u64)
-        .read_to_end(&mut bytes);
-    let truncated = bytes.len() > limit;
-    if truncated || read.is_err() {
-        let _ = child.kill();
-    }
-    let status = child
-        .wait()
-        .map_err(|_| Error::invalid("Cannot wait for Git diff"))?;
-    read.map_err(|_| Error::invalid("Cannot read Git diff"))?;
-    if !truncated && !status.success() && status.code() != Some(1) {
+    let output = crate::process::capture(
+        command,
+        limit,
+        std::time::Duration::from_secs(15),
+        "Git review",
+    )?;
+    if !output.truncated && !output.status.success() && output.status.code() != Some(1) {
         return Err(Error::invalid(
-            "Git diff failed; inspect the worker worktree",
+            "Git review failed; inspect the worker worktree",
         ));
     }
-    bytes.truncate(limit);
-    Ok((bytes, truncated))
+    Ok((output.bytes, output.truncated))
 }
 fn append_bounded(target: &mut String, bytes: &[u8], truncated: &mut bool) {
     let s = String::from_utf8_lossy(bytes);
