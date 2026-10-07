@@ -1034,3 +1034,432 @@ fn codex_jsonl_tolerates_unknown_events_items_and_extra_fields() {
         })
     );
 }
+fn review_repo(dir: &Path) -> PathBuf {
+    let repo = dir.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "base",
+        ],
+    );
+    repo
+}
+#[tokio::test]
+async fn failure_events_invalid_output_missing_thread_and_spawn_failure_are_terminal() {
+    let cases = [
+        ("head -c 1048577 /dev/zero | tr '\\000' x", "exceeds 1 MiB"),
+        (
+            "printf '%s\\n' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"secret\"}}'",
+            "turn failure",
+        ),
+        (
+            "printf '%s\\n' '{\"type\":\"error\",\"message\":\"secret\"}'",
+            "turn failure",
+        ),
+        ("echo not-json", "Invalid Codex JSONL"),
+        ("true", "without turn.completed"),
+        (
+            "printf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}'",
+            "without a recorded thread",
+        ),
+        (
+            "printf '%s\\n' '{\"type\":\"thread.started\"}'",
+            "thread ID missing",
+        ),
+        (
+            "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"t\"}' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}'; exit 8",
+            "exited unsuccessfully",
+        ),
+        ("missing-executable", "Cannot launch codex"),
+    ];
+    for (body, expected) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = review_repo(dir.path());
+        let bin = dir.path().join("codex");
+        if body != "missing-executable" {
+            script(&bin, &format!("cat >/dev/null\n{body}"));
+        }
+        let mut c = config();
+        c.repository = Some(repo);
+        c.codex = bin;
+        let s = live();
+        let w = workspace(&dir.path().join("db"), &s, c);
+        let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
+        runtime::run(w.clone(), id.clone(), run, prompt, rx).await;
+        let s = finished(&w, &id).await;
+        let worker = s.sessions.last().unwrap().worker.as_ref().unwrap();
+        assert_eq!(worker.status, WorkerStatus::Failed, "{body}");
+        assert!(
+            worker.error.as_ref().unwrap().contains(expected),
+            "{:?}",
+            worker.error
+        );
+        assert!(!worker.error.as_ref().unwrap().contains("secret"));
+    }
+}
+#[tokio::test]
+async fn stop_cancel_and_shutdown_terminate_owned_descendants() {
+    for mode in ["stop", "cancel", "shutdown"] {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = review_repo(dir.path());
+        let pid_file = dir.path().join("descendant");
+        let bin = dir.path().join("codex");
+        script(
+            &bin,
+            &format!(
+                "cat >/dev/null\nsleep 60 &\necho $! > '{}'\nprintf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"t\"}}'\nwait",
+                pid_file.display()
+            ),
+        );
+        let mut c = config();
+        c.repository = Some(repo);
+        c.codex = bin;
+        let s = live();
+        let w = workspace(&dir.path().join("db"), &s, c);
+        let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
+        let task = tokio::spawn(runtime::run(w.clone(), id.clone(), run, prompt, rx));
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !pid_file.exists()
+                || w.snapshots
+                    .borrow()
+                    .sessions
+                    .last()
+                    .unwrap()
+                    .worker
+                    .as_ref()
+                    .unwrap()
+                    .thread_id
+                    .is_none()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        match mode {
+            "stop" => {
+                w.store.lock().unwrap().controls[&id].send_replace(true);
+            }
+            "cancel" => task.abort(),
+            "shutdown" => Shutdown {
+                workspace: w.clone(),
+            }
+            .shutdown()
+            .await
+            .unwrap(),
+            _ => unreachable!(),
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap();
+        let s = finished(&w, &id).await;
+        assert_eq!(
+            s.sessions.last().unwrap().worker.as_ref().unwrap().status,
+            if mode == "cancel" {
+                WorkerStatus::Interrupted
+            } else {
+                WorkerStatus::Stopped
+            }
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let alive = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .ok()
+                    .is_some_and(|stat| {
+                        stat.rsplit_once(')').unwrap().1.split_whitespace().next() != Some("Z")
+                    });
+                if !alive {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+}
+#[test]
+fn review_covers_base_commits_staged_unstaged_deletions_renames_and_safe_symlinks() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let repo = review_repo(dir.path());
+    for name in ["committed", "staged", "unstaged", "deleted", "old-name"] {
+        std::fs::write(repo.join(name), "base\n").unwrap();
+    }
+    git(&repo, &["add", "."]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-qm",
+            "files",
+        ],
+    );
+    let base = String::from_utf8(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    std::fs::write(repo.join("committed"), "worker commit\n").unwrap();
+    git(&repo, &["add", "committed"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-qm",
+            "worker",
+        ],
+    );
+    std::fs::write(repo.join("staged"), "staged change\n").unwrap();
+    git(&repo, &["add", "staged"]);
+    std::fs::write(repo.join("unstaged"), "unstaged change\n").unwrap();
+    std::fs::remove_file(repo.join("deleted")).unwrap();
+    git(&repo, &["mv", "old-name", "new-name"]);
+    std::fs::write(dir.path().join("outside"), "outside-secret-content\n").unwrap();
+    symlink(dir.path().join("outside"), repo.join("link")).unwrap();
+    std::fs::write(repo.join("binary"), [0, 255, 1]).unwrap();
+    let changes = runtime::changes(repo.to_str().unwrap(), &base).unwrap();
+    for name in [
+        "committed",
+        "staged",
+        "unstaged",
+        "deleted",
+        "old-name",
+        "new-name",
+        "link",
+        "binary",
+    ] {
+        assert!(changes.files.contains(&name.into()), "{name}");
+    }
+    for text in [
+        "worker commit",
+        "staged change",
+        "unstaged change",
+        "deleted file",
+        "Untracked symlink",
+    ] {
+        assert!(changes.diff.contains(text), "{text}");
+    }
+    assert!(!changes.diff.contains("outside-secret-content"));
+}
+#[test]
+fn messages_and_file_lists_have_explicit_bounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = live();
+    let w = workspace(&dir.path().join("db"), &s, config());
+    let (mut s, _) = w
+        .store
+        .lock()
+        .unwrap()
+        .apply(env(s.revision, start(&s)), &w.config)
+        .unwrap();
+    let id = s.sessions.last().unwrap().id.clone();
+    runtime::event(&mut s,&id,&serde_json::json!({"type":"item.completed","item":{"type":"agent_message","text":"é".repeat(100_000)}})).unwrap();
+    let body = &s.messages.last().unwrap().body;
+    assert!(body.len() <= 64 * 1024);
+    assert!(body.ends_with("[Message truncated]"));
+    let repo = review_repo(dir.path());
+    for i in 0..600 {
+        std::fs::write(repo.join(format!("file-{i:04}")), "x\n").unwrap();
+    }
+    let changes = runtime::changes(repo.to_str().unwrap(), "HEAD").unwrap();
+    assert!(changes.files.len() <= 512);
+    assert!(changes.truncated);
+}
+#[test]
+fn removed_board_items_keep_linked_identity_without_becoming_active() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("gh");
+    let items = dir.path().join("items");
+    std::fs::write(
+        &items,
+        "{\"data\":{\"node\":{\"items\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}",
+    )
+    .unwrap();
+    script(
+        &bin,
+        &format!(
+            "case \"$*\" in\n *users/*) echo '{{\"type\":\"User\"}}';;\n *projectV2*) echo '{{\"data\":{{\"user\":{{\"projectV2\":{{\"id\":\"P1\",\"title\":\"Relay\",\"url\":\"board\"}}}}}}}}';;\n *fields*) echo '{{\"data\":{{\"node\":{{\"fields\":{{\"nodes\":[],\"pageInfo\":{{\"hasNextPage\":false}}}}}}}}}}';;\n *items*) cat '{}';;\n *) exit 1;;\nesac",
+            items.display()
+        ),
+    );
+    let mut c = config();
+    c.gh = bin;
+    let s = live();
+    let w = workspace(&dir.path().join("db"), &s, c);
+    let (id, run, _rx, _prompt) = reserve(&w, env(s.revision, start(&s)));
+    w.update_run(&id, &run, |s| {
+        let worker = s.sessions.last_mut().unwrap().worker.as_mut().unwrap();
+        worker.status = WorkerStatus::Completed;
+        worker.thread_id = Some("t".into());
+        worker.worktree = Some("/owned".into());
+        Ok(())
+    })
+    .unwrap();
+    let issue_id = s.issues[0].id.clone();
+    let director = s.directors[0].id.clone();
+    w.store
+        .lock()
+        .unwrap()
+        .connection
+        .execute("INSERT INTO syncs VALUES('demo','sync')", [])
+        .unwrap();
+    w.synchronize("demo", "sync");
+    let removed = w.snapshots.borrow().clone();
+    let historic = removed.issues.iter().find(|i| i.id == issue_id).unwrap();
+    assert_eq!(historic.column_id, "github-removed");
+    assert_eq!(removed.projects[0].columns.len(), 1);
+    assert_eq!(removed.projects[0].columns[0].title, "No status");
+    assert!(
+        !removed.projects[0]
+            .columns
+            .iter()
+            .any(|c| c.id == historic.column_id)
+    );
+    assert_eq!(
+        removed.sessions.last().unwrap().issue_id.as_deref(),
+        Some(issue_id.as_str())
+    );
+    assert!(runtime::authorize_turn(&removed, &issue_id, &director, true, &w.config).is_err());
+    let original = s.issues[0].clone();
+    let response = serde_json::json!({"data":{"node":{"items":{"nodes":[{"type":"ISSUE","content":{"__typename":"Issue","number":original.reference.number,"title":original.title,"body":original.body,"url":original.reference.url,"repository":{"nameWithOwner":"jens-hj/relay"},"labels":{"nodes":[]}}}],"pageInfo":{"hasNextPage":false}}}}});
+    std::fs::write(items, response.to_string()).unwrap();
+    // Fixture ID differs from provider-qualified remote ID; simulate provider-qualified history.
+    {
+        let mut store = w.store.lock().unwrap();
+        let mut snapshot = store.snapshot().unwrap();
+        let new_id = format!("github:jens-hj/relay:{}", original.reference.number);
+        snapshot
+            .issues
+            .iter_mut()
+            .find(|i| i.id == issue_id)
+            .unwrap()
+            .id = new_id.clone();
+        snapshot.sessions.last_mut().unwrap().issue_id = Some(new_id);
+        store.save(&snapshot).unwrap();
+    }
+    w.synchronize("demo", "sync");
+    let restored = w.snapshots.borrow().clone();
+    let restored_id = restored.sessions.last().unwrap().issue_id.as_ref().unwrap();
+    let issue = restored
+        .issues
+        .iter()
+        .find(|i| &i.id == restored_id)
+        .unwrap();
+    assert_eq!(issue.column_id, "github-no-status");
+    assert!(runtime::authorize_turn(&restored, &issue.id, &director, true, &w.config).is_ok());
+}
+#[test]
+fn token_exclusion_is_verified_in_an_isolated_test_process() {
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "tests::token_exclusion_child", "--nocapture"])
+        .env("RELAY_TOKEN", "test-bearer-must-not-be-inherited")
+        .env("RELAY_TOKEN_CHILD_TEST", "1")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+}
+#[tokio::test]
+async fn token_exclusion_child() {
+    if std::env::var_os("RELAY_TOKEN_CHILD_TEST").is_none() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = review_repo(dir.path());
+    let bin = dir.path().join("codex");
+    script(
+        &bin,
+        "test -z \"$RELAY_TOKEN\" || exit 99\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"t\"}' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}'",
+    );
+    let gh = dir.path().join("gh");
+    script(
+        &gh,
+        "test -z \"$RELAY_TOKEN\" || exit 99\ncase \"$*\" in\n *users/*) echo '{\"type\":\"User\"}';;\n *projectV2*) echo '{\"data\":{\"user\":{\"projectV2\":{\"id\":\"P1\",\"title\":\"Relay\",\"url\":\"board\"}}}}';;\n *fields*) echo '{\"data\":{\"node\":{\"fields\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}';;\n *items*) echo '{\"data\":{\"node\":{\"items\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}';;\n *) exit 1;;\nesac",
+    );
+    let mut c = config();
+    c.repository = Some(repo);
+    c.codex = bin;
+    c.gh = gh;
+    assert!(github::sync(&c, "demo").is_ok());
+    let s = live();
+    let w = workspace(&dir.path().join("db"), &s, c);
+    let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
+    runtime::run(w.clone(), id.clone(), run, prompt, rx).await;
+    assert_eq!(
+        finished(&w, &id)
+            .await
+            .sessions
+            .last()
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .status,
+        WorkerStatus::Completed
+    );
+}
+#[tokio::test]
+async fn concurrent_runtime_events_publish_monotonic_committed_revisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = live();
+    let w = workspace(&dir.path().join("db"), &s, config());
+    let (a, ar, _rx, _p) = reserve(&w, env(s.revision, start(&s)));
+    let s = w.snapshots.borrow().clone();
+    let (b, br, _rx, _p) = reserve(&w, env(s.revision, start(&s)));
+    let initial = w.snapshots.borrow().revision;
+    let initial_messages = w.snapshots.borrow().messages.len();
+    let mut receiver = w.snapshots.subscribe();
+    let writer = w.clone();
+    let writing = tokio::task::spawn_blocking(move || {
+        std::thread::scope(|scope| {
+            for (id, run) in [(a, ar), (b, br)] {
+                let w = writer.clone();
+                scope.spawn(move||{for i in 0..25 {w.update_run(&id,&run,|s|{runtime::event(s,&id,&serde_json::json!({"type":"item.completed","item":{"type":"agent_message","text":format!("Evidence {i}")}}))?;Ok(())}).unwrap();}});
+            }
+        });
+    });
+    tokio::pin!(writing);
+    let mut revision = initial;
+    loop {
+        tokio::select! { result=&mut writing=>{result.unwrap();break;}, changed=receiver.changed()=>{changed.unwrap();let next=receiver.borrow_and_update().revision;assert!(next>=revision);revision=next;} }
+    }
+    let saved = w.store.lock().unwrap().snapshot().unwrap();
+    let published = w.snapshots.borrow().clone();
+    assert_eq!(saved, published);
+    assert_eq!(published.revision, initial + 50);
+    assert_eq!(published.messages.len(), initial_messages + 50);
+    assert!(published.revision >= revision);
+}

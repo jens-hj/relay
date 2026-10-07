@@ -112,6 +112,10 @@ pub(crate) fn authorize_turn(
         .as_ref()
         .ok_or_else(|| Error::invalid("Configure GitHub project before starting workers"))?;
     if project.fixture
+        || !project
+            .columns
+            .iter()
+            .any(|column| column.id == issue.column_id)
         || project
             .github
             .as_ref()
@@ -168,6 +172,7 @@ pub(crate) fn authorize_turn(
 }
 fn git(path: &Path, args: &[&str]) -> Result<Vec<u8>, Error> {
     let output = ProcessCommand::new("git")
+        .env_remove("RELAY_TOKEN")
         .arg("-C")
         .arg(path)
         .args(args)
@@ -216,6 +221,7 @@ pub(crate) fn prepare(
 const DIFF_LIMIT: usize = 128 * 1024;
 fn diff_output(command: &mut ProcessCommand, limit: usize) -> Result<(Vec<u8>, bool), Error> {
     let mut child = command
+        .env_remove("RELAY_TOKEN")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -255,16 +261,42 @@ fn append_bounded(target: &mut String, bytes: &[u8], truncated: &mut bool) {
 }
 pub(crate) fn changes(path: &str, base: &str) -> Result<ChangeSet, Error> {
     let path = Path::new(path);
-    let names = git(path, &["diff", "--name-only", "-z", base, "--"])?;
-    let untracked = git(path, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let (mut names, names_cut) = diff_output(
+        ProcessCommand::new("git").arg("-C").arg(path).args([
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            base,
+            "--",
+        ]),
+        512 * 4096,
+    )?;
+    let (mut untracked, untracked_cut) = diff_output(
+        ProcessCommand::new("git").arg("-C").arg(path).args([
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ]),
+        512 * 4096,
+    )?;
+    // A truncated NUL-delimited list must not invent a partial pathname.
+    if names_cut {
+        names.truncate(names.iter().rposition(|b| *b == 0).map_or(0, |i| i + 1));
+    }
+    if untracked_cut {
+        untracked.truncate(untracked.iter().rposition(|b| *b == 0).map_or(0, |i| i + 1));
+    }
     let mut files = Vec::new();
     let mut diff = String::new();
-    let mut truncated = false;
+    let mut truncated = names_cut || untracked_cut;
     let (bytes, cut) = diff_output(
         ProcessCommand::new("git").arg("-C").arg(path).args([
             "diff",
             "--no-ext-diff",
             "--no-textconv",
+            "--no-renames",
             base,
             "--",
         ]),
@@ -289,6 +321,36 @@ pub(crate) fn changes(path: &str, base: &str) -> Result<ChangeSet, Error> {
             break;
         }
         let name = String::from_utf8_lossy(name);
+        let file = path.join(name.as_ref());
+        let metadata = std::fs::symlink_metadata(&file)
+            .map_err(|_| Error::invalid("Untracked file changed during review capture"))?;
+        if metadata.file_type().is_symlink() {
+            let target = std::fs::read_link(&file)
+                .map_err(|_| Error::invalid("Cannot review untracked symlink"))?;
+            append_bounded(
+                &mut diff,
+                format!(
+                    "Untracked symlink: {name} -> {}\n",
+                    target.to_string_lossy()
+                )
+                .as_bytes(),
+                &mut truncated,
+            );
+            continue;
+        }
+        if !metadata.is_file()
+            || !file
+                .canonicalize()
+                .map_err(|_| Error::invalid("Cannot resolve untracked file"))?
+                .starts_with(
+                    path.canonicalize()
+                        .map_err(|_| Error::invalid("Cannot resolve worktree"))?,
+                )
+        {
+            return Err(Error::invalid(
+                "Untracked review path is outside the worktree or is not a regular file",
+            ));
+        }
         let (bytes, cut) = diff_output(
             ProcessCommand::new("git")
                 .arg("-C")
@@ -332,6 +394,9 @@ pub(crate) fn event(
             let id = value["thread_id"]
                 .as_str()
                 .ok_or_else(|| Error::invalid("Codex thread ID missing"))?;
+            if id.is_empty() || id.len() > 128 || id.starts_with('-') {
+                return Err(Error::invalid("Codex thread ID is invalid"));
+            }
             if worker
                 .thread_id
                 .as_ref()
@@ -378,7 +443,16 @@ pub(crate) fn event(
                 "file_change" => Some(item["changes"].to_string()),
                 _ => None,
             };
-            if let Some(body) = body {
+            if let Some(mut body) = body {
+                const LIMIT: usize = 64 * 1024;
+                if body.len() > LIMIT {
+                    let mut end = LIMIT - 32;
+                    while !body.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    body.truncate(end);
+                    body.push_str("\n[Message truncated]");
+                }
                 snapshot.messages.push(Message {
                     id: format!("message-{}", uuid::Uuid::new_v4()),
                     session_id: session_id.into(),
@@ -431,6 +505,11 @@ pub(crate) async fn run(
     prompt: String,
     mut stop: watch::Receiver<bool>,
 ) {
+    let _guard = RunGuard {
+        workspace: workspace.clone(),
+        session: session_id.clone(),
+        run: run_id.clone(),
+    };
     let result = execute(&workspace, &session_id, &run_id, &prompt, &mut stop).await;
     // Diff collection runs outside the writer lock and async executor.
     let snapshot = workspace.snapshots.borrow().clone();
@@ -485,6 +564,16 @@ pub(crate) async fn run(
         }
         Ok(())
     });
+}
+struct RunGuard {
+    workspace: Workspace,
+    session: String,
+    run: String,
+}
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        let _ = self.workspace.interrupt_run(&self.session, &self.run);
+    }
 }
 async fn execute(
     workspace: &Workspace,
@@ -647,6 +736,11 @@ async fn execute(
         }
         child
     };
+    let _process_guard = ProcessGuard {
+        owned: child
+            .id()
+            .and_then(|pid| process_identity(pid).map(|identity| (pid, identity))),
+    };
     let publication = workspace.update_run(session_id, run_id, |s| {
         s.sessions
             .iter_mut()
@@ -700,6 +794,16 @@ async fn terminate(child: &mut tokio::process::Child) {
     }
     let _ = child.kill().await;
     let _ = child.wait().await;
+}
+struct ProcessGuard {
+    owned: Option<(u32, String)>,
+}
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        if let Some((pid, identity)) = &self.owned {
+            reap_owned(*pid, identity);
+        }
+    }
 }
 
 pub(crate) fn process_identity(pid: u32) -> Option<String> {

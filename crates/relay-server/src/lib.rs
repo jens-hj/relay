@@ -75,6 +75,7 @@ impl std::error::Error for Error {}
 struct Store {
     connection: Connection,
     controls: HashMap<String, watch::Sender<bool>>,
+    closing: bool,
 }
 
 impl Store {
@@ -115,6 +116,7 @@ impl Store {
         Ok(Self {
             connection,
             controls: HashMap::new(),
+            closing: false,
         })
     }
     fn snapshot(&self) -> Result<Snapshot, Error> {
@@ -379,6 +381,47 @@ fn prompt_message(session: &str, request: &str, prompt: &str) -> Message {
     }
 }
 impl Workspace {
+    fn interrupt_run(&self, session: &str, run: &str) -> Result<(), Error> {
+        let mut store = self.store.lock().map_err(Error::internal)?;
+        if store.run_id(session)?.as_deref() != Some(run) {
+            return Ok(());
+        }
+        let mut snapshot = store.snapshot()?;
+        let Some(worker) = snapshot
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == session)
+            .and_then(|s| s.worker.as_mut())
+            .filter(|w| runtime::active(&w.status))
+        else {
+            return Ok(());
+        };
+        let process: Option<(u32, String)> = store
+            .connection
+            .query_row(
+                "SELECT pid,identity FROM processes WHERE session_id=?1 AND run_id=?2",
+                params![session, run],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(Error::internal)?;
+        if let Some((pid, identity)) = process {
+            runtime::reap_owned(pid, &identity);
+        }
+        worker.status = WorkerStatus::Interrupted;
+        worker.error = Some(
+            "Server execution task ended before a terminal outcome; continuation is explicit"
+                .into(),
+        );
+        snapshot.revision = snapshot
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| Error::invalid("Revision exhausted"))?;
+        store.save(&snapshot)?;
+        store.controls.remove(session);
+        self.snapshots.send_replace(snapshot);
+        Ok(())
+    }
     fn update_run(
         &self,
         session: &str,
@@ -459,6 +502,20 @@ impl Workspace {
                             issue.result = old.result.clone();
                         }
                     }
+                    // Keep referenced history, but no removed item belongs to a live board column.
+                    let mut retained = Vec::new();
+                    for old in snapshot.issues.iter().filter(|i| {
+                        i.project_id == project_id && !issues.iter().any(|new| new.id == i.id)
+                    }) {
+                        let linked = snapshot.sessions.iter().any(|s| s.issue_id.as_deref() == Some(old.id.as_str()))
+                            || snapshot.directors.iter().any(|d| snapshot.effective_profile(d).ok().is_some_and(|p| matches!(p.scope, DirectorScope::Issues { issue_ids } if issue_ids.contains(&old.id))));
+                        if linked {
+                            let mut historic = old.clone();
+                            historic.column_id = "github-removed".into();
+                            retained.push(historic);
+                        }
+                    }
+                    issues.extend(retained);
                     snapshot.issues.retain(|i| i.project_id != project_id);
                     snapshot.issues.extend(issues);
                 }
@@ -511,6 +568,65 @@ pub fn router_with_config(
     defaults: DirectorProfile,
     config: RuntimeConfig,
 ) -> Result<Router, Error> {
+    router_with_shutdown(path, token, defaults, config).map(|(router, _)| router)
+}
+
+/// Explicit server-lifetime control. Dropping clients does not stop workers.
+#[derive(Clone)]
+pub struct Shutdown {
+    workspace: Workspace,
+}
+impl Shutdown {
+    pub async fn shutdown(&self) -> Result<(), Error> {
+        {
+            let mut store = self.workspace.store.lock().map_err(Error::internal)?;
+            store.closing = true;
+            for control in store.controls.values() {
+                control.send_replace(true);
+            }
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let unfinished: Vec<(String, String)> = {
+                let store = self.workspace.store.lock().map_err(Error::internal)?;
+                store
+                    .snapshot()?
+                    .sessions
+                    .iter()
+                    .filter(|s| {
+                        s.worker
+                            .as_ref()
+                            .is_some_and(|w| runtime::active(&w.status))
+                    })
+                    .map(|s| {
+                        Ok((
+                            s.id.clone(),
+                            store
+                                .run_id(&s.id)?
+                                .ok_or_else(|| Error::invalid("Active run receipt missing"))?,
+                        ))
+                    })
+                    .collect::<Result<_, Error>>()?
+            };
+            if unfinished.is_empty() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                for (session, run) in unfinished {
+                    self.workspace.interrupt_run(&session, &run)?;
+                }
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+}
+pub fn router_with_shutdown(
+    path: impl AsRef<Path>,
+    token: String,
+    defaults: DirectorProfile,
+    config: RuntimeConfig,
+) -> Result<(Router, Shutdown), Error> {
     if token.len() < 16 || token.trim() != token || !token.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(Error::invalid(
             "RELAY_TOKEN must contain at least 16 printable ASCII characters with no spaces",
@@ -595,16 +711,22 @@ pub fn router_with_config(
         token: token.into(),
         config: Arc::new(config),
     };
-    Ok(Router::new()
-        .route("/v1/snapshot", get(snapshot))
-        .route("/v1/commands", post(command))
-        .route("/v1/events", get(events))
-        .layer(DefaultBodyLimit::max(64 * 1024))
-        .layer(axum::middleware::from_fn_with_state(
-            workspace.clone(),
-            authorize,
-        ))
-        .with_state(workspace))
+    let shutdown = Shutdown {
+        workspace: workspace.clone(),
+    };
+    Ok((
+        Router::new()
+            .route("/v1/snapshot", get(snapshot))
+            .route("/v1/commands", post(command))
+            .route("/v1/events", get(events))
+            .layer(DefaultBodyLimit::max(64 * 1024))
+            .layer(axum::middleware::from_fn_with_state(
+                workspace.clone(),
+                authorize,
+            ))
+            .with_state(workspace),
+        shutdown,
+    ))
 }
 
 async fn authorize(
@@ -635,6 +757,13 @@ async fn command(
     let handle = tokio::runtime::Handle::current();
     let result = tokio::task::spawn_blocking(move || {
         let mut store = workspace.store.lock().map_err(Error::internal)?;
+        if store.closing {
+            return Err(Error::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "shutdown",
+                "Server is shutting down",
+            ));
+        }
         let run_id = envelope.request_id.clone();
         let (snapshot, action) = store.apply(envelope, &workspace.config)?;
         workspace.snapshots.send_replace(snapshot.clone());

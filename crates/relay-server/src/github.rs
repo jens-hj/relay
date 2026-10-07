@@ -6,6 +6,7 @@ use std::{collections::HashSet, process::Command};
 
 fn graphql(config: &RuntimeConfig, query: &str, variables: Value) -> Result<Value, Error> {
     let mut cmd = Command::new(&config.gh);
+    cmd.env_remove("RELAY_TOKEN");
     cmd.args(["api", "--hostname", "github.com", "graphql", "-f"])
         .arg(format!("query={query}"));
     for (key, value) in variables.as_object().unwrap() {
@@ -69,6 +70,7 @@ pub(crate) fn sync(config: &RuntimeConfig, project_id: &str) -> Result<Board, Er
     let remote = config.remote.as_ref().ok_or_else(|| Error::invalid("Configure RELAY_GITHUB_REPO, RELAY_GITHUB_PROJECT_OWNER and RELAY_GITHUB_PROJECT_NUMBER"))?;
     // GitHub emits NOT_FOUND for the owner kind that does not exist; resolve owner first.
     let owner = Command::new(&config.gh)
+        .env_remove("RELAY_TOKEN")
         .args([
             "api",
             "--hostname",
@@ -134,11 +136,6 @@ pub(crate) fn sync(config: &RuntimeConfig, project_id: &str) -> Result<Board, Er
         if after.is_none() {
             break;
         }
-    }
-    if board.columns.is_empty() {
-        return Err(Error::invalid(
-            "GitHub project requires a Status single-select field",
-        ));
     }
     board.columns.push(BoardColumn {
         id: "github-no-status".into(),

@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(path) => DirectorProfile::from_toml(&std::fs::read_to_string(path)?)?,
         Err(_) => DirectorProfile::default(),
     };
-    let app = relay_server::router_with_config(
+    let (app, shutdown) = relay_server::router_with_shutdown(
         &path,
         token,
         defaults,
@@ -29,8 +29,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path.display()
     );
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+        .with_graceful_shutdown(async move {
+            #[cfg(unix)]
+            {
+                if let Ok(mut terminate) =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                {
+                    tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+                } else {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+            if let Err(error) = shutdown.shutdown().await {
+                eprintln!("Worker shutdown failed: {error}");
+            }
         })
         .await?;
     Ok(())
