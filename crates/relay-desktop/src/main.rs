@@ -24,23 +24,24 @@ fn main() -> Result<(), String> {
         Err(_) => {}
         _ => return Err("RELAY_THEME must be system, light, or dark".into()),
     }
-    App::new("Relay").window(WindowConfig::new(1380.0, 900.0))
-        .theme(theme::configured_palette(false, preferences.dark_neutral, preferences.scale))
-        .clear(theme::base).run(move |ui, context| {
-        let font_warning = match fonts::configure(&mut ui.fonts().borrow_mut()) {
-            Ok(true) => String::new(),
-            Ok(false) => "Neurath X is unavailable. Install it locally or set RELAY_TITLE_FONT to your font file.".into(),
-            Err(error) => error,
-        };
-        let (updates, sender) = state_channel(network::NetworkState::default());
-        let commands = network::start(config.clone(), sender);
-        let model = model::Model::new(ui, commands);
-        model.preferences.set(preferences.clone());
-        model.font_status.set(font_warning);
-        model.notice.set(warning.clone());
-        settings::bind(model, context.clone(), Some(path.clone()));
-        Effect::new(move || model.receive(updates.get()));
-        ui::shell(model)
-    });
+    App::new("Relay")
+        .window(WindowConfig::new(1380.0, 900.0))
+        .theme(theme::configured_palette(
+            false,
+            preferences.dark_neutral,
+            preferences.scale,
+        ))
+        .clear(theme::base)
+        .run(move |ui, context| {
+            fonts::configure(&mut ui.fonts().borrow_mut());
+            let (updates, sender) = state_channel(network::NetworkState::default());
+            let commands = network::start(config.clone(), sender);
+            let model = model::Model::new(ui, commands);
+            model.preferences.set(preferences.clone());
+            model.notice.set(warning.clone());
+            settings::bind(model, context.clone(), Some(path.clone()));
+            Effect::new(move || model.receive(updates.get()));
+            ui::shell(model)
+        });
     Ok(())
 }

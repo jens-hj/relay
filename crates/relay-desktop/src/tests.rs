@@ -21,7 +21,8 @@ fn mount(light: bool, width: f32) -> Mounted {
     let scope = Scope::new(|| {});
     let ui = scope.run(Ui::new);
     let mut fonts = FontContext::embedded_only();
-    crate::fonts::configure(&mut fonts).unwrap();
+    crate::fonts::configure(&mut fonts);
+    assert!(fonts.has_family("Reddit Sans"));
     assert!(fonts.has_family("Zed Mono"));
     ui.set_fonts(fonts);
     let (sender, commands) = tokio::sync::mpsc::unbounded_channel();

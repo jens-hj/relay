@@ -6,16 +6,13 @@ https://github.com/zed-industries/zed-fonts/releases/tag/1.2.0
 These are the original Iosevka-derived Zed Mono faces, licensed under SIL OFL 1.1;
 the accompanying license comes from `zed-iosevka/LICENSE.md` in that repository.
 
-Neurath X is not redistributed. Install your licensed copy locally, or set
-`RELAY_TITLE_FONT` to its TTF/OTF/TTC file. The client uses the installed
-`Neurath X` or `RB Neurath X` family for titles and subtitles. If unavailable,
-Mosaic's title fallback remains active and Settings reports the missing font.
+Reddit Sans regular, semibold, bold, and extra bold are bundled for titles and
+subtitles from the official repository at commit
+`aae51f87b9dc16ab78e8013c1f945dda85318ecc`:
+https://github.com/reddit/redditsans/tree/aae51f87b9dc16ab78e8013c1f945dda85318ecc/fonts/sans/ttf
 
-Official source: https://www.renebieder.com/fonts/neurath-x
-
-For an internal visual evaluation, the foundry offers test fonts at
-https://www.renebieder.com/trial-fonts. That download requires a name and email.
-The test-font terms allow internal evaluation and prohibit distribution outside
-the organization; keep these files outside the public repository. See
-https://www.renebieder.com/info#licenses_trial. A shipping font asset needs
-licensing that covers Relay's intended application distribution.
+The unmodified static TTF files carry the weights used by Relay's headings;
+they do not depend on variable-font axis support or installed system fonts.
+They are licensed under SIL OFL 1.1; `Reddit-Sans-LICENSE.txt` is the upstream
+`OFL.txt`, including the copyright notice. Both font families load from embedded
+assets before the UI is built, so they are available offline on every client.

@@ -89,10 +89,7 @@ fn Settings(model: Model) -> Element {
                 }
                 col height:min-content gap:{px(10.0)}px {
                     text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Fonts"
-                    text font-size:{px(12.0)}px "Titles: Neurath X · Text: Zed Mono"
-                    if !model.font_status.get().is_empty() {
-                        text font-size:{px(12.0)}px font-color:muted {model.font_status.get()}
-                    }
+                    text font-size:{px(12.0)}px "Titles: Reddit Sans · Text: Zed Mono"
                 }
                 text font-size:{px(12.0)}px font-color:muted "Settings are saved on this machine."
             }
