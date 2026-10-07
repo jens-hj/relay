@@ -2,6 +2,8 @@
 
 Tracked milestone: one authoritative GitHub Projects board, one issue-linked Codex worker, and a reviewable result in the native client. Relay itself is the first connected repository. The orchestrator owns integration and validation; two HAPI workers own the server and desktop slices in separate worktrees.
 
+Tracked in [issue #2](https://github.com/jens-hj/relay/issues/2), with the live self-test in [issue #3](https://github.com/jens-hj/relay/issues/3). See the [validation record](dogfood-validation.md). The two implementation workers were restarted with yolo/full access at the user's explicit request; Relay's product workers continue to use workspace-write sandboxing.
+
 ## Acceptance criteria
 
 - Mirror GitHub Projects v2 Status columns and issue items for the configured repository. Paginate; exclude draft issues and pull requests explicitly. Preserve provider-qualified issue identity. Remote sync errors leave the last good board intact and visible. Sync is explicit initially. No remote status changes are implied by local execution.
