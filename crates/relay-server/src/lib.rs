@@ -196,9 +196,9 @@ impl Store {
                 if project.github.is_none() {
                     return Err(Error::invalid("Project has no configured GitHub board"));
                 }
-                if config.remote.is_none() {
+                if !runtime::configured_project(project, config) {
                     return Err(Error::invalid(
-                        "GitHub board is not configured on this server",
+                        "Project is not the currently configured repository and GitHub board",
                     ));
                 }
                 action = Some(Action::Sync(project_id));
@@ -499,8 +499,22 @@ impl Workspace {
                     // Preserve local issue result metadata while replacing remote fields.
                     let mut issues = board.issues;
                     for issue in &mut issues {
-                        if let Some(old) = snapshot.issues.iter().find(|i| i.id == issue.id) {
+                        if let Some(old) = snapshot.issues.iter().find(|i| {
+                            i.project_id == project_id
+                                && i.reference.provider == issue.reference.provider
+                                && i.reference.repository == issue.reference.repository
+                                && i.reference.number == issue.reference.number
+                        }) {
+                            issue.id = old.id.clone();
                             issue.result = old.result.clone();
+                        } else if snapshot
+                            .issues
+                            .iter()
+                            .any(|i| i.id == issue.id && i.project_id != project_id)
+                        {
+                            // One provider issue can appear on multiple historical boards.
+                            // Keep existing IDs intact and give the new board its own local ID.
+                            issue.id = format!("{}@{}", issue.id, project_id);
                         }
                     }
                     // Keep referenced history, but no removed item belongs to a live board column.
@@ -633,7 +647,7 @@ pub fn router_with_shutdown(
             "RELAY_TOKEN must contain at least 16 printable ASCII characters with no spaces",
         ));
     }
-    let mut store = Store::open(path.as_ref(), defaults)?;
+    let mut store = Store::open(path.as_ref(), defaults.clone())?;
     let mut initial = store.snapshot()?;
     let mut changed = false;
     // Reap only a previously owned Linux process whose boot/start identity still matches.
@@ -680,29 +694,62 @@ pub fn router_with_shutdown(
         }
     }
     if let Some(remote) = &config.remote {
-        let project = &mut initial.projects[0];
-        if project
-            .github
-            .as_ref()
-            .is_none_or(|g| g.owner != remote.owner || g.number != remote.number)
-            || project.repository != remote.repository
-        {
-            project.repository = remote.repository.clone();
-            project.github = Some(GitHubProject {
-                owner: remote.owner.clone(),
-                number: remote.number,
-                url: format!(
-                    "https://github.com/users/{}/projects/{}",
-                    remote.owner, remote.number
-                ),
-                last_synced_at: None,
-                sync_error: None,
+        let selected = if let Some(index) = initial.projects.iter().position(|project| {
+            project.id != "demo" && runtime::configured_project(project, &config)
+        }) {
+            index
+        } else {
+            let id = format!(
+                "github-project:{}:{}:{}",
+                remote.owner, remote.number, remote.repository
+            );
+            if initial.projects.iter().any(|project| project.id == id) {
+                return Err(Error::invalid(
+                    "Configured live project ID collides with historical project metadata",
+                ));
+            }
+            initial.projects.push(Project {
+                id: id.clone(),
+                name: format!("{} · GitHub project {}", remote.repository, remote.number),
+                repository: remote.repository.clone(),
+                fixture: false,
+                columns: vec![BoardColumn {
+                    id: "github-no-status".into(),
+                    title: "No status".into(),
+                }],
+                defaults,
+                github: Some(GitHubProject {
+                    owner: remote.owner.clone(),
+                    number: remote.number,
+                    url: format!(
+                        "https://github.com/users/{}/projects/{}",
+                        remote.owner, remote.number
+                    ),
+                    last_synced_at: None,
+                    sync_error: None,
+                }),
             });
+            initial.directors.push(Director {
+                id: format!("director-{id}"),
+                project_id: id,
+                name: "Project director".into(),
+                overrides: ProfileOverrides::default(),
+            });
+            changed = true;
+            initial.projects.len() - 1
+        };
+        // The current configured live project comes first; all other identities remain intact.
+        if selected != 0 {
+            let project = initial.projects.remove(selected);
+            initial.projects.insert(0, project);
             changed = true;
         }
     }
     if changed {
-        initial.revision += 1;
+        initial.revision = initial
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| Error::invalid("Revision exhausted"))?;
         store.save(&initial)?;
     }
     let (snapshots, _) = watch::channel(initial);

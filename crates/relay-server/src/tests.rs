@@ -4,6 +4,7 @@ use std::{path::PathBuf, time::Duration};
 fn live() -> Snapshot {
     let mut s = demo_snapshot(DirectorProfile::default());
     let p = &mut s.projects[0];
+    p.id = "live".into();
     p.fixture = false;
     p.repository = "jens-hj/relay".into();
     p.github = Some(GitHubProject {
@@ -14,8 +15,15 @@ fn live() -> Snapshot {
         sync_error: None,
     });
     for i in &mut s.issues {
+        i.project_id = p.id.clone();
         i.reference.provider = Provider::Github;
         i.reference.repository = p.repository.clone();
+    }
+    for director in &mut s.directors {
+        director.project_id = p.id.clone();
+    }
+    for session in &mut s.sessions {
+        session.project_id = p.id.clone();
     }
     s
 }
@@ -546,7 +554,7 @@ fn paginated_board_maps_status_and_filters_drafts_prs_and_other_repos() {
     );
     let mut c = config();
     c.gh = bin;
-    let board = github::sync(&c, "demo").unwrap();
+    let board = github::sync(&c, "live").unwrap();
     assert_eq!(board.issues.len(), 2);
     assert_eq!(board.issues[0].id, "github:jens-hj/relay:7");
     assert_eq!(board.issues[0].column_id, "doing");
@@ -563,11 +571,11 @@ fn paginated_board_maps_status_and_filters_drafts_prs_and_other_repos() {
         .unwrap()
         .connection
         .execute(
-            "INSERT OR REPLACE INTO syncs(project_id,request_id) VALUES('demo','sync-test')",
+            "INSERT OR REPLACE INTO syncs(project_id,request_id) VALUES('live','sync-test')",
             [],
         )
         .unwrap();
-    w.synchronize("demo", "sync-test");
+    w.synchronize("live", "sync-test");
     let good = w.snapshots.borrow().clone();
     script(&c.gh, "echo secret-auth-detail >&2\nexit 1");
     w.store
@@ -575,11 +583,11 @@ fn paginated_board_maps_status_and_filters_drafts_prs_and_other_repos() {
         .unwrap()
         .connection
         .execute(
-            "INSERT OR REPLACE INTO syncs(project_id,request_id) VALUES('demo','sync-test')",
+            "INSERT OR REPLACE INTO syncs(project_id,request_id) VALUES('live','sync-test')",
             [],
         )
         .unwrap();
-    w.synchronize("demo", "sync-test");
+    w.synchronize("live", "sync-test");
     let failed = w.snapshots.borrow().clone();
     assert_eq!(failed.issues, good.issues);
     assert_eq!(failed.projects[0].columns, good.projects[0].columns);
@@ -833,7 +841,7 @@ fn sync_receipts_are_idempotent_and_obsolete_results_do_not_publish() {
     let request = env(
         s.revision,
         Command::SyncProject {
-            project_id: "demo".into(),
+            project_id: "live".into(),
         },
     );
     let mut store = w.store.lock().unwrap();
@@ -842,9 +850,9 @@ fn sync_receipts_are_idempotent_and_obsolete_results_do_not_publish() {
     assert!(store.apply(request.clone(), &w.config).unwrap().1.is_none());
     w.snapshots.send_replace(saved.clone());
     drop(store);
-    w.synchronize("demo", "superseded");
+    w.synchronize("live", "superseded");
     assert_eq!(*w.snapshots.borrow(), saved);
-    w.synchronize("demo", &request.request_id);
+    w.synchronize("live", &request.request_id);
     assert!(
         w.snapshots.borrow().projects[0]
             .github
@@ -1394,9 +1402,9 @@ fn removed_board_items_keep_linked_identity_without_becoming_active() {
         .lock()
         .unwrap()
         .connection
-        .execute("INSERT INTO syncs VALUES('demo','sync')", [])
+        .execute("INSERT INTO syncs VALUES('live','sync')", [])
         .unwrap();
-    w.synchronize("demo", "sync");
+    w.synchronize("live", "sync");
     let removed = w.snapshots.borrow().clone();
     let historic = removed.issues.iter().find(|i| i.id == issue_id).unwrap();
     assert_eq!(historic.column_id, "github-removed-from-board");
@@ -1430,7 +1438,7 @@ fn removed_board_items_keep_linked_identity_without_becoming_active() {
         snapshot.sessions.last_mut().unwrap().issue_id = Some(new_id);
         store.save(&snapshot).unwrap();
     }
-    w.synchronize("demo", "sync");
+    w.synchronize("live", "sync");
     let restored = w.snapshots.borrow().clone();
     let restored_id = restored.sessions.last().unwrap().issue_id.as_ref().unwrap();
     let issue = restored
@@ -1476,7 +1484,7 @@ async fn token_exclusion_child() {
     c.repository = Some(repo);
     c.codex = bin;
     c.gh = gh;
-    assert!(github::sync(&c, "demo").is_ok());
+    assert!(github::sync(&c, "live").is_ok());
     let s = live();
     let w = workspace(&dir.path().join("db"), &s, c);
     let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
@@ -1611,9 +1619,9 @@ fn oversized_github_capture_reports_error_without_destroying_last_good_board() {
         .lock()
         .unwrap()
         .connection
-        .execute("INSERT INTO syncs VALUES('demo','sync')", [])
+        .execute("INSERT INTO syncs VALUES('live','sync')", [])
         .unwrap();
-    w.synchronize("demo", "sync");
+    w.synchronize("live", "sync");
     let failed = w.snapshots.borrow().clone();
     assert_eq!(failed.issues, s.issues);
     assert_eq!(failed.projects[0].columns, s.projects[0].columns);
@@ -1625,5 +1633,313 @@ fn oversized_github_capture_reports_error_without_destroying_last_good_board() {
             .as_ref()
             .unwrap()
             .contains("exceeds 128 KiB")
+    );
+}
+#[test]
+fn configured_live_project_migration_preserves_demo_and_historical_identities() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("db");
+    let defaults = DirectorProfile::default();
+    let mut store = Store::open(&db, defaults.clone()).unwrap();
+    let mut demo = store.snapshot().unwrap();
+    demo.apply(
+        Command::AddComment {
+            message_id: "m2".into(),
+            quote: None,
+            author: "Reviewer".into(),
+            body: "Retain fixture history".into(),
+        },
+        "fixture-comment",
+        1,
+    )
+    .unwrap();
+    store.save(&demo).unwrap();
+    drop(store);
+    let c = config();
+    let _router = router_with_config(
+        &db,
+        "token-at-least-sixteen".into(),
+        defaults.clone(),
+        c.clone(),
+    )
+    .unwrap();
+    let a = Store::open(&db, defaults.clone())
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    let current = a.projects[0].clone();
+    assert_ne!(current.id, "demo");
+    assert!(!current.fixture);
+    assert!(current.github.as_ref().unwrap().last_synced_at.is_none());
+    assert_eq!(
+        a.projects.iter().find(|p| p.id == "demo"),
+        Some(&demo.projects[0])
+    );
+    assert_eq!(a.issues, demo.issues);
+    assert_eq!(a.sessions, demo.sessions);
+    assert_eq!(a.messages, demo.messages);
+    assert_eq!(a.comments, demo.comments);
+    for director in &demo.directors {
+        assert!(a.directors.contains(director));
+        assert_eq!(
+            a.effective_profile(director).unwrap(),
+            demo.effective_profile(director).unwrap()
+        );
+    }
+    let director = a
+        .directors
+        .iter()
+        .find(|d| d.project_id == current.id)
+        .unwrap();
+    assert_eq!(director.overrides, ProfileOverrides::default());
+    assert_eq!(a.effective_profile(director).unwrap(), defaults);
+    let _router = router_with_config(
+        &db,
+        "token-at-least-sixteen".into(),
+        defaults.clone(),
+        c.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        Store::open(&db, defaults.clone())
+            .unwrap()
+            .snapshot()
+            .unwrap(),
+        a
+    );
+    let mut next = c.clone();
+    next.remote.as_mut().unwrap().number = 6;
+    let _router = router_with_config(
+        &db,
+        "token-at-least-sixteen".into(),
+        defaults.clone(),
+        next.clone(),
+    )
+    .unwrap();
+    let b = Store::open(&db, defaults.clone())
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    assert_ne!(b.projects[0].id, current.id);
+    assert_eq!(b.projects.len(), 3);
+    assert_eq!(
+        b.projects.iter().find(|p| p.id == current.id),
+        Some(&current)
+    );
+    assert_eq!(
+        b.projects.iter().find(|p| p.id == "demo"),
+        Some(&demo.projects[0])
+    );
+    assert_eq!(b.issues, a.issues);
+    assert_eq!(b.directors[..a.directors.len()], a.directors);
+    assert!(!runtime::configured_project(&current, &next));
+    let mut store = Store::open(&db, defaults.clone()).unwrap();
+    assert!(
+        store
+            .apply(
+                env(
+                    b.revision,
+                    Command::SyncProject {
+                        project_id: current.id.clone()
+                    }
+                ),
+                &next
+            )
+            .is_err()
+    );
+    drop(store);
+    let _router =
+        router_with_config(&db, "token-at-least-sixteen".into(), defaults.clone(), c).unwrap();
+    let restored = Store::open(&db, defaults).unwrap().snapshot().unwrap();
+    assert_eq!(restored.projects[0], current);
+    assert_eq!(restored.projects.len(), 3);
+    assert_eq!(restored.directors, b.directors);
+    assert_eq!(restored.comments, demo.comments);
+}
+#[test]
+fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_delegate() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("db");
+    let bin = dir.path().join("gh");
+    script(
+        &bin,
+        "case \"$*\" in\n *users/*) echo '{\"type\":\"User\"}';;\n *projectV2*) echo '{\"data\":{\"user\":{\"projectV2\":{\"id\":\"P1\",\"title\":\"Live Relay\",\"url\":\"board\"}}}}';;\n *fields*) echo '{\"data\":{\"node\":{\"fields\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}';;\n *items*) echo '{\"data\":{\"node\":{\"items\":{\"nodes\":[{\"type\":\"ISSUE\",\"content\":{\"__typename\":\"Issue\",\"number\":3,\"title\":\"Live task\",\"body\":\"Implement\",\"url\":\"issue\",\"repository\":{\"nameWithOwner\":\"jens-hj/relay\"},\"labels\":{\"nodes\":[]}}}],\"pageInfo\":{\"hasNextPage\":false}}}}}';;\n *) exit 1;;\nesac",
+    );
+    let mut c = config();
+    c.gh = bin;
+    let _router = router_with_config(
+        &db,
+        "token-at-least-sixteen".into(),
+        DirectorProfile::default(),
+        c.clone(),
+    )
+    .unwrap();
+    let s = Store::open(&db, DirectorProfile::default())
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    let live_id = s.projects[0].id.clone();
+    let fixtures = s.issues.clone();
+    let w = workspace(&db, &s, c.clone());
+    w.store
+        .lock()
+        .unwrap()
+        .connection
+        .execute("INSERT INTO syncs VALUES(?1,'sync')", [&live_id])
+        .unwrap();
+    w.synchronize(&live_id, "sync");
+    let synced = w.snapshots.borrow().clone();
+    assert_eq!(
+        synced
+            .issues
+            .iter()
+            .filter(|i| i.project_id == "demo")
+            .cloned()
+            .collect::<Vec<_>>(),
+        fixtures
+    );
+    assert_eq!(synced.sessions, s.sessions);
+    assert_eq!(synced.messages, s.messages);
+    assert_eq!(synced.comments, s.comments);
+    assert_eq!(synced.directors, s.directors);
+    assert!(
+        synced
+            .validate_profile(
+                "demo",
+                &synced
+                    .effective_profile(
+                        synced
+                            .directors
+                            .iter()
+                            .find(|d| d.id == "director-review")
+                            .unwrap()
+                    )
+                    .unwrap()
+            )
+            .is_ok()
+    );
+    let issue = synced
+        .issues
+        .iter()
+        .find(|i| i.project_id == live_id)
+        .unwrap();
+    let director = synced
+        .directors
+        .iter()
+        .find(|d| d.project_id == live_id)
+        .unwrap();
+    let profile = synced.effective_profile(director).unwrap();
+    assert!(!profile.responsibilities.contains(&Task::Implement));
+    assert!(runtime::authorize_turn(&synced, &issue.id, &director.id, false, &c).is_err());
+    assert!(runtime::authorize_turn(&synced, &issue.id, &director.id, true, &c).is_ok());
+    for changed in ["owner", "number", "repository"] {
+        let mut other = c.clone();
+        let r = other.remote.as_mut().unwrap();
+        match changed {
+            "owner" => r.owner = "different-owner".into(),
+            "number" => r.number += 1,
+            "repository" => r.repository = "other/repo".into(),
+            _ => unreachable!(),
+        };
+        assert!(runtime::authorize_turn(&synced, &issue.id, &director.id, true, &other).is_err());
+        assert!(
+            w.store
+                .lock()
+                .unwrap()
+                .apply(
+                    env(
+                        synced.revision,
+                        Command::SyncProject {
+                            project_id: live_id.clone()
+                        }
+                    ),
+                    &other
+                )
+                .is_err()
+        );
+    }
+    // A provider issue mirrored on a second board needs a distinct local identity,
+    // while the original project's issue and result remain unchanged.
+    {
+        let mut store = w.store.lock().unwrap();
+        let mut snapshot = store.snapshot().unwrap();
+        snapshot
+            .issues
+            .iter_mut()
+            .find(|i| i.id == issue.id)
+            .unwrap()
+            .result = Some("Reviewed on original board".into());
+        store.save(&snapshot).unwrap();
+    }
+    let mut second = c.clone();
+    second.remote.as_mut().unwrap().number = 6;
+    let _router = router_with_config(
+        &db,
+        "token-at-least-sixteen".into(),
+        DirectorProfile::default(),
+        second.clone(),
+    )
+    .unwrap();
+    let second_snapshot = Store::open(&db, DirectorProfile::default())
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    let second_id = second_snapshot.projects[0].id.clone();
+    let second_workspace = workspace(&db, &second_snapshot, second);
+    second_workspace
+        .store
+        .lock()
+        .unwrap()
+        .connection
+        .execute("INSERT INTO syncs VALUES(?1,'second-sync')", [&second_id])
+        .unwrap();
+    second_workspace.synchronize(&second_id, "second-sync");
+    let both = second_workspace.snapshots.borrow().clone();
+    let old = both
+        .issues
+        .iter()
+        .find(|i| i.project_id == live_id)
+        .unwrap();
+    let new = both
+        .issues
+        .iter()
+        .find(|i| i.project_id == second_id)
+        .unwrap();
+    assert_eq!(old.id, issue.id);
+    assert_eq!(old.result.as_deref(), Some("Reviewed on original board"));
+    assert_ne!(new.id, old.id);
+    assert_eq!(new.reference, old.reference);
+    assert_eq!(both.issues.iter().filter(|i| i.id == old.id).count(), 1);
+    let new_director = both
+        .directors
+        .iter()
+        .find(|d| d.project_id == second_id)
+        .unwrap();
+    assert!(
+        runtime::authorize_turn(
+            &both,
+            &new.id,
+            &new_director.id,
+            true,
+            &second_workspace.config
+        )
+        .is_ok()
+    );
+    assert!(
+        runtime::authorize_turn(&both, &old.id, &director.id, true, &second_workspace.config)
+            .is_err()
+    );
+    let new_id = new.id.clone();
+    second_workspace.synchronize(&second_id, "second-sync");
+    assert_eq!(
+        second_workspace
+            .snapshots
+            .borrow()
+            .issues
+            .iter()
+            .find(|i| i.project_id == second_id)
+            .unwrap()
+            .id,
+        new_id
     );
 }

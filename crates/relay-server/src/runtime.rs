@@ -91,6 +91,16 @@ impl RuntimeConfig {
 pub(crate) fn active(status: &WorkerStatus) -> bool {
     matches!(status, WorkerStatus::Queued | WorkerStatus::Running)
 }
+pub(crate) fn configured_project(project: &Project, config: &RuntimeConfig) -> bool {
+    project.id != "demo"
+        && !project.fixture
+        && config.remote.as_ref().is_some_and(|remote| {
+            project.repository == remote.repository
+                && project.github.as_ref().is_some_and(|board| {
+                    board.owner == remote.owner && board.number == remote.number
+                })
+        })
+}
 pub(crate) fn authorize_turn(
     snapshot: &Snapshot,
     issue_id: &str,
@@ -111,6 +121,7 @@ pub(crate) fn authorize_turn(
         .as_ref()
         .ok_or_else(|| Error::invalid("Configure GitHub project before starting workers"))?;
     if project.fixture
+        || !configured_project(project, config)
         || !project
             .columns
             .iter()
