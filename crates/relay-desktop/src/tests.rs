@@ -20,7 +20,10 @@ fn mount(light: bool, width: f32) -> Mounted {
     install_theme(&theme::palette(light));
     let scope = Scope::new(|| {});
     let ui = scope.run(Ui::new);
-    ui.set_fonts(FontContext::embedded_only());
+    let mut fonts = FontContext::embedded_only();
+    crate::fonts::configure(&mut fonts).unwrap();
+    assert!(fonts.has_family("Zed Mono"));
+    ui.set_fonts(fonts);
     let (sender, commands) = tokio::sync::mpsc::unbounded_channel();
     let model = scope.run(|| Model::new(&ui, sender));
     model.receive(NetworkState {
@@ -42,6 +45,146 @@ fn mount(light: bool, width: f32) -> Mounted {
     };
     mounted.settle();
     mounted
+}
+
+#[test]
+fn display_settings_persist_validate_and_preserve_existing_file_on_failure() {
+    use crate::settings::{Preferences, ThemeMode};
+    let directory = std::env::temp_dir().join(format!("relay-settings-{}", uuid::Uuid::new_v4()));
+    let path = directory.join("settings.toml");
+    let mut preferences = Preferences::load(&path).unwrap();
+    assert_eq!(preferences.mode, ThemeMode::Dark);
+    assert_eq!(preferences.scale, 1.0);
+    preferences.mode = ThemeMode::System;
+    preferences.dark_neutral = true;
+    preferences.light_warm = true;
+    preferences.scale = 1.5;
+    preferences.sidebar_width = 300.0;
+    preferences.save(&path).unwrap();
+    assert_eq!(Preferences::load(&path).unwrap(), preferences);
+    let before = std::fs::read(&path).unwrap();
+    preferences.scale = f32::NAN;
+    assert!(preferences.save(&path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    std::fs::write(&path, "scale = 8.0").unwrap();
+    assert!(Preferences::load(&path).is_err());
+    std::fs::write(&path, "broken syntax").unwrap();
+    assert!(Preferences::load(&path).is_err());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn settings_work_disconnected_and_scale_layout_and_hit_targets_without_losing_drafts() {
+    let mounted = mount(false, 1380.0);
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+    mounted.model.receive(NetworkState::default());
+    mounted.model.worker_prompt.set("Keep this draft".into());
+    mounted.key(Key::Character(",".into()), true);
+    assert_eq!(mounted.model.page.get_untracked(), Page::Settings);
+    let before = mounted.rect("Theme: Dark");
+    mounted.model.preferences.update(|p| p.scale = 1.5);
+    mounted.settle();
+    let after = mounted.rect("Theme: Dark");
+    assert!((after.size.height / before.size.height - 1.5).abs() < 0.05);
+    assert!((mounted.rect("Sidebar").size.width - 330.0).abs() < 1.0);
+    mounted.click("Theme: Light");
+    assert_eq!(
+        mounted.model.preferences.get_untracked().mode,
+        crate::settings::ThemeMode::Light
+    );
+    let paper = mosaic::core::theme::color(theme::base);
+    mounted.click("Light palette: Warm");
+    assert_ne!(mosaic::core::theme::color(theme::base), paper);
+    mounted.click("Theme: Dark");
+    let slate = mosaic::core::theme::color(theme::base);
+    mounted.click("Dark palette: Neutral");
+    assert_ne!(mosaic::core::theme::color(theme::base), slate);
+    mounted.click("Theme: System");
+    assert_eq!(
+        mounted.model.preferences.get_untracked().mode,
+        crate::settings::ThemeMode::System
+    );
+    assert_eq!(mosaic::core::theme::scalar(theme::ui_scale), 1.5);
+    assert_eq!(
+        mounted.model.worker_prompt.get_untracked(),
+        "Keep this draft"
+    );
+    assert!(mounted.commands.is_empty());
+}
+
+#[test]
+fn sidebar_drag_clamps_width_and_settings_remain_keyboard_reachable_in_short_window() {
+    let mut mounted = mount(false, 820.0);
+    let sidebar = mounted.rect("Sidebar");
+    let start = Vector2::new(sidebar.origin.x + sidebar.size.width - 1.0, 80.0);
+    for (kind, position) in [
+        (PointerEventKind::Down(PointerButton::Primary), start),
+        (PointerEventKind::Move, Vector2::new(700.0, 80.0)),
+        (
+            PointerEventKind::Up(PointerButton::Primary),
+            Vector2::new(700.0, 80.0),
+        ),
+    ] {
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind,
+            position,
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+        mounted.settle();
+    }
+    assert_eq!(
+        mounted.model.preferences.get_untracked().sidebar_width,
+        360.0
+    );
+    assert!((mounted.rect("Sidebar").size.width - 360.0).abs() < 1.0);
+    mounted.size = Size::new(820.0, 360.0);
+    mounted.settle();
+    mounted.focus("Settings");
+    mounted.key(Key::Enter, false);
+    assert_eq!(mounted.model.page.get_untracked(), Page::Settings);
+    mounted.focus("Reset sidebar width");
+    mounted.key(Key::Enter, false);
+    assert_eq!(
+        mounted.model.preferences.get_untracked().sidebar_width,
+        220.0
+    );
+}
+
+#[test]
+fn large_scale_settings_keep_controls_visible_in_a_narrow_window() {
+    let mut mounted = mount(false, 820.0);
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+    mounted.model.preferences.update(|p| {
+        p.scale = 2.0;
+        p.sidebar_width = 160.0;
+    });
+    mounted.size = Size::new(820.0, 600.0);
+    mounted.key(Key::Character(",".into()), true);
+    for label in [
+        "Theme: System",
+        "Decrease interface scale",
+        "Reset interface scale",
+        "Reset sidebar width",
+    ] {
+        mounted.focus(label);
+        let rect = mounted.rect(label);
+        assert!(rect.origin.x >= 320.0, "{label}: {rect:?}");
+        assert!(
+            rect.origin.x + rect.size.width <= 820.0,
+            "{label}: {rect:?}"
+        );
+    }
+    mounted.key(Key::Enter, false);
+    assert_eq!(
+        mounted.model.preferences.get_untracked().sidebar_width,
+        220.0
+    );
 }
 
 impl Mounted {

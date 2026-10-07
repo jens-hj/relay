@@ -65,9 +65,17 @@ The default server address is `127.0.0.1:7331`. Both processes require the token
 | `RELAY_REPO_PATH` | Server | Matching local Git checkout; never supplied by a client |
 | `RELAY_ENDPOINT` | Client | `http://127.0.0.1:7331/` |
 | `RELAY_NAME` | Client | `Teammate`; editable in the comment composer |
-| `RELAY_THEME` | Client | `system`; optionally `light` or `dark` |
+| `RELAY_THEME` | Client | Optional startup override: `dark`, `light`, or `system`; defaults to saved settings, initially dark |
+| `RELAY_SETTINGS_PATH` | Client | Optional settings file; otherwise the platform's local configuration directory, `relay/settings.toml` |
+| `RELAY_TITLE_FONT` | Client | Optional path to your licensed Neurath X TTF/OTF/TTC file; otherwise uses an installed Neurath X family |
 
 Keep tokens in your shell/session environment or an external secret manager. `just` also loads an optional `.env` file, allowing separate terminals to share your local configuration. `.env` and database files are ignored by Git; the binaries do not load `.env` themselves. The bundled reusable template is [profiles/default.toml](../profiles/default.toml); set `RELAY_DEFAULT_PROFILE` to your own complete template when starting a new workspace.
+
+Open **Settings** from the sidebar, the command palette, or **Ctrl+,** (**⌘+,** on macOS). Choose Dark, Light, or System appearance, with separate palettes for light and dark. Dark is the initial default. Display settings are client-local and survive restarts; they do not change the server workspace.
+
+Mosaic automatically follows the display scale reported by the operating system, including monitor changes. Interface scale adjusts text, spacing, and controls on top of that scale; 100% follows the operating system. Use a larger setting if your 4K display reports 100% scaling. Pixel resolution alone does not identify physical display DPI. Drag the sidebar's right edge to resize it, or use its keyboard-accessible controls in Settings.
+
+Zed Mono is bundled under SIL OFL 1.1. Titles and subtitles use your licensed Neurath X installation; if unavailable, Settings reports the fallback. Font provenance and licensing are documented in [the font assets](../crates/relay-desktop/assets/fonts/README.md).
 
 ## Remote server
 

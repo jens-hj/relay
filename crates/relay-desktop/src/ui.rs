@@ -1,9 +1,104 @@
 use crate::{
+    controls::{ButtonStyle, button},
     model::{EditTarget, Model, Page},
     theme::*,
 };
 use mosaic::prelude::*;
 use relay_core::*;
+
+#[component]
+fn Settings(model: Model) -> Element {
+    use crate::settings::ThemeMode;
+    view! {
+        scroll {
+            col height:min-content pad:{px(28.0)}px gap:{px(24.0)}px {
+                col height:min-content gap:{px(10.0)}px {
+                    text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Appearance"
+                    grid
+                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(100.0).into(), GridTrack::fr(1.0)))}
+                        max-width:{px(480.0)}px height:min-content gap:{px(8.0)}px {
+                        for (label, mode) in [("Dark", ThemeMode::Dark), ("Light", ThemeMode::Light), ("System", ThemeMode::System)] {
+                            button #action @click:{ model.preferences.update(|p| p.mode = mode); }
+                                width:fill
+                                fill:if model.preferences.get().mode == mode { accent-soft } else { raised }
+                                label:{format!("Theme: {label}")} (label)
+                        }
+                    }
+                    text font-family:sans-serif font-size:{px(14.0)}px "Light palette"
+                    grid
+                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(100.0).into(), GridTrack::fr(1.0)))}
+                        max-width:{px(480.0)}px height:min-content gap:{px(8.0)}px {
+                        for (label, warm) in [("Paper", false), ("Warm", true)] {
+                            button #action
+                                @click:{ model.preferences.update(|p| p.light_warm = warm); }
+                                width:fill
+                                fill:if model.preferences.get().light_warm == warm { accent-soft } else { raised }
+                                label:{format!("Light palette: {label}")} (label)
+                        }
+                    }
+                    text font-family:sans-serif font-size:{px(14.0)}px "Dark palette"
+                    grid
+                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(100.0).into(), GridTrack::fr(1.0)))}
+                        max-width:{px(480.0)}px height:min-content gap:{px(8.0)}px {
+                        for (label, neutral) in [("Slate", false), ("Neutral", true)] {
+                            button #action
+                                @click:{ model.preferences.update(|p| p.dark_neutral = neutral); }
+                                width:fill
+                                fill:if model.preferences.get().dark_neutral == neutral { accent-soft } else { raised }
+                                label:{format!("Dark palette: {label}")} (label)
+                        }
+                    }
+                }
+                col height:min-content gap:{px(10.0)}px {
+                    text font-family:sans-serif font-size:{px(18.0)}px font-weight:650
+                        "Interface scale"
+                    text font-size:{px(12.0)}px font-color:muted
+                        "Display scaling follows your operating system. Adjust the interface size here."
+                    grid
+                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(100.0).into(), GridTrack::fr(1.0)))}
+                        max-width:{px(480.0)}px height:min-content gap:{px(8.0)}px align:center {
+                        button #action
+                            @click:{ model.preferences.update(|p| p.scale = (p.scale - 0.1).max(0.8)); }
+                            width:fill label:"Decrease interface scale"
+                            disabled:{model.preferences.get().scale <= 0.8} "−"
+                        text {format!("{:.0}%", model.preferences.get().scale * 100.0)}
+                        button #action
+                            @click:{ model.preferences.update(|p| p.scale = (p.scale + 0.1).min(2.0)); }
+                            width:fill label:"Increase interface scale"
+                            disabled:{model.preferences.get().scale >= 2.0} "+"
+                        button #action @click:{model.preferences.update(|p| p.scale = 1.0);}
+                            width:fill label:"Reset interface scale" "Reset"
+                    }
+                }
+                col height:min-content gap:{px(10.0)}px {
+                    text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Sidebar"
+                    text font-size:{px(12.0)}px font-color:muted "Drag its right edge to resize."
+                    grid
+                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(100.0).into(), GridTrack::fr(1.0)))}
+                        max-width:{px(480.0)}px height:min-content gap:{px(8.0)}px {
+                        button #action
+                            @click:{model.preferences.update(|p| p.sidebar_width = (p.sidebar_width - 20.0).max(160.0));}
+                            width:fill label:"Narrower sidebar" "Narrower"
+                        button #action
+                            @click:{model.preferences.update(|p| p.sidebar_width = (p.sidebar_width + 20.0).min(360.0));}
+                            width:fill label:"Wider sidebar" "Wider"
+                        button #action
+                            @click:{model.preferences.update(|p| p.sidebar_width = 220.0);}
+                            width:fill label:"Reset sidebar width" "Reset"
+                    }
+                }
+                col height:min-content gap:{px(10.0)}px {
+                    text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Fonts"
+                    text font-size:{px(12.0)}px "Titles: Neurath X · Text: Zed Mono"
+                    if !model.font_status.get().is_empty() {
+                        text font-size:{px(12.0)}px font-color:muted {model.font_status.get()}
+                    }
+                }
+                text font-size:{px(12.0)}px font-color:muted "Settings are saved on this machine."
+            }
+        }
+    }
+}
 
 fn sync_label(synced_at: Option<u64>) -> String {
     let Some(synced_at) = synced_at else {
@@ -54,30 +149,31 @@ fn scope_label(scope: &DirectorScope, snapshot: &Snapshot) -> String {
 pub fn shell(model: Model) -> Element {
     let width = State::new(1280.0f32);
     let root = view! {
-        stack fill:base font-family:sans-serif font-color:ink font-size:14px {
+        stack fill:base font-family:monospace font-color:ink font-size:{px(14.0)}px {
             row @layout:{ move |rect: Rect| width.set(rect.size.width) } {
-                Sidebar model:(model) narrow:{ width.get() < 900.0 }
+                Sidebar model:(model)
                 col width:1fr {
-                    row height:84px pad:(horizontal:28px vertical:18px) align:center justify:between
-                        shrink:0 {
-                        col height:min-content gap:4px {
-                            text font-size:22px font-weight:650
+                    row height:min-content min-height:{px(84.0)}px
+                        pad:(horizontal:{px(28.0)}px vertical:{px(18.0)}px) align:center
+                        justify:between shrink:0 {
+                        col height:min-content gap:{px(4.0)}px {
+                            text font-size:{px(22.0)}px font-weight:650 font-family:sans-serif
                                 {
-                                match model.page.get() { Page::Board => "Project board", Page::Sessions => "Sessions", Page::Directors => "Directors" }
+                                match model.page.get() { Page::Board => "Project board", Page::Sessions => "Sessions", Page::Directors => "Directors", Page::Settings => "Settings" }
                             }
-                            text font-size:12px font-color:muted
+                            text font-size:{px(12.0)}px font-color:muted font-family:sans-serif
                                 { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| format!("{} · {}", p.repository, if p.fixture { "Fixture workspace" } else { "Remote GitHub board" })).unwrap_or_default() }
                         }
                         button #action @click:{ model.palette.set(true); }
-                            label:"Open command palette" "Commands  ⌘ / Ctrl K"
+                            label:"Open command palette" "Commands"
                     }
                     if !model.notice.get().is_empty() {
-                        row height:min-content fill:accent-soft pad:12px gap:12px align:center
-                            shrink:0 {
-                            col width:1fr height:min-content gap:4px {
-                                text font-size:12px { model.notice.get() }
+                        row height:min-content fill:accent-soft pad:{px(12.0)}px gap:{px(12.0)}px
+                            align:center shrink:0 {
+                            col width:1fr height:min-content gap:{px(4.0)}px {
+                                text font-size:{px(12.0)}px { model.notice.get() }
                                 if model.can_retry() {
-                                    text font-size:11px { model.retry_summary() }
+                                    text font-size:{px(11.0)}px { model.retry_summary() }
                                 }
                             }
                             button #action @click:{ model.review_latest(); }
@@ -94,29 +190,41 @@ pub fn shell(model: Model) -> Element {
                             button #action @click:{ model.notice.set(String::new()); } "Dismiss"
                         }
                     }
-                    if model.snapshot.get().projects.is_empty() {
-                        col height:min-content pad:32px gap:12px {
-                            text font-size:18px "Waiting for your workspace"
-                            text font-color:muted { model.status.get() }
-                            text font-color:muted
-                                "Start relay-server and connect with its workspace token."
+                    if model.page.get() == Page::Settings {
+                        col {
+                            Settings model:(model)
                         }
                     } else {
-                        if model.page.get() == Page::Board {
-                            if width.get() < 1050.0 && model.issue.get().is_some() {
-                                IssueDetail model:(model)
+                        col {
+                            if model.snapshot.get().projects.is_empty() {
+                                col height:min-content pad:{px(32.0)}px gap:{px(12.0)}px {
+                                    text font-family:sans-serif font-size:{px(18.0)}px
+                                        "Waiting for your workspace"
+                                    text font-color:muted { model.status.get() }
+                                    text font-color:muted
+                                        "Start relay-server and connect with its workspace token."
+                                }
                             } else {
-                                row height:1fr {
-                                    Board model:(model) narrow:{ width.get() < 850.0 }
-                                    if model.issue.get().is_some() {
-                                        IssueDetail model:(model)
+                                col {
+                                    if model.page.get() == Page::Board {
+                                        if width.get() < px(1050.0) && model.issue.get().is_some() {
+                                            IssueDetail model:(model)
+                                        } else {
+                                            row height:1fr {
+                                                Board model:(model)
+                                                    narrow:{ width.get() < px(850.0) }
+                                                if model.issue.get().is_some() {
+                                                    IssueDetail model:(model)
+                                                }
+                                            }
+                                        }
+                                    } else if model.page.get() == Page::Sessions {
+                                        Sessions model:(model)
+                                    } else {
+                                        Profiles model:(model)
                                     }
                                 }
                             }
-                        } else if model.page.get() == Page::Sessions {
-                            Sessions model:(model)
-                        } else {
-                            Profiles model:(model)
                         }
                     }
                 }
@@ -160,6 +268,10 @@ pub fn shell(model: Model) -> Element {
                 model.searching.set(true);
                 ctx.stop_propagation();
             }
+            Key::Character(key) if command && key == "," => {
+                model.page.set(Page::Settings);
+                ctx.stop_propagation();
+            }
             Key::Escape => {
                 model.palette.set(false);
                 model.searching.set(false);
@@ -172,36 +284,44 @@ pub fn shell(model: Model) -> Element {
 }
 
 #[component]
-fn Sidebar(model: Model, narrow: Derived<bool>) -> Element {
+fn Sidebar(model: Model) -> Element {
+    let edges = State::new(ResizeEdges::RIGHT);
     view! {
-        col width:if narrow.get() { 154px } else { 204px } fill:sidebar pad:18px gap:12px shrink:0 {
-            text font-size:26px font-weight:750 font-color:accent "relay"
-            text font-size:11px font-color:muted "YOUR TEAM, IN MOTION"
-            el height:18px {}
-            text font-size:11px font-weight:650 font-color:muted "PROJECTS"
-            for (_, project) in { model.snapshot.get().projects.into_iter().map(|p| (p.id.clone(), p)) } {
-                let id = State::new(project.id.clone());
-                button #action @click:{ model.select_project(id.get_untracked()); }
-                    label:{ model.snapshot.get().projects.iter().find(|p| p.id == id.get()).map(|p| format!("Open {}", p.name)).unwrap_or_default() }
-                    { model.snapshot.get().projects.iter().find(|p| p.id == id.get()).map(|p| p.name.clone()).unwrap_or_default() }
-            }
-            el height:8px {}
-            for (label, page) in [("Board", Page::Board), ("Sessions", Page::Sessions), ("Directors", Page::Directors)] {
-                button #action
-                    @click:{
-                        if page == Page::Directors { model.open_profile(EditTarget::Defaults); }
-                        else { model.page.set(page); }
+        col width:{px(model.preferences.get().sidebar_width)}px min-width:{px(160.0)}
+            max-width:{px(360.0)} fill:sidebar pad:{px(18.0)}px gap:{px(12.0)}px shrink:0 clip
+            resizable:($edges) label:"Sidebar"
+            @resize:{ move |event: &ResizeEvent, _| if event.phase == ResizePhase::End {
+                model.preferences.update(|p| p.sidebar_width = (event.size.width / p.scale).clamp(160.0, 360.0));
+            } } {
+            text font-size:{px(26.0)}px font-weight:750 font-family:sans-serif font-color:accent
+                "Relay"
+            scroll height:1fr {
+                col height:min-content gap:{px(12.0)}px {
+                    text font-size:{px(11.0)}px font-weight:650 font-family:sans-serif
+                        font-color:muted "Projects"
+                    for (_, project) in { model.snapshot.get().projects.into_iter().map(|p| (p.id.clone(), p)) } {
+                        let id = State::new(project.id.clone());
+                        button #action @click:{ model.select_project(id.get_untracked()); }
+                            width:fill
+                            label:{ model.snapshot.get().projects.iter().find(|p| p.id == id.get()).map(|p| format!("Open {}", p.name)).unwrap_or_default() }
+                            { model.snapshot.get().projects.iter().find(|p| p.id == id.get()).map(|p| p.name.clone()).unwrap_or_default() }
                     }
-                    fill:if model.page.get() == page { accent-soft } else { sidebar }
-                    label:(label.to_string()) (label)
+                    el height:{px(8.0)}px {}
+                    for (label, page) in [("Board", Page::Board), ("Sessions", Page::Sessions), ("Directors", Page::Directors), ("Settings", Page::Settings)] {
+                        button #action
+                            @click:{
+                                if page == Page::Directors { model.open_profile(EditTarget::Defaults); }
+                                else { model.page.set(page); }
+                            }
+                            width:fill
+                            fill:if model.page.get() == page { accent-soft } else { sidebar }
+                            label:(label.to_string()) (label)
+                    }
+                }
             }
-            el height:1fr {}
-            col height:min-content gap:6px shrink:0 {
-                text font-size:12px
-                    font-color:if model.connected.get() { { mosaic::core::theme::color(accent) } } else { { mosaic::core::theme::color(danger) } }
-                    { model.status.get() }
-                text font-size:11px font-color:muted "Shared workspace"
-            }
+            text font-size:{px(12.0)}px shrink:0
+                font-color:if model.connected.get() { { mosaic::core::theme::color(accent) } } else { { mosaic::core::theme::color(danger) } }
+                { model.status.get() }
         }
     }
 }
@@ -225,8 +345,8 @@ fn Board(model: Model, narrow: Derived<bool>) -> Element {
             .unwrap_or_default()
     });
     view! {
-        col width:1fr pad:(horizontal:24px vertical:8px) gap:12px {
-            text font-size:12px font-color:muted
+        col width:1fr pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) gap:{px(12.0)}px {
+            text font-size:{px(12.0)}px font-color:muted
                 {
                 model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| match &p.github {
                     Some(g) => format!("{} · board {} #{} · {}\n{}", g.url, g.owner, g.number, sync_label(g.last_synced_at), g.sync_error.clone().unwrap_or_default()),
@@ -238,7 +358,7 @@ fn Board(model: Model, narrow: Derived<bool>) -> Element {
                 "Sync project"
             scroll {
                 if narrow.get() {
-                    col height:min-content gap:18px {
+                    col height:min-content gap:{px(18.0)}px {
                         for (_, column) in { columns.get().into_iter().map(|c| (c.id.clone(), c)) } {
                             col width:1fr height:min-content {
                                 BoardColumnView model:(model) column:(column.clone())
@@ -246,7 +366,7 @@ fn Board(model: Model, narrow: Derived<bool>) -> Element {
                         }
                     }
                 } else {
-                    row height:min-content gap:16px align:start {
+                    row height:min-content gap:{px(16.0)}px align:start {
                         for (_, column) in { columns.get().into_iter().map(|c| (c.id.clone(), c)) } {
                             col width:1fr height:min-content {
                                 BoardColumnView model:(model) column:(column.clone())
@@ -273,11 +393,13 @@ fn BoardColumnView(model: Model, column: BoardColumn) -> Element {
             .collect::<Vec<_>>()
     });
     view! {
-        col height:min-content width:1fr gap:12px {
-            row height:min-content justify:between align:center pad:(horizontal:4px vertical:10px) {
-                text font-size:13px font-weight:650 label:{ format!("Column {}", column_id.get()) }
+        col height:min-content width:1fr gap:{px(12.0)}px {
+            row height:min-content justify:between align:center
+                pad:(horizontal:{px(4.0)}px vertical:{px(10.0)}px) {
+                text font-size:{px(13.0)}px font-weight:650 font-family:sans-serif
+                    label:{ format!("Column {}", column_id.get()) }
                     { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).and_then(|p| p.columns.iter().find(|c| c.id == column_id.get())).map(|c| c.title.clone()).unwrap_or_default() }
-                text font-size:12px font-color:muted { issues.get().len().to_string() }
+                text font-size:{px(12.0)}px font-color:muted { issues.get().len().to_string() }
             }
             for (_, issue) in { issues.get().into_iter().map(|i| (i.id.clone(), i)) } {
                 IssueCard model:(model) issue:(issue.clone())
@@ -311,22 +433,23 @@ fn IssueCard(model: Model, issue: Issue) -> Element {
     });
     view! {
         button @click:{ model.issue.set(Some(id.clone())); model.worker_approval.set(false); }
-            width:fill height:min-content fill:surface radius:10px pad:16px
+            width:fill height:min-content fill:surface radius:{px(10.0)}px pad:{px(16.0)}px
             label:{ format!("Open issue #{}", current.get().reference.number) }
-            hover { fill:raised } focused { stroke:(width:2px color:accent offset:2px) } {
-            col height:min-content gap:14px align:start {
-                text font-size:11px font-color:muted
+            hover { fill:raised }
+            focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) } {
+            col height:min-content gap:{px(14.0)}px align:start {
+                text font-size:{px(11.0)}px font-color:muted
                     { format!("#{} · {}", current.get().reference.number, if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "FIXTURE" } else { "GITHUB" }) }
-                text font-size:15px font-weight:600 font-color:ink label:{ current.get().title }
-                    { current.get().title }
+                text font-size:{px(15.0)}px font-weight:600 font-family:sans-serif font-color:ink
+                    label:{ current.get().title } { current.get().title }
                 for (_, label) in { current.get().labels.into_iter().map(|label| (label.clone(), label)) } {
-                    text font-size:11px font-color:accent (label.clone())
+                    text font-size:{px(11.0)}px font-color:accent (label.clone())
                 }
                 if session_count.get() > 0 {
-                    text font-size:11px font-color:muted
+                    text font-size:{px(11.0)}px font-color:muted
                         { format!("{} linked sessions", session_count.get()) }
                 } else {
-                    text font-size:11px font-color:muted "Ready to scope"
+                    text font-size:{px(11.0)}px font-color:muted "Ready to scope"
                 }
             }
         }
@@ -344,9 +467,9 @@ fn IssueDetail(model: Model) -> Element {
             .find(|i| Some(&i.id) == model.issue.get().as_ref())
     });
     view! {
-        col width:320px shrink:1 fill:surface pad:22px gap:14px {
+        col width:{px(320.0)} shrink:1 fill:surface pad:{px(22.0)}px gap:{px(14.0)}px {
             row height:min-content align:center justify:between {
-                text font-size:12px font-color:muted "ISSUE DETAILS"
+                text font-size:{px(12.0)}px font-color:muted "ISSUE DETAILS"
                 button #action @click:{ model.issue.set(None); } label:"Close issue details" "Close"
             }
             scroll {
@@ -354,28 +477,32 @@ fn IssueDetail(model: Model) -> Element {
                     let detail_id = State::new(detail.id.clone());
                     let fallback = detail.clone();
                     let current = Derived::new(move || model.snapshot.get().issues.into_iter().find(|i| i.id == detail_id.get()).unwrap_or_else(|| fallback.clone()));
-                    col height:min-content gap:18px selectable {
-                        text font-size:12px font-color:accent
+                    col height:min-content gap:{px(18.0)}px selectable {
+                        text font-size:{px(12.0)}px font-color:accent
                             (format!("{} #{}", current.get().reference.repository, current.get().reference.number))
-                        text font-size:21px font-weight:650 label:{ current.get().title }
-                            { current.get().title }
-                        text font-size:14px label:{ current.get().body } { current.get().body }
-                        text font-size:11px font-color:muted
+                        text font-size:{px(21.0)}px font-weight:650 font-family:sans-serif
+                            label:{ current.get().title } { current.get().title }
+                        text font-size:{px(14.0)}px label:{ current.get().body }
+                            { current.get().body }
+                        text font-size:{px(11.0)}px font-color:muted
                             { if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "Fixture issue · execution unavailable".to_string() } else { current.get().reference.url } }
                         if model.snapshot.get().projects.iter().find(|p| p.id == current.get().project_id).is_some_and(|p| !p.columns.iter().any(|c| c.id == current.get().column_id)) {
-                            text font-size:12px font-color:muted label:"Issue removed from board"
+                            text font-size:{px(12.0)}px font-color:muted
+                                label:"Issue removed from board"
                                 "No longer on this board · history retained. Restore and sync before starting or continuing a worker. Active turns may finish or be stopped."
                         }
                         WorkerForm model:(model) continuation:false
-                        text font-size:12px font-weight:650 "LINKED SESSIONS"
+                        text font-size:{px(12.0)}px font-weight:650 font-family:sans-serif
+                            "LINKED SESSIONS"
                         for (_, session) in { model.snapshot.get().sessions.into_iter().filter(|s| s.issue_id.as_ref() == Some(&detail_id.get())).map(|s| (s.id.clone(), s)).collect::<Vec<_>>() } {
                             let id = State::new(session.id.clone());
                             button #action @click:{ model.open_session(id.get_untracked()); }
                                 { model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default() }
                         }
                         if current.get().result.is_some() {
-                            text font-size:12px font-weight:650 "RESULT"
-                            text font-size:14px { current.get().result.unwrap_or_default() }
+                            text font-size:{px(12.0)}px font-weight:650 font-family:sans-serif
+                                "RESULT"
+                            text font-size:{px(14.0)}px { current.get().result.unwrap_or_default() }
                         }
                     }
                 }
@@ -396,8 +523,8 @@ fn Sessions(model: Model) -> Element {
             .collect::<Vec<_>>()
     });
     view! {
-        col width:1fr pad:(horizontal:24px vertical:8px) gap:12px {
-            row height:min-content gap:8px shrink:0 {
+        col width:1fr pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) gap:{px(12.0)}px {
+            row height:min-content gap:{px(8.0)}px shrink:0 {
                 for (_, session) in { sessions.get().into_iter().map(|s| (s.id.clone(), s)) } {
                     let id = State::new(session.id.clone());
                     button #action @click:{ model.open_session(id.get_untracked()); }
@@ -405,7 +532,7 @@ fn Sessions(model: Model) -> Element {
                         { model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default() }
                 }
             }
-            row height:min-content gap:8px align:center shrink:0 {
+            row height:min-content gap:{px(8.0)}px align:center shrink:0 {
                 button #action
                     @click:{
                     let snapshot = model.snapshot.get_untracked();
@@ -422,7 +549,7 @@ fn Sessions(model: Model) -> Element {
                     }
                 }
                     "Director profile"
-                text font-size:12px font-color:muted
+                text font-size:{px(12.0)}px font-color:muted
                     {
                     let snapshot = model.snapshot.get();
                     snapshot.sessions.iter().find(|s| s.id == model.session.get()).map(|s| {
@@ -432,7 +559,7 @@ fn Sessions(model: Model) -> Element {
                 }
             }
             row height:min-content align:center justify:between shrink:0 {
-                text font-size:12px font-color:muted
+                text font-size:{px(12.0)}px font-color:muted
                     { if model.snapshot.get().sessions.iter().any(|s| s.id == model.session.get() && s.fixture) { "Fixture transcript · Ctrl/Cmd+Enter to comment" } else { "Immutable worker messages and tool results · Ctrl/Cmd+Enter to comment" } }
                 button #action @click:{ model.searching.set(!model.searching.get_untracked()); }
                     label:"Search transcript" "Find  ⌘ / Ctrl F"
@@ -442,7 +569,7 @@ fn Sessions(model: Model) -> Element {
                 { search_field.focus(); }
             }
             scroll {
-                col height:min-content gap:14px {
+                col height:min-content gap:{px(14.0)}px {
                     for (_, message) in { model.snapshot.get().messages.into_iter().filter(|m| m.session_id == model.session.get() && m.body.to_lowercase().contains(&model.search.get().to_lowercase())).map(|m| (m.id.clone(), m)).collect::<Vec<_>>() } {
                         MessageView model:(model) message:(message.clone())
                     }
@@ -452,12 +579,12 @@ fn Sessions(model: Model) -> Element {
             if !model.comment_target.get().is_empty() {
                 Composer model:(model)
             }
-            row height:min-content gap:8px shrink:0 {
+            row height:min-content gap:{px(8.0)}px shrink:0 {
                 button #action @click:{} disabled "Compact and continue"
                 button #action @click:{} disabled "Reset context"
                 button #action @click:{} disabled "Archive / start new"
             }
-            text font-size:11px font-color:muted shrink:0
+            text font-size:{px(11.0)}px font-color:muted shrink:0
                 "Context/reset controls unavailable until harness support. Cache expiry unknown."
         }
     }
@@ -483,14 +610,14 @@ fn MessageView(model: Model, message: Message) -> Element {
     let focused_id = message.id.clone();
     let quote_model = model;
     let content = view! {
-        col height:min-content fill:surface radius:10px pad:18px gap:10px focus
-            label:(format!("Message {}", message.id))
+        col height:min-content fill:surface radius:{px(10.0)}px pad:{px(18.0)}px gap:{px(10.0)}px
+            focus label:(format!("Message {}", message.id))
             @focus:{ move |focused| { if focused { model.focused_message.set(focused_id.clone()); } } }
-            focused { stroke:(width:2px color:accent offset:-1px) } {
+            focused { stroke:(width:{px(2.0)} color:accent offset:{px(-1.0)}) } {
             row height:min-content justify:between align:center {
-                row height:min-content gap:10px {
-                    text font-size:13px font-weight:650 (message.author)
-                    text font-size:11px font-color:muted (kind_label)
+                row height:min-content gap:{px(10.0)}px {
+                    text font-size:{px(13.0)}px font-weight:650 (message.author)
+                    text font-size:{px(11.0)}px font-color:muted (kind_label)
                 }
                 button #action @click:{ model.start_comment(&target); }
                     label:(format!("Comment on {}", message.id)) "Comment"
@@ -502,18 +629,19 @@ fn MessageView(model: Model, message: Message) -> Element {
             }
             if expanded.get() {
                 col height:min-content selectable {
-                    text font-size:15px (message.body.clone())
+                    text font-size:{px(15.0)}px (message.body.clone())
                 }
             }
             for (_, comment) in { model.snapshot.get().comments.into_iter().filter(|c| c.message_id == id).map(|c| (c.id.clone(), c)).collect::<Vec<_>>() } {
                 let quoted = State::new(comment.quote.clone());
-                col height:min-content fill:accent-soft radius:6px pad:12px gap:6px selectable {
-                    text font-size:12px font-weight:650 (comment.author.clone())
+                col height:min-content fill:accent-soft radius:{px(6.0)}px pad:{px(12.0)}px
+                    gap:{px(6.0)}px selectable {
+                    text font-size:{px(12.0)}px font-weight:650 (comment.author.clone())
                     if quoted.get().is_some() {
-                        text font-size:12px font-color:muted
+                        text font-size:{px(12.0)}px font-color:muted
                             { format!("“{}”", quoted.get().unwrap_or_default()) }
                     }
-                    text font-size:14px (comment.body.clone())
+                    text font-size:{px(14.0)}px (comment.body.clone())
                 }
             }
         }
@@ -572,9 +700,10 @@ fn MessageView(model: Model, message: Message) -> Element {
 #[component]
 fn Composer(model: Model) -> Element {
     view! {
-        col height:min-content fill:surface radius:10px pad:14px gap:8px shrink:0 {
-            row height:min-content gap:12px justify:between align:center {
-                text font-size:12px font-weight:650
+        col height:min-content fill:surface radius:{px(10.0)}px pad:{px(14.0)}px gap:{px(8.0)}px
+            shrink:0 {
+            row height:min-content gap:{px(12.0)}px justify:between align:center {
+                text font-size:{px(12.0)}px font-weight:650 font-family:sans-serif
                     {
                     model.snapshot.get().messages.iter().find(|m| m.id == model.comment_target.get()).map(|m| format!("Feedback on {}’s {}", m.author, m.kind)).unwrap_or_else(|| "Contextual feedback".into())
                 }
@@ -583,13 +712,13 @@ fn Composer(model: Model) -> Element {
                     disabled:{ model.busy.get() } "Discard draft"
             }
             if !model.comment_quote.get().is_empty() {
-                text font-size:12px font-color:muted
+                text font-size:{px(12.0)}px font-color:muted
                     { format!("“{}”", model.comment_quote.get()) }
             }
-            row height:min-content gap:10px align:center {
-                input #input-field width:140px label:"Comment author" placeholder:"Your name"
+            row height:min-content gap:{px(10.0)}px align:center {
+                input #input-field width:{px(140.0)} label:"Comment author" placeholder:"Your name"
                     model.author
-                input #area multiline height:74px width:1fr label:"Comment body"
+                input #area multiline height:{px(74.0)}px width:1fr label:"Comment body"
                     placeholder:"Leave contextual feedback…" model.comment_body as comment_input
                 { comment_input.focus(); }
                 button #action @click:{ model.save_comment(); }
@@ -603,9 +732,9 @@ fn Composer(model: Model) -> Element {
 #[component]
 fn Profiles(model: Model) -> Element {
     view! {
-        col width:1fr pad:(horizontal:24px vertical:8px) gap:14px {
+        col width:1fr pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) gap:{px(14.0)}px {
             scroll width:max-content {
-                row height:min-content width:max-content gap:8px {
+                row height:min-content width:max-content gap:{px(8.0)}px {
                     button #action @click:{ model.open_profile(EditTarget::Defaults); }
                         "Project defaults"
                     for (_, director) in { model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
@@ -620,18 +749,18 @@ fn Profiles(model: Model) -> Element {
                         label:"Create director" "+ Director"
                 }
             } as tabs
-            { tabs.root().style(Style::stack().width(Dimension::Fill).height(42.0).basis(42.0).shrink(0.0)); }
+            { Effect::new(move || { tabs.root().style(Style::stack().width(Dimension::Fill).height(px(42.0)).basis(px(42.0)).shrink(0.0)); }); }
             scroll {
-                col height:min-content gap:20px {
-                    text font-size:20px font-weight:650
+                col height:min-content gap:{px(20.0)}px {
+                    text font-size:{px(20.0)}px font-weight:650 font-family:sans-serif
                         { if model.editor.get() == EditTarget::Defaults { "Project defaults" } else { "Director profile" } }
                     if model.editor.get() != EditTarget::Defaults {
                         input #input-field label:"Director name" model.editor_name
                     }
-                    text font-size:12px font-color:muted
+                    text font-size:{px(12.0)}px font-color:muted
                         "Effective profiles gate issue-linked worker execution."
                     ProfileField model:(model) title:"Agent harness" field:"harness"
-                    row height:min-content gap:8px {
+                    row height:min-content gap:{px(8.0)}px {
                         button #action
                             @click:{ model.modify_profile("harness", |p| p.harness = Harness::Codex); }
                             fill:if model.editor_profile.get().harness == Harness::Codex { accent-soft } else { raised }
@@ -642,7 +771,7 @@ fn Profiles(model: Model) -> Element {
                             "Claude Code"
                     }
                     ProfileField model:(model) title:"Scope" field:"scope"
-                    row height:min-content gap:8px {
+                    row height:min-content gap:{px(8.0)}px {
                         button #action
                             @click:{ model.modify_profile("scope", |p| p.scope = DirectorScope::Project); }
                             "Whole project"
@@ -661,7 +790,7 @@ fn Profiles(model: Model) -> Element {
                                 { format!("{} #{}", if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if issue_ids.contains(&issue_id.get())) { "✓" } else { "+" }, number) }
                         }
                     }
-                    text font-size:12px font-color:muted
+                    text font-size:{px(12.0)}px font-color:muted
                         {
                         match model.editor_profile.get().scope {
                             DirectorScope::Project => "All project issues".into(),
@@ -676,21 +805,22 @@ fn Profiles(model: Model) -> Element {
                     ProfileField model:(model) title:"Required for completion" field:"completion"
                     StepChoices model:(model) completion:true
                     ProfileField model:(model) title:"Concurrent workers" field:"max_workers"
-                    row height:min-content gap:10px align:center {
+                    row height:min-content gap:{px(10.0)}px align:center {
                         button #action
                             @click:{ model.modify_profile("max_workers", |p| p.max_workers = p.max_workers.saturating_sub(1)); }
                             label:"Decrease worker limit" "−"
-                        text font-size:18px { model.editor_profile.get().max_workers.to_string() }
+                        text font-size:{px(18.0)}px
+                            { model.editor_profile.get().max_workers.to_string() }
                         button #action
                             @click:{ model.modify_profile("max_workers", |p| p.max_workers = (p.max_workers + 1).min(64)); }
                             label:"Increase worker limit" "+"
-                        text font-size:12px font-color:muted "0 pauses delegation"
+                        text font-size:{px(12.0)}px font-color:muted "0 pauses delegation"
                     }
                     ProfileField model:(model) title:"Action permissions" field:"permissions"
-                    col height:min-content gap:8px {
+                    col height:min-content gap:{px(8.0)}px {
                         for task in Task::ALL {
                             row height:min-content align:center justify:between {
-                                text font-size:13px (task.label())
+                                text font-size:{px(13.0)}px (task.label())
                                 button #action
                                     @click:{ model.modify_profile("permissions", |p| { let current = p.permissions[&task]; p.permissions.insert(task, current.next()); }); }
                                     label:{ format!("{} permission", task.label()) }
@@ -698,27 +828,28 @@ fn Profiles(model: Model) -> Element {
                             }
                         }
                     }
-                    row height:min-content gap:8px {
+                    row height:min-content gap:{px(8.0)}px {
                         button #action @click:{ model.export_toml(); } "Export / edit TOML"
                         button #action
                             @click:{ model.toml.set(model.editor_profile.get_untracked().to_toml()); model.advanced.set(true); }
                             "Show effective profile"
                     }
                     if model.advanced.get() {
-                        col height:min-content gap:10px {
-                            text font-size:12px font-color:muted
+                        col height:min-content gap:{px(10.0)}px {
+                            text font-size:{px(12.0)}px font-color:muted
                                 "Project defaults use a complete profile. Directors use overrides; omitted fields inherit. Copy this text to export."
-                            input #area multiline height:240px label:"Profile TOML" model.toml
+                            input #area multiline height:{px(240.0)}px label:"Profile TOML"
+                                model.toml
                             button #action @click:{ model.import_toml(); } "Import TOML into draft"
                         }
                     }
                 }
             }
-            row height:min-content gap:12px align:center shrink:0 {
+            row height:min-content gap:{px(12.0)}px align:center shrink:0 {
                 button #action @click:{ model.save_profile(); }
                     disabled:{ model.busy.get() || !model.connected.get() } label:"Save profile"
                     "Save profile"
-                text font-size:12px font-color:muted
+                text font-size:{px(12.0)}px font-color:muted
                     "Explicit overrides survive project default changes"
             }
         }
@@ -729,9 +860,9 @@ fn Profiles(model: Model) -> Element {
 fn ProfileField(model: Model, title: &'static str, field: &'static str) -> Element {
     view! {
         row height:min-content justify:between align:center {
-            col height:min-content gap:4px {
-                text font-size:13px font-weight:650 (title)
-                text font-size:11px font-color:muted { model.origin(field) }
+            col height:min-content gap:{px(4.0)}px {
+                text font-size:{px(13.0)}px font-weight:650 font-family:sans-serif (title)
+                text font-size:{px(11.0)}px font-color:muted { model.origin(field) }
             }
             if model.origin(field) == "Director override" {
                 button #action @click:{ model.inherit(field); } label:{ format!("Inherit {field}") }
@@ -744,7 +875,7 @@ fn ProfileField(model: Model, title: &'static str, field: &'static str) -> Eleme
 #[component]
 fn StepChoices(model: Model, completion: bool) -> Element {
     view! {
-        grid cols:(1fr 1fr 1fr 1fr) height:min-content gap:6px {
+        grid cols:(1fr 1fr 1fr 1fr) height:min-content gap:{px(6.0)}px {
             for task in Task::ALL {
                 button #action
                     @click:{ model.modify_profile(if completion { "completion" } else { "responsibilities" }, |p| {
@@ -752,7 +883,7 @@ fn StepChoices(model: Model, completion: bool) -> Element {
                     if steps.contains(&task) { steps.retain(|t| t != &task); } else { steps.push(task); }
                 }); }
                     width:fill {
-                    text font-size:12px
+                    text font-size:{px(12.0)}px
                         { format!("{} {}", if (if completion { model.editor_profile.get().completion } else { model.editor_profile.get().responsibilities }).contains(&task) { "✓" } else { "+" }, task.label()) }
                 }
             }
@@ -773,17 +904,18 @@ fn Palette(model: Model) -> Element {
         }
     });
     let view = view! {
-        col fill:#00000055 align:center pad:(horizontal:30px vertical:90px) {
-            col height:min-content width:560px max-width:100% fill:surface radius:14px pad:18px
-                gap:12px {
+        col fill:#00000055 align:center pad:(horizontal:{px(30.0)}px vertical:{px(90.0)}px) {
+            col height:min-content width:{px(560.0)} max-width:100% fill:surface radius:{px(14.0)}px
+                pad:{px(18.0)}px gap:{px(12.0)}px {
                 row height:min-content justify:between align:center {
-                    text font-size:15px font-weight:650 "Command palette"
+                    text font-size:{px(15.0)}px font-weight:650 font-family:sans-serif
+                        "Command palette"
                     button #action @click:{ model.palette.set(false); } "Esc"
                 }
                 input #input-field placeholder:"Find an action…" label:"Command search" query
                     as command_search
                 { command_search.focus(); }
-                for (label, index) in [("Open board", 0), ("Open sessions", 1), ("Edit project defaults", 2), ("Create director", 3), ("Search transcript", 4), ("Sync project", 5), ("Stop worker", 6)] {
+                for (label, index) in [("Open board", 0), ("Open sessions", 1), ("Edit project defaults", 2), ("Create director", 3), ("Search transcript", 4), ("Sync project", 5), ("Stop worker", 6), ("Open settings", 7)] {
                     if label.to_lowercase().contains(&query.get().to_lowercase()) {
                         button #action
                             @click:{
@@ -812,6 +944,7 @@ fn Palette(model: Model) -> Element {
                     "Search transcript",
                     "Sync project",
                     "Stop worker",
+                    "Open settings",
                 ]
                 .iter()
                 .position(|label| {
@@ -857,6 +990,7 @@ fn palette_action(model: Model, index: usize) {
         3 => model.open_profile(EditTarget::New),
         5 => model.sync_project(),
         6 => model.stop_worker(),
+        7 => model.page.set(Page::Settings),
         _ => {
             model.page.set(Page::Sessions);
             model.searching.set(true);
@@ -869,8 +1003,8 @@ fn palette_action(model: Model, index: usize) {
 #[component]
 fn WorkerForm(model: Model, continuation: bool) -> Element {
     view! {
-        col height:min-content gap:10px {
-            text font-size:13px font-weight:650
+        col height:min-content gap:{px(10.0)}px {
+            text font-size:{px(13.0)}px font-weight:650 font-family:sans-serif
                 { if continuation { "Continue this session" } else { "Start issue worker" } }
             if !continuation {
                 for (_, director) in { model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
@@ -881,7 +1015,7 @@ fn WorkerForm(model: Model, continuation: bool) -> Element {
                         { model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| format!("Director: {}", d.name)).unwrap_or_default() }
                 }
             }
-            text font-size:12px font-color:muted
+            text font-size:{px(12.0)}px font-color:muted
                 {
                 match model.worker_profile(continuation) {
                     Ok((p, active)) => format!("{} · Implementation: {} · {} · {} / {} workers active", match p.harness { Harness::Codex => "Codex", Harness::ClaudeCode => "Claude Code" }, p.permissions.get(&Task::Implement).copied().unwrap_or(Permission::Deny).label(), scope_label(&p.scope, &model.snapshot.get()), active, p.max_workers),
@@ -891,9 +1025,14 @@ fn WorkerForm(model: Model, continuation: bool) -> Element {
             input #input-field label:"Worker prompt" placeholder:"Prompt for this turn…"
                 model.worker_prompt
             if model.worker_profile(continuation).is_ok_and(|(p, _)| p.permissions.get(&Task::Implement) == Some(&Permission::Ask)) {
-                checkbox label:"Approve implementation for this turn" model.worker_approval
+                checkbox label:"Approve implementation for this turn" model.worker_approval as approval
+                {
+                    if let Some(label) = approval.label() { label.inherit_font_size(); }
+                    approval.root().style_dyn(move || Style::row().height(Dimension::MinContent).gap(px(8.0)).shrink(0.0));
+                    approval.indicator().style_dyn(move || Style::stack().width(px(18.0)).height(px(18.0)).shrink(0.0));
+                }
             }
-            text font-size:11px font-color:muted
+            text font-size:{px(11.0)}px font-color:muted
                 { model.worker_gate(continuation).err().unwrap_or_else(|| "Ready · server rechecks policy and revision".into()) }
             button #action @click:{ model.run_worker(continuation); }
                 label:if continuation { "Send worker prompt" } else { "Start worker" }
@@ -936,15 +1075,15 @@ fn WorkerPanel(model: Model) -> Element {
         col height:min-content {
             if worker.get().is_some() {
                 scroll {
-                    col height:min-content gap:10px {
+                    col height:min-content gap:{px(10.0)}px {
                         if removed.get() {
-                            text font-size:12px font-color:muted
+                            text font-size:{px(12.0)}px font-color:muted
                                 label:"Session issue removed from board"
                                 "Issue no longer on this board. Active turns may finish or be stopped; new turns require restoration and sync."
                         }
-                        text font-size:13px font-weight:650
+                        text font-size:{px(13.0)}px font-weight:650 font-family:sans-serif
                             { format!("Worker: {:?}", worker.get().unwrap().status) }
-                        text font-size:12px font-color:muted
+                        text font-size:{px(12.0)}px font-color:muted
                             { worker.get().unwrap().error.unwrap_or_default() }
                         if worker.get().is_some_and(|w| matches!(w.status, WorkerStatus::Running | WorkerStatus::Queued)) {
                             button #action @click:{ model.stop_worker(); } label:"Stop worker"
@@ -953,16 +1092,17 @@ fn WorkerPanel(model: Model) -> Element {
                         } else if worker.get().is_some_and(|w| w.thread_id.is_some() && w.worktree.is_some()) {
                             WorkerForm model:(model) continuation:true
                         } else {
-                            text font-size:12px font-color:muted label:"Worker cannot continue"
+                            text font-size:{px(12.0)}px font-color:muted
+                                label:"Worker cannot continue"
                                 "No resumable worker was recorded. Review the error above, then open the linked issue to start a new worker."
                             button #action @click:{ model.open_worker_issue(); }
                                 label:"Start new worker from linked issue"
                                 disabled:{ !model.snapshot.get().sessions.iter().any(|s| s.id == model.session.get() && s.issue_id.as_ref().is_some_and(|id| model.snapshot.get().issues.iter().any(|i| &i.id == id))) }
                                 "Open issue / start new worker"
                         }
-                        text font-size:11px font-color:muted
+                        text font-size:{px(11.0)}px font-color:muted
                             "Completed means the harness turn ended; issue acceptance still needs review."
-                        text font-size:12px font-color:muted
+                        text font-size:{px(12.0)}px font-color:muted
                             {
                             worker.get().unwrap().usage.map(|u| format!("Latest measured turn · input {} · cached input {} · output {} tokens", u.input_tokens, u.cached_input_tokens, u.output_tokens)).unwrap_or_else(|| "Latest turn usage unavailable".into())
                         }
@@ -970,13 +1110,13 @@ fn WorkerPanel(model: Model) -> Element {
                             @click:{ model.review_changes.set(!model.review_changes.get_untracked()); }
                             label:"Toggle change review" "Changes and provenance"
                         if model.review_changes.get() {
-                            col height:min-content gap:8px selectable {
-                                text font-size:12px
+                            col height:min-content gap:{px(8.0)}px selectable {
+                                text font-size:{px(12.0)}px
                                     {
                                     let w = worker.get().unwrap();
                                     format!("Branch: {}\nBase: {}\nWorktree: {}\nThread: {}", w.branch.unwrap_or_else(|| "unavailable".into()), w.base_commit.unwrap_or_else(|| "unavailable".into()), w.worktree.unwrap_or_else(|| "unavailable".into()), w.thread_id.unwrap_or_else(|| "unavailable".into()))
                                 }
-                                text font-size:12px
+                                text font-size:{px(12.0)}px
                                     {
                                     worker.get().unwrap().changes.map(|c| format!("Files: {}\n{}\n{}", c.files.join(", "), if c.truncated { "Review truncated by server" } else { "Bounded review" }, c.diff)).unwrap_or_else(|| "Change review unavailable".into())
                                 }
@@ -984,7 +1124,7 @@ fn WorkerPanel(model: Model) -> Element {
                         }
                     }
                 } as panel
-                { panel.root().style(Style::stack().width(Dimension::Fill).height(280.0).shrink(0.0)); }
+                { Effect::new(move || { panel.root().style(Style::stack().width(Dimension::Fill).height(px(280.0)).shrink(0.0)); }); }
             }
         }
     }

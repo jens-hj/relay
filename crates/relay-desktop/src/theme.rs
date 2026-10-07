@@ -4,16 +4,49 @@ mosaic::scheme! {
     pub RelayTheme {
         base:Color, sidebar:Color, surface:Color, raised:Color,
         ink:Color, muted:Color, edge:Color, accent:Color, accent-soft:Color,
-        danger:Color,
+        danger:Color, ui-scale:Scalar = 1,
     }
 }
 
+#[cfg(test)]
 pub fn palette(light: bool) -> RelayTheme {
+    configured_palette(light, false, 1.0)
+}
+
+pub fn px(value: f32) -> f32 {
+    value * mosaic::core::theme::scalar(ui_scale)
+}
+
+pub fn configured_palette(light: bool, alternate: bool, scale: f32) -> RelayTheme {
     let hex = Color::from_rgb_hex;
-    let base_color = hex(if light { 0xF6F7F9 } else { 0x12151B });
-    let sidebar_color = hex(if light { 0xECEFF4 } else { 0x0E1117 });
-    let surface_color = hex(if light { 0xFFFFFF } else { 0x1B2029 });
-    let raised_color = hex(if light { 0xE8EDF5 } else { 0x272F3C });
+    let base_color = hex(if light {
+        if alternate { 0xF8F5EF } else { 0xF6F7F9 }
+    } else if alternate {
+        0x171717
+    } else {
+        0x12151B
+    });
+    let sidebar_color = hex(if light {
+        if alternate { 0xEFEAE0 } else { 0xECEFF4 }
+    } else if alternate {
+        0x111111
+    } else {
+        0x0E1117
+    });
+    let surface_color = hex(if light {
+        0xFFFFFF
+    } else if alternate {
+        0x222222
+    } else {
+        0x1B2029
+    });
+    let raised_color = hex(if light {
+        if alternate { 0xEAE4D8 } else { 0xE8EDF5 }
+    } else if alternate {
+        0x303030
+    } else {
+        0x272F3C
+    });
     let ink_color = hex(if light { 0x1C2433 } else { 0xE7ECF5 });
     let muted_color = hex(if light { 0x647087 } else { 0x96A3B9 });
     let edge_color = hex(if light { 0xD8DFEA } else { 0x303A4A });
@@ -23,20 +56,20 @@ pub fn palette(light: bool) -> RelayTheme {
     mosaic::theme! { RelayTheme {
         base:base_color, sidebar:sidebar_color, surface:surface_color, raised:raised_color,
         ink:ink_color, muted:muted_color, edge:edge_color, accent:accent_color,
-        accent-soft:accent_soft_color, danger:danger_color,
+        accent-soft:accent_soft_color, danger:danger_color, ui-scale:scale,
     } }
 }
 
 mosaic::style! {
-    pub #action width:max-content height:min-content shrink:0 radius:7px pad:(horizontal:12px vertical:8px) fill:raised font-color:ink font-size:13px
-        hover { fill:accent-soft } focused { stroke:(width:2px color:accent offset:2px) }
+    pub #action width:max-content height:min-content shrink:0 radius:{px(7.0)}px pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px) fill:raised font-color:ink font-size:{px(13.0)}px
+        hover { fill:accent-soft } focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) }
         disabled { opacity:0.45 }
     pub #input-field
-        fill:surface font-color:ink font-size:14px stroke:(width:1px color:edge offset:-1px)
-        radius:7px pad:10px
-        focused { stroke:(width:2px color:accent offset:-1px) }
+        fill:surface font-color:ink font-size:{px(14.0)}px stroke:(width:{px(1.0)} color:edge offset:{px(-1.0)})
+        radius:{px(7.0)}px pad:{px(10.0)}px
+        focused { stroke:(width:{px(2.0)} color:accent offset:{px(-1.0)}) }
     pub #area
-        fill:surface font-color:ink font-size:14px stroke:(width:1px color:edge offset:-1px)
-        radius:7px pad:10px
-        focused { stroke:(width:2px color:accent offset:-1px) }
+        fill:surface font-color:ink font-size:{px(14.0)}px stroke:(width:{px(1.0)} color:edge offset:{px(-1.0)})
+        radius:{px(7.0)}px pad:{px(10.0)}px
+        focused { stroke:(width:{px(2.0)} color:accent offset:{px(-1.0)}) }
 }

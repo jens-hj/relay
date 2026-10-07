@@ -8,6 +8,7 @@ pub enum Page {
     Board,
     Sessions,
     Directors,
+    Settings,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditTarget {
@@ -31,6 +32,8 @@ struct Pending {
 
 #[derive(Clone, Copy)]
 pub struct Model {
+    pub preferences: State<crate::settings::Preferences>,
+    pub font_status: State<String>,
     pub snapshot: State<Snapshot>,
     pub connected: State<bool>,
     pub status: State<String>,
@@ -72,6 +75,8 @@ pub struct Model {
 impl Model {
     pub fn new(ui: &Ui, commands: UnboundedSender<CommandEnvelope>) -> Self {
         Self {
+            preferences: State::new(crate::settings::Preferences::default()),
+            font_status: State::new(String::new()),
             snapshot: State::new(Snapshot::default()),
             connected: State::new(false),
             status: State::new("Connecting…".into()),
