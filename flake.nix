@@ -85,7 +85,7 @@
                 imagemagick
                 xclip
               ])
-              ++ [ mesa.drivers ]
+              ++ [ mesa ]
             )
           );
         };
