@@ -10,8 +10,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use relay_core::{ApiError, CommandEnvelope, DirectorProfile, Snapshot, demo_snapshot};
+use relay_core::*;
+mod github;
+mod runtime;
+pub use runtime::{RemoteConfig, RuntimeConfig};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use std::collections::HashMap;
 use std::{
     path::Path,
     sync::{Arc, Mutex},
@@ -70,6 +74,7 @@ impl std::error::Error for Error {}
 
 struct Store {
     connection: Connection,
+    controls: HashMap<String, watch::Sender<bool>>,
 }
 
 impl Store {
@@ -85,7 +90,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 1 {
+        if version > 2 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -94,7 +99,10 @@ impl Store {
             "BEGIN IMMEDIATE;
              CREATE TABLE IF NOT EXISTS workspace (id INTEGER PRIMARY KEY CHECK(id = 1), snapshot TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS receipts (request_id TEXT PRIMARY KEY, request TEXT NOT NULL);
-             PRAGMA user_version = 1;
+             CREATE TABLE IF NOT EXISTS runs (session_id TEXT PRIMARY KEY, run_id TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS syncs (project_id TEXT PRIMARY KEY, request_id TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS processes (session_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, pid INTEGER NOT NULL, identity TEXT NOT NULL);
+             PRAGMA user_version = 2;
              COMMIT;"
         ).map_err(Error::internal)?;
         let seed = serde_json::to_string(&demo_snapshot(defaults)).map_err(Error::internal)?;
@@ -104,7 +112,10 @@ impl Store {
                 [&seed],
             )
             .map_err(Error::internal)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            controls: HashMap::new(),
+        })
     }
     fn snapshot(&self) -> Result<Snapshot, Error> {
         let json: String = self
@@ -115,7 +126,30 @@ impl Store {
             .map_err(Error::internal)?;
         serde_json::from_str(&json).map_err(Error::internal)
     }
-    fn apply(&mut self, envelope: CommandEnvelope) -> Result<Snapshot, Error> {
+    fn save(&mut self, snapshot: &Snapshot) -> Result<(), Error> {
+        self.connection
+            .execute(
+                "UPDATE workspace SET snapshot = ?1 WHERE id = 1",
+                [serde_json::to_string(snapshot).map_err(Error::internal)?],
+            )
+            .map_err(Error::internal)?;
+        Ok(())
+    }
+    fn run_id(&self, session: &str) -> Result<Option<String>, Error> {
+        self.connection
+            .query_row(
+                "SELECT run_id FROM runs WHERE session_id=?1",
+                [session],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Error::internal)
+    }
+    fn apply(
+        &mut self,
+        envelope: CommandEnvelope,
+        config: &RuntimeConfig,
+    ) -> Result<(Snapshot, Option<Action>), Error> {
         uuid::Uuid::parse_str(&envelope.request_id)
             .map_err(|_| Error::invalid("request_id must be a UUID"))?;
         let request = serde_json::to_string(&envelope).map_err(Error::internal)?;
@@ -143,7 +177,7 @@ impl Store {
                     "request_id was already used for a different command",
                 ));
             }
-            return Ok(snapshot);
+            return Ok((snapshot, None));
         }
         if snapshot.revision != envelope.expected_revision {
             return Err(Error::new(
@@ -152,16 +186,149 @@ impl Store {
                 "Workspace changed. Refresh and review your draft before saving again.",
             ));
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(Error::internal)?
-            .as_secs();
-        snapshot
-            .apply(envelope.command, &envelope.request_id, now)
-            .map_err(Error::invalid)?;
-        let json = serde_json::to_string(&snapshot).map_err(Error::internal)?;
+        let mut action = None;
+        match envelope.command {
+            Command::SyncProject { project_id } => {
+                let project = snapshot.project(&project_id).map_err(Error::invalid)?;
+                if project.github.is_none() {
+                    return Err(Error::invalid("Project has no configured GitHub board"));
+                }
+                if config.remote.is_none() {
+                    return Err(Error::invalid(
+                        "GitHub board is not configured on this server",
+                    ));
+                }
+                action = Some(Action::Sync(project_id));
+            }
+            Command::StartWorker {
+                issue_id,
+                director_id,
+                prompt,
+                approve_implementation,
+            } => {
+                validate_prompt(&prompt)?;
+                runtime::authorize_turn(
+                    &snapshot,
+                    &issue_id,
+                    &director_id,
+                    approve_implementation,
+                    config,
+                )?;
+                let issue = snapshot.issues.iter().find(|i| i.id == issue_id).unwrap();
+                let session_id = format!("session-{}", envelope.request_id);
+                snapshot.sessions.push(Session {
+                    id: session_id.clone(),
+                    project_id: issue.project_id.clone(),
+                    issue_id: Some(issue_id),
+                    director_id,
+                    title: issue.title.clone(),
+                    role: SessionRole::Worker,
+                    fixture: false,
+                    worker: Some(WorkerRun {
+                        status: WorkerStatus::Queued,
+                        thread_id: None,
+                        worktree: None,
+                        branch: None,
+                        base_commit: None,
+                        error: None,
+                        usage: None,
+                        changes: None,
+                    }),
+                });
+                snapshot
+                    .messages
+                    .push(prompt_message(&session_id, &envelope.request_id, &prompt));
+                action = Some(Action::Run { session_id, prompt });
+            }
+            Command::SendWorker {
+                session_id,
+                prompt,
+                approve_implementation,
+            } => {
+                validate_prompt(&prompt)?;
+                let session = snapshot
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .ok_or_else(|| Error::invalid("Session not found"))?;
+                let worker = session
+                    .worker
+                    .as_ref()
+                    .ok_or_else(|| Error::invalid("Not a worker session"))?;
+                if runtime::active(&worker.status) {
+                    return Err(Error::invalid("Worker already has an active turn"));
+                }
+                if worker.thread_id.is_none() || worker.worktree.is_none() {
+                    return Err(Error::invalid(
+                        "Worker has no recorded thread/worktree to resume",
+                    ));
+                }
+                runtime::authorize_turn(
+                    &snapshot,
+                    session
+                        .issue_id
+                        .as_deref()
+                        .ok_or_else(|| Error::invalid("Session has no issue"))?,
+                    &session.director_id,
+                    approve_implementation,
+                    config,
+                )?;
+                let worker = snapshot
+                    .sessions
+                    .iter_mut()
+                    .find(|s| s.id == session_id)
+                    .unwrap()
+                    .worker
+                    .as_mut()
+                    .unwrap();
+                worker.status = WorkerStatus::Queued;
+                worker.error = None;
+                worker.usage = None;
+                snapshot
+                    .messages
+                    .push(prompt_message(&session_id, &envelope.request_id, &prompt));
+                action = Some(Action::Run { session_id, prompt });
+            }
+            Command::StopWorker { session_id } => {
+                let worker = snapshot
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .and_then(|s| s.worker.as_ref())
+                    .ok_or_else(|| Error::invalid("Worker session not found"))?;
+                if !runtime::active(&worker.status) {
+                    return Err(Error::invalid("Worker has no active turn"));
+                }
+                if !self.controls.contains_key(&session_id) {
+                    return Err(Error::invalid(
+                        "Worker process is unavailable; restart to classify interrupted runs",
+                    ));
+                }
+                action = Some(Action::Stop(session_id));
+            }
+            command => {
+                snapshot
+                    .apply(command, &envelope.request_id, now())
+                    .map_err(Error::invalid)?;
+            }
+        }
+        if action.is_some() {
+            snapshot.revision = snapshot
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| Error::invalid("Revision exhausted"))?;
+        }
+        if let Some(Action::Run { session_id, .. }) = &action {
+            transaction.execute("INSERT INTO runs(session_id,run_id) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET run_id=excluded.run_id",params![session_id,envelope.request_id]).map_err(Error::internal)?;
+        }
+        if let Some(Action::Sync(project_id)) = &action {
+            transaction.execute("INSERT INTO syncs(project_id,request_id) VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET request_id=excluded.request_id",params![project_id,envelope.request_id]).map_err(Error::internal)?;
+        }
         transaction
-            .execute("UPDATE workspace SET snapshot = ?1 WHERE id = 1", [&json])
+            .execute(
+                "UPDATE workspace SET snapshot = ?1 WHERE id = 1",
+                [serde_json::to_string(&snapshot).map_err(Error::internal)?],
+            )
             .map_err(Error::internal)?;
         transaction
             .execute(
@@ -170,7 +337,7 @@ impl Store {
             )
             .map_err(Error::internal)?;
         transaction.commit().map_err(Error::internal)?;
-        Ok(snapshot)
+        Ok((snapshot, action))
     }
 }
 
@@ -179,8 +346,139 @@ struct Workspace {
     store: Arc<Mutex<Store>>,
     snapshots: watch::Sender<Snapshot>,
     token: Arc<str>,
+    config: Arc<RuntimeConfig>,
 }
 
+enum Action {
+    Sync(String),
+    Run { session_id: String, prompt: String },
+    Stop(String),
+}
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+fn validate_prompt(prompt: &str) -> Result<(), Error> {
+    if prompt.trim().is_empty() || prompt.len() > 32_000 {
+        Err(Error::invalid(
+            "Prompt must be nonempty and at most 32000 bytes",
+        ))
+    } else {
+        Ok(())
+    }
+}
+fn prompt_message(session: &str, request: &str, prompt: &str) -> Message {
+    Message {
+        id: format!("prompt-{request}"),
+        session_id: session.into(),
+        author: "You".into(),
+        kind: "prompt".into(),
+        body: prompt.into(),
+    }
+}
+impl Workspace {
+    fn update_run(
+        &self,
+        session: &str,
+        run: &str,
+        update: impl FnOnce(&mut Snapshot) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let mut store = self.store.lock().map_err(Error::internal)?;
+        if store.run_id(session)?.as_deref() != Some(run) {
+            return Err(Error::invalid("Run superseded"));
+        }
+        let mut snapshot = store.snapshot()?;
+        if !snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == session)
+            .and_then(|s| s.worker.as_ref())
+            .is_some_and(|w| runtime::active(&w.status))
+        {
+            return Err(Error::invalid("Run is no longer active"));
+        }
+        let previous = snapshot.clone();
+        update(&mut snapshot)?;
+        if snapshot == previous {
+            return Ok(());
+        }
+        snapshot.revision = snapshot
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| Error::invalid("Revision exhausted"))?;
+        store.save(&snapshot)?;
+        if snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == session)
+            .and_then(|s| s.worker.as_ref())
+            .is_some_and(|w| !runtime::active(&w.status))
+        {
+            store.controls.remove(session);
+        }
+        self.snapshots.send_replace(snapshot);
+        Ok(())
+    }
+    fn synchronize(&self, project_id: &str, request_id: &str) {
+        let result = github::sync(&self.config, project_id);
+        let update = || -> Result<(), Error> {
+            let mut store = self.store.lock().map_err(Error::internal)?;
+            let latest: Option<String> = store
+                .connection
+                .query_row(
+                    "SELECT request_id FROM syncs WHERE project_id=?1",
+                    [project_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(Error::internal)?;
+            if latest.as_deref() != Some(request_id) {
+                return Ok(());
+            }
+            let mut snapshot = store.snapshot()?;
+            let project = snapshot
+                .projects
+                .iter_mut()
+                .find(|p| p.id == project_id)
+                .ok_or_else(|| Error::invalid("Project missing"))?;
+            match result {
+                Ok(board) => {
+                    project.name = board.title;
+                    project.columns = board.columns;
+                    project.fixture = false;
+                    let g = project.github.as_mut().unwrap();
+                    g.url = board.url;
+                    g.last_synced_at = Some(now());
+                    g.sync_error = None;
+                    // Preserve local issue result metadata while replacing remote fields.
+                    let mut issues = board.issues;
+                    for issue in &mut issues {
+                        if let Some(old) = snapshot.issues.iter().find(|i| i.id == issue.id) {
+                            issue.result = old.result.clone();
+                        }
+                    }
+                    snapshot.issues.retain(|i| i.project_id != project_id);
+                    snapshot.issues.extend(issues);
+                }
+                Err(error) => {
+                    project.github.as_mut().unwrap().sync_error = Some(error.to_string());
+                }
+            }
+            snapshot.revision = snapshot
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| Error::invalid("Revision exhausted"))?;
+            store.save(&snapshot)?;
+            self.snapshots.send_replace(snapshot);
+            Ok(())
+        };
+        if let Err(error) = update() {
+            eprintln!("Board state publication failed: {error}");
+        }
+    }
+}
 impl Workspace {
     fn authorize(&self, headers: &HeaderMap) -> Result<(), Error> {
         let supplied = headers
@@ -204,17 +502,98 @@ pub fn router(
     token: String,
     defaults: DirectorProfile,
 ) -> Result<Router, Error> {
+    router_with_config(path, token, defaults, RuntimeConfig::default())
+}
+
+pub fn router_with_config(
+    path: impl AsRef<Path>,
+    token: String,
+    defaults: DirectorProfile,
+    config: RuntimeConfig,
+) -> Result<Router, Error> {
     if token.len() < 16 || token.trim() != token || !token.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(Error::invalid(
             "RELAY_TOKEN must contain at least 16 printable ASCII characters with no spaces",
         ));
     }
-    let store = Store::open(path.as_ref(), defaults)?;
-    let (snapshots, _) = watch::channel(store.snapshot()?);
+    let mut store = Store::open(path.as_ref(), defaults)?;
+    let mut initial = store.snapshot()?;
+    let mut changed = false;
+    // Reap only a previously owned Linux process whose boot/start identity still matches.
+    // A reused PID must never authorize signalling an unrelated process.
+    {
+        let mut statement = store
+            .connection
+            .prepare("SELECT session_id,pid,identity FROM processes")
+            .map_err(Error::internal)?;
+        let records = statement
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, u32>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(Error::internal)?;
+        for record in records {
+            let (session, pid, identity) = record.map_err(Error::internal)?;
+            if initial
+                .sessions
+                .iter()
+                .find(|s| s.id == session)
+                .and_then(|s| s.worker.as_ref())
+                .is_some_and(|w| runtime::active(&w.status))
+            {
+                runtime::reap_owned(pid, &identity);
+            }
+        }
+    }
+    store
+        .connection
+        .execute("DELETE FROM processes", [])
+        .map_err(Error::internal)?;
+    for session in &mut initial.sessions {
+        if let Some(w) = &mut session.worker
+            && runtime::active(&w.status)
+        {
+            w.status = WorkerStatus::Interrupted;
+            w.error =
+                Some("Server restarted before the turn ended; continuation is explicit".into());
+            changed = true;
+        }
+    }
+    if let Some(remote) = &config.remote {
+        let project = &mut initial.projects[0];
+        if project
+            .github
+            .as_ref()
+            .is_none_or(|g| g.owner != remote.owner || g.number != remote.number)
+            || project.repository != remote.repository
+        {
+            project.repository = remote.repository.clone();
+            project.github = Some(GitHubProject {
+                owner: remote.owner.clone(),
+                number: remote.number,
+                url: format!(
+                    "https://github.com/users/{}/projects/{}",
+                    remote.owner, remote.number
+                ),
+                last_synced_at: None,
+                sync_error: None,
+            });
+            changed = true;
+        }
+    }
+    if changed {
+        initial.revision += 1;
+        store.save(&initial)?;
+    }
+    let (snapshots, _) = watch::channel(initial);
     let workspace = Workspace {
         store: Arc::new(Mutex::new(store)),
         snapshots,
         token: token.into(),
+        config: Arc::new(config),
     };
     Ok(Router::new()
         .route("/v1/snapshot", get(snapshot))
@@ -253,11 +632,33 @@ async fn command(
     workspace.authorize(&headers)?;
     let Json(envelope) =
         body.map_err(|_| Error::invalid("Expected a valid JSON command envelope"))?;
+    let handle = tokio::runtime::Handle::current();
     let result = tokio::task::spawn_blocking(move || {
         let mut store = workspace.store.lock().map_err(Error::internal)?;
-        let snapshot = store.apply(envelope)?;
-        // Commit and publication share the lock, preserving revision order across writers.
+        let run_id = envelope.request_id.clone();
+        let (snapshot, action) = store.apply(envelope, &workspace.config)?;
         workspace.snapshots.send_replace(snapshot.clone());
+        match action {
+            Some(Action::Run { session_id, prompt }) => {
+                let (sender, receiver) = watch::channel(false);
+                store.controls.insert(session_id.clone(), sender);
+                handle.spawn(runtime::run(
+                    workspace.clone(),
+                    session_id,
+                    run_id,
+                    prompt,
+                    receiver,
+                ));
+            }
+            Some(Action::Stop(session_id)) => {
+                store.controls.get(&session_id).unwrap().send_replace(true);
+            }
+            Some(Action::Sync(project_id)) => {
+                let workspace = workspace.clone();
+                handle.spawn_blocking(move || workspace.synchronize(&project_id, &run_id));
+            }
+            None => {}
+        }
         Ok::<_, Error>(snapshot)
     })
     .await
@@ -303,3 +704,6 @@ async fn stream(mut socket: WebSocket, mut receiver: watch::Receiver<Snapshot>) 
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

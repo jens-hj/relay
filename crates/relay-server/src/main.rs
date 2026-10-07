@@ -16,7 +16,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(path) => DirectorProfile::from_toml(&std::fs::read_to_string(path)?)?,
         Err(_) => DirectorProfile::default(),
     };
-    let app = relay_server::router(&path, token, defaults)?;
+    let app = relay_server::router_with_config(
+        &path,
+        token,
+        defaults,
+        relay_server::RuntimeConfig::from_env()?,
+    )?;
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     eprintln!(
         "Relay server listening on {} · database {}",

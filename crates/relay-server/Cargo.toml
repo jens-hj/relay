@@ -13,6 +13,7 @@ axum.workspace = true
 rusqlite.workspace = true
 uuid.workspace = true
 subtle.workspace = true
+libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
