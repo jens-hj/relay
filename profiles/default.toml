@@ -1,0 +1,16 @@
+harness = "codex"
+responsibilities = ["plan", "delegate", "verify", "review"]
+completion = ["verify", "review"]
+max_workers = 4
+
+[scope]
+kind = "project"
+
+[permissions]
+plan = "allow"
+delegate = "allow"
+implement = "ask"
+verify = "allow"
+review = "ask"
+merge = "deny"
+deploy = "deny"

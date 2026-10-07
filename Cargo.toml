@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/relay-core", "crates/relay-server", "crates/relay-desktop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+relay-core = { path = "crates/relay-core" }
+mosaic = { git = "https://gitlab.com/unincorporated/mosaic/mosaic.git", rev = "658ccfa168fcdccea790b81d591ff263e555ce61" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.9"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "net", "sync", "time", "signal"] }
+axum = { version = "0.8", features = ["ws"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+uuid = { version = "1.18", features = ["v4"] }
+thiserror = "2.0"
+subtle = "2.6"
+tempfile = "3.23"
+
+[profile.dev]
+debug = 1
+
+[profile.release]
+lto = "thin"
