@@ -26,6 +26,8 @@ Worker turns run in their own Git worktrees using Codex's workspace-write sandbo
 
 Mosaic tools are available separately through `nix run .#mosaic-fmt` and `nix run .#mosaic-cli`, so entering the shell does not build editor or packaging tools. Use `nix fmt` to format the flake.
 
+`nix develop .#ui-test` also supplies Linux native-window verification tools: Xvfb, xdotool, ImageMagick, xclip, and Mesa. These stay out of the default shell. The desktop still needs a display; use Xvfb and Mesa software Vulkan when testing without a physical screen.
+
 ```sh
 nix develop --command just dev
 ```

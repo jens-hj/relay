@@ -58,11 +58,11 @@
           ]
         );
         mkRelayShell =
-          libraries:
+          libraries: extraTools:
           pkgs.mkShell (
             {
               name = "relay";
-              packages = tools;
+              packages = tools ++ extraTools;
               buildInputs = libraries;
               RUST_BACKTRACE = "1";
             }
@@ -74,8 +74,20 @@
       in
       {
         devShells = {
-          default = mkRelayShell desktopLibraries;
-          server = mkRelayShell [ ];
+          default = mkRelayShell desktopLibraries [ ];
+          server = mkRelayShell [ ] [ ];
+          ui-test = mkRelayShell desktopLibraries (
+            pkgs.lib.optionals pkgs.stdenv.isLinux (
+              with pkgs;
+              (map lib.getBin [
+                xorg-server
+                xdotool
+                imagemagick
+                xclip
+              ])
+              ++ [ mesa.drivers ]
+            )
+          );
         };
         packages = {
           inherit (mosaic.packages.${system}) mosaic-cli mosaic-fmt mosaic-lsp;
