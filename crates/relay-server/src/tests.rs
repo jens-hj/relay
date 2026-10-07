@@ -187,6 +187,69 @@ fn completed_items_are_immutable_usage_measured_and_thread_identity_checked() {
         .is_err()
     );
 }
+
+#[test]
+fn completed_turn_with_missing_usage_keeps_measurements_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let snapshot = live();
+    let workspace = workspace(&dir.path().join("db"), &snapshot, config());
+    let (mut snapshot, _) = workspace
+        .store
+        .lock()
+        .unwrap()
+        .apply(env(snapshot.revision, start(&snapshot)), &workspace.config)
+        .unwrap();
+    let id = snapshot.sessions.last().unwrap().id.clone();
+    runtime::event(
+        &mut snapshot,
+        &id,
+        &serde_json::json!({"type":"thread.started","thread_id":"usage-thread"}),
+    )
+    .unwrap();
+    for usage in [
+        serde_json::Value::Null,
+        serde_json::json!({"input_tokens":11,"output_tokens":7}),
+    ] {
+        assert!(
+            runtime::event(
+                &mut snapshot,
+                &id,
+                &serde_json::json!({"type":"turn.completed","usage":usage})
+            )
+            .unwrap()
+        );
+        assert!(
+            snapshot
+                .sessions
+                .last()
+                .unwrap()
+                .worker
+                .as_ref()
+                .unwrap()
+                .usage
+                .is_none()
+        );
+    }
+    assert!(runtime::event(
+        &mut snapshot,
+        &id,
+        &serde_json::json!({"type":"turn.completed","usage":{"input_tokens":11,"cached_input_tokens":0,"output_tokens":7}})
+    ).unwrap());
+    assert_eq!(
+        snapshot
+            .sessions
+            .last()
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .usage
+            .as_ref()
+            .unwrap()
+            .cached_input_tokens,
+        0
+    );
+}
 #[test]
 fn migration_keeps_comments_and_restart_interrupts_only_unfinished_runs() {
     let dir = tempfile::tempdir().unwrap();

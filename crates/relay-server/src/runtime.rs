@@ -398,15 +398,17 @@ pub(crate) fn event(
                 ));
             }
             let u = &value["usage"];
-            worker.usage = Some(TokenUsage {
-                input_tokens: u["input_tokens"]
-                    .as_u64()
-                    .ok_or_else(|| Error::invalid("Codex usage missing"))?,
-                cached_input_tokens: u["cached_input_tokens"].as_u64().unwrap_or(0),
-                output_tokens: u["output_tokens"]
-                    .as_u64()
-                    .ok_or_else(|| Error::invalid("Codex usage missing"))?,
-            });
+            worker.usage = u["input_tokens"]
+                .as_u64()
+                .zip(u["cached_input_tokens"].as_u64())
+                .zip(u["output_tokens"].as_u64())
+                .map(
+                    |((input_tokens, cached_input_tokens), output_tokens)| TokenUsage {
+                        input_tokens,
+                        cached_input_tokens,
+                        output_tokens,
+                    },
+                );
             return Ok(true);
         }
         "turn.failed" | "error" => {
