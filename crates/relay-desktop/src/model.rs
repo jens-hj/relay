@@ -402,6 +402,20 @@ impl Model {
         }
         self.worker_approval.set(false);
     }
+    pub fn open_worker_issue(&self) {
+        let snapshot = self.snapshot.get_untracked();
+        if let Some(session) = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == self.session.get_untracked())
+        {
+            self.project.set(session.project_id.clone());
+            self.issue.set(session.issue_id.clone());
+            self.worker_director.set(session.director_id.clone());
+            self.worker_approval.set(false);
+            self.page.set(Page::Board);
+        }
+    }
     pub fn worker_profile(&self, continuation: bool) -> Result<(DirectorProfile, usize), String> {
         let snapshot = self.snapshot.get();
         let (director_id, issue_id) = if continuation {
@@ -418,7 +432,10 @@ impl Model {
                 return Err("Worker is active; stop or wait before continuing".into());
             }
             if worker.thread_id.is_none() || worker.worktree.is_none() {
-                return Err("No recorded thread/worktree to resume".into());
+                return Err(
+                    "This worker cannot continue. Open the linked issue to start a new worker."
+                        .into(),
+                );
             }
             (
                 session.director_id.clone(),

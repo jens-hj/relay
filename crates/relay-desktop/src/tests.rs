@@ -940,3 +940,67 @@ fn snapshot_prompt_and_comment_ids_confirm_ambiguous_writes() {
     assert!(!mounted.model.can_retry());
     assert!(mounted.model.worker_prompt.get_untracked().is_empty());
 }
+
+#[test]
+fn failed_launch_without_thread_offers_new_linked_worker_instead_of_continue() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = live_snapshot();
+    let session = &mut snapshot.sessions[0];
+    session.fixture = false;
+    session.issue_id = Some("issue-2".into());
+    session.director_id = snapshot.directors[0].id.clone();
+    session.worker = Some(WorkerRun {
+        status: WorkerStatus::Failed,
+        thread_id: None,
+        worktree: Some("/repo/failed-launch".into()),
+        branch: Some("failed-launch".into()),
+        base_commit: None,
+        error: Some("Codex could not start. Check server CLI authentication.".into()),
+        usage: None,
+        changes: None,
+    });
+    let session_id = session.id.clone();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(session_id);
+    mounted
+        .model
+        .worker_prompt
+        .set("Retained recovery draft".into());
+    mounted.settle();
+    mounted.rect("Worker cannot continue");
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Send worker prompt"))
+    );
+    mounted.focus("Start new worker from linked issue");
+    mounted.click("Start new worker from linked issue");
+    assert_eq!(mounted.model.page.get_untracked(), Page::Board);
+    assert_eq!(
+        mounted.model.issue.get_untracked().as_deref(),
+        Some("issue-2")
+    );
+    assert_eq!(
+        mounted.model.worker_director.get_untracked(),
+        mounted.model.snapshot.get_untracked().directors[0].id
+    );
+    assert_eq!(
+        mounted.model.worker_prompt.get_untracked(),
+        "Retained recovery draft"
+    );
+    assert!(
+        mounted
+            .model
+            .worker_gate(false)
+            .unwrap_err()
+            .contains("Approve")
+    );
+    mounted.rect("Start worker");
+}

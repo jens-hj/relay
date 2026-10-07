@@ -5,6 +5,52 @@ use crate::{
 use mosaic::prelude::*;
 use relay_core::*;
 
+fn sync_label(synced_at: Option<u64>) -> String {
+    let Some(synced_at) = synced_at else {
+        return "Not synced yet".into();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let age = now.saturating_sub(synced_at);
+    if age < 60 {
+        return "Last synced just now".into();
+    }
+    let (count, unit) = if age < 3600 {
+        (age / 60, "minute")
+    } else if age < 86400 {
+        (age / 3600, "hour")
+    } else {
+        (age / 86400, "day")
+    };
+    format!(
+        "Last synced {count} {unit}{} ago",
+        if count == 1 { "" } else { "s" }
+    )
+}
+
+fn scope_label(scope: &DirectorScope, snapshot: &Snapshot) -> String {
+    match scope {
+        DirectorScope::Project => "All project issues".into(),
+        DirectorScope::Issues { issue_ids } => format!(
+            "Selected issues: {}",
+            issue_ids
+                .iter()
+                .map(|id| {
+                    snapshot
+                        .issues
+                        .iter()
+                        .find(|i| &i.id == id)
+                        .map(|i| format!("#{}", i.reference.number))
+                        .unwrap_or_else(|| "unavailable issue".into())
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 pub fn shell(model: Model) -> Element {
     let width = State::new(1280.0f32);
     let root = view! {
@@ -179,7 +225,7 @@ fn Board(model: Model, narrow: Derived<bool>) -> Element {
         col width:1fr pad:(horizontal:24px vertical:8px) gap:12px {
             text font-size:12px font-color:muted {
                 model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| match &p.github {
-                    Some(g) => format!("{} · board {} #{} · last sync {}\n{}", g.url, g.owner, g.number, g.last_synced_at.map(|t| format!("{t} (Unix seconds)")).unwrap_or_else(|| "never".into()), g.sync_error.clone().unwrap_or_default()),
+                    Some(g) => format!("{} · board {} #{} · {}\n{}", g.url, g.owner, g.number, sync_label(g.last_synced_at), g.sync_error.clone().unwrap_or_default()),
                     None => "Fixture board · no remote synchronization".into()
                 }).unwrap_or_default()
             }
@@ -808,7 +854,7 @@ fn WorkerForm(model: Model, continuation: bool) -> Element {
             }
             text font-size:12px font-color:muted {
                 match model.worker_profile(continuation) {
-                    Ok((p, active)) => format!("{:?} · Implement {} · scope {:?} · {} / {} workers active", p.harness, p.permissions.get(&Task::Implement).copied().unwrap_or(Permission::Deny).label(), p.scope, active, p.max_workers),
+                    Ok((p, active)) => format!("{} · Implementation: {} · {} · {} / {} workers active", match p.harness { Harness::Codex => "Codex", Harness::ClaudeCode => "Claude Code" }, p.permissions.get(&Task::Implement).copied().unwrap_or(Permission::Deny).label(), scope_label(&p.scope, &model.snapshot.get()), active, p.max_workers),
                     Err(error) => error
                 }
             }
@@ -867,8 +913,15 @@ fn WorkerPanel(model: Model) -> Element {
                         text font-size:12px font-color:muted { worker.get().unwrap().error.unwrap_or_default() }
                         if worker.get().is_some_and(|w| matches!(w.status, WorkerStatus::Running | WorkerStatus::Queued)) {
                             button #action @click:{ model.stop_worker(); } label:"Stop worker" disabled:{ model.busy.get() || !model.connected.get() } "Stop worker"
-                        } else {
+                        } else if worker.get().is_some_and(|w| w.thread_id.is_some() && w.worktree.is_some()) {
                             WorkerForm model:(model) continuation:true
+                        } else {
+                            text font-size:12px font-color:muted label:"Worker cannot continue"
+                                "No resumable worker was recorded. Review the error above, then open the linked issue to start a new worker."
+                            button #action @click:{ model.open_worker_issue(); }
+                                label:"Start new worker from linked issue"
+                                disabled:{ !model.snapshot.get().sessions.iter().any(|s| s.id == model.session.get() && s.issue_id.as_ref().is_some_and(|id| model.snapshot.get().issues.iter().any(|i| &i.id == id))) }
+                                "Open issue / start new worker"
                         }
                         text font-size:11px font-color:muted "Completed means the harness turn ended; issue acceptance still needs review."
                         text font-size:12px font-color:muted {
