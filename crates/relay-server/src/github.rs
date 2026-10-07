@@ -187,7 +187,7 @@ pub(crate) fn sync(config: &RuntimeConfig, project_id: &str) -> Result<Board, Er
                 return Err(Error::invalid("GitHub issue has an unknown Status option"));
             }
             board.issues.push(Issue {
-                id: format!("github:{}:{number}", remote.repository),
+                id: format!("github:{}:{number}@{project_id}", remote.repository),
                 project_id: project_id.into(),
                 reference: IssueRef {
                     provider: Provider::Github,

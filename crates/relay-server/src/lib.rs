@@ -509,14 +509,6 @@ impl Workspace {
                         }) {
                             issue.id = old.id.clone();
                             issue.result = old.result.clone();
-                        } else if snapshot
-                            .issues
-                            .iter()
-                            .any(|i| i.id == issue.id && i.project_id != project_id)
-                        {
-                            // One provider issue can appear on multiple historical boards.
-                            // Keep existing IDs intact and give the new board its own local ID.
-                            issue.id = format!("{}@{}", issue.id, project_id);
                         }
                     }
                     // Keep referenced history, but no removed item belongs to a live board column.

@@ -612,7 +612,7 @@ fn paginated_board_maps_status_and_filters_drafts_prs_and_other_repos() {
     c.gh = bin;
     let board = github::sync(&c, "live").unwrap();
     assert_eq!(board.issues.len(), 2);
-    assert_eq!(board.issues[0].id, "github:jens-hj/relay:7");
+    assert_eq!(board.issues[0].id, "github:jens-hj/relay:7@live");
     assert_eq!(board.issues[0].column_id, "doing");
     assert_eq!(board.issues[1].column_id, "github-no-status");
     assert_eq!(board.columns[1].title, "In Progress");
@@ -2057,6 +2057,22 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
             .find(|i| i.id == issue.id)
             .unwrap()
             .result = Some("Reviewed on original board".into());
+        snapshot
+            .directors
+            .iter_mut()
+            .find(|d| d.id == director.id)
+            .unwrap()
+            .overrides
+            .scope = Some(DirectorScope::Issues {
+            issue_ids: vec![issue.id.clone()],
+        });
+        let mut history = snapshot.sessions[0].clone();
+        history.id = "retained-board-history".into();
+        history.project_id = live_id.clone();
+        history.director_id = director.id.clone();
+        history.issue_id = Some(issue.id.clone());
+        history.worker = None;
+        snapshot.sessions.push(history);
         store.save(&snapshot).unwrap();
     }
     let mut second = c.clone();
@@ -2096,7 +2112,25 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
     assert_eq!(old.id, issue.id);
     assert_eq!(old.result.as_deref(), Some("Reviewed on original board"));
     assert_ne!(new.id, old.id);
+    assert!(new.id.ends_with(&format!("@{second_id}")));
     assert_eq!(new.reference, old.reference);
+    assert_eq!(
+        both.sessions
+            .iter()
+            .find(|s| s.id == "retained-board-history")
+            .unwrap()
+            .issue_id
+            .as_deref(),
+        Some(old.id.as_str())
+    );
+    assert_eq!(
+        both.effective_profile(both.directors.iter().find(|d| d.id == director.id).unwrap())
+            .unwrap()
+            .scope,
+        DirectorScope::Issues {
+            issue_ids: vec![old.id.clone()]
+        }
+    );
     assert_eq!(both.issues.iter().filter(|i| i.id == old.id).count(), 1);
     let new_director = both
         .directors
