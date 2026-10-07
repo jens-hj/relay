@@ -794,42 +794,136 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
 }
 #[test]
 fn actual_v1_database_migrates_without_losing_local_comments() {
+    for legacy_version in [0, 1] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("db");
+        let defaults = DirectorProfile {
+            max_workers: 7,
+            ..DirectorProfile::default()
+        };
+        let mut s = demo_snapshot(defaults);
+        s.apply(
+            Command::AddComment {
+                message_id: "m2".into(),
+                quote: None,
+                author: "Reviewer".into(),
+                body: "Keep this".into(),
+            },
+            "legacy",
+            1,
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(&s).unwrap();
+        for p in value["projects"].as_array_mut().unwrap() {
+            p.as_object_mut().unwrap().remove("github");
+        }
+        for p in value["sessions"].as_array_mut().unwrap() {
+            p.as_object_mut().unwrap().remove("worker");
+        }
+        let connection = Connection::open(&db).unwrap();
+        connection.execute_batch("CREATE TABLE workspace(id INTEGER PRIMARY KEY,snapshot TEXT NOT NULL);CREATE TABLE receipts(request_id TEXT PRIMARY KEY,request TEXT NOT NULL);PRAGMA user_version=1;").unwrap();
+        connection
+            .pragma_update(None, "user_version", legacy_version)
+            .unwrap();
+        let receipt = env(
+            0,
+            Command::AddComment {
+                message_id: "m2".into(),
+                quote: None,
+                author: "Reviewer".into(),
+                body: "Keep this".into(),
+            },
+        );
+        connection
+            .execute(
+                "INSERT INTO receipts VALUES(?1,?2)",
+                params![receipt.request_id, serde_json::to_string(&receipt).unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO workspace VALUES(1,?1)", [value.to_string()])
+            .unwrap();
+        drop(connection);
+        let mut store = Store::open(&db, DirectorProfile::default()).unwrap();
+        assert_eq!(store.snapshot().unwrap(), s);
+        // Legacy optional fields default to None; persisted defaults win over new seed defaults.
+        assert!(
+            store
+                .snapshot()
+                .unwrap()
+                .projects
+                .iter()
+                .all(|p| p.github.is_none())
+        );
+        assert!(
+            store
+                .snapshot()
+                .unwrap()
+                .sessions
+                .iter()
+                .all(|s| s.worker.is_none())
+        );
+        assert!(
+            store
+                .apply(receipt.clone(), &RuntimeConfig::default())
+                .unwrap()
+                .1
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+                .unwrap(),
+            2
+        );
+        drop(store);
+        let mut reopened = Store::open(&db, DirectorProfile::default()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap(), s);
+        assert!(
+            reopened
+                .apply(receipt, &RuntimeConfig::default())
+                .unwrap()
+                .1
+                .is_none()
+        );
+        // Foundation's >1 guard now rejects this database before it can erase runtime fields.
+        assert!(
+            reopened
+                .connection
+                .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+                .unwrap()
+                > 1
+        );
+    }
+}
+
+#[test]
+fn newer_database_version_is_rejected_without_mutating_history() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("db");
-    let mut s = demo_snapshot(DirectorProfile::default());
-    s.apply(
-        Command::AddComment {
-            message_id: "m2".into(),
-            quote: None,
-            author: "Reviewer".into(),
-            body: "Keep this".into(),
-        },
-        "legacy",
-        1,
-    )
-    .unwrap();
-    let mut value = serde_json::to_value(&s).unwrap();
-    for p in value["projects"].as_array_mut().unwrap() {
-        p.as_object_mut().unwrap().remove("github");
-    }
-    for p in value["sessions"].as_array_mut().unwrap() {
-        p.as_object_mut().unwrap().remove("worker");
-    }
-    let connection = Connection::open(&db).unwrap();
-    connection.execute_batch("CREATE TABLE workspace(id INTEGER PRIMARY KEY,snapshot TEXT NOT NULL);CREATE TABLE receipts(request_id TEXT PRIMARY KEY,request TEXT NOT NULL);PRAGMA user_version=1;").unwrap();
-    connection
-        .execute("INSERT INTO workspace VALUES(1,?1)", [value.to_string()])
-        .unwrap();
-    drop(connection);
     let store = Store::open(&db, DirectorProfile::default()).unwrap();
-    assert_eq!(store.snapshot().unwrap(), s);
+    let before = store.snapshot().unwrap();
+    store
+        .connection
+        .pragma_update(None, "user_version", 3)
+        .unwrap();
+    drop(store);
+    let error = Store::open(&db, DirectorProfile::default()).err().unwrap();
+    assert_eq!(error.code, "invalid");
+    let connection = Connection::open(&db).unwrap();
     assert_eq!(
-        store
-            .connection
+        connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        2
+        3
     );
+    let json: String = connection
+        .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Snapshot>(&json).unwrap(), before);
 }
 #[test]
 fn sync_receipts_are_idempotent_and_obsolete_results_do_not_publish() {
