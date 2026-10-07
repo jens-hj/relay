@@ -465,6 +465,18 @@ fn Sessions(model: Model) -> Element {
 
 #[component]
 fn MessageView(model: Model, message: Message) -> Element {
+    let details = matches!(
+        message.kind.as_str(),
+        "issue-context" | "command_execution" | "file_change"
+    );
+    let expanded = State::new(!details);
+    let kind_label = match message.kind.as_str() {
+        "issue-context" => "Source context",
+        "command_execution" => "Tool result",
+        "file_change" => "File changes",
+        other => other,
+    }
+    .to_owned();
     let target = message.clone();
     let keyboard = message.clone();
     let id = message.id.clone();
@@ -478,13 +490,20 @@ fn MessageView(model: Model, message: Message) -> Element {
             row height:min-content justify:between align:center {
                 row height:min-content gap:10px {
                     text font-size:13px font-weight:650 (message.author)
-                    text font-size:11px font-color:muted (message.kind)
+                    text font-size:11px font-color:muted (kind_label)
                 }
                 button #action @click:{ model.start_comment(&target); }
                     label:(format!("Comment on {}", message.id)) "Comment"
             }
-            col height:min-content selectable {
-                text font-size:15px (message.body)
+            if details {
+                button #action @click:{ expanded.set(!expanded.get_untracked()); }
+                    label:{ if expanded.get() { "Hide message details" } else { "Show message details" } }
+                    { if expanded.get() { "Hide details" } else { "Show details" } }
+            }
+            if expanded.get() {
+                col height:min-content selectable {
+                    text font-size:15px (message.body.clone())
+                }
             }
             for (_, comment) in { model.snapshot.get().comments.into_iter().filter(|c| c.message_id == id).map(|c| (c.id.clone(), c)).collect::<Vec<_>>() } {
                 let quoted = State::new(comment.quote.clone());
