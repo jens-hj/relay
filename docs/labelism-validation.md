@@ -18,6 +18,7 @@ Desktop coverage added or kept by this work:
   - The inspector opens on its identifier header, which holds Close.
   - The profile header is 74px at the page padding, the inheritance strip 54px and the save bar 50px.
   - The session header is 74px with the run strip directly below it.
+  - Agent messages and the draft wrap within a 760 px reading column beside the 92 px author column.
 - **Board actions menu:**
   - Escape closes it and returns focus to the trigger, and one click reopens it.
   - A press outside it closes it, including a press on another control, which still activates.
@@ -31,6 +32,11 @@ Desktop coverage added or kept by this work:
   - The new task draft survives closing and reopening the form.
   - Switching a 1380 px window from 100% to 200% scale moves the session into its narrow layout without rebuilding the draft surface: the focused editing node and draft text are kept.
   - At 760 px and 200% scale every session panel (actions, details, warnings, approval, recovery) stays reachable and the draft node is kept.
+- **Bounded panels:**
+  - Session actions, details, warnings, approval and recovery share a height budget and scroll within it, so the draft stays mounted and every control can be hit at 760 px and 200%.
+  - The worker setup scrolls 24 directors and resources at 1600 px/100% and 760 px/200% without losing the prompt or Start worker.
+  - Operation history shows 50 completed operations with readable provider results and a reachable Close.
+- **Page header:** the shared header's eyebrow follows navigation between Settings, Connections, Publish and New Project.
 - **Settings:** saved files without high-contrast keys keep their values; false keys are omitted; backups never replace an existing file; unreadable or newer files are never overwritten; a failed backup stays suspended; retry adopts a repaired file.
 - **Typography:** a live `Readout` value keeps its 13px Zed Mono container typography when its value changes. A second regression records the pinned text behavior described below.
 
@@ -44,7 +50,24 @@ Linux, `nix develop .#ui-test`: Xvfb with Mesa lavapipe (software Vulkan).
 - **Demo data:** the read-only demo fixture project is shown as Fixture.
 - **No real harness:** no real agent turns or remote provider writes were made.
 
-CAPTURES
+Final round, frames in `/tmp/relay-labelism-capture/final2/` (earlier rounds are kept separately). Session frames and `compare-03-session.png` come from the build of `217d4cc`, after transcript content was capped at its 760 px reading column; the other frames come from `345fc01`, whose views are unchanged since. Names are `<palette>-<window>-s<sidebar>[-200pct]-<view>.png`.
+
+| Frames | Shows |
+|---|---|
+| `compare-01-board.png`, `compare-02-profile.png`, `compare-03-session.png` | Concept render beside the native frame at 1600×1000, sidebar 300 |
+| `warm-1600-s300-{demo,demo-detail,capture-detail,profile,settings}` | Warm light: fixture board with tinted label strips, inspector with anchored worker setup, director profile, settings modules |
+| `neutral-1600-s300-{board,session}` | Neutral dark: seeded project board; worker session waiting for approval |
+| `slate-1380-s220-{demo,demo-detail,capture-detail,profile,session,settings}` | Default Slate dark at the normal 220 px sidebar |
+| `slate-760-s220-{board,capture-detail,profile,session}` | 760 px window: stacked columns, full-width inspector, stacked profile, narrow session |
+| `slate-1380-s220-200pct-{board,capture-detail,profile,session}` | 200% scale: compact session header, bounded inspector |
+| `hc-dark-1380-s220-{demo-detail,session}`, `hc-light-1380-s220-{demo-detail,profile}` | High contrast palettes |
+
+**Differences from the concept, kept on purpose:**
+- the sidebar tree replaces the concept's turn ruler and fixed legend;
+- the session has no right rail: queued messages stay inline in the transcript, and usage and changes open from the session actions;
+- mock-only readouts are left out: turn numbers, elapsed time, timestamps, keyboard grid hints, unsaved-change counts and per-file bars;
+- profile origins are whole-field, not per action;
+- Merge and Deploy stay editable.
 
 ## Framework notes
 
@@ -71,4 +94,8 @@ CAPTURES
 
 ## Final check
 
-FINAL
+`CARGO_TARGET_DIR=<shared> nix develop --command just check` exited 0 at `217d4cc`:
+- 98 desktop, 109 server, 6 core and 10 HTTP tests;
+- strict Clippy on all workspace targets;
+- Rust, Mosaic, just and Nix formatting;
+- `nix flake check` (native x86_64-linux outputs; other platforms omitted).
