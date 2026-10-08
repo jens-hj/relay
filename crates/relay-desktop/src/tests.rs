@@ -4099,3 +4099,43 @@ fn profile_header_counts_real_overrides_and_keeps_its_geometry() {
     assert!(!has_label(&mounted, "Overrides"));
     assert!(has_label(&mounted, "Directors"));
 }
+
+#[test]
+fn session_header_and_run_strip_show_only_recorded_values() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = live_snapshot();
+    let session = &mut snapshot.sessions[0];
+    session.fixture = false;
+    session.director_id = snapshot.directors[0].id.clone();
+    let mut run = worker_run(WorkerStatus::Running);
+    run.thread_id = None;
+    run.worktree = Some("/srv/relay/worktrees/issue-2-a41c".into());
+    session.worker = Some(run);
+    let session_id = session.id.clone();
+    let cells = crate::conversation::run_cells(&snapshot, &snapshot.sessions[0]);
+    let keys: Vec<_> = cells.iter().map(|c| c.0).collect();
+    assert_eq!(
+        keys,
+        ["Harness", "Worktree", "Approval"],
+        "no thread was recorded"
+    );
+    assert_eq!(cells[1].1, "…/worktrees/issue-2-a41c");
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(session_id);
+    mounted.settle();
+    let header = mounted.rect("Session header");
+    assert!((header.size.height - 74.0).abs() <= 1.0, "{header:?}");
+    let strip = mounted.rect("Session run");
+    assert!((strip.origin.y - (header.origin.y + header.size.height)).abs() <= 1.0);
+    assert!(has_label(&mounted, "Worktree"));
+    assert!(!has_label(&mounted, "Thread"));
+    // The draft sits beside the 92px author column.
+    let draft = mounted.rect("Next message");
+    let send = mounted.rect("Send message");
+    assert!(send.origin.x < draft.origin.x + 92.0);
+    assert!(has_label(&mounted, "Stop worker"));
+}
