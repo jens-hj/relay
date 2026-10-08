@@ -366,6 +366,13 @@ pub(super) fn apply(
                     ConnectionInput::Board { source } => validate_source(source)?,
                 }
             }
+            let directory = absolute(
+                &Path::new(&root).join("workspace").display().to_string(),
+                true,
+            )?;
+            if !directory.starts_with(Path::new(&root)) {
+                return Err(Error::invalid("Default workspace escapes the project root"));
+            }
             let id = format!("project-{request}");
             snapshot.projects.push(Project {
                 id: id.clone(),
@@ -384,16 +391,6 @@ pub(super) fn apply(
                 overrides: ProfileOverrides::default(),
             });
             local_board(snapshot, &id);
-            let directory = Path::new(
-                snapshot
-                    .project(&id)
-                    .map_err(Error::invalid)?
-                    .root
-                    .as_ref()
-                    .unwrap(),
-            )
-            .join("workspace");
-            let directory = absolute(&directory.display().to_string(), true)?;
             snapshot.connections.push(ProjectConnection {
                 id: format!("workspace-{id}"),
                 project_id: id.clone(),
@@ -1077,6 +1074,13 @@ pub(super) fn clone_repository(workspace: &Workspace, id: &str) -> Result<(), Er
     }
     let mut owned = true;
     if destination.exists() {
+        if !destination
+            .canonicalize()
+            .map_err(Error::internal)?
+            .starts_with(&root)
+        {
+            return Err(Error::invalid("Clone destination escapes the project root"));
+        }
         let origin = crate::process::capture(
             ProcessCommand::new("git")
                 .arg("-C")
@@ -1384,6 +1388,62 @@ mod tests {
         assert!(Path::new(path).join(".git").is_dir());
         assert_eq!(Path::new(path), root.join("repos/github.com/org/repo"));
         assert_eq!(completed.operations[0].state, OperationState::Completed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_workspace_paths_do_not_adopt_external_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("workspace")).unwrap();
+        let mut s = Snapshot::default();
+        let result = apply(
+            &mut s,
+            Command::CreateProject {
+                name: "Project".into(),
+                root: root.display().to_string(),
+                connections: vec![],
+            },
+            "project",
+            DirectorProfile::default(),
+            &RuntimeConfig::default(),
+        );
+        assert!(result.err().unwrap().to_string().contains("escapes"));
+        assert!(s.projects.is_empty());
+        std::fs::remove_file(root.join("workspace")).unwrap();
+        let project = create(&mut s, &root, "Project");
+        std::fs::create_dir_all(root.join("repos/github.com/org")).unwrap();
+        symlink(&outside, root.join("repos/github.com/org/repo")).unwrap();
+        let action = apply(
+            &mut s,
+            Command::AddConnection {
+                project_id: project,
+                connection: ConnectionInput::Repository {
+                    remote: "org/repo".into(),
+                },
+            },
+            "clone-symlink",
+            DirectorProfile::default(),
+            &RuntimeConfig::default(),
+        )
+        .unwrap();
+        let Some(Action::Operations(ids)) = action else {
+            panic!("Clone not scheduled")
+        };
+        let w = workspace(
+            &dir.path().join("data.sqlite3"),
+            &s,
+            RuntimeConfig::default(),
+        );
+        run(w.clone(), ids[0].clone());
+        let s = w.snapshots.borrow();
+        assert_eq!(s.operations[0].state, OperationState::Failed);
+        assert!(s.operations[0].error.as_ref().unwrap().contains("escapes"));
+        assert!(outside.read_dir().unwrap().next().is_none());
     }
 
     #[test]

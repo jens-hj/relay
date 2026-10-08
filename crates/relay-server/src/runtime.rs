@@ -439,6 +439,13 @@ fn prepare_workspaces(
                 // A failed preparation may have left an owned worktree. Reuse it only
                 // when it is demonstrably this session's branch in this repository.
                 if path.exists() {
+                    if !path
+                        .canonicalize()
+                        .map_err(Error::internal)?
+                        .starts_with(&root)
+                    {
+                        return Err(Error::invalid("Session worktree escapes the project root"));
+                    }
                     let actual =
                         String::from_utf8(git(&path, &["symbolic-ref", "--short", "HEAD"])?)
                             .map_err(Error::internal)?;

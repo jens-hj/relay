@@ -18,7 +18,7 @@ Repositories clone under `ROOT/repos/HOST/NAMESPACE/REPO` using the server's exi
 
 Agent sessions always reference a local task or remote issue and a director. A director's first conversation creates a local planning task. Each turn checks current scope, action permission, board membership, and worker limit; Ask requires approval and Deny is not overridable. Directors do not consume worker slots. Codex uses app-server stdio; Claude Code uses streaming JSON/control protocol. Both report transcript, thread identity, lifecycle and measured usage. Completed means the turn ended, not independently accepted work. Agent completion never commits, integrates, publishes a board, or changes remote status automatically.
 
-Explicit task edits and moves on a remote board go through its provider. Publishing a local board selects a new or existing destination, destination repositories, and column mappings. Each write persists an in-flight journal key before contacting the provider and its result before the next step. Provider APIs do not guarantee exactly-once creation: uncertain outcomes require a validated remote result before continuing. A board becomes remote only after publication and authoritative readback succeed. Session transcripts are retained locally, not exported as issue comments.
+Explicit task edits and moves on a remote board go through its provider. Publishing a local board selects a new or existing destination, destination repositories, and column mappings. Each write persists an in-flight journal key before contacting the provider and its result before the next step. Provider APIs do not guarantee exactly-once creation: uncertain outcomes require a validated remote result before continuing. A board becomes remote only after publication and authoritative readback succeed. Publication redirects duplicate board/task identities to the preserved local IDs; historical records, sessions, scopes and receipts retain their original IDs. Session transcripts are retained locally, not exported as issue comments.
 
 Execution settings inherit project → director → worker and are captured when each turn launches. Workers retain their original harness across profile changes. Automatic configures Codex workspace-write/never approval or Claude native auto/required sandbox. Ask uses native permission callbacks, recorded with exact run identity and answered inline once. Pending requests expire on terminal state/restart; receipts make answers idempotent. Unrestricted Access explicitly selects native full access/bypass. Server-enforced scope, board membership, action permission, and worker limits apply in every mode. Other profile responsibilities and completion criteria remain workflow configuration; Relay does not yet turn every configured action into a separately enforceable harness tool permission. Context compaction/reset and predictive cache warnings require a later harness integration. Cached token counts are measurements from completed turns, not a cache-expiry estimate.
 
@@ -34,6 +34,8 @@ All routes require `Authorization: Bearer <token>`, including WebSocket upgrade.
 | --- | --- |
 | `GET /v1/snapshot` | Current authoritative snapshot, including monotonic revision |
 | `POST /v1/commands` | Typed command envelope; returns committed snapshot |
+| `POST /v1/boards/discover` | Read destination metadata and named columns before publication |
+| `POST /v1/operations/reconcile` | Validate a known remote result URL and preview recovery without writing |
 | `GET /v1/harnesses` | Cached, bounded executable/version/authentication probes on the server |
 | `POST /v1/harnesses/refresh` | Refresh read-only harness probes |
 | `GET /v1/events` | WebSocket: initial snapshot followed by committed snapshots |
@@ -64,7 +66,7 @@ Profiles configure Codex or Claude Code, whole-project or selected-issue scope, 
 
 ## Next milestones
 
-1. Expand the GitHub/Codex/Claude loop to GitLab, preserving provider-specific board identity and semantics.
+1. Extend GitLab support to additional board filters and list types while preserving provider semantics.
 2. Add autonomous director delegation, richer harness capability reporting, and enforceable permissions for additional actions.
 3. Add identities, membership, review permissions, and shared-session handoff.
 4. Extend document selection across recorded messages, add richer file review, and implement the three context lifecycle actions with actual harness support.
