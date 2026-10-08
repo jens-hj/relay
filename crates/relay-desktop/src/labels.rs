@@ -253,15 +253,16 @@ pub fn Tag(text: String) -> Element {
 #[component]
 pub fn LabelStrip(labels: Derived<Vec<String>>) -> Element {
     view! {
-        row width:1fr min-width:0px height:fill clip
+        row width:1fr min-width:0px clip
             fill:{labels.get().last().map(|l| color(label_tint(l))).unwrap_or(Color::TRANSPARENT)} {
             for (_, label) in { labels.get().into_iter().map(|l| (l.clone(), l)) } {
                 let swatch = label_tint(label);
-                row width:max-content height:fill shrink:0 align:center
+                row width:max-content shrink:0 align:center
                     pad:(horizontal:{px(8.0)}px vertical:0px) fill:{color(swatch)}
-                    stroke:(width:{px(1.0)} color:rule.hair edges:left)
-                    font-size:{px(10.5)}px font-color:ink.fg {
-                    text text-wrap:none text-transform:uppercase letter-spacing:{px(0.6)}px (label.clone())
+                    stroke:(width:{px(1.0)} color:rule.hair edges:left) font-size:{px(10.5)}px
+                    font-color:ink.fg {
+                    text text-wrap:none text-transform:uppercase letter-spacing:{px(0.6)}px
+                        (label.clone())
                 }
             }
         }
@@ -277,9 +278,12 @@ pub fn Readout(key: String, value: Derived<String>) -> Element {
     view! {
         col height:min-content min-width:0px gap:{px(3.0)}px {
             row #relay.eyebrow height:min-content {
-                text text-wrap:none text-transform:uppercase letter-spacing:{px(0.6)}px (key.clone())
+                text text-wrap:none text-transform:uppercase letter-spacing:{px(0.6)}px
+                    (key.clone())
             }
-            row #relay.value height:min-content { text {value.get()} }
+            row #relay.value height:min-content {
+                text {value.get()}
+            }
         }
     }
 }

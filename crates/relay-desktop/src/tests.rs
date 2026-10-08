@@ -4139,7 +4139,7 @@ fn session_header_and_run_strip_show_only_recorded_values() {
     let keys: Vec<_> = cells.iter().map(|c| c.0).collect();
     assert_eq!(
         keys,
-        ["Harness", "Worktree", "Approval"],
+        ["Harness", "Worktree", "Next-turn approval"],
         "no thread was recorded"
     );
     assert_eq!(cells[1].1, "…/worktrees/issue-2-a41c");
@@ -4230,6 +4230,16 @@ fn profile_fields_remain_reachable_at_double_scale_without_rebuilding_the_draft(
     assert_eq!(
         mounted.model.editor_profile.get_untracked().permissions[&Task::Deploy],
         Permission::Allow
+    );
+    mounted.focus("Increase worker limit");
+    mounted.key(Key::Enter, false);
+    assert!(
+        mounted
+            .model
+            .editor_overrides
+            .get_untracked()
+            .max_workers
+            .is_some()
     );
     for label in [
         "Increase worker limit",
@@ -4362,4 +4372,102 @@ fn profile_scope_reacts_to_publication_and_harness_choice_reports_actual_availab
         mounted.model.editor_profile.get_untracked().harness,
         Harness::ClaudeCode
     );
+}
+
+#[test]
+fn new_task_draft_survives_closing_and_reopening_the_form() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    snapshot.projects[0].fixture = false;
+    snapshot.migrate_projects();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    mounted.click("New task");
+    type_in(&mounted, "New task title", "Kept title");
+    type_in(&mounted, "New task body", "Kept body");
+    mounted.click("New task");
+    assert!(!has_label(&mounted, "New task title"));
+    mounted.click("New task");
+    mounted.click("Create task");
+    let request = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(&request.command, Command::CreateTask { title, body, .. } if title == "Kept title" && body == "Kept body"),
+        "{:?}",
+        request.command
+    );
+}
+
+#[test]
+fn narrow_sessions_stack_entries_without_rebuilding_the_draft() {
+    let mounted = mount(false, 760.0);
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
+    let mut snapshot = live_snapshot();
+    let session = &mut snapshot.sessions[0];
+    session.fixture = false;
+    session.director_id = snapshot.directors[0].id.clone();
+    session.worker = Some(worker_run(WorkerStatus::Running));
+    let session_id = session.id.clone();
+    snapshot.tool_permissions.push(ToolPermission {
+        id: "p".into(),
+        session_id: session_id.clone(),
+        run_id: "r".into(),
+        tool: "Write".into(),
+        description: "notes.txt".into(),
+        decision: None,
+        expired: false,
+    });
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(session_id.clone());
+    mounted.settle();
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|l| l.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&draft);
+    mounted
+        .ui
+        .dispatch_ime(ImeEvent::Commit("kept draft".into()));
+    mounted.settle();
+    let focused = mounted.ui.focused().map(|e| e.id());
+    // Doubling the scale switches the conversation to its narrow layout.
+    mounted.model.preferences.update(|p| p.scale = 2.0);
+    mounted.settle();
+    assert_eq!(
+        mounted.ui.focused().map(|e| e.id()),
+        focused,
+        "draft surface kept"
+    );
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, &session_id)),
+        "kept draft"
+    );
+    for label in [
+        "Allow once tool request",
+        "Deny tool request",
+        "Send message",
+        "Session actions",
+    ] {
+        let rect = mounted.rect(label);
+        assert!(
+            rect.origin.x >= 0.0 && rect.origin.x + rect.size.width <= 761.0,
+            "{label}: {rect:?}"
+        );
+    }
+    // Stop moves into the session actions when the header is narrow.
+    assert!(!has_label(&mounted, "Stop worker"));
+    mounted.click("Session actions");
+    assert!(has_label(&mounted, "Stop worker"));
 }

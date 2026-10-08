@@ -130,6 +130,11 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
     let creating = State::new(false);
     let managing = State::new(false);
     let history = State::new(false);
+    let draft = TaskDraft {
+        title: State::new(String::new()),
+        body: State::new(String::new()),
+        repository: State::new(None),
+    };
     let menu = State::new(false);
     let trigger_slot: Rc<RefCell<Option<Element>>> = Rc::default();
     let project_name = Derived::new(move || {
@@ -226,7 +231,7 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                 }
             }
             if creating.get() && model.selected_board().is_some() {
-                NewTaskForm model:(model) open:(creating)
+                NewTaskForm model:(model) open:(creating) draft:(draft)
             }
             if managing.get() {
                 col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
@@ -295,12 +300,23 @@ pub(crate) fn BoardChoices(model: Model) -> Element {
     }
 }
 
+/// The new task form's draft. The board owns it, so hiding the form keeps
+/// what was entered.
+#[derive(Clone, Copy)]
+pub(crate) struct TaskDraft {
+    title: State<String>,
+    body: State<String>,
+    repository: State<Option<String>>,
+}
+
 /// The new task form, opened from the board header.
 #[component]
-pub(crate) fn NewTaskForm(model: Model, open: State<bool>) -> Element {
-    let title = State::new(String::new());
-    let body = State::new(String::new());
-    let repository = State::new(None::<String>);
+pub(crate) fn NewTaskForm(model: Model, open: State<bool>, draft: TaskDraft) -> Element {
+    let TaskDraft {
+        title,
+        body,
+        repository,
+    } = draft;
     view! {
         col height:min-content gap:{px(8.0)}px pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
             stroke:(width:{px(1.0)} color:rule.line edges:bottom) label:"New task" {
@@ -662,14 +678,16 @@ pub(crate) fn IssueDetail(model: Model) -> Element {
                                 }
                             }
                             if !anchored.get() {
-                                col height:min-content pad:(horizontal:{px(14.0)}px vertical:{px(12.0)}px) {
+                                col height:min-content
+                                    pad:(horizontal:{px(14.0)}px vertical:{px(12.0)}px) {
                                     WorkerForm model:(model) continuation:false
                                 }
                             }
                         }
                     }
                     if anchored.get() {
-                        col height:min-content shrink:0 pad:(horizontal:{px(14.0)}px vertical:{px(12.0)}px)
+                        col height:min-content shrink:0
+                            pad:(horizontal:{px(14.0)}px vertical:{px(12.0)}px)
                             stroke:(width:{px(1.0)} color:rule.line edges:top) {
                             WorkerForm model:(model) continuation:false
                         }
@@ -781,12 +799,14 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
                 }
             }
             if model.worker_profile(continuation).is_ok() {
-                grid cols:{GridTracks::auto_fit(GridTrack::minmax(px(80.0).into(), GridTrack::fr(1.0)))}
+                grid
+                    cols:{GridTracks::auto_fit(GridTrack::minmax(px(80.0).into(), GridTrack::fr(1.0)))}
                     height:min-content gap:0px stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
                     label:"Worker policy" {
                     for (_, key) in { worker_policy(model, continuation).into_iter().map(|(k, _)| (k, k)).collect::<Vec<_>>() } {
                         let field: &'static str = key;
-                        col height:min-content min-width:0px pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px)
+                        col height:min-content min-width:0px
+                            pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px)
                             stroke:(width:{px(1.0)} color:rule.hair edges:right) {
                             Readout key:(field.to_string())
                                 value:(Derived::new(move || worker_policy(model, continuation).into_iter().find(|(k, _)| *k == field).map(|(_, v)| v).unwrap_or_default()))
@@ -801,7 +821,9 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
                     WorkerApproval model:(model)
                 }
                 row height:min-content align:center gap:{px(12.0)}px {
-                    row #relay.caption width:1fr min-width:0px height:min-content { text {gate_status.get()} }
+                    row #relay.caption width:1fr min-width:0px height:min-content {
+                        text {gate_status.get()}
+                    }
                     button #relay.primary @click:{ model.run_worker(continuation); }
                         label:if continuation { "Send worker prompt" } else { "Start worker" }
                         disabled:{ model.worker_gate(continuation).is_err() }

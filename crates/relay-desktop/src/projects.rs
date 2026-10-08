@@ -413,13 +413,16 @@ pub fn OperationHistory(model: Model, open: State<bool>) -> Element {
                 row #relay.eyebrow height:min-content width:max-content {
                     text text-transform:uppercase letter-spacing:{px(0.6)}px "Operation history"
                 }
-                button #relay.action @click:{open.set(false);} label:"Close operation history" "Close"
+                button #relay.action @click:{open.set(false);} label:"Close operation history"
+                    "Close"
             }
             for (_, operation) in {model.snapshot.get().operations.into_iter().filter(|o|o.project_id==model.project.get() && o.state==OperationState::Completed).map(|o|(o.id.clone(),o)).collect::<Vec<_>>()} {
                 OperationCard model:(model) operation:(operation.clone())
             }
             if !model.snapshot.get().operations.iter().any(|o|o.project_id==model.project.get() && o.state==OperationState::Completed) {
-                row #relay.caption height:min-content { text "No completed operations" }
+                row #relay.caption height:min-content {
+                    text "No completed operations"
+                }
             }
         }
     }

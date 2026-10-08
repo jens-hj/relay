@@ -641,11 +641,17 @@ pub fn Conversation(model: Model) -> Element {
             mosaic::core::reactive::untracked(|| find_next(model, &search_controller, 1));
         }
     });
+    // Narrow conversations (small windows, large scales) stack the author
+    // column above each entry and wrap card actions. Only track templates
+    // change, so transcript and draft surfaces are never rebuilt.
+    let doc_width = State::new(1200.0f32);
+    let compact = Derived::new(move || doc_width.get() < px(720.0));
     let root = view! {
-        col width:1fr gap:0px {
+        col width:1fr gap:0px @layout:{move |rect: Rect| doc_width.set(rect.size.width)} {
             row height:{px(74.0)}px shrink:0 stroke:(width:{px(1.0)} color:rule.line edges:bottom)
                 label:"Session header" {
-                stack width:{px(74.0)}px shrink:0 align:center justify:center
+                stack width:{px(if compact.get() {52.0} else {74.0})}px shrink:0 align:center
+                    justify:center
                     fill:{color(match header_state.get() {RunState::Running => run.fill, RunState::Waiting => attention.fill, _ => ink.inverse})} {
                     row width:max-content height:min-content font-weight:700
                         font-size:{px(if header_id.get().chars().count() > 4 {17.0} else {24.0})}px
@@ -669,21 +675,25 @@ pub fn Conversation(model: Model) -> Element {
                 col #relay.cell width:max-content
                     stroke:(width:{px(1.0)} color:rule.line edges:left) label:"Session status"
                     description:{if header_state.get() == RunState::Unavailable {"No active agent"} else {header_state.get().label()}} {
-                    row #relay.eyebrow height:min-content {
-                        text text-transform:uppercase letter-spacing:{px(0.6)}px "Status"
+                    if !compact.get() {
+                        row #relay.eyebrow height:min-content {
+                            text text-transform:uppercase letter-spacing:{px(0.6)}px "Status"
+                        }
                     }
                     row height:min-content width:max-content align:center gap:{px(6.0)}px {
                         if header_state.get() != RunState::Unavailable {
                             StatusGlyph state:(header_state)
                         }
-                        row height:min-content width:max-content font-size:{px(13.0)}px
-                            font-color:{color(header_state.get().text_color())} {
-                            text text-wrap:none
-                                {if header_state.get() == RunState::Unavailable {"No active agent"} else {header_state.get().label()}}
+                        if !compact.get() {
+                            row height:min-content width:max-content font-size:{px(13.0)}px
+                                font-color:{color(header_state.get().text_color())} {
+                                text text-wrap:none
+                                    {if header_state.get() == RunState::Unavailable {"No active agent"} else {header_state.get().label()}}
+                            }
                         }
                     }
                 }
-                if session.get().and_then(|s|s.worker).is_some_and(|w|matches!(w.status,WorkerStatus::Running|WorkerStatus::Queued)) {
+                if !compact.get() && session.get().and_then(|s|s.worker).is_some_and(|w|matches!(w.status,WorkerStatus::Running|WorkerStatus::Queued)) {
                     col #relay.cell width:max-content
                         stroke:(width:{px(1.0)} color:rule.line edges:left) {
                         button #relay.action @click:{model.stop_worker();} label:"Stop worker"
@@ -711,7 +721,14 @@ pub fn Conversation(model: Model) -> Element {
                 col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
                     gap:{px(10.0)}px shrink:0
                     stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
-                    row height:min-content gap:{px(8.0)}px {
+                    if compact.get() && session.get().and_then(|s|s.worker).is_some_and(|w|matches!(w.status,WorkerStatus::Running|WorkerStatus::Queued)) {
+                        row height:min-content {
+                            button #relay.action @click:{model.stop_worker();} label:"Stop worker"
+                                disabled:{!model.connected.get() || model.busy.get()} "Stop worker"
+                        }
+                    }
+                    grid height:min-content gap:{px(8.0)}px
+                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(90.0).into(), GridTrack::fr(1.0)))} {
                         button #relay.action @click:{model.open_worker_issue();}
                             label:"Linked issue" "Issue"
                         button #relay.action
@@ -848,17 +865,17 @@ pub fn Conversation(model: Model) -> Element {
             }
             scroll {
                 col height:min-content
-                    pad:(left:{px(28.0)}px right:{px(36.0)}px top:{px(22.0)}px bottom:{px(14.0)}px)
+                    pad:(left:{px(if compact.get() {12.0} else {28.0})}px right:{px(if compact.get() {12.0} else {36.0})}px top:{px(22.0)}px bottom:{px(14.0)}px)
                     gap:{px(16.0)}px {
                     for (_, message) in {model.snapshot.get().messages.into_iter().filter(|m|m.session_id==model.session.get()).map(|m|(m.id.clone(),m)).collect::<Vec<_>>()} {
                         col height:min-content {
                             TranscriptMessage model:(model) message-id:(message.id.clone())
-                                controller:(controller)
+                                controller:(controller) compact:(compact)
                         }
                     }
                     for (_, permission) in {model.snapshot.get().tool_permissions.into_iter().filter(|p|p.session_id == model.session.get() && p.decision.is_none() && !p.expired).map(|p|(p.id.clone(),p)).collect::<Vec<_>>()} {
                         let permission = State::new(permission.clone());
-                        row height:min-content shrink:0 {
+                        grid height:min-content shrink:0 cols:{entry_cols(compact.get())} {
                             Gutter author:(Derived::new(|| "Request".to_string()))
                                 tone:(Derived::new(|| attention.text))
                             row width:1fr min-width:0px max-width:{px(760.0)}px height:min-content
@@ -866,42 +883,47 @@ pub fn Conversation(model: Model) -> Element {
                                 stroke:(width:{px(1.0)} color:attention.text offset:{px(-1.0)})
                                 label:"Approval request" {
                                 el width:{px(6.0)}px height:fill shrink:0 fill:attention.fill {}
-                                col width:1fr min-width:0px height:min-content gap:{px(4.0)}px
-                                    pad:(horizontal:{px(14.0)}px vertical:{px(10.0)}px) {
-                                    row height:min-content font-size:{px(11.0)}px
-                                        font-color:attention.text {
-                                        text text-transform:uppercase letter-spacing:{px(0.6)}px
-                                            "Waiting for approval"
-                                    }
-                                    row #relay.title height:min-content font-size:{px(14.0)}px {
-                                        text
-                                            {format!("Approval requested · {}",permission.get().tool)}
-                                    }
-                                    scroll max-height:{px(140.0)}px {
-                                        row height:min-content font-size:{px(12.0)}px {
-                                            text {permission.get().description}
+                                grid width:1fr min-width:0px height:min-content
+                                    cols:{if compact.get() {GridTracks::new([GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0), GridTrack::MaxContent])}} {
+                                    col width:1fr min-width:0px height:min-content gap:{px(4.0)}px
+                                        pad:(horizontal:{px(14.0)}px vertical:{px(10.0)}px) {
+                                        row height:min-content font-size:{px(11.0)}px
+                                            font-color:attention.text {
+                                            text text-transform:uppercase letter-spacing:{px(0.6)}px
+                                                "Waiting for approval"
+                                        }
+                                        row #relay.title height:min-content font-size:{px(14.0)}px {
+                                            text
+                                                {format!("Approval requested · {}",permission.get().tool)}
+                                        }
+                                        scroll max-height:{px(140.0)}px {
+                                            row height:min-content font-size:{px(12.0)}px {
+                                                text {permission.get().description}
+                                            }
                                         }
                                     }
-                                }
-                                row width:max-content align:center gap:{px(8.0)}px
-                                    pad:(horizontal:{px(14.0)}px vertical:{px(10.0)}px)
-                                    stroke:(width:{px(1.0)} color:attention.text edges:left) {
-                                    for (label, allow) in [("Deny",false),("Allow once",true)] {
-                                        button #relay.action
-                                            @click:{let p=permission.get_untracked(); model.submit(Command::RespondPermission{permission_id:p.id,run_id:p.run_id,allow},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
-                                            fill:{color(if allow {attention.fill} else {surface.panel})}
-                                            disabled:{!model.connected.get() || model.busy.get()}
-                                            label:{format!("{} tool request",label)}
-                                            hover {
-                                                fill:{color(if allow {attention.fill} else {surface.raised})}
-                                            }
-                                            pressed {
-                                                fill:{color(if allow {attention.fill} else {surface.selected})}
-                                            } {
-                                            row height:min-content width:max-content
-                                                font-weight:{if allow {700} else {400}}
-                                                font-color:{color(if allow {attention.on} else {ink.fg})} {
-                                                text (label)
+                                    grid height:min-content align:center gap:{px(8.0)}px
+                                        pad:(horizontal:{px(14.0)}px vertical:{px(10.0)}px)
+                                        cols:{if compact.get() {GridTracks::auto_fit(GridTrack::minmax(px(90.0).into(), GridTrack::fr(1.0)))} else {GridTracks::new([GridTrack::MaxContent, GridTrack::MaxContent])}}
+                                        stroke:(width:{px(1.0)} color:{if compact.get() {Color::TRANSPARENT} else {color(attention.text)}} edges:left)
+                                        stroke:+(width:{px(1.0)} color:{if compact.get() {color(attention.text)} else {Color::TRANSPARENT}} edges:top) {
+                                        for (label, allow) in [("Deny",false),("Allow once",true)] {
+                                            button #relay.action
+                                                @click:{let p=permission.get_untracked(); model.submit(Command::RespondPermission{permission_id:p.id,run_id:p.run_id,allow},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
+                                                fill:{color(if allow {attention.fill} else {surface.panel})}
+                                                disabled:{!model.connected.get() || model.busy.get()}
+                                                label:{format!("{} tool request",label)}
+                                                hover {
+                                                    fill:{color(if allow {attention.fill} else {surface.raised})}
+                                                }
+                                                pressed {
+                                                    fill:{color(if allow {attention.fill} else {surface.selected})}
+                                                } {
+                                                row height:min-content width:max-content
+                                                    font-weight:{if allow {700} else {400}}
+                                                    font-color:{color(if allow {attention.on} else {ink.fg})} {
+                                                    text (label)
+                                                }
                                             }
                                         }
                                     }
@@ -914,7 +936,7 @@ pub fn Conversation(model: Model) -> Element {
                         let cancel = State::new(queued.id.clone());
                         let promote = State::new(queued.id.clone());
                         let edit = State::new(queued.id.clone());
-                        row height:min-content shrink:0 {
+                        grid height:min-content shrink:0 cols:{entry_cols(compact.get())} {
                             Gutter
                                 author:(Derived::new(move || match model.snapshot.get().submissions.iter().find(|s|s.id==queued_id.get()).map(|s|s.state.clone()) {Some(SubmissionState::Paused) => "Paused".to_string(), _ => "Queued".to_string()}))
                                 tone:(Derived::new(|| ink.muted))
@@ -941,7 +963,8 @@ pub fn Conversation(model: Model) -> Element {
                                                 {model.snapshot.get().submissions.iter().find(|s|s.id==queued_id.get()).and_then(|s|s.error.clone()).unwrap_or_default()}
                                         }
                                     }
-                                    row height:min-content gap:{px(4.0)}px {
+                                    grid height:min-content gap:{px(4.0)}px
+                                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(80.0).into(), GridTrack::fr(1.0)))} {
                                         button #relay.action
                                             @click:{model.submit(Command::CancelTurn{submission_id:cancel.get_untracked()},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
                                             pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
@@ -960,13 +983,14 @@ pub fn Conversation(model: Model) -> Element {
                         }
                     }
                     if model.snapshot.get().submissions.iter().any(|s|s.session_id==model.session.get() && s.state==SubmissionState::Paused) && session.get().and_then(|s|s.worker).is_some_and(|w|!matches!(w.status,WorkerStatus::Queued|WorkerStatus::Running)) {
-                        row height:min-content pad:(left:{px(92.0)}px) {
+                        row height:min-content
+                            pad:(left:{px(if compact.get() {0.0} else {92.0})}px) {
                             button #relay.action
                                 @click:{model.submit(Command::ResumeQueue{session_id:model.session.get_untracked()},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
                                 label:"Resume paused queue" "Resume queue"
                         }
                     }
-                    row height:min-content pad:(top:{px(10.0)}px)
+                    grid height:min-content pad:(top:{px(10.0)}px) cols:{entry_cols(compact.get())}
                         stroke:(width:{px(1.0)} color:rule.hair edges:top) label:"Next message" {
                         col width:{px(92.0)}px shrink:0 height:min-content gap:{px(8.0)}px
                             pad:(top:{px(2.0)}px) {
@@ -1086,7 +1110,12 @@ pub fn Conversation(model: Model) -> Element {
 }
 
 #[component]
-fn TranscriptMessage(model: Model, message_id: String, controller: ControllerState) -> Element {
+fn TranscriptMessage(
+    model: Model,
+    message_id: String,
+    controller: ControllerState,
+    compact: Derived<bool>,
+) -> Element {
     let message_id = State::new(message_id);
     let message = Derived::new(move || {
         model
@@ -1105,7 +1134,7 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
     });
     let prompt = Derived::new(move || message.get().is_some_and(|m| m.kind == "prompt"));
     view! {
-        row height:min-content {
+        grid height:min-content cols:{entry_cols(compact.get())} {
             Gutter author:(Derived::new(move || message.get().map(|m|m.author).unwrap_or_default()))
                 tone:(Derived::new(move || if prompt.get() {ink.fg} else {ink.muted}))
             col width:1fr min-width:0px max-width:{px(760.0)}px height:min-content gap:{px(8.0)}px
@@ -1159,6 +1188,16 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
                 }
             }
         }
+    }
+}
+
+/// Transcript entry tracks: the 92px author column beside the content, or
+/// the author above it in narrow conversations.
+fn entry_cols(compact: bool) -> GridTracks {
+    if compact {
+        GridTracks::new([GridTrack::fr(1.0)])
+    } else {
+        GridTracks::new([px(92.0).into(), GridTrack::fr(1.0)])
     }
 }
 
@@ -2134,8 +2173,8 @@ pub(crate) fn provenance(
 }
 
 /// The worker run's recorded values for the session's metadata strip:
-/// harness, thread, worktree and the approval mode in effect. Values that
-/// were not recorded are left out.
+/// harness, thread and worktree as recorded, and the approval mode that the
+/// next turn will use. Values that were not recorded are left out.
 pub(crate) fn run_cells(snapshot: &Snapshot, session: &Session) -> Vec<(&'static str, String)> {
     let Some(worker) = &session.worker else {
         return Vec::new();
@@ -2174,7 +2213,9 @@ pub(crate) fn run_cells(snapshot: &Snapshot, session: &Session) -> Vec<(&'static
         .as_ref()
         .map(|e| e.approval)
         .unwrap_or(inherited);
-    cells.push(("Approval", approval.label().to_string()));
+    // The mode in effect for the next turn; it can change while a run is
+    // active, so it is not presented as what this run recorded.
+    cells.push(("Next-turn approval", approval.label().to_string()));
     cells
 }
 
