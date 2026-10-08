@@ -164,8 +164,8 @@ pub fn StatusGlyph(state: Derived<RunState>) -> Element {
             stroke:(width:{px(1.0)} color:{color(frame())} offset:{px(-0.5)}) {
             if state.get() == RunState::Running {
                 col {
-                    el height:1fr {}
-                    el height:1fr fill:run-text {}
+                    el width:fill height:1fr {}
+                    el width:fill height:1fr fill:run-text {}
                 }
             }
             if state.get() == RunState::Waiting {
@@ -318,12 +318,12 @@ pub fn UsageReadout(usage: relay_core::TokenUsage) -> Element {
             if reported {
                 row height:{px(12.0)}px stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
                     label:"Usage meter" {
-                    el width:{uncached}fr fill:tint-sky {}
-                    el width:{cached_part}fr fill:tint-lilac {}
-                    el width:{output_part}fr fill:tint-sand {}
+                    el width:{uncached}fr height:fill fill:rule {}
+                    el width:{cached_part}fr height:fill fill:accent {}
+                    el width:{output_part}fr height:fill fill:ink {}
                 }
                 row height:min-content gap:{px(12.0)}px {
-                    for (name, tint) in [("Uncached input", tint_sky), ("Cached input", tint_lilac), ("Output", tint_sand)] {
+                    for (name, tint) in [("Uncached input", rule), ("Cached input", accent), ("Output", ink)] {
                         row width:max-content height:min-content align:center gap:{px(5.0)}px {
                             el width:{px(9.0)}px height:{px(9.0)}px fill:{color(tint)}
                                 stroke:(width:{px(1.0)} color:rule offset:{px(-0.5)}) {}

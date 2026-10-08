@@ -640,18 +640,23 @@ pub fn Conversation(model: Model) -> Element {
                     label:"Session actions" width:{px(30.0)}px "⋯"
             }
             if menu.get() {
-                row height:min-content pad:(horizontal:{px(24.0)}px vertical:0px) gap:{px(8.0)}px
-                    shrink:0 {
-                    button #action @click:{model.open_worker_issue();} label:"Linked issue" "Issue"
-                    button #action
-                        @click:{if let Some(s)=session.get_untracked(){model.open_profile(EditTarget::Director(s.director_id));}}
-                        label:"Director profile" "Profile"
-                    button #action
-                        @click:{details.set(if details.get_untracked()=="changes" {String::new()}else{"changes".into()});}
-                        label:"Toggle change review" "Changes"
-                    button #action
-                        @click:{details.set(if details.get_untracked()=="usage" {String::new()}else{"usage".into()});}
-                        label:"Session usage and provenance" "Details"
+                col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
+                    gap:{px(10.0)}px shrink:0 stroke:(width:{px(1.0)} color:edge edges:bottom) {
+                    row height:min-content gap:{px(8.0)}px {
+                        button #action @click:{model.open_worker_issue();} label:"Linked issue"
+                            "Issue"
+                        button #action
+                            @click:{if let Some(s)=session.get_untracked(){model.open_profile(EditTarget::Director(s.director_id));}}
+                            label:"Director profile" "Profile"
+                        button #action
+                            @click:{details.set(if details.get_untracked()=="changes" {String::new()}else{"changes".into()});}
+                            label:"Toggle change review" "Changes"
+                        button #action
+                            @click:{details.set(if details.get_untracked()=="usage" {String::new()}else{"usage".into()});}
+                            label:"Session usage and provenance" "Details"
+                        button #action @click:{model.searching.set(true);menu.set(false);}
+                            label:"Search transcript" "Find"
+                    }
                     if session.get().is_some_and(|s| !s.fixture && s.worker.is_some()) {
                         let current = session.get_untracked().unwrap();
                         let session_id = current.id.clone();
@@ -676,7 +681,7 @@ pub fn Conversation(model: Model) -> Element {
                             SlidingSegments name:("Worker approval".to_string())
                                 options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
                                 index:(mode_index) select:(choose) attention:(None)
-                                cell-width:(120.0)
+                                cell-width:(156.0)
                                 disabled:(Derived::new(move || !model.connected.get() || model.busy.get()))
                             button #action
                                 @click:{model.submit(Command::SetWorkerExecution{session_id:session_id.clone(),execution:None},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
@@ -686,8 +691,6 @@ pub fn Conversation(model: Model) -> Element {
                         text font-size:{px(11.0)}px font-color:muted
                             "Execution changes apply to the next turn."
                     }
-                    button #action @click:{model.searching.set(true);menu.set(false);}
-                        label:"Search transcript" "Find"
                 }
             }
             if removed.get() {
@@ -719,22 +722,22 @@ pub fn Conversation(model: Model) -> Element {
                 scroll {
                     col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
                         selectable label:"Session details" {
+                        if details.get() == "usage" {
+                            for (_, usage) in {session.get().and_then(|s| s.worker).and_then(|w| w.usage).map(|u| (format!("{}-{}-{}", u.input_tokens, u.cached_input_tokens, u.output_tokens), u)).into_iter().collect::<Vec<_>>()} {
+                                col height:min-content pad:(bottom:{px(12.0)}px) {
+                                    UsageReadout usage:(usage.clone())
+                                }
+                            }
+                        }
                         text font-size:{px(12.0)}px
                             {session.get().map(|s|workspace_review(&s,details.get()=="changes")).unwrap_or_default()}
                         text font-size:{px(12.0)}px
                             {
                             session.get().and_then(|s|s.worker).map(|w| if details.get()=="changes" { w.changes.map(|c|format!("{}\n{}{}",c.files.join("\n"),c.diff,if c.truncated {"\nReview truncated"}else{""})).unwrap_or_else(||"Changes unavailable".into()) } else {format!("Branch: {}\nBase: {}\nWorktree: {}\nThread: {}\n{}",w.branch.unwrap_or_default(),w.base_commit.unwrap_or_default(),w.worktree.unwrap_or_default(),w.thread_id.unwrap_or_default(),if w.usage.is_some() {""} else {"Usage unavailable for the latest turn"})}).unwrap_or_else(||"No execution metadata".into())
                         }
-                        if details.get() == "usage" {
-                            for (_, usage) in {session.get().and_then(|s| s.worker).and_then(|w| w.usage).map(|u| (format!("{}-{}-{}", u.input_tokens, u.cached_input_tokens, u.output_tokens), u)).into_iter().collect::<Vec<_>>()} {
-                                col height:min-content pad:(top:{px(10.0)}px) {
-                                    UsageReadout usage:(usage.clone())
-                                }
-                            }
-                        }
                     }
                 } as review
-                { review.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(px(200.0)).shrink(0.0)); }
+                { review.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(px(260.0)).shrink(0.0)); }
             }
             if model.searching.get() {
                 row height:min-content pad:(horizontal:{px(24.0)}px vertical:0px) shrink:0 {
@@ -781,7 +784,11 @@ pub fn Conversation(model: Model) -> Element {
                                         fill:{color(if allow {attention_fill} else {surface})}
                                         font-color:{color(if allow {on_attention} else {ink})}
                                         disabled:{!model.connected.get() || model.busy.get()}
-                                        label:{format!("{} tool request",label)} (label)
+                                        label:{format!("{} tool request",label)} {
+                                        text font-weight:{if allow {700} else {400}}
+                                            font-color:{color(if allow {on_attention} else {ink})}
+                                            (label)
+                                    }
                                 }
                             }
                         }

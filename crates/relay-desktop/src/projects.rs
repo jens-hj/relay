@@ -198,7 +198,9 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
             col height:min-content gap:{px(6.0)}px {
                 for (index, label) in [(0,"Repository"),(1,"Directory"),(2,"GitHub board"),(3,"GitLab board")] {
                     button #action @click:{kind.set(index);}
-                        fill:if kind.get() == index {accent-soft} else {raised} (label)
+                        fill:if kind.get() == index {inverse} else {surface}
+                        font-color:{color(if kind.get() == index {on_inverse} else {ink})}
+                        font-weight:{if kind.get() == index {700} else {400}} (label)
                 }
             }
             input #input-field label:"Connection address"
@@ -287,7 +289,9 @@ pub fn BoardActions(model: Model) -> Element {
                 button #action
                     @click:{model.preferences.update(|p| {p.selected_boards.insert(model.project.get_untracked(),id.get_untracked());});model.issue.set(None);}
                     label:{format!("Select board {}",board_name.get())}
-                    fill:if model.selected_board().is_some_and(|b|b.id==id.get()){accent-soft}else{raised}
+                    fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {inverse} else {surface}
+                    font-color:{color(if model.selected_board().is_some_and(|b|b.id==id.get()) {on_inverse} else {ink})}
+                    font-weight:{if model.selected_board().is_some_and(|b|b.id==id.get()) {700} else {400}}
                     {board_name.get()}
             }
             if model.selected_board().is_some() {
@@ -315,7 +319,9 @@ pub fn BoardActions(model: Model) -> Element {
                         let connection_name=State::new(connection.name.clone());
                         button #action @click:{repository.set(Some(connection_id.get_untracked()));}
                             label:{format!("New task repository {}",connection_name.get())}
-                            fill:if repository.get().as_ref()==Some(&connection_id.get()){accent-soft}else{raised}
+                            fill:if repository.get().as_ref()==Some(&connection_id.get()) {inverse} else {surface}
+                            font-color:{color(if repository.get().as_ref()==Some(&connection_id.get()) {on_inverse} else {ink})}
+                            font-weight:{if repository.get().as_ref()==Some(&connection_id.get()) {700} else {400}}
                             {connection_name.get()}
                     }
                     button #action
@@ -651,9 +657,13 @@ fn Publish(model: Model) -> Element {
             grid cols:{GridTracks::auto_fit(GridTrack::minmax(px(120.0).into(),GridTrack::fr(1.0)))}
                 height:min-content gap:{px(8.0)}px {
                 button #action @click:{github.set(true);} width:fill
-                    fill:if github.get(){accent-soft}else{raised} "GitHub project"
+                    fill:if github.get() {inverse} else {surface}
+                    font-color:{color(if github.get() {on_inverse} else {ink})}
+                    font-weight:{if github.get() {700} else {400}} "GitHub project"
                 button #action @click:{github.set(false);} width:fill
-                    fill:if github.get(){raised}else{accent-soft} "GitLab board"
+                    fill:if github.get() {surface} else {inverse}
+                    font-color:{color(if github.get() {ink} else {on_inverse})}
+                    font-weight:{if github.get() {400} else {700}} "GitLab board"
             }
             text font-size:{px(12.0)}px font-color:muted
                 "Use 0 to create a new destination, or enter an existing board number."
@@ -691,7 +701,9 @@ fn Publish(model: Model) -> Element {
                     button #action
                         @click:{mappings.update(|m|{m.insert(id.get_untracked(),choice_id.get_untracked());});}
                         label:{format!("Map {} to {}",column_title.get(),choice_title.get())}
-                        fill:if mappings.get().get(&id.get())==Some(&choice_id.get()){accent-soft}else{raised}
+                        fill:if mappings.get().get(&id.get())==Some(&choice_id.get()) {inverse} else {surface}
+                        font-color:{color(if mappings.get().get(&id.get())==Some(&choice_id.get()) {on_inverse} else {ink})}
+                        font-weight:{if mappings.get().get(&id.get())==Some(&choice_id.get()) {700} else {400}}
                         {choice_title.get()}
                 }
             }
@@ -706,7 +718,9 @@ fn Publish(model: Model) -> Element {
                         button #action
                             @click:{repositories.update(|r|{r.insert(issue_id.get_untracked(),connection_id.get_untracked());});}
                             label:{format!("Issue repository {} for {}",connection_name.get(),issue_title.get())}
-                            fill:if repositories.get().get(&issue_id.get())==Some(&connection_id.get()){accent-soft}else{raised}
+                            fill:if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {inverse} else {surface}
+                            font-color:{color(if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {on_inverse} else {ink})}
+                            font-weight:{if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {700} else {400}}
                             {connection_name.get()}
                     }
                 }
@@ -741,7 +755,9 @@ pub fn WorkspaceChoices(model: Model) -> Element {
                 text font-size:{px(12.0)}px font-color:muted
                     "Automatic selects all ready repositories and directories on the server. Selection is fixed for subsequent turns."
                 button #action @click:{model.workspace_selection.set(None);}
-                    fill:if model.workspace_selection.get().is_none(){accent-soft}else{raised}
+                    fill:if model.workspace_selection.get().is_none() {inverse} else {surface}
+                    font-color:{color(if model.workspace_selection.get().is_none() {on_inverse} else {ink})}
+                    font-weight:{if model.workspace_selection.get().is_none() {700} else {400}}
                     "Automatic resources"
                 for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && c.enabled && c.state==ConnectionState::Ready && !matches!(c.kind,ConnectionKind::Board{..})).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
                     let id=State::new(connection.id.clone());
@@ -749,7 +765,9 @@ pub fn WorkspaceChoices(model: Model) -> Element {
                     button #action
                         @click:{let all=model.snapshot.get_untracked().connections.iter().filter(|c|c.project_id==model.project.get_untracked() && c.enabled && c.state==ConnectionState::Ready && !matches!(c.kind,ConnectionKind::Board{..})).map(|c|c.id.clone()).collect();model.workspace_selection.update(|selected|{let ids=selected.get_or_insert(all);if ids.contains(&id.get_untracked()){ids.retain(|c|c!=&id.get_untracked());}else{ids.push(id.get_untracked());}});}
                         label:{format!("Workspace resource {}",name.get())}
-                        fill:if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())){accent-soft}else{raised}
+                        fill:if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {inverse} else {surface}
+                        font-color:{color(if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {on_inverse} else {ink})}
+                        font-weight:{if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {700} else {400}}
                         {name.get()}
                 }
             }
