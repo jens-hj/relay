@@ -1,6 +1,8 @@
 //! Relay's domain and versioned client/server contract. No UI or execution dependencies.
 
 mod conversation;
+mod projects;
+pub use projects::*;
 mod execution;
 pub use execution::*;
 mod fixture;
@@ -34,6 +36,8 @@ pub struct BoardColumn {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default)]
+    pub root: Option<String>,
     pub id: String,
     pub name: String,
     pub repository: String,
@@ -55,9 +59,12 @@ pub struct GitHubProject {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issue {
+    #[serde(default)]
+    pub repository_connection_id: Option<String>,
     pub id: String,
     pub project_id: String,
-    pub reference: IssueRef,
+    #[serde(default)]
+    pub reference: Option<IssueRef>,
     pub title: String,
     pub body: String,
     pub column_id: String,
@@ -82,6 +89,10 @@ pub enum SessionRole {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
+    #[serde(default)]
+    pub connection_ids: Vec<String>,
+    #[serde(default)]
+    pub workspaces: Vec<SessionWorkspace>,
     pub id: String,
     pub project_id: String,
     pub issue_id: Option<String>,
@@ -160,6 +171,16 @@ pub struct Comment {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     #[serde(default)]
+    pub protocol_version: u32,
+    #[serde(default)]
+    pub connections: Vec<ProjectConnection>,
+    #[serde(default)]
+    pub boards: Vec<Board>,
+    #[serde(default)]
+    pub memberships: Vec<BoardMembership>,
+    #[serde(default)]
+    pub operations: Vec<ProjectOperation>,
+    #[serde(default)]
     pub bindings: Vec<ProjectBinding>,
     #[serde(default)]
     pub installations: Vec<HarnessInstallation>,
@@ -187,6 +208,79 @@ pub struct CommandEnvelope {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    CreateProject {
+        name: String,
+        root: String,
+        connections: Vec<ConnectionInput>,
+    },
+    RenameProject {
+        project_id: String,
+        name: String,
+    },
+    AddConnection {
+        project_id: String,
+        connection: ConnectionInput,
+    },
+    RetryConnection {
+        connection_id: String,
+    },
+    RemoveConnection {
+        connection_id: String,
+    },
+    CreateTask {
+        repository_connection_id: Option<String>,
+        board_id: String,
+        title: String,
+        body: String,
+    },
+    UpdateTask {
+        issue_id: String,
+        title: String,
+        body: String,
+    },
+    MoveTask {
+        board_id: String,
+        issue_id: String,
+        column_id: String,
+    },
+    UpdateBoardColumns {
+        board_id: String,
+        columns: Vec<BoardColumn>,
+    },
+    SyncBoard {
+        board_id: String,
+    },
+    PublishBoard {
+        board_id: String,
+        target: PublishTarget,
+        columns: Vec<ColumnMapping>,
+        tasks: Vec<TaskPublication>,
+    },
+    RetryOperation {
+        operation_id: String,
+    },
+    ReconcileOperation {
+        operation_id: String,
+        key: String,
+        result: String,
+    },
+    StartSession {
+        director_id: String,
+        issue_id: Option<String>,
+        role: SessionRole,
+        prompt: String,
+        approve_implementation: bool,
+        connection_ids: Option<Vec<String>>,
+    },
+    StartDirector {
+        director_id: String,
+        prompt: String,
+        approve_implementation: bool,
+    },
+    SetSessionConnections {
+        session_id: String,
+        connection_ids: Vec<String>,
+    },
     ConfigureProject {
         binding: ProjectBinding,
     },
@@ -309,7 +403,23 @@ impl Snapshot {
     /// Apply only to a candidate snapshot: the server commits it atomically after validation.
     pub fn apply(&mut self, command: Command, id: &str, now: u64) -> Result<(), String> {
         match command {
-            Command::ConfigureProject { .. }
+            Command::CreateProject { .. }
+            | Command::RenameProject { .. }
+            | Command::AddConnection { .. }
+            | Command::RetryConnection { .. }
+            | Command::RemoveConnection { .. }
+            | Command::CreateTask { .. }
+            | Command::UpdateTask { .. }
+            | Command::MoveTask { .. }
+            | Command::UpdateBoardColumns { .. }
+            | Command::SyncBoard { .. }
+            | Command::PublishBoard { .. }
+            | Command::RetryOperation { .. }
+            | Command::ReconcileOperation { .. }
+            | Command::StartSession { .. }
+            | Command::StartDirector { .. }
+            | Command::SetSessionConnections { .. }
+            | Command::ConfigureProject { .. }
             | Command::ConfigureHarness { .. }
             | Command::RespondPermission { .. }
             | Command::SetWorkerExecution { .. }

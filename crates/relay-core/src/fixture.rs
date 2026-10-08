@@ -2,6 +2,7 @@ use crate::*;
 
 pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
     let project = Project {
+        root: None,
         id: "demo".into(),
         name: "Relay · demo".into(),
         repository: "demo/relay".into(),
@@ -26,10 +27,10 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
         ("issue-3", 3, "Review conversations in context", "review", "experience", "Attach feedback to the exact message or quoted passage that prompted it. Keep the conversation and its issue links intact across sessions.", Some("Fixture result: a contextual comment prototype is ready for review.")),
         ("issue-4", 4, "Expose context and usage controls", "backlog", "efficiency", "Support compact, reset context, and archive/start-new as separate actions. Report cache state only when the connected harness provides evidence.", None),
     ].into_iter().map(|(id, number, title, column, label, body, result)| Issue {
-        id: id.into(), project_id: "demo".into(), reference: IssueRef {
+        id: id.into(), project_id: "demo".into(), repository_connection_id: None, reference: Some(IssueRef {
             provider: Provider::Github, repository: "demo/relay".into(), number,
             url: format!("https://github.com/demo/relay/issues/{number}"),
-        }, title: title.into(), body: body.into(), column_id: column.into(), labels: vec![label.into()], result: result.map(String::from),
+        }), title: title.into(), body: body.into(), column_id: column.into(), labels: vec![label.into()], result: result.map(String::from),
     }).collect();
     let directors = vec![
         Director {
@@ -55,6 +56,8 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
     ];
     let sessions = vec![
         Session {
+            workspaces: vec![],
+            connection_ids: vec![],
             id: "session-plan".into(),
             project_id: "demo".into(),
             issue_id: Some("issue-2".into()),
@@ -65,6 +68,8 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
             worker: None,
         },
         Session {
+            workspaces: vec![],
+            connection_ids: vec![],
             id: "session-worker".into(),
             project_id: "demo".into(),
             issue_id: Some("issue-2".into()),
@@ -75,6 +80,8 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
             worker: None,
         },
         Session {
+            workspaces: vec![],
+            connection_ids: vec![],
             id: "session-review".into(),
             project_id: "demo".into(),
             issue_id: Some("issue-3".into()),
@@ -95,6 +102,11 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
         ("m7", "session-review", "Jens", "message", "Keep review keyboard-friendly. I should be able to jump between messages and comment without losing my place."),
     ].into_iter().map(|(id, session, author, kind, body)| Message { id: id.into(), session_id: session.into(), author: author.into(), kind: kind.into(), body: body.into(), parts: vec![] }).collect();
     Snapshot {
+        protocol_version: PROTOCOL_VERSION,
+        connections: vec![],
+        boards: vec![],
+        memberships: vec![],
+        operations: vec![],
         bindings: vec![],
         installations: vec![],
         tool_permissions: vec![],
