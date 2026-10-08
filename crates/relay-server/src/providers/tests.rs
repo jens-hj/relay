@@ -523,6 +523,191 @@ fn pending_task() -> Issue {
         repository_connection_id: Some("repository".into()),
     }
 }
+
+fn reconciliation_snapshot(kind: OperationKind, key: &str) -> Snapshot {
+    let mut snapshot = Snapshot::default();
+    snapshot.issues.push(pending_task());
+    snapshot.boards.push(board_record(gh_source()));
+    snapshot.connections.push(repository_connection());
+    let mut op = sample_operation(kind);
+    op.state = OperationState::NeedsReconciliation;
+    op.error = Some("Remote acceptance unknown".into());
+    op.results.insert("pending".into(), key.into());
+    snapshot.operations.push(op);
+    snapshot
+}
+
+fn reconcile(
+    snapshot: &mut Snapshot,
+    key: &str,
+    result: &str,
+) -> Result<Option<crate::Action>, Error> {
+    crate::projects::apply(
+        snapshot,
+        relay_core::Command::ReconcileOperation {
+            operation_id: "operation".into(),
+            key: key.into(),
+            result: result.into(),
+        },
+        "recovery-request",
+        DirectorProfile::default(),
+        &RuntimeConfig::default(),
+    )
+}
+
+fn creation() -> OperationKind {
+    OperationKind::CreateTask {
+        board_id: "board".into(),
+        issue_id: "task".into(),
+    }
+}
+
+fn new_publication() -> OperationKind {
+    let mut source = gh_source();
+    if let BoardSource::Github { number, .. } = &mut source {
+        *number = 0;
+    }
+    OperationKind::Publish {
+        board_id: "local".into(),
+        target: PublishTarget {
+            source,
+            name: "New board".into(),
+        },
+        tasks: vec![],
+        columns: vec![],
+    }
+}
+
+#[test]
+fn reconciliation_rejects_untyped_or_unrelated_results_without_changing_pending_history() {
+    let issue = encode(&reference_for(&gh_source(), "elsewhere/repo", 1)).unwrap();
+    let wrong_repo = encode(&reference_for(&gh_source(), "other/repo", 1)).unwrap();
+    let wrong_provider = encode(&reference_for(&gl_source(false), "group/repo", 1)).unwrap();
+    let cases = vec![
+        (creation(), "issue/task", "pending", "issue/task".into()),
+        (creation(), "issue/task", "issue/task", "not JSON".into()),
+        (creation(), "issue/task", "issue/task", wrong_repo),
+        (creation(), "issue/task", "issue/task", wrong_provider),
+        (creation(), "issue/task", "status/task", "confirmed".into()),
+        (creation(), "issue/task", "issue/other-task", issue),
+        (
+            creation(),
+            "column/todo",
+            "column/todo",
+            "remote-status".into(),
+        ),
+        (
+            creation(),
+            "unknown/task",
+            "unknown/task",
+            "confirmed".into(),
+        ),
+        (creation(), "edit/task", "edit/task", "confirmed".into()),
+        (creation(), "status/task", "status/task", "success".into()),
+        (creation(), "membership/task", "membership/task", " ".into()),
+        (creation(), "board", "board", encode(&gh_source()).unwrap()),
+        (
+            new_publication(),
+            "board",
+            "board",
+            encode(&BoardSource::Local).unwrap(),
+        ),
+        (
+            new_publication(),
+            "board",
+            "board",
+            encode(&gl_source(false)).unwrap(),
+        ),
+        (
+            new_publication(),
+            "board",
+            "board",
+            encode(&BoardSource::Github {
+                owner: "other".into(),
+                number: 2,
+                url: String::new(),
+            })
+            .unwrap(),
+        ),
+        (
+            new_publication(),
+            "board",
+            "board",
+            encode(&BoardSource::Github {
+                owner: "owner".into(),
+                number: 0,
+                url: String::new(),
+            })
+            .unwrap(),
+        ),
+    ];
+    for (kind, pending, key, value) in cases {
+        let mut snapshot = reconciliation_snapshot(kind, pending);
+        let before = serde_json::to_value(&snapshot).unwrap();
+        assert!(
+            reconcile(&mut snapshot, key, &value).is_err(),
+            "accepted {key}: {value}"
+        );
+        assert_eq!(
+            serde_json::to_value(&snapshot).unwrap(),
+            before,
+            "mutated {key}"
+        );
+    }
+}
+
+#[test]
+fn reconciliation_accepts_only_typed_results_for_the_exact_operation_step() {
+    let cases = vec![
+        (
+            creation(),
+            "issue/task",
+            encode(&reference_for(&gh_source(), "elsewhere/repo", 1)).unwrap(),
+        ),
+        (creation(), "membership/task", "ITEM1".into()),
+        (creation(), "status/task", "confirmed".into()),
+        (
+            OperationKind::MoveTask {
+                board_id: "board".into(),
+                issue_id: "task".into(),
+                column_id: "todo".into(),
+            },
+            "status/task",
+            "confirmed".into(),
+        ),
+        (
+            OperationKind::EditTask {
+                issue_id: "task".into(),
+                title: "Title".into(),
+                body: "Body".into(),
+            },
+            "edit/task",
+            "confirmed".into(),
+        ),
+        (new_publication(), "board", encode(&gh_source()).unwrap()),
+    ];
+    for (kind, key, value) in cases {
+        let mut snapshot = reconciliation_snapshot(kind, key);
+        let action = reconcile(&mut snapshot, key, &value).unwrap();
+        assert!(matches!(action, Some(crate::Action::Operations(ids)) if ids == ["operation"]));
+        let operation = &snapshot.operations[0];
+        assert_eq!(operation.state, OperationState::Pending);
+        assert_eq!(operation.error, None);
+        assert_eq!(operation.results.get(key), Some(&value));
+        assert_eq!(
+            operation.results.get("pending").map(String::as_str),
+            Some(key)
+        );
+        // A second submission cannot change the accepted result or restart the job.
+        let before = serde_json::to_value(&snapshot).unwrap();
+        assert!(reconcile(&mut snapshot, key, "different").is_err());
+        assert_eq!(serde_json::to_value(&snapshot).unwrap(), before);
+        snapshot.operations[0].state = OperationState::NeedsReconciliation;
+        let before = serde_json::to_value(&snapshot).unwrap();
+        assert!(reconcile(&mut snapshot, key, &value).is_err());
+        assert_eq!(serde_json::to_value(&snapshot).unwrap(), before);
+    }
+}
 fn repository_connection() -> ProjectConnection {
     ProjectConnection {
         id: "repository".into(),
@@ -637,13 +822,17 @@ async fn create_task_reconciles_unknown_issue_creation_without_duplicate_and_pre
             .reference
             .is_none()
     );
-    journal(
-        &workspace,
-        "operation",
-        "issue/task",
-        encode(&reference_for(&gh_source(), "elsewhere/repo", 1)).unwrap(),
-    )
-    .unwrap();
+    workspace
+        .update_project(|snapshot| {
+            let action = reconcile(
+                snapshot,
+                "issue/task",
+                &encode(&reference_for(&gh_source(), "elsewhere/repo", 1))?,
+            )?;
+            assert!(matches!(action, Some(crate::Action::Operations(_))));
+            Ok(())
+        })
+        .unwrap();
     execute(&workspace, "operation").unwrap();
     let snapshot = workspace.snapshots.borrow();
     let task = snapshot.issues.iter().find(|i| i.id == "task").unwrap();

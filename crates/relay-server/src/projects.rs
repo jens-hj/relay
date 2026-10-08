@@ -776,23 +776,19 @@ pub(super) fn apply(
             key,
             result,
         } => {
+            let key = text(&key, 256, "operation step")?;
+            let result = text(&result, 16 * 1024, "provider result")?;
+            let operation = snapshot
+                .operations
+                .iter()
+                .find(|o| o.id == operation_id)
+                .ok_or_else(|| Error::invalid("Operation not found"))?;
+            crate::providers::validate_reconciliation(snapshot, operation, &key, &result)?;
             let operation = snapshot
                 .operations
                 .iter_mut()
                 .find(|o| o.id == operation_id)
                 .ok_or_else(|| Error::invalid("Operation not found"))?;
-            if operation.state != OperationState::NeedsReconciliation {
-                return Err(Error::invalid("Operation does not need reconciliation"));
-            }
-            let key = text(&key, 256, "operation step")?;
-            let result = text(&result, 16 * 1024, "provider result")?;
-            if operation.results.get("pending") != Some(&key)
-                || operation.results.contains_key(&key)
-            {
-                return Err(Error::invalid(
-                    "Use the exact unresolved provider step; known results cannot be replaced",
-                ));
-            }
             operation.results.insert(key, result);
             operation.state = OperationState::Pending;
             operation.error = None;

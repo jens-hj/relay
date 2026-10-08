@@ -8,6 +8,8 @@ Tracking: [issue #8](https://github.com/jens-hj/relay/issues/8). Verified on Lin
 
 Coverage includes schema migration and durable command receipts; independent named projects; root validation and automatic Git cloning; local tasks without fabricated provider references; removed/restored connections; protocol compatibility; provider pagination, permission failures and retained confirmed state; journaled publication and explicit edits/moves; URL-based recovery; publishing into an already-connected destination with retained task/session/scope identities; and preservation across database reopen. Duplicate provider records become redirects rather than deleting history. Pending writes remain gated after identity consolidation.
 
+The reconciliation follow-up passed 109 server tests and 10 HTTP/workspace integration tests, strict server Clippy and all formatting checks. Command-handler regressions reject malformed or unrelated typed results, pending/column/unknown keys and replacement of confirmed results without changing the snapshot. The real CLI-subprocess recovery test now passes its known issue through the command handler and confirms no duplicate issue creation.
+
 Subprocess tests exercised both harness adapters with two repository worktrees, the default project directory and an additional ordinary directory. Edits stayed out of canonical repository checkouts, reviews covered both repositories, and continuation reused the same thread and workspace set despite adding another connection.
 
 ## Native and live checks

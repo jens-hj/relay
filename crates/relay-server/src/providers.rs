@@ -1343,6 +1343,139 @@ impl ReadBudget {
     }
 }
 
+/// Validate advanced known results before journaling or scheduling any continuation.
+/// This is deliberately read-only and applies even when the caller skips URL lookup.
+pub(super) fn validate_reconciliation(
+    snapshot: &Snapshot,
+    op: &ProjectOperation,
+    key: &str,
+    result: &str,
+) -> Result<(), Error> {
+    if op.state != OperationState::NeedsReconciliation {
+        return Err(Error::invalid("Operation does not need reconciliation"));
+    }
+    if op.results.get("pending").map(String::as_str) != Some(key) || op.results.contains_key(key) {
+        return Err(Error::invalid(
+            "Use the exact unresolved provider step; known results cannot be replaced",
+        ));
+    }
+    if key == "board" {
+        let OperationKind::Publish { target, .. } = &op.kind else {
+            return Err(Error::invalid("Operation has no board creation step"));
+        };
+        let source: BoardSource = decode(result)?;
+        validate_source(&source)?;
+        if source_number(&target.source) != 0 || source_number(&source) == 0 {
+            return Err(Error::invalid("Supply the created remote board"));
+        }
+        // Reuse the URL parser to check owner/host/group/path and positive board ID.
+        let url = match &source {
+            BoardSource::Github { owner, number, url } if url.is_empty() => {
+                format!("https://github.com/users/{owner}/projects/{number}")
+            }
+            BoardSource::Gitlab {
+                host,
+                group,
+                path,
+                number,
+                url,
+            } if url.is_empty() => {
+                format!(
+                    "https://{host}/{}{path}/-/boards/{number}",
+                    if *group { "groups/" } else { "" }
+                )
+            }
+            BoardSource::Github { url, .. } | BoardSource::Gitlab { url, .. } => url.clone(),
+            BoardSource::Local => return Err(Error::invalid("Supply a remote board")),
+        };
+        if !source.same_board(&board_source_from_url(&target.source, &url)?) {
+            return Err(Error::invalid(
+                "Created board does not match destination scope",
+            ));
+        }
+        return Ok(());
+    }
+    let (namespace, task_id) = key
+        .split_once('/')
+        .ok_or_else(|| Error::invalid("Unsupported provider recovery step"))?;
+    let task = snapshot.issue(task_id).map_err(Error::invalid)?;
+    if task.project_id != op.project_id {
+        return Err(Error::invalid("Recovery task is outside this project"));
+    }
+    let (source, connection) = match &op.kind {
+        OperationKind::Publish { target, tasks, .. }
+            if matches!(namespace, "issue" | "membership" | "status") =>
+        {
+            let assignment = tasks
+                .iter()
+                .find(|t| t.issue_id == task_id)
+                .ok_or_else(|| Error::invalid("Pending step does not belong to this operation"))?;
+            let source = if source_number(&target.source) == 0 {
+                decode(
+                    op.results
+                        .get("board")
+                        .ok_or_else(|| Error::invalid("Resolve board creation first"))?,
+                )?
+            } else {
+                target.source.clone()
+            };
+            (source, Some(assignment.repository_connection_id.as_str()))
+        }
+        OperationKind::CreateTask { board_id, issue_id }
+            if issue_id == task_id && matches!(namespace, "issue" | "membership" | "status") =>
+        {
+            (
+                snapshot
+                    .board(board_id)
+                    .map_err(Error::invalid)?
+                    .source
+                    .clone(),
+                task.repository_connection_id.as_deref(),
+            )
+        }
+        OperationKind::MoveTask { issue_id, .. }
+            if issue_id == task_id && namespace == "status" =>
+        {
+            return confirmed(result.to_owned());
+        }
+        OperationKind::EditTask { issue_id, .. } if issue_id == task_id && namespace == "edit" => {
+            return confirmed(result.to_owned());
+        }
+        _ => {
+            return Err(Error::invalid(
+                "Pending step does not belong to this operation",
+            ));
+        }
+    };
+    validate_source(&source)?;
+    match namespace {
+        "issue" => {
+            let reference: IssueRef = decode(result)?;
+            validate_reference(&reference)?;
+            if issue_reference_from_url(&source, &reference.url)? != reference {
+                return Err(Error::invalid(
+                    "Known issue does not match destination provider",
+                ));
+            }
+            let repo = repository(
+                snapshot,
+                &op.project_id,
+                connection.ok_or_else(|| Error::invalid("Operation has no task repository"))?,
+                &source,
+            )?;
+            if !same_repository(&reference.provider, &repo, &reference.repository) {
+                return Err(Error::invalid(
+                    "Known issue does not match selected repository",
+                ));
+            }
+            Ok(())
+        }
+        "membership" if !result.trim().is_empty() && !result.contains('\0') => Ok(()),
+        "status" => confirmed(result.to_owned()),
+        _ => Err(Error::invalid("Invalid reconciled provider result")),
+    }
+}
+
 /// Resolve an explicit known remote URL into a typed reconciliation result.
 /// This function is read-only: it neither journals nor retries any provider write.
 /// The dispatcher must still require the exact pending key when accepting it.
