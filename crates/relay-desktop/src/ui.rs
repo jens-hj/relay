@@ -292,17 +292,18 @@ fn Board(model: Model, narrow: Derived<bool>) -> Element {
                 col height:min-content gap:{px(12.0)}px {
                     text font-size:{px(12.0)}px font-color:muted
                         {
-                if let Some(board)=model.selected_board() {format!("{} · {}\n{}",board.name,match board.source {BoardSource::Local=>"Local board".to_owned(),BoardSource::Github{owner,number,..}=>format!("GitHub {owner} · {number} · {}",sync_label(board.last_synced_at)),BoardSource::Gitlab{host,path,number,group,..}=>format!("GitLab {host}/{path} · {} · {number} · {}",if group {"group"}else{"project"},sync_label(board.last_synced_at))},board.error.unwrap_or_default())} else {
+                if let Some(board)=model.selected_board() {board_caption(&board) } else {
                     model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| match &p.github {
-                        Some(g) => format!("{} · board {} #{} · {}\n{}",g.url,g.owner,g.number,sync_label(g.last_synced_at),g.sync_error.clone().unwrap_or_default()),
+                        Some(g) => with_board_error(format!("{} · board {} #{} · {}",g.url,g.owner,g.number,sync_label(g.last_synced_at)),g.sync_error.as_deref()),
                         None => "Fixture board".into()
                     }).unwrap_or_default()
                 }
             }
                     BoardActions model:(model)
-                    button #action @click:{ model.sync_project(); } label:"Sync project"
-                        disabled:{ model.busy.get() || !model.connected.get() || model.selected_board().is_some_and(|b| b.source == BoardSource::Local) }
-                        "Sync project"
+                    if model.selected_board().is_some_and(|b| b.source != BoardSource::Local) || (model.selected_board().is_none() && model.snapshot.get().projects.iter().any(|p| p.id==model.project.get() && p.github.is_some()) && !model.snapshot.get().boards.iter().any(|b|b.project_id==model.project.get())) {
+                        button #action @click:{ model.sync_project(); } label:"Sync project"
+                            disabled:{ model.busy.get() || !model.connected.get() } "Sync project"
+                    }
                     if narrow.get() {
                         col height:min-content gap:{px(18.0)}px {
                             for (_, column) in { columns.get().into_iter().map(|c| (c.id.clone(), c)) } {
@@ -936,4 +937,36 @@ fn HarnessActions(
                 label:{format!("{name} executable and status details")} "Details"
         }
     }
+}
+
+fn with_board_error(mut caption: String, error: Option<&str>) -> String {
+    if let Some(error) = error.filter(|e| !e.trim().is_empty()) {
+        caption.push('\n');
+        caption.push_str(error);
+    }
+    caption
+}
+pub(crate) fn board_caption(board: &Board) -> String {
+    let caption = match &board.source {
+        BoardSource::Local if board.name == "Local board" => board.name.clone(),
+        BoardSource::Local => format!("{} · Local board", board.name),
+        BoardSource::Github { owner, number, .. } => format!(
+            "{} · GitHub {owner} · {number} · {}",
+            board.name,
+            sync_label(board.last_synced_at)
+        ),
+        BoardSource::Gitlab {
+            host,
+            path,
+            number,
+            group,
+            ..
+        } => format!(
+            "{} · GitLab {host}/{path} · {} · {number} · {}",
+            board.name,
+            if *group { "group" } else { "project" },
+            sync_label(board.last_synced_at)
+        ),
+    };
+    with_board_error(caption, board.error.as_deref())
 }
