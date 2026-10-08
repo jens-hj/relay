@@ -50,7 +50,13 @@ pub fn SlidingSegments(
                     button #relay.tree-control @click:{choose(slot);} width:1fr height:fill
                         role:radio disabled:{disabled.get()}
                         stroke:(width:{px(if slot==0 {0.0} else {1.0})} color:rule.hair edges:left)
-                        font-color:{color(if index.get()!=slot {ink.fg} else if is_attention() {attention.on} else {ink.on_inverse})} {
+                        font-color:{color(if index.get()!=slot {ink.fg} else if is_attention() {attention.on} else {ink.on_inverse})}
+                        hover {
+                            fill:{color(if index.get()!=slot {surface.raised} else if is_attention() {attention.fill} else {ink.inverse_hover})}
+                        }
+                        pressed {
+                            fill:{color(if index.get()!=slot {surface.selected} else if is_attention() {attention.fill} else {ink.inverse_pressed})}
+                        } {
                         text text-wrap:none font-weight:{if index.get()==slot {700} else {400}}
                             font-color:{color(if index.get()!=slot {ink.fg} else if is_attention() {attention.on} else {ink.on_inverse})}
                             {option_name.get()}

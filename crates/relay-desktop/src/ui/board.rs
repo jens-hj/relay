@@ -186,8 +186,9 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                             button #relay.header-action
                                 @click:{creating.set(!creating.get_untracked());}
                                 fill:{color(ink.inverse)} font-color:{color(ink.on_inverse)}
-                                font-weight:700 label:"New task" hover { fill:{color(ink.inverse)} }
-                                pressed { fill:{color(ink.inverse)} } {
+                                font-weight:700 label:"New task"
+                                hover { fill:{color(ink.inverse_hover)} }
+                                pressed { fill:{color(ink.inverse_pressed)} } {
                                 text font-weight:{700} font-color:{color(ink.on_inverse)} "New task"
                             }
                         }
@@ -307,10 +308,10 @@ pub(crate) fn BoardChoices(model: Model) -> Element {
                     pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
                     fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {ink.inverse} else {surface.panel}
                     hover {
-                        fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {ink.inverse} else {surface.raised}
+                        fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {ink.inverse_hover} else {surface.raised}
                     }
                     pressed {
-                        fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {ink.inverse} else {surface.raised}
+                        fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {ink.inverse_pressed} else {surface.raised}
                     } {
                     row width:max-content
                         font-color:{color(if model.selected_board().is_some_and(|b|b.id==id.get()) {ink.on_inverse} else {ink.fg})}
@@ -355,10 +356,10 @@ pub(crate) fn NewTaskForm(model: Model, open: State<bool>, draft: TaskDraft) -> 
                     button #relay.action @click:{repository.set(None);}
                         fill:if repository.get().is_none() {ink.inverse} else {surface.panel}
                         hover {
-                            fill:if repository.get().is_none() {ink.inverse} else {surface.raised}
+                            fill:if repository.get().is_none() {ink.inverse_hover} else {surface.raised}
                         }
                         pressed {
-                            fill:if repository.get().is_none() {ink.inverse} else {surface.raised}
+                            fill:if repository.get().is_none() {ink.inverse_pressed} else {surface.raised}
                         } {
                         row width:max-content
                             font-color:{color(if repository.get().is_none() {ink.on_inverse} else {ink.fg})} {
@@ -374,10 +375,10 @@ pub(crate) fn NewTaskForm(model: Model, open: State<bool>, draft: TaskDraft) -> 
                         label:{format!("New task repository {}",connection_name.get())}
                         fill:if repository.get().as_ref()==Some(&connection_id.get()) {ink.inverse} else {surface.panel}
                         hover {
-                            fill:if repository.get().as_ref()==Some(&connection_id.get()) {ink.inverse} else {surface.raised}
+                            fill:if repository.get().as_ref()==Some(&connection_id.get()) {ink.inverse_hover} else {surface.raised}
                         }
                         pressed {
-                            fill:if repository.get().as_ref()==Some(&connection_id.get()) {ink.inverse} else {surface.raised}
+                            fill:if repository.get().as_ref()==Some(&connection_id.get()) {ink.inverse_pressed} else {surface.raised}
                         } {
                         row width:max-content
                             font-color:{color(if repository.get().as_ref()==Some(&connection_id.get()) {ink.on_inverse} else {ink.fg})} {

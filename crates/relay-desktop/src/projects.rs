@@ -782,15 +782,15 @@ fn Publish(model: Model) -> Element {
                     fill:if github.get() {ink.inverse} else {surface.panel}
                     font-color:{color(if github.get() {ink.on_inverse} else {ink.fg})}
                     font-weight:{if github.get() {700} else {400}}
-                    hover { fill:if github.get() {ink.inverse} else {surface.raised} }
-                    pressed { fill:if github.get() {ink.inverse} else {surface.raised} }
+                    hover { fill:if github.get() {ink.inverse_hover} else {surface.raised} }
+                    pressed { fill:if github.get() {ink.inverse_pressed} else {surface.raised} }
                     "GitHub project"
                 button #relay.action @click:{github.set(false);} width:fill
                     fill:if github.get() {surface.panel} else {ink.inverse}
                     font-color:{color(if github.get() {ink.fg} else {ink.on_inverse})}
                     font-weight:{if github.get() {400} else {700}}
-                    hover { fill:if github.get() {surface.raised} else {ink.inverse} }
-                    pressed { fill:if github.get() {surface.raised} else {ink.inverse} }
+                    hover { fill:if github.get() {surface.raised} else {ink.inverse_hover} }
+                    pressed { fill:if github.get() {surface.raised} else {ink.inverse_pressed} }
                     "GitLab board"
             }
             text font-size:{px(12.0)}px font-color:ink.muted
@@ -834,10 +834,10 @@ fn Publish(model: Model) -> Element {
                         font-color:{color(if mappings.get().get(&id.get())==Some(&choice_id.get()) {ink.on_inverse} else {ink.fg})}
                         font-weight:{if mappings.get().get(&id.get())==Some(&choice_id.get()) {700} else {400}}
                         hover {
-                            fill:if mappings.get().get(&id.get())==Some(&choice_id.get()) {ink.inverse} else {surface.raised}
+                            fill:if mappings.get().get(&id.get())==Some(&choice_id.get()) {ink.inverse_hover} else {surface.raised}
                         }
                         pressed {
-                            fill:if mappings.get().get(&id.get())==Some(&choice_id.get()) {ink.inverse} else {surface.raised}
+                            fill:if mappings.get().get(&id.get())==Some(&choice_id.get()) {ink.inverse_pressed} else {surface.raised}
                         }
                         {choice_title.get()}
                 }
@@ -857,10 +857,10 @@ fn Publish(model: Model) -> Element {
                             font-color:{color(if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {ink.on_inverse} else {ink.fg})}
                             font-weight:{if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {700} else {400}}
                             hover {
-                                fill:if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {ink.inverse} else {surface.raised}
+                                fill:if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {ink.inverse_hover} else {surface.raised}
                             }
                             pressed {
-                                fill:if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {ink.inverse} else {surface.raised}
+                                fill:if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {ink.inverse_pressed} else {surface.raised}
                             }
                             {connection_name.get()}
                     }
@@ -907,10 +907,10 @@ pub fn WorkspaceChoices(model: Model, #[prop(default = false)] flush: bool) -> E
                     font-weight:{if model.workspace_selection.get().is_none() {700} else {400}}
                     focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
                     hover {
-                        fill:if model.workspace_selection.get().is_none() {ink.inverse} else {surface.raised}
+                        fill:if model.workspace_selection.get().is_none() {ink.inverse_hover} else {surface.raised}
                     }
                     pressed {
-                        fill:if model.workspace_selection.get().is_none() {ink.inverse} else {surface.raised}
+                        fill:if model.workspace_selection.get().is_none() {ink.inverse_pressed} else {surface.raised}
                     }
                     "Automatic resources"
                 for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && c.enabled && c.state==ConnectionState::Ready && !matches!(c.kind,ConnectionKind::Board{..})).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
@@ -925,10 +925,10 @@ pub fn WorkspaceChoices(model: Model, #[prop(default = false)] flush: bool) -> E
                         font-weight:{if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {700} else {400}}
                         focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
                         hover {
-                            fill:if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {ink.inverse} else {surface.raised}
+                            fill:if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {ink.inverse_hover} else {surface.raised}
                         }
                         pressed {
-                            fill:if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {ink.inverse} else {surface.raised}
+                            fill:if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {ink.inverse_pressed} else {surface.raised}
                         }
                         {name.get()}
                 }

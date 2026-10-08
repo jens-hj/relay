@@ -3218,6 +3218,8 @@ fn every_palette_keeps_text_and_controls_readable() {
         }
         for (name, foreground, background) in [
             ("on inverse", c.on_inverse, c.inverse),
+            ("on inverse hover", c.on_inverse, c.inverse_hover),
+            ("on inverse pressed", c.on_inverse, c.inverse_pressed),
             ("on run", c.on_run, c.run),
             ("on attention", c.on_attention, c.attention),
             ("ink on accent soft", c.ink, c.accent_soft),
@@ -3239,8 +3241,25 @@ fn every_palette_keeps_text_and_controls_readable() {
                 assert!(ratio >= 3.0, "{palette:?} {name}: {ratio:.2}");
             }
         }
-        let indicator = contrast(c.inverse, c.surface);
-        assert!(indicator >= 3.0, "{palette:?} selector: {indicator:.2}");
+        for (name, fill) in [
+            ("rest", c.inverse),
+            ("hover", c.inverse_hover),
+            ("pressed", c.inverse_pressed),
+        ] {
+            let indicator = contrast(fill, c.surface);
+            assert!(
+                indicator >= 3.0,
+                "{palette:?} selector {name}: {indicator:.2}"
+            );
+        }
+        assert!(
+            contrast(c.inverse, c.inverse_hover) >= 1.2,
+            "{palette:?} hover must be visible"
+        );
+        assert!(
+            contrast(c.inverse_hover, c.inverse_pressed) >= 1.2,
+            "{palette:?} press must be visible"
+        );
         if matches!(
             palette,
             Palette::Paper | Palette::Warm | Palette::Slate | Palette::Neutral
@@ -3985,65 +4004,88 @@ fn wide_profiles_show_the_action_matrix_beside_the_controls() {
 }
 
 #[test]
-fn inverse_controls_keep_their_fill_while_hovered_and_pressed() {
-    let mounted = mount(false, 1380.0);
-    mounted.model.open_director_profile("director-main".into());
-    mounted.settle();
-    let fill = |label: &str| {
-        let id = mounted
-            .ui
-            .inspection_snapshot()
-            .nodes
-            .iter()
-            .find(|n| n.label.as_deref() == Some(label))
-            .unwrap()
-            .id;
-        mounted
-            .ui
-            .inspection_details(id)
-            .unwrap()
-            .attributes
-            .into_iter()
-            .find(|a| a.name == "fill")
-            .map(|a| a.value)
-    };
-    let pointer = |kind: PointerEventKind, position: Vector2| {
-        mounted.ui.dispatch_pointer(PointerEvent {
-            kind,
-            position,
-            pointer_type: PointerType::Mouse,
-            modifiers: Modifiers::default(),
-            timestamp: Duration::ZERO,
-        });
+fn inverse_controls_show_hover_and_press_in_every_palette() {
+    for (light, alternate, high_contrast) in [
+        (true, false, false),
+        (true, true, false),
+        (true, false, true),
+        (false, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
+        let mounted = mount(light, 1380.0);
+        install_theme(&theme::configured_palette(
+            light,
+            alternate,
+            high_contrast,
+            1.0,
+        ));
+        mounted.model.open_director_profile("director-main".into());
         mounted.settle();
-    };
-    // Hover, then press without releasing, keeping on-inverse text readable.
-    let hold = |target: &str, filled: &str| {
-        let rest = fill(filled);
-        let center = mounted.rect(target).center();
-        pointer(PointerEventKind::Move, center);
-        assert_eq!(fill(filled), rest, "{filled} while hovered");
-        pointer(PointerEventKind::Down(PointerButton::Primary), center);
-        assert_eq!(fill(filled), rest, "{filled} while pressed");
-        let away = Vector2::new(700.0, 880.0);
-        pointer(PointerEventKind::Move, away);
-        pointer(PointerEventKind::Up(PointerButton::Primary), away);
-        rest
-    };
-    let unselected = fill("Director row Review director");
-    let selected = hold(
-        "Open director Project director",
-        "Director row Project director",
-    );
-    assert_ne!(selected, unselected);
-    hold("Save profile", "Save profile");
-    pointer(
-        PointerEventKind::Move,
-        mounted.rect("Open director Review director").center(),
-    );
-    let hovered = fill("Director row Review director");
-    assert_ne!(hovered, unselected, "unselected rows still show hover");
-    assert_ne!(hovered, selected);
+        let fill = |label: &str| {
+            let id = mounted
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .iter()
+                .find(|n| n.label.as_deref() == Some(label))
+                .unwrap()
+                .id;
+            mounted
+                .ui
+                .inspection_details(id)
+                .unwrap()
+                .attributes
+                .into_iter()
+                .find(|a| a.name == "fill")
+                .map(|a| a.value)
+        };
+        let pointer = |kind: PointerEventKind, position: Vector2| {
+            mounted.ui.dispatch_pointer(PointerEvent {
+                kind,
+                position,
+                pointer_type: PointerType::Mouse,
+                modifiers: Modifiers::default(),
+                timestamp: Duration::ZERO,
+            });
+            mounted.settle();
+        };
+        // Real pointer events must change the fill and restore it on leaving.
+        let hold = |target: &str, filled: &str| {
+            let rest = fill(filled);
+            let center = mounted.rect(target).center();
+            pointer(PointerEventKind::Move, center);
+            let hovered = fill(filled);
+            assert_ne!(hovered, rest, "{filled} while hovered");
+            pointer(PointerEventKind::Down(PointerButton::Primary), center);
+            assert_ne!(fill(filled), rest, "{filled} while pressed");
+            assert_ne!(fill(filled), hovered, "{filled} press differs from hover");
+            let away = Vector2::new(700.0, 880.0);
+            pointer(PointerEventKind::Move, away);
+            pointer(PointerEventKind::Up(PointerButton::Primary), away);
+            assert_eq!(fill(filled), rest, "{filled} after leaving");
+            rest
+        };
+        let unselected = fill("Director row Review director");
+        let selected = hold(
+            "Open director Project director",
+            "Director row Project director",
+        );
+        assert_ne!(selected, unselected);
+        hold("Save profile", "Save profile");
+        hold("Agent harness: Codex", "Agent harness: Codex");
+        pointer(
+            PointerEventKind::Move,
+            mounted.rect("Open director Review director").center(),
+        );
+        let hovered = fill("Director row Review director");
+        assert_ne!(hovered, unselected, "unselected rows still show hover");
+        assert_ne!(hovered, selected);
+        mounted.click("New Project");
+        hold("Create project", "Create project");
+        mounted.click("Add connection");
+        hold("Connection type: Repository", "Connection type: Repository");
+    }
 }
 
 #[test]

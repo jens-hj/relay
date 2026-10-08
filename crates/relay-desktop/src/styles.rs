@@ -28,7 +28,7 @@ mosaic::style! {
     pub(crate) #relay.primary width:max-content height:min-content shrink:0 radius:0px
         pad:(horizontal:{px(12.0)}px vertical:{px(7.0)}px) fill:ink.inverse font-color:ink.on-inverse
         font-size:{px(13.0)}px font-weight:700
-        hover { fill:ink.inverse } pressed { fill:ink.inverse }
+        hover { fill:ink.inverse-hover } pressed { fill:ink.inverse-pressed }
         focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(2.0)}) }
         disabled { opacity:0.5 }
     pub(crate) #relay.field fill:surface.panel radius:0px font-color:ink.fg font-size:{px(14.0)}px

@@ -7,7 +7,7 @@ use mosaic::prelude::*;
 mosaic::scheme! {
     pub RelayTheme {
         surface { base:Color, sidebar:Color, panel:Color, raised:Color, selected:Color },
-        ink { fg:Color, muted:Color, inverse:Color, on-inverse:Color },
+        ink { fg:Color, muted:Color, inverse:Color, inverse-hover:Color, inverse-pressed:Color, on-inverse:Color },
         rule { line:Color, hair:Color },
         accent { focus:Color, soft:Color },
         run { fill:Color, text:Color, on:Color },
@@ -94,6 +94,8 @@ pub struct Colors {
     pub accent: Color,
     pub accent_soft: Color,
     pub inverse: Color,
+    pub inverse_hover: Color,
+    pub inverse_pressed: Color,
     pub on_inverse: Color,
     pub run: Color,
     pub run_text: Color,
@@ -136,6 +138,8 @@ struct Neutrals {
     edge: u32,
     line: u32,
     inverse: u32,
+    inverse_hover: u32,
+    inverse_pressed: u32,
 }
 
 fn soft_light(n: Neutrals) -> Colors {
@@ -153,6 +157,8 @@ fn soft_light(n: Neutrals) -> Colors {
         accent: hex(0x4F63C2),
         accent_soft: hex(0xD7DCF1),
         inverse: hex(n.inverse),
+        inverse_hover: hex(n.inverse_hover),
+        inverse_pressed: hex(n.inverse_pressed),
         on_inverse: hex(n.surface),
         run: hex(0xB5D6C3),
         run_text: hex(0x2F6347),
@@ -184,6 +190,8 @@ fn soft_dark(n: Neutrals) -> Colors {
         accent: hex(0x9DB0F0),
         accent_soft: hex(0x313A58),
         inverse: hex(n.inverse),
+        inverse_hover: hex(n.inverse_hover),
+        inverse_pressed: hex(n.inverse_pressed),
         on_inverse: hex(n.base),
         run: hex(0x9CC7AE),
         run_text: hex(0xA7D3B9),
@@ -214,6 +222,8 @@ pub fn colors(palette: Palette) -> Colors {
             edge: 0xCDD1D6,
             line: 0x6A717A,
             inverse: 0x33373D,
+            inverse_hover: 0x4B525C,
+            inverse_pressed: 0x606A77,
         }),
         Palette::Warm => soft_light(Neutrals {
             base: 0xE8E5DF,
@@ -226,6 +236,8 @@ pub fn colors(palette: Palette) -> Colors {
             edge: 0xD2CDC4,
             line: 0x6E6B66,
             inverse: 0x33363B,
+            inverse_hover: 0x4D5158,
+            inverse_pressed: 0x656A73,
         }),
         Palette::Slate => soft_dark(Neutrals {
             base: 0x1C2028,
@@ -238,6 +250,8 @@ pub fn colors(palette: Palette) -> Colors {
             edge: 0x343C4A,
             line: 0x7C8696,
             inverse: 0xDCE0E6,
+            inverse_hover: 0xBCC4CF,
+            inverse_pressed: 0xA5B0C0,
         }),
         Palette::Neutral => soft_dark(Neutrals {
             base: 0x1F2125,
@@ -250,6 +264,8 @@ pub fn colors(palette: Palette) -> Colors {
             edge: 0x383B40,
             line: 0x8C8E92,
             inverse: 0xDCD8D0,
+            inverse_hover: 0xBCB7AE,
+            inverse_pressed: 0xA6A198,
         }),
         // The stark concept variant: ink rules and one orange signal. Orange
         // is a fill; text and glyph strokes use the text-grade orange.
@@ -266,6 +282,8 @@ pub fn colors(palette: Palette) -> Colors {
             accent: hex(0x2B4BC7),
             accent_soft: hex(0xCBD2F2),
             inverse: hex(0x15181D),
+            inverse_hover: hex(0x343B45),
+            inverse_pressed: hex(0x4D5865),
             on_inverse: hex(0xEDF0F2),
             run: hex(0xFF4E00),
             run_text: hex(0xA33600),
@@ -293,6 +311,8 @@ pub fn colors(palette: Palette) -> Colors {
             accent: hex(0x7FA0FF),
             accent_soft: hex(0x1E2740),
             inverse: hex(0xE3E6E8),
+            inverse_hover: hex(0xC2C8CE),
+            inverse_pressed: hex(0xAAB4BF),
             on_inverse: hex(0x0D0E10),
             run: hex(0xFF5A14),
             run_text: hex(0xFF6A2A),
@@ -330,7 +350,7 @@ pub fn configured_palette(
     let [input_fill, cached_fill, output_fill] = c.meter;
     mosaic::theme! { RelayTheme {
         surface { base:(c.base), sidebar:(c.sidebar), panel:(c.surface), raised:(c.raised), selected:(c.selected) },
-        ink { fg:(c.ink), muted:(c.muted), inverse:(c.inverse), on-inverse:(c.on_inverse) },
+        ink { fg:(c.ink), muted:(c.muted), inverse:(c.inverse), inverse-hover:(c.inverse_hover), inverse-pressed:(c.inverse_pressed), on-inverse:(c.on_inverse) },
         rule { line:(c.line), hair:(c.edge) },
         accent { focus:(c.accent), soft:(c.accent_soft) },
         run { fill:(c.run), text:(c.run_text), on:(c.on_run) },

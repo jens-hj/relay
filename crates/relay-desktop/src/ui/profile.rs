@@ -572,10 +572,10 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
                         min-height:{px(30.0)}px label:"Scope: Whole project" role:checkbox
                         fill:{color(if whole_project.get() {ink.inverse} else {surface.panel})}
                         hover {
-                            fill:{color(if whole_project.get() {ink.inverse} else {surface.raised})}
+                            fill:{color(if whole_project.get() {ink.inverse_hover} else {surface.raised})}
                         }
                         pressed {
-                            fill:{color(if whole_project.get() {ink.inverse} else {surface.raised})}
+                            fill:{color(if whole_project.get() {ink.inverse_pressed} else {surface.raised})}
                         } {
                         row height:min-content width:max-content
                             font-color:{color(if whole_project.get() {ink.on_inverse} else {ink.fg})}
@@ -691,8 +691,8 @@ fn HarnessChoice(
             label:{format!("Agent harness: {name}")} description:{caption.get()}
             fill:{color(if selected.get() {ink.inverse} else {surface.panel})}
             stroke:(width:{px(1.0)} color:rule.hair offset:{px(-1.0)})
-            hover { fill:{color(if selected.get() {ink.inverse} else {surface.raised})} }
-            pressed { fill:{color(if selected.get() {ink.inverse} else {surface.raised})} } {
+            hover { fill:{color(if selected.get() {ink.inverse_hover} else {surface.raised})} }
+            pressed { fill:{color(if selected.get() {ink.inverse_pressed} else {surface.raised})} } {
             col height:min-content min-height:{px(76.0)}px justify:center gap:{px(8.0)}px
                 pad:{px(12.0)}px {
                 row height:min-content gap:{px(8.0)}px align:center

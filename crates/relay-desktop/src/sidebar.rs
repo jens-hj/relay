@@ -94,8 +94,8 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                     width:{px(52.0)}px height:fill label:"Settings"
                     stroke:(width:{px(1.0)} color:rule.line edges:right)
                     fill:{if model.page.get() == Page::Settings {color(ink.inverse)} else {Color::TRANSPARENT}}
-                    hover { fill:{if model.page.get() == Page::Settings {color(ink.inverse)} else {color(surface.raised)}} }
-                    pressed { fill:{if model.page.get() == Page::Settings {color(ink.inverse)} else {color(surface.raised)}} }
+                    hover { fill:{if model.page.get() == Page::Settings {color(ink.inverse_hover)} else {color(surface.raised)}} }
+                    pressed { fill:{if model.page.get() == Page::Settings {color(ink.inverse_pressed)} else {color(surface.raised)}} }
                     font-color:{color(if model.page.get() == Page::Settings {ink.on_inverse} else {ink.muted})} {
                     icon size:{px(18.0)}px gear-icon
                     tooltip #relay.tooltip summary:"Settings" {text "Settings · Ctrl/Cmd+,"}
@@ -216,8 +216,8 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
                 button #relay.tree-control @click:{model.select_project(id.get_untracked());}
                     width:{px(24.0)}px height:{px(24.0)}px align:center label:{format!("Open board for {}", name.get())}
                     fill:{if model.project.get() == id.get() && model.page.get() == Page::Board {color(ink.inverse)} else {Color::TRANSPARENT}}
-                    hover { fill:{if model.project.get() == id.get() && model.page.get() == Page::Board {color(ink.inverse)} else {color(surface.raised)}} }
-                    pressed { fill:{if model.project.get() == id.get() && model.page.get() == Page::Board {color(ink.inverse)} else {color(surface.raised)}} }
+                    hover { fill:{if model.project.get() == id.get() && model.page.get() == Page::Board {color(ink.inverse_hover)} else {color(surface.raised)}} }
+                    pressed { fill:{if model.project.get() == id.get() && model.page.get() == Page::Board {color(ink.inverse_pressed)} else {color(surface.raised)}} }
                     font-color:{color(if model.project.get() == id.get() && model.page.get() == Page::Board {ink.on_inverse} else {ink.muted})}
                     {
                     icon size:{px(16.0)}px board-icon
@@ -318,8 +318,10 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
                 pad:(left:{px(4.0)}px right:{px(4.0)}px)
                 fill:{if selected.get() {color(ink.inverse)} else {Color::TRANSPARENT}}
                 font-color:{color(if selected.get() {ink.on_inverse} else {ink.fg})}
-                hover { fill:{color(if selected.get() {ink.inverse} else {surface.raised})} }
-                pressed { fill:{color(if selected.get() {ink.inverse} else {surface.raised})} } {
+                hover { fill:{color(if selected.get() {ink.inverse_hover} else {surface.raised})} }
+                pressed {
+                    fill:{color(if selected.get() {ink.inverse_pressed} else {surface.raised})}
+                } {
                 button #relay.tree-control @click:{toggle(model.expanded_directors, id.get_untracked());}
                     width:{px(24.0)}px height:{px(24.0)}px align:center label:{format!("Toggle director {}", name.get())}
                     font-color:{color(if selected.get() {ink.on_inverse} else {ink.muted})}
@@ -447,7 +449,7 @@ fn WorkerTree(model: Model, session_id: String, focus: TreeFocus) -> Element {
             height:{px(30.0)}px
             fill:{if selected.get() {color(ink.inverse)} else {Color::TRANSPARENT}}
             font-color:{color(if selected.get() {ink.on_inverse} else {ink.muted})}
-            hover { fill:{color(if selected.get() {ink.inverse} else {surface.raised})} } pressed { fill:{color(if selected.get() {ink.inverse} else {surface.raised})} } {
+            hover { fill:{color(if selected.get() {ink.inverse_hover} else {surface.raised})} } pressed { fill:{color(if selected.get() {ink.inverse_pressed} else {surface.raised})} } {
             StatusGlyph state:(state) inverse:(selected)
             stack #relay.fade-label {
                 row #relay.fade-line {
