@@ -11,9 +11,71 @@ use relay_core::*;
 #[component]
 fn Settings(model: Model) -> Element {
     use crate::settings::ThemeMode;
+    let checkout = State::new(String::new());
+    let repository = State::new(String::new());
+    let owner = State::new(String::new());
+    let number = State::new(String::new());
+    let setup = State::new(
+        !model
+            .snapshot
+            .get_untracked()
+            .projects
+            .iter()
+            .any(|p| !p.fixture),
+    );
     view! {
         scroll {
             col height:min-content pad:{px(28.0)}px gap:{px(24.0)}px {
+                col height:min-content gap:{px(10.0)}px {
+                    text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Harnesses"
+                    text font-size:{px(12.0)}px font-color:muted
+                        "Installed on the connected server. Existing harness logins and model settings are used."
+                    if !model.connected.get() {
+                        text font-size:{px(12.0)}px font-color:muted
+                            "Disconnected · last checked status retained"
+                    }
+                    if !model.harness_error.get().is_empty() {
+                        text font-size:{px(12.0)}px font-color:muted {model.harness_error.get()}
+                    }
+                    for (_, harness) in [("codex",Harness::Codex),("claude",Harness::ClaudeCode)] {
+                        HarnessCard model:(model) harness:(harness)
+                    }
+                }
+                col height:min-content gap:{px(10.0)}px {
+                    row height:min-content align:center gap:{px(10.0)}px {
+                        text font-family:sans-serif font-size:{px(18.0)}px font-weight:650
+                            "Projects"
+                        button #action @click:{setup.set(!setup.get_untracked());}
+                            label:"Add project" "+ Project"
+                    }
+                    for (_, binding) in {model.snapshot.get().bindings.into_iter().map(|b|(b.project_id(),b)).collect::<Vec<_>>()} {
+                        let id = State::new(binding.project_id());
+                        button #action @click:{model.select_project(id.get_untracked());}
+                            {model.snapshot.get().bindings.iter().find(|b|b.project_id()==id.get()).map(|b|format!("{} · board {}",b.repository,b.number)).unwrap_or_default()}
+                    }
+                    if setup.get() {
+                        col max-width:{px(600.0)}px height:min-content gap:{px(8.0)}px {
+                            text font-size:{px(12.0)}px font-color:muted
+                                "Connect a GitHub board. The checkout path is on the server; project setup and sessions are saved there."
+                            input #input-field label:"Checkout path on server"
+                                placeholder:"/home/you/repos/project" checkout
+                            input #input-field label:"GitHub repository"
+                                placeholder:"owner/repository" repository
+                            input #input-field label:"GitHub project owner"
+                                placeholder:"user or organization" owner
+                            input #input-field label:"GitHub board number" placeholder:"5" number
+                            button #action
+                                @click:{
+                                    if let Ok(number) = number.get_untracked().trim().parse::<u64>() {
+                                        let binding = ProjectBinding { checkout: checkout.get_untracked().trim().into(), repository: repository.get_untracked().trim().into(), owner: owner.get_untracked().trim().into(), number };
+                                        model.submit(Command::ConfigureProject {binding:binding.clone()},model.snapshot.get_untracked().revision,crate::model::Saved::Project(binding.project_id()));
+                                    } else {model.notice.set("Enter a positive board number".into());}
+                                }
+                                disabled:{!model.connected.get() || model.busy.get()}
+                                label:"Save project and sync board" "Connect project"
+                        }
+                    }
+                }
                 col height:min-content gap:{px(10.0)}px {
                     text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Appearance"
                     grid
@@ -93,7 +155,8 @@ fn Settings(model: Model) -> Element {
                     text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Fonts"
                     text font-size:{px(12.0)}px "Titles: Reddit Sans · Text: Zed Mono"
                 }
-                text font-size:{px(12.0)}px font-color:muted "Settings are saved on this machine."
+                text font-size:{px(12.0)}px font-color:muted
+                    "Appearance is saved on this machine. Projects and harness configuration are saved on the server."
             }
         }
     }
@@ -519,6 +582,18 @@ fn Profiles(model: Model) -> Element {
                             fill:if model.editor_profile.get().harness == Harness::ClaudeCode { accent-soft } else { raised }
                             "Claude Code"
                     }
+                    ProfileField model:(model) title:"Execution approval" field:"execution"
+                    row height:min-content gap:{px(8.0)}px {
+                        for mode in ApprovalMode::ALL {
+                            button #action
+                                @click:{model.modify_profile("execution", |p| p.execution.approval = mode);}
+                                fill:if model.editor_profile.get().execution.approval == mode {accent-soft} else {raised}
+                                label:{format!("Execution approval: {}",mode.label())}
+                                {mode.label()}
+                        }
+                    }
+                    text font-size:{px(12.0)}px font-color:muted
+                        "Execution mode configures the harness. Action permissions are separate workflow settings."
                     ProfileField model:(model) title:"Scope" field:"scope"
                     row height:min-content gap:{px(8.0)}px {
                         button #action
@@ -820,6 +895,59 @@ fn WorkerForm(model: Model, continuation: bool) -> Element {
                 label:if continuation { "Send worker prompt" } else { "Start worker" }
                 disabled:{ model.worker_gate(continuation).is_err() }
                 { if continuation { "Send / continue" } else { "Start worker" } }
+        }
+    }
+}
+
+#[component]
+fn HarnessCard(model: Model, harness: Harness) -> Element {
+    let status = Derived::new(move || {
+        model
+            .harnesses
+            .get()
+            .into_iter()
+            .find(|s| s.harness == harness)
+    });
+    let advanced = State::new(false);
+    let executable = State::new(String::new());
+    let name = match harness {
+        Harness::Codex => "Codex",
+        Harness::ClaudeCode => "Claude Code",
+    };
+    view! {
+        col height:min-content max-width:{px(720.0)}px gap:{px(8.0)}px {
+            row height:min-content gap:{px(12.0)}px align:center {
+                text font-family:sans-serif font-size:{px(14.0)}px font-weight:650 (name)
+                text font-size:{px(12.0)}px
+                    {if !model.connected.get() {"Disconnected".to_owned()} else {status.get().map(|s|match s.state.as_str(){"ready"=>"Ready","signed_out"=>"Signed out","missing"=>"Not installed","incompatible"=>"Incompatible",_=>"Check unavailable"}.to_owned()).unwrap_or_else(||"Checking…".to_owned())}}
+                button #action
+                    @click:{if let Some(sender)=model.harness_refresh.get_untracked(){let _=sender.send(());}}
+                    disabled:{!model.connected.get()} label:{format!("Refresh {name} status")}
+                    "Check again"
+                button #action
+                    @click:{
+                    if let Some(status) = status.get_untracked() {executable.set(status.executable);}
+                    advanced.set(!advanced.get_untracked());
+                }
+                    label:{format!("{name} executable and status details")} "Details"
+            }
+            if status.get().is_some() {
+                text font-size:{px(12.0)}px font-color:muted
+                    {status.get().map(|s|s.detail).unwrap_or_default()}
+            }
+            if advanced.get() {
+                col height:min-content gap:{px(8.0)}px {
+                    text font-size:{px(12.0)}px font-color:muted
+                        {status.get().map(|s|format!("{} · {}",s.version.unwrap_or_else(||"Version unavailable".into()),sync_label(Some(s.checked_at)).replacen("Last synced", "Checked", 1))).unwrap_or_default()}
+                    text font-size:{px(12.0)}px font-color:muted
+                        "Automatic · Ask · Unrestricted Access. Mode availability also depends on the harness account and managed settings."
+                    input #input-field label:{format!("{name} executable on server")} executable
+                    button #action
+                        @click:{model.submit(Command::ConfigureHarness{harness,executable:executable.get_untracked().trim().into()},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
+                        disabled:{!model.connected.get() || model.busy.get()}
+                        label:{format!("Save {name} executable and check status")} "Save and check"
+                }
+            }
         }
     }
 }

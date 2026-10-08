@@ -43,6 +43,8 @@ impl Config {
 
 #[derive(Clone, Default)]
 pub struct NetworkState {
+    pub harnesses: Vec<relay_core::HarnessStatus>,
+    pub harness_error: String,
     pub snapshot: Snapshot,
     pub connected: bool,
     pub status: String,
@@ -53,6 +55,7 @@ pub struct NetworkState {
 }
 
 enum Event {
+    Harnesses(Result<Vec<relay_core::HarnessStatus>, String>),
     Snapshot(Snapshot),
     Status(bool, String),
     Outcome(String, Result<Snapshot, String>, bool, bool),
@@ -61,8 +64,12 @@ enum Event {
 pub fn start(
     config: Config,
     ui: StateSender<NetworkState>,
-) -> mpsc::UnboundedSender<CommandEnvelope> {
+) -> (
+    mpsc::UnboundedSender<CommandEnvelope>,
+    mpsc::UnboundedSender<()>,
+) {
     let (commands, receiver) = mpsc::unbounded_channel();
+    let (refresh, mut refreshes) = mpsc::unbounded_channel();
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -72,11 +79,38 @@ pub fn start(
         runtime.block_on(async move {
             let client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(12))
+                .timeout(Duration::from_secs(30))
                 .build()
                 .expect("HTTP client");
             let (events, mut updates) = mpsc::unbounded_channel();
             let stream = tokio::spawn(stream(config.clone(), client.clone(), events.clone()));
+            let status_config = config.clone();
+            let status_client = client.clone();
+            let status_events = events.clone();
+            let status_task = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                loop {
+                    let refresh = tokio::select! { _ = interval.tick() => false, Some(()) = refreshes.recv() => true };
+                    let result = async {
+                        let response = if refresh { status_client.post(status_config.url("v1/harnesses/refresh")) } else {status_client.get(status_config.url("v1/harnesses"))}
+                            .bearer_auth(&status_config.token)
+                            .send()
+                            .await
+                            .map_err(|_| "Harness status unavailable".to_owned())?;
+                        if !response.status().is_success() {
+                            return Err("Server could not check harness status".to_owned());
+                        }
+                        response
+                            .json()
+                            .await
+                            .map_err(|_| "Incompatible harness status".to_owned())
+                    }
+                    .await;
+                    if status_events.send(Event::Harnesses(result)).is_err() {
+                        break;
+                    }
+                }
+            });
             let writer = tokio::spawn(write(config, client, receiver, events));
             let mut state = NetworkState {
                 status: "Connecting…".into(),
@@ -84,6 +118,13 @@ pub fn start(
             };
             while let Some(event) = updates.recv().await {
                 match event {
+                    Event::Harnesses(result) => match result {
+                        Ok(statuses) => {
+                            state.harnesses = statuses;
+                            state.harness_error.clear();
+                        }
+                        Err(error) => state.harness_error = error,
+                    },
                     Event::Snapshot(snapshot) => replace_snapshot(&mut state, snapshot),
                     Event::Status(connected, status) => {
                         state.connected = connected;
@@ -111,9 +152,10 @@ pub fn start(
             }
             stream.abort();
             writer.abort();
+            status_task.abort();
         });
     });
-    commands
+    (commands, refresh)
 }
 
 fn replace_snapshot(state: &mut NetworkState, snapshot: Snapshot) {

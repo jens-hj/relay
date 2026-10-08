@@ -1,6 +1,8 @@
 //! Relay's domain and versioned client/server contract. No UI or execution dependencies.
 
 mod conversation;
+mod execution;
+pub use execution::*;
 mod fixture;
 mod profile;
 pub use conversation::*;
@@ -118,6 +120,10 @@ pub struct ChangeSet {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerRun {
+    #[serde(default)]
+    pub harness: Harness,
+    #[serde(default)]
+    pub execution: Option<ExecutionSettings>,
     pub status: WorkerStatus,
     pub thread_id: Option<String>,
     pub worktree: Option<String>,
@@ -153,6 +159,12 @@ pub struct Comment {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub bindings: Vec<ProjectBinding>,
+    #[serde(default)]
+    pub installations: Vec<HarnessInstallation>,
+    #[serde(default)]
+    pub tool_permissions: Vec<ToolPermission>,
     pub revision: u64,
     pub projects: Vec<Project>,
     pub issues: Vec<Issue>,
@@ -175,6 +187,22 @@ pub struct CommandEnvelope {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    ConfigureProject {
+        binding: ProjectBinding,
+    },
+    ConfigureHarness {
+        harness: Harness,
+        executable: String,
+    },
+    SetWorkerExecution {
+        session_id: String,
+        execution: Option<ExecutionSettings>,
+    },
+    RespondPermission {
+        permission_id: String,
+        run_id: String,
+        allow: bool,
+    },
     SubmitTurn {
         session_id: String,
         draft_revision: u64,
@@ -281,7 +309,11 @@ impl Snapshot {
     /// Apply only to a candidate snapshot: the server commits it atomically after validation.
     pub fn apply(&mut self, command: Command, id: &str, now: u64) -> Result<(), String> {
         match command {
-            Command::SyncProject { .. }
+            Command::ConfigureProject { .. }
+            | Command::ConfigureHarness { .. }
+            | Command::RespondPermission { .. }
+            | Command::SetWorkerExecution { .. }
+            | Command::SyncProject { .. }
             | Command::StartWorker { .. }
             | Command::SendWorker { .. }
             | Command::SubmitTurn { .. }

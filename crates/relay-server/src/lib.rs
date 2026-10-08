@@ -12,8 +12,10 @@ use axum::{
 };
 use relay_core::*;
 mod app_server;
+mod claude;
 mod conversation;
 mod github;
+mod harness;
 mod process;
 mod runtime;
 pub use runtime::{RemoteConfig, RuntimeConfig};
@@ -76,6 +78,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 struct Store {
+    defaults: DirectorProfile,
     connection: Connection,
     controls: HashMap<String, watch::Sender<bool>>,
     closing: bool,
@@ -94,7 +97,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 3 {
+        if version > 4 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -109,17 +112,45 @@ impl Store {
              CREATE TABLE IF NOT EXISTS drafts(session_id TEXT PRIMARY KEY, draft TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS draft_receipts(request_id TEXT PRIMARY KEY, request TEXT NOT NULL, response TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY, metadata TEXT NOT NULL, bytes BLOB NOT NULL);
-             PRAGMA user_version = 3;
-             COMMIT;"
+             PRAGMA user_version = 4;"
         ).map_err(Error::internal)?;
-        let seed = serde_json::to_string(&demo_snapshot(defaults)).map_err(Error::internal)?;
-        connection
+        let seed =
+            serde_json::to_string(&demo_snapshot(defaults.clone())).map_err(Error::internal)?;
+        let inserted = connection
             .execute(
                 "INSERT OR IGNORE INTO workspace(id, snapshot) VALUES (1, ?1)",
                 [&seed],
             )
             .map_err(Error::internal)?;
+        if version < 4 && inserted == 0 {
+            let json: String = connection
+                .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+                    r.get(0)
+                })
+                .map_err(Error::internal)?;
+            let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
+            let mut old = DirectorProfile::default();
+            old.permissions.insert(Task::Implement, Permission::Ask);
+            for project in &mut snapshot.projects {
+                if project.defaults == old {
+                    project
+                        .defaults
+                        .permissions
+                        .insert(Task::Implement, Permission::Allow);
+                }
+            }
+            connection
+                .execute(
+                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                    [serde_json::to_string(&snapshot).map_err(Error::internal)?],
+                )
+                .map_err(Error::internal)?;
+        }
+        connection
+            .execute_batch("COMMIT;")
+            .map_err(Error::internal)?;
         Ok(Self {
+            defaults,
             connection,
             controls: HashMap::new(),
             closing: false,
@@ -198,6 +229,75 @@ impl Store {
         }
         let mut action = None;
         match envelope.command {
+            Command::ConfigureProject { binding } => {
+                let id = harness::add_project(&mut snapshot, binding, self.defaults.clone())?;
+                action = Some(Action::Sync(id));
+            }
+            Command::ConfigureHarness {
+                harness,
+                executable,
+            } => {
+                if executable.trim().is_empty()
+                    || executable.len() > 4096
+                    || executable.contains(['\0', '\n', '\r'])
+                {
+                    return Err(Error::invalid("Enter an executable path or command name"));
+                }
+                snapshot.installations.retain(|i| i.harness != harness);
+                snapshot.installations.push(HarnessInstallation {
+                    harness,
+                    executable,
+                });
+                snapshot.revision += 1;
+            }
+            Command::SetWorkerExecution {
+                session_id,
+                execution,
+            } => {
+                let worker = snapshot
+                    .sessions
+                    .iter_mut()
+                    .find(|s| s.id == session_id && !s.fixture)
+                    .and_then(|s| s.worker.as_mut())
+                    .ok_or_else(|| Error::invalid("Live worker not found"))?;
+                worker.execution = execution;
+                snapshot.revision += 1;
+            }
+            Command::RespondPermission {
+                permission_id,
+                run_id,
+                allow,
+            } => {
+                let permission = snapshot
+                    .tool_permissions
+                    .iter_mut()
+                    .find(|p| {
+                        p.id == permission_id
+                            && p.run_id == run_id
+                            && p.decision.is_none()
+                            && !p.expired
+                    })
+                    .ok_or_else(|| Error::invalid("Permission request is no longer pending"))?;
+                let active = snapshot
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == permission.session_id)
+                    .and_then(|s| s.worker.as_ref())
+                    .is_some_and(|w| runtime::active(&w.status));
+                let current: Option<String> = transaction
+                    .query_row(
+                        "SELECT run_id FROM runs WHERE session_id=?1",
+                        [&permission.session_id],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(Error::internal)?;
+                if !active || current.as_deref() != Some(run_id.as_str()) {
+                    return Err(Error::invalid("Permission run is no longer active"));
+                }
+                permission.decision = Some(allow);
+                snapshot.revision += 1;
+            }
             command @ (Command::SubmitTurn { .. }
             | Command::PromoteTurn { .. }
             | Command::CancelTurn { .. }
@@ -217,7 +317,10 @@ impl Store {
                 if project.github.is_none() {
                     return Err(Error::invalid("Project has no configured GitHub board"));
                 }
-                if !runtime::configured_project(project, config) {
+                if !runtime::configured_project(
+                    project,
+                    &harness::configuration(&snapshot, &project_id, config),
+                ) {
                     return Err(Error::invalid(
                         "Project is not the currently configured repository and GitHub board",
                     ));
@@ -239,6 +342,16 @@ impl Store {
                     config,
                 )?;
                 let issue = snapshot.issues.iter().find(|i| i.id == issue_id).unwrap();
+                let chosen_harness = snapshot
+                    .effective_profile(
+                        snapshot
+                            .directors
+                            .iter()
+                            .find(|d| d.id == director_id)
+                            .unwrap(),
+                    )
+                    .map_err(Error::invalid)?
+                    .harness;
                 let session_id = format!("session-{}", envelope.request_id);
                 snapshot.sessions.push(Session {
                     id: session_id.clone(),
@@ -249,6 +362,8 @@ impl Store {
                     role: SessionRole::Worker,
                     fixture: false,
                     worker: Some(WorkerRun {
+                        harness: chosen_harness,
+                        execution: None,
                         status: WorkerStatus::Queued,
                         thread_id: None,
                         worktree: None,
@@ -378,6 +493,8 @@ impl Store {
 
 #[derive(Clone)]
 struct Workspace {
+    harness_status: Arc<Mutex<Vec<HarnessStatus>>>,
+    harness_probe: Arc<tokio::sync::Mutex<()>>,
     drafts: watch::Sender<Vec<Draft>>,
     transport_shutdown: watch::Sender<bool>,
     transports: Arc<std::sync::atomic::AtomicUsize>,
@@ -460,6 +577,7 @@ impl Workspace {
             session,
             "Execution interrupted; review and resume explicitly",
         );
+        harness::expire(&mut snapshot, session, run);
         snapshot.revision = snapshot
             .revision
             .checked_add(1)
@@ -498,7 +616,6 @@ impl Workspace {
             .revision
             .checked_add(1)
             .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-        store.save(&snapshot)?;
         if snapshot
             .sessions
             .iter()
@@ -507,12 +624,15 @@ impl Workspace {
             .is_some_and(|w| !runtime::active(&w.status))
         {
             store.controls.remove(session);
+            harness::expire(&mut snapshot, session, run);
         }
+        store.save(&snapshot)?;
         self.snapshots.send_replace(snapshot);
         Ok(())
     }
     fn synchronize(&self, project_id: &str, request_id: &str) {
-        let result = github::sync(&self.config, project_id);
+        let config = harness::configuration(&self.snapshots.borrow(), project_id, &self.config);
+        let result = github::sync(&config, project_id);
         let update = || -> Result<(), Error> {
             let mut store = self.store.lock().map_err(Error::internal)?;
             let latest: Option<String> = store
@@ -805,6 +925,27 @@ pub fn router_with_shutdown(
             changed = true;
         }
     }
+    if let (Some(remote), Some(checkout)) = (&config.remote, &config.repository) {
+        let binding = ProjectBinding {
+            repository: remote.repository.clone(),
+            owner: remote.owner.clone(),
+            number: remote.number,
+            checkout: checkout.display().to_string(),
+        };
+        if !initial.bindings.iter().any(|b| b == &binding) {
+            initial
+                .bindings
+                .retain(|b| b.project_id() != binding.project_id());
+            initial.bindings.push(binding);
+            changed = true;
+        }
+    }
+    for permission in &mut initial.tool_permissions {
+        if permission.decision.is_none() && !permission.expired {
+            permission.expired = true;
+            changed = true;
+        }
+    }
     if changed {
         initial.revision = initial
             .revision
@@ -814,6 +955,8 @@ pub fn router_with_shutdown(
     }
     let (snapshots, _) = watch::channel(initial);
     let workspace = Workspace {
+        harness_status: Arc::new(Mutex::new(vec![])),
+        harness_probe: Arc::new(tokio::sync::Mutex::new(())),
         drafts: watch::channel(conversation::read_drafts(&store.connection)?).0,
         transport_shutdown: watch::channel(false).0,
         transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -827,6 +970,8 @@ pub fn router_with_shutdown(
     };
     Ok((
         Router::new()
+            .route("/v1/harnesses", get(harness::statuses))
+            .route("/v1/harnesses/refresh", post(harness::refresh))
             .route("/v1/snapshot", get(snapshot))
             .route("/v1/commands", post(command))
             .route(
@@ -892,7 +1037,15 @@ async fn command(
             ));
         }
         let run_id = envelope.request_id.clone();
+        let reset_status = matches!(envelope.command, Command::ConfigureHarness { .. });
         let (snapshot, action) = store.apply(envelope, &workspace.config)?;
+        if reset_status {
+            workspace
+                .harness_status
+                .lock()
+                .map_err(Error::internal)?
+                .clear();
+        }
         workspace
             .drafts
             .send_replace(conversation::read_drafts(&store.connection)?);

@@ -11,7 +11,8 @@ Use this repository's `flake.nix` for development tools. Enter `nix develop` (or
 - `just lint` runs Clippy with warnings treated as errors.
 - `just fmt` formats Rust, Mosaic views, justfile, and Nix.
 - `just check` runs the complete project checks.
-- `just dev` is a temporary demo pair; closing its client stops its server.
+- `just dev` opens a persistent local workspace with installed Claude Code/Codex; closing its client stops its server.
+- `just demo` opens an isolated fixture preview.
 - `just dogfood` runs Relay's live board server; use `just client` separately.
 
 Mosaic is private and uses the user's SSH configuration. Keep Cargo and Nix pinned to the same published Mosaic commit. Never commit credentials, replace the SSH URLs with local paths, or silently change dependency pins to work around missing access.

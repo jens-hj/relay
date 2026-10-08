@@ -66,6 +66,7 @@ async fn authentication_covers_reads_writes_and_event_upgrade() {
     let client = reqwest::Client::new();
     for path in [
         "snapshot",
+        "harnesses",
         "events",
         "drafts",
         "drafts/events",
@@ -81,6 +82,15 @@ async fn authentication_covers_reads_writes_and_event_upgrade() {
             401
         );
     }
+    assert_eq!(
+        client
+            .post(format!("{}/v1/harnesses/refresh", server.endpoint))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
     assert_eq!(
         client
             .post(format!("{}/v1/commands", server.endpoint))

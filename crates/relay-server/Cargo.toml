@@ -10,12 +10,13 @@ relay-core.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs"] }
 axum.workspace = true
 rusqlite.workspace = true
 uuid.workspace = true
 subtle.workspace = true
 libc = "0.2"
+base64 = "0.22"
 tempfile.workspace = true
 percent-encoding = "2.3"
 

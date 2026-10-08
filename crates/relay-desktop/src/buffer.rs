@@ -333,9 +333,6 @@ pub fn execution_problem(model: Model) -> Option<String> {
     let Ok(profile) = snapshot.effective_profile(director) else {
         return Some("Director profile is invalid".into());
     };
-    if profile.harness != Harness::Codex {
-        return Some("This harness cannot execute turns yet".into());
-    }
     if matches!(&profile.scope,DirectorScope::Issues{issue_ids} if !issue_ids.contains(&issue.id)) {
         return Some("Issue is outside director scope".into());
     }

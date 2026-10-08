@@ -22,6 +22,7 @@
         pkgs = import nixpkgs {
           inherit system;
           overlays = [ (import rust-overlay) ];
+          config.allowUnfreePredicate = pkg: builtins.elem (pkgs.lib.getName pkg) [ "claude-code" ];
         };
         rust = pkgs.rust-bin.stable."1.89.0".default.override {
           extensions = [
@@ -32,19 +33,26 @@
           ];
         };
         relayCodex = pkgs.callPackage ./nix/codex.nix { };
-        tools = with pkgs; [
-          rust
-          bash
-          just
-          pkg-config
-          git
-          gh
-          relayCodex
-          curl
-          jq
-          openssl
-          sqlite
-        ];
+        tools =
+          with pkgs;
+          [
+            rust
+            bash
+            just
+            pkg-config
+            git
+            gh
+            relayCodex
+            claude-code
+            curl
+            jq
+            openssl
+            sqlite
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.bubblewrap
+            pkgs.socat
+          ];
         desktopLibraries = pkgs.lib.optionals pkgs.stdenv.isLinux (
           with pkgs;
           [

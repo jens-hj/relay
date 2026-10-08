@@ -15,8 +15,8 @@ Validation on 2026-10-07 used the pinned Nix development environment, Linux, Xvf
 
 The first live attempt exposed an obsolete default model in the flake's older Codex CLI. Its failed session and worktree were preserved. The environment now pins official Codex 0.161.0 with hash-verified bundled resources; a real invocation from that Nix shell succeeded before repeating the workflow. Relay still honors existing server-side model/provider configuration.
 
-## Current limits
+## Limits at the first milestone
 
-This milestone supports GitHub Projects v2 Status boards and Codex. GitLab, Claude Code, autonomous director delegation, and compact/reset controls remain later work. Responsibilities and completion settings describe workflow intent; only the documented launch policy and Codex sandbox are enforced. Completed turns still require independent acceptance, and Relay exposes no merge/push/deploy or remote status mutation.
+The validation above covered GitHub Projects v2 Status boards and Codex. See [local harness validation](harness-validation.md) for the subsequent Claude Code integration. GitLab, Claude Code, autonomous director delegation, and compact/reset controls remain later work. Responsibilities and completion settings describe workflow intent; only the documented launch policy and Codex sandbox are enforced. Completed turns still require independent acceptance, and Relay exposes no merge/push/deploy or remote status mutation.
 
 Linux process cleanup was tested against both fixtures and the actual Codex sandbox. Deliberately escaping descendants are not contained. macOS and Windows native behavior and crash cleanup have not been validated. Transcript support covers agent/reasoning messages, command results, and file changes; other event types may be ignored. Token counts describe the latest completed turn, not total session billing or predicted future cache state.

@@ -9,8 +9,11 @@ kind = "project"
 [permissions]
 plan = "allow"
 delegate = "allow"
-implement = "ask"
+implement = "allow"
 verify = "allow"
 review = "ask"
 merge = "deny"
 deploy = "deny"
+
+[execution]
+approval = "automatic"

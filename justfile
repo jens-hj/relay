@@ -6,14 +6,28 @@ set positional-arguments
 default:
     @just --list
 
-# Check the installed tools and server-side GitHub/Codex authentication.
+# Check local harness installations/authentication independently.
 doctor:
-    cargo --version
-    git --version
-    gh --version
-    codex --version
-    gh auth status
-    codex login status
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for relay_harness in codex claude; do
+        relay_override="RELAY_CODEX_BIN"
+        [[ "$relay_harness" == claude ]] && relay_override="RELAY_CLAUDE_BIN"
+        relay_binary="${!relay_override:-}"
+        if [[ -z "$relay_binary" ]]; then
+            for relay_candidate in "$HOME/.local/bin/$relay_harness" "$HOME/.npm-global/bin/$relay_harness" "$HOME/.nix-profile/bin/$relay_harness"; do
+                if [[ -x "$relay_candidate" ]]; then relay_binary="$relay_candidate"; break; fi
+            done
+        fi
+        relay_binary="${relay_binary:-$(command -v "$relay_harness" || true)}"
+        printf '%s: %s\n' "$relay_harness" "${relay_binary:-not installed}"
+        if [[ -n "$relay_binary" ]]; then
+            "$relay_binary" --version || true
+            if [[ "$relay_harness" == claude ]]; then "$relay_binary" auth status --text || true
+            else "$relay_binary" login status || true; fi
+        fi
+    done
+    gh auth status || true
 
 # Create a persistent local workspace token; preserve existing configuration.
 setup:
@@ -45,10 +59,17 @@ dogfood repo="jens-hj/relay" owner="jens-hj" board="5":
     export RELAY_DATABASE="${RELAY_DATABASE:-data/dogfood.sqlite3}"
     exec cargo run --locked -p relay-server
 
-# Build and launch the local server and desktop; optionally choose another port.
+# Open the persistent local workspace with installed agent harnesses.
 dev port="7331":
     #!/usr/bin/env bash
     set -euo pipefail
+    umask 077
+    if [[ -z "${RELAY_TOKEN:-}" ]]; then
+        if [[ -f .env ]]; then printf 'Set RELAY_TOKEN in .env before starting Relay.\n' >&2; exit 1; fi
+        just setup
+        exec just dev "$1"
+    fi
+    export RELAY_DATABASE="${RELAY_DATABASE:-data/local.sqlite3}"
     relay_port="$1"
     if ! [[ "$relay_port" =~ ^[0-9]{1,5}$ ]] || ((10#$relay_port < 1 || 10#$relay_port > 65535)); then
         printf 'Port must be a number from 1 to 65535.\n' >&2
@@ -108,6 +129,15 @@ dev port="7331":
     wait "$relay_client_pid" || relay_status=$?
     relay_client_pid=""
     exit "$relay_status"
+
+# Open isolated fixture-only previews; no real harness turns.
+demo port="7331":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    relay_demo_dir="$(mktemp -d)"
+    trap 'rm -rf "$relay_demo_dir"' EXIT
+    unset RELAY_GITHUB_REPO RELAY_GITHUB_PROJECT_OWNER RELAY_GITHUB_PROJECT_NUMBER RELAY_REPO_PATH
+    RELAY_DEMO=1 RELAY_DATABASE="$relay_demo_dir/demo.sqlite3" just dev "$1"
 
 # Run only the server; set RELAY_TOKEN in the environment or .env.
 server:

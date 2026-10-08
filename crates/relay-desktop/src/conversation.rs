@@ -614,6 +614,31 @@ pub fn Conversation(model: Model) -> Element {
                     button #action
                         @click:{details.set(if details.get_untracked()=="usage" {String::new()}else{"usage".into()});}
                         label:"Session usage and provenance" "Details"
+                    if session.get().is_some_and(|s| !s.fixture && s.worker.is_some()) {
+                        let current = session.get_untracked().unwrap();
+                        let session_id = current.id.clone();
+                        let snapshot = model.snapshot.get();
+                        let inherited = snapshot.directors.iter().find(|d| d.id == current.director_id).and_then(|d|snapshot.effective_profile(d).ok()).map(|p|p.execution.approval).unwrap_or_default();
+                        let worker = current.worker.unwrap();
+                        text font-size:{px(12.0)}px font-color:muted
+                            {format!("{} · {} · {}",match worker.harness{Harness::Codex=>"Codex",Harness::ClaudeCode=>"Claude Code"},worker.execution.as_ref().map(|e|e.approval).unwrap_or(inherited).label(),if worker.execution.is_some(){"Worker override"}else{"Inherited from director"})}
+                        row height:min-content gap:{px(8.0)}px {
+                            for mode in ApprovalMode::ALL {
+                                let id = session_id.clone();
+                                button #action
+                                    @click:{model.submit(Command::SetWorkerExecution{session_id:id.clone(),execution:Some(ExecutionSettings{approval:mode})},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
+                                    disabled:{!model.connected.get() || model.busy.get()}
+                                    label:{format!("Worker approval: {}",mode.label())}
+                                    {mode.label()}
+                            }
+                            button #action
+                                @click:{model.submit(Command::SetWorkerExecution{session_id:session_id.clone(),execution:None},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
+                                disabled:{!model.connected.get() || model.busy.get()}
+                                label:"Inherit worker execution settings" "Inherit"
+                        }
+                        text font-size:{px(11.0)}px font-color:muted
+                            "Execution changes apply to the next turn."
+                    }
                     button #action @click:{model.searching.set(true);menu.set(false);}
                         label:"Search transcript" "Find"
                 }
@@ -675,6 +700,25 @@ pub fn Conversation(model: Model) -> Element {
                         col height:min-content {
                             TranscriptMessage model:(model) message-id:(message.id.clone())
                                 controller:(controller)
+                        }
+                    }
+                    for (_, permission) in {model.snapshot.get().tool_permissions.into_iter().filter(|p|p.session_id == model.session.get() && p.decision.is_none() && !p.expired).map(|p|(p.id.clone(),p)).collect::<Vec<_>>()} {
+                        let permission = State::new(permission.clone());
+                        col height:min-content shrink:0 gap:{px(8.0)}px
+                            pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) {
+                            text font-family:sans-serif font-size:{px(14.0)}px font-weight:650
+                                {format!("Approval requested · {}",permission.get().tool)}
+                            scroll max-height:{px(140.0)}px {
+                                text font-size:{px(12.0)}px {permission.get().description}
+                            }
+                            row height:min-content gap:{px(8.0)}px {
+                                for (label, allow) in [("Allow once",true),("Deny",false)] {
+                                    button #action
+                                        @click:{let p=permission.get_untracked(); model.submit(Command::RespondPermission{permission_id:p.id,run_id:p.run_id,allow},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
+                                        disabled:{!model.connected.get() || model.busy.get()}
+                                        label:{format!("{} tool request",label)} (label)
+                                }
+                            }
                         }
                     }
                     for (_, queued) in {model.snapshot.get().submissions.into_iter().filter(|s|s.session_id==model.session.get() && matches!(s.state,SubmissionState::Queued|SubmissionState::Paused)).map(|s|(s.id.clone(),s)).collect::<Vec<_>>()} {

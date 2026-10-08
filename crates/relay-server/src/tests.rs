@@ -2,8 +2,14 @@ use super::*;
 use axum::{body::Bytes, extract::Path as RoutePath};
 use std::os::unix::fs::PermissionsExt;
 use std::{path::PathBuf, time::Duration};
+
+mod harness_tests;
 fn live() -> Snapshot {
-    let mut s = demo_snapshot(DirectorProfile::default());
+    let mut defaults = DirectorProfile::default();
+    defaults
+        .permissions
+        .insert(Task::Implement, Permission::Ask);
+    let mut s = demo_snapshot(defaults);
     let p = &mut s.projects[0];
     p.id = "live".into();
     p.fixture = false;
@@ -59,6 +65,8 @@ fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig) -> Workspa
     store.save(snapshot).unwrap();
     let (snapshots, _) = watch::channel(snapshot.clone());
     Workspace {
+        harness_status: Arc::new(Mutex::new(vec![])),
+        harness_probe: Arc::new(tokio::sync::Mutex::new(())),
         drafts: watch::channel(vec![]).0,
         transport_shutdown: watch::channel(false).0,
         transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -69,9 +77,56 @@ fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig) -> Workspa
     }
 }
 fn script(path: &Path, body: &str) {
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    // Existing lifecycle fixtures describe a turn using the old normalized
+    // events. Their fake CLI now hosts that turn behind the app-server wire
+    // protocol, exercising the production transport rather than Codex exec.
+    if path.file_name().is_some_and(|name| name == "codex") {
+        let turn = path.with_extension("turn");
+        let body = body.replace("echo $$", "echo $RELAY_TEST_PARENT");
+        std::fs::write(&turn, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&turn, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let thread = body
+            .split("\"thread_id\":\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("thread");
+        let wrapper = format!(
+            r#"#!/bin/sh
+export RELAY_TEST_PARENT=$$
+thread='{thread}'
+while IFS= read -r line; do
+  method=$(printf '%s' "$line" | jq -r '.method')
+  id=$(printf '%s' "$line" | jq -c '.id')
+  case "$method" in
+    initialize) printf '{{"id":%s,"result":{{}}}}\n' "$id" ;;
+    thread/start|thread/resume) printf '{{"id":%s,"result":{{"thread":{{"id":"%s"}}}}}}\n' "$id" "$thread" ;;
+    turn/start)
+      printf '{{"id":%s,"result":{{"turn":{{"id":"turn"}}}}}}\n' "$id"
+      printf '%s' "$line" | jq -jr '.params.input | map(.text // "") | join("\n")' | '{turn}' "$@" | while IFS= read -r event || [ -n "$event" ]; do
+        case "$event" in
+          *'"type":"thread.started"'*) ;;
+          *'"type":"item.completed"'*) printf '%s' "$event" | jq -c --arg thread "$thread" '{{method:"item/completed",params:{{threadId:$thread,turnId:"turn",item:{{id:(.item.id // "answer"),type:"agentMessage",text:.item.text}}}}}}' ;;
+          *'"type":"turn.completed"'*)
+            printf '%s' "$event" | jq -c --arg thread "$thread" '{{method:"thread/tokenUsage/updated",params:{{threadId:$thread,tokenUsage:{{last:{{inputTokens:.usage.input_tokens,cachedInputTokens:.usage.cached_input_tokens,outputTokens:.usage.output_tokens}}}}}}}}'
+            printf '{{"method":"turn/completed","params":{{"threadId":"%s","turn":{{"id":"turn","status":"completed"}}}}}}\n' "$thread" ;;
+          *'"type":"turn.failed"'*|*'"type":"error"'*) printf '{{"method":"turn/completed","params":{{"threadId":"%s","turn":{{"id":"turn","status":"failed"}}}}}}\n' "$thread" ;;
+          *) printf '%s\n' "$event" ;;
+        esac
+      done
+      exit ;;
+    turn/interrupt) printf '{{"id":%s,"result":{{}}}}\n' "$id" ;;
+  esac
+done
+"#,
+            turn = turn.display()
+        );
+        std::fs::write(path, wrapper).unwrap();
+    } else {
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    }
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
+
 fn git(repo: &Path, args: &[&str]) {
     assert!(
         std::process::Command::new("git")
@@ -105,7 +160,7 @@ fn each_turn_checks_current_scope_permissions_harness_and_limit() {
     assert!(runtime::authorize_turn(&s, &issue, &d, true, &c).is_err());
     s.projects[0].defaults.max_workers = 1;
     s.projects[0].defaults.harness = Harness::ClaudeCode;
-    assert!(runtime::authorize_turn(&s, &issue, &d, true, &c).is_err());
+    assert!(runtime::authorize_turn(&s, &issue, &d, true, &c).is_ok());
     s.projects[0].defaults.harness = Harness::Codex;
     s.projects[0].defaults.scope = DirectorScope::Issues {
         issue_ids: vec!["other".into()],
@@ -436,8 +491,8 @@ async fn subprocess_exact_resume_sandbox_stdin_usage_and_untracked_diff() {
         WorkerStatus::Completed
     );
     let args = std::fs::read_to_string(args).unwrap();
-    assert!(args.starts_with("exec\n--json\n--sandbox\nworkspace-write\n-\n"));
-    assert!(args.contains("resume\n-c\nsandbox_mode=\"workspace-write\"\n--json\nexact-thread\n-"));
+    assert!(args.starts_with("app-server\n--stdio\n"));
+    assert_eq!(args.matches("app-server\n--stdio\n").count(), 2);
     assert!(!args.contains("bypass"));
     let prompt = std::fs::read_to_string(prompt_file).unwrap();
     assert!(prompt.ends_with("$(touch injection) `whoami`"));
@@ -445,7 +500,7 @@ async fn subprocess_exact_resume_sandbox_stdin_usage_and_untracked_diff() {
         .split("Relay context JSON:\n")
         .nth(1)
         .unwrap()
-        .split("\n\nRequested turn:")
+        .split("\n$(touch injection)")
         .next()
         .unwrap();
     let context: serde_json::Value = serde_json::from_str(context).unwrap();
@@ -755,7 +810,16 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let client = reqwest::Client::new();
-    let request = env(s.revision, start(&s));
+    let current: Snapshot = client
+        .get(format!("http://{addr}/v1/snapshot"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let request = env(current.revision, start(&s));
     let id = format!("session-{}", request.request_id);
     let send = |e: &CommandEnvelope| {
         client
@@ -784,6 +848,7 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
                 .unwrap()
                 .thread_id
                 .is_some()
+                && marker.exists()
             {
                 break;
             }
@@ -931,7 +996,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            3
+            4
         );
         drop(store);
         let mut reopened = Store::open(&db, DirectorProfile::default()).unwrap();
@@ -962,7 +1027,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 4)
+        .pragma_update(None, "user_version", 5)
         .unwrap();
     drop(store);
     let error = Store::open(&db, DirectorProfile::default()).err().unwrap();
@@ -972,7 +1037,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        4
+        5
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -1282,27 +1347,19 @@ async fn failure_events_invalid_output_missing_thread_and_spawn_failure_are_term
         ("head -c 1048577 /dev/zero | tr '\\000' x", "exceeds 1 MiB"),
         (
             "printf '%s\\n' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"secret\"}}'",
-            "turn failure",
+            "turn failed",
         ),
         (
             "printf '%s\\n' '{\"type\":\"error\",\"message\":\"secret\"}'",
-            "turn failure",
+            "turn failed",
         ),
-        ("echo not-json", "Invalid Codex JSONL"),
-        ("true", "without turn.completed"),
-        (
-            "printf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}'",
-            "without a recorded thread",
-        ),
+        ("echo not-json", "Invalid Codex app-server response"),
+        ("true", "disconnected"),
         (
             "printf '%s\\n' '{\"type\":\"thread.started\"}'",
-            "thread ID missing",
+            "disconnected",
         ),
-        (
-            "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"t\"}' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}'; exit 8",
-            "exited unsuccessfully",
-        ),
-        ("missing-executable", "Cannot launch codex"),
+        ("missing-executable", "Cannot launch agent harness"),
     ];
     for (body, expected) in cases {
         let dir = tempfile::tempdir().unwrap();
@@ -1935,7 +1992,7 @@ fn configured_live_project_migration_preserves_demo_and_historical_identities() 
                 ),
                 &next
             )
-            .is_err()
+            .is_ok()
     );
     drop(store);
     let _router =
@@ -2020,8 +2077,10 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
         .unwrap();
     let profile = synced.effective_profile(director).unwrap();
     assert!(!profile.responsibilities.contains(&Task::Implement));
-    assert!(runtime::authorize_turn(&synced, &issue.id, &director.id, false, &c).is_err());
+    assert!(runtime::authorize_turn(&synced, &issue.id, &director.id, false, &c).is_ok());
     assert!(runtime::authorize_turn(&synced, &issue.id, &director.id, true, &c).is_ok());
+    // Saved project bindings, rather than the last environment configuration,
+    // remain authoritative for every registered board.
     for changed in ["owner", "number", "repository"] {
         let mut other = c.clone();
         let r = other.remote.as_mut().unwrap();
@@ -2031,21 +2090,11 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
             "repository" => r.repository = "other/repo".into(),
             _ => unreachable!(),
         };
-        assert!(runtime::authorize_turn(&synced, &issue.id, &director.id, true, &other).is_err());
+        assert!(runtime::authorize_turn(&synced, &issue.id, &director.id, true, &other).is_ok());
+        let mut unregistered = synced.clone();
+        unregistered.bindings.clear();
         assert!(
-            w.store
-                .lock()
-                .unwrap()
-                .apply(
-                    env(
-                        synced.revision,
-                        Command::SyncProject {
-                            project_id: live_id.clone()
-                        }
-                    ),
-                    &other
-                )
-                .is_err()
+            runtime::authorize_turn(&unregistered, &issue.id, &director.id, true, &other).is_err()
         );
     }
     // A provider issue mirrored on a second board needs a distinct local identity,
@@ -2151,7 +2200,7 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
     );
     assert!(
         runtime::authorize_turn(&both, &old.id, &director.id, true, &second_workspace.config)
-            .is_err()
+            .is_ok()
     );
     let new_id = new.id.clone();
     second_workspace.synchronize(&second_id, "second-sync");

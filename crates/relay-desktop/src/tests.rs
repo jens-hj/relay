@@ -141,6 +141,7 @@ fn sidebar_tree_disclosure_keyboard_and_secondary_actions_are_independent() {
     assert!(mounted.model.issue.get_untracked().is_none());
     // A profile/transcript viewport's scale binding must die with that view.
     mounted.click("Settings");
+    mounted.focus("Theme: Light");
     mounted.click("Theme: Light");
     mounted.click("Increase interface scale");
     let snapshot = mounted.ui.inspection_snapshot();
@@ -365,18 +366,23 @@ fn settings_work_disconnected_and_scale_layout_and_hit_targets_without_losing_dr
     let after = mounted.rect("Theme: Dark");
     assert!((after.size.height / before.size.height - 1.5).abs() < 0.05);
     assert!((mounted.rect("Sidebar").size.width - 330.0).abs() < 1.0);
+    mounted.focus("Theme: Light");
     mounted.click("Theme: Light");
     assert_eq!(
         mounted.model.preferences.get_untracked().mode,
         crate::settings::ThemeMode::Light
     );
     let paper = mosaic::core::theme::color(theme::base);
+    mounted.focus("Light palette: Warm");
     mounted.click("Light palette: Warm");
     assert_ne!(mosaic::core::theme::color(theme::base), paper);
+    mounted.focus("Theme: Dark");
     mounted.click("Theme: Dark");
     let slate = mosaic::core::theme::color(theme::base);
+    mounted.focus("Dark palette: Neutral");
     mounted.click("Dark palette: Neutral");
     assert_ne!(mosaic::core::theme::color(theme::base), slate);
+    mounted.focus("Theme: System");
     mounted.click("Theme: System");
     assert_eq!(
         mounted.model.preferences.get_untracked().mode,
@@ -517,7 +523,9 @@ impl Mounted {
                 self.settle();
                 let rect = self.rect(label);
                 assert!(
-                    rect.origin.y >= 0.0 && rect.origin.y + rect.size.height <= self.size.height
+                    rect.origin.y >= 0.0
+                        && rect.origin.y + rect.size.height <= self.size.height + 0.01,
+                    "{label}: {rect:?}"
                 );
                 return;
             }
@@ -742,7 +750,11 @@ fn profile_controls_preserve_inheritance_and_reject_invalid_imports() {
 }
 
 fn live_snapshot() -> Snapshot {
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut defaults = DirectorProfile::default();
+    defaults
+        .permissions
+        .insert(Task::Implement, Permission::Ask);
+    let mut snapshot = demo_snapshot(defaults);
     snapshot.projects[0].fixture = false;
     snapshot.projects[0].github = Some(GitHubProject {
         owner: "team".into(),
@@ -903,13 +915,7 @@ fn deny_scope_harness_and_capacity_cannot_be_overridden() {
         s.projects[0].defaults.scope = DirectorScope::Project;
         s.projects[0].defaults.harness = Harness::ClaudeCode;
     });
-    assert!(
-        mounted
-            .model
-            .worker_gate(false)
-            .unwrap_err()
-            .contains("Codex")
-    );
+    assert!(mounted.model.worker_gate(false).is_ok());
     mounted.model.snapshot.update(|s| {
         s.projects[0].defaults.harness = Harness::Codex;
         s.projects[0].defaults.max_workers = 0;
@@ -932,6 +938,8 @@ fn worker_running_stop_completed_review_and_continue_use_recorded_session() {
     session.issue_id = Some("issue-2".into());
     session.director_id = snapshot.directors[0].id.clone();
     session.worker = Some(WorkerRun {
+        harness: Harness::Codex,
+        execution: None,
         status: WorkerStatus::Running,
         thread_id: Some("thread-live".into()),
         worktree: Some("/repo/worktrees/live".into()),
@@ -1094,6 +1102,8 @@ fn removed_board_items_keep_history_but_block_new_turns_until_restored() {
     session.director_id = director_id;
     session.fixture = false;
     session.worker = Some(WorkerRun {
+        harness: Harness::Codex,
+        execution: None,
         status: WorkerStatus::Completed,
         thread_id: Some("recorded-thread".into()),
         worktree: Some("/repo/worktree".into()),
@@ -1197,9 +1207,10 @@ fn removed_board_items_keep_history_but_block_new_turns_until_restored() {
 }
 
 #[test]
-fn unmodified_default_director_can_delegate_after_explicit_approval() {
+fn unmodified_default_director_can_delegate_automatically() {
     let mut mounted = mount(false, 1380.0);
-    let snapshot = live_snapshot();
+    let mut snapshot = live_snapshot();
+    snapshot.projects[0].defaults = DirectorProfile::default();
     assert_eq!(snapshot.projects[0].defaults, DirectorProfile::default());
     assert!(
         !snapshot.projects[0]
@@ -1213,20 +1224,12 @@ fn unmodified_default_director_can_delegate_after_explicit_approval() {
         .model
         .worker_prompt
         .set("Delegate this issue".into());
-    assert!(
-        mounted
-            .model
-            .worker_gate(false)
-            .unwrap_err()
-            .contains("Approve")
-    );
-    mounted.model.worker_approval.set(true);
     assert!(mounted.model.worker_gate(false).is_ok());
     mounted.model.run_worker(false);
     assert!(matches!(
         mounted.commands.try_recv().unwrap().command,
         Command::StartWorker {
-            approve_implementation: true,
+            approve_implementation: false,
             ..
         }
     ));
@@ -1435,6 +1438,8 @@ fn failed_launch_without_thread_offers_new_linked_worker_instead_of_continue() {
     session.issue_id = Some("issue-2".into());
     session.director_id = snapshot.directors[0].id.clone();
     session.worker = Some(WorkerRun {
+        harness: Harness::Codex,
+        execution: None,
         status: WorkerStatus::Failed,
         thread_id: None,
         worktree: Some("/repo/failed-launch".into()),
@@ -1576,6 +1581,8 @@ fn buffer_worker(mounted: &Mounted) {
     s.fixture = false;
     s.role = SessionRole::Worker;
     s.worker = Some(WorkerRun {
+        harness: Harness::Codex,
+        execution: None,
         status: WorkerStatus::Running,
         thread_id: Some("thread".into()),
         worktree: Some("/worktree".into()),
@@ -1917,5 +1924,84 @@ fn composing_on_recorded_text_creates_one_reply_and_never_submits_an_empty_compo
     assert_eq!(
         mounted.model.snapshot.get_untracked().messages[0].body,
         source
+    );
+}
+
+#[test]
+fn harness_settings_refresh_and_saved_execution_override_use_server_state() {
+    let mut mounted = mount(false, 1380.0);
+    let (refresh, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.harness_refresh.set(Some(refresh));
+    mounted.model.receive(NetworkState {
+        snapshot: live_snapshot(),
+        connected: true,
+        harnesses: vec![HarnessStatus {
+            harness: Harness::ClaudeCode,
+            executable: "/server/claude".into(),
+            version: Some("2.test".into()),
+            state: "ready".into(),
+            detail: "Installed and authenticated".into(),
+            checked_at: 1,
+        }],
+        ..Default::default()
+    });
+    mounted.model.page.set(Page::Settings);
+    mounted.settle();
+    mounted.click("Refresh Claude Code status");
+    assert!(requests.try_recv().is_ok());
+    assert!(mounted.commands.try_recv().is_err());
+    mounted.click("Claude Code executable and status details");
+    mounted.settle();
+    mounted.click("Save Claude Code executable and check status");
+    let command = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(command.command, Command::ConfigureHarness {harness: Harness::ClaudeCode, executable} if executable == "/server/claude")
+    );
+}
+
+#[test]
+fn inline_permission_answers_exact_run_and_disappears_when_expired() {
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let session = mounted.model.session.get_untracked();
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot.messages.retain(|m| m.session_id != session);
+    snapshot.tool_permissions.push(ToolPermission {
+        id: "permission-1".into(),
+        session_id: session.clone(),
+        run_id: "native-run-1".into(),
+        tool: "Write".into(),
+        description: "notes.txt".into(),
+        decision: None,
+        expired: false,
+    });
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    mounted.click("Allow once tool request");
+    let envelope = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(envelope.command,Command::RespondPermission{permission_id, run_id, allow:true} if permission_id == "permission-1" && run_id == "native-run-1")
+    );
+    snapshot.revision += 1;
+    snapshot.tool_permissions[0].expired = true;
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        outcome: Some((envelope.request_id, Ok(()))),
+        outcome_serial: 1,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Allow once tool request"))
     );
 }

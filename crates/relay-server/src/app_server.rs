@@ -57,7 +57,7 @@ impl Rpc {
     }
 }
 
-fn inputs(
+pub(super) fn inputs(
     workspace: &Workspace,
     parts: &[Part],
     directory: &std::path::Path,
@@ -225,10 +225,10 @@ pub(super) async fn execute(
     workspace: &Workspace,
     session: &str,
     run: &str,
-    execution_prompt: &str,
-    parts: &[Part],
+    input: Vec<Value>,
     previous_thread: Option<&str>,
     path: &str,
+    mode: ApprovalMode,
     child: &mut tokio::process::Child,
     stop: &mut watch::Receiver<bool>,
 ) -> Result<(), Error> {
@@ -237,31 +237,20 @@ pub(super) async fn execute(
         stdout: BufReader::new(child.stdout.take().unwrap()),
         serial: 0,
     };
-    // Keep user context separate from workflow instructions and preserve multimodal part order.
-    let asset_workspace = workspace.clone();
-    let ordered_parts = parts.to_vec();
-    let instructions = execution_prompt
-        .split("\n\nRequested turn:\n")
-        .next()
-        .unwrap_or(execution_prompt)
-        .to_owned();
-    // A private directory outside Git keeps input files out of review without modifying repository metadata.
-    let (_directory, input) = tokio::task::spawn_blocking(move || {
-        let directory = tempfile::Builder::new()
-            .prefix("relay-inputs-")
-            .tempdir()
-            .map_err(Error::internal)?;
-        let mut input = vec![json!({"type":"text","text":instructions})];
-        inputs(
-            &asset_workspace,
-            &ordered_parts,
-            directory.path(),
-            &mut input,
-        )?;
-        Ok::<_, Error>((directory, input))
-    })
-    .await
-    .map_err(Error::internal)??;
+    let policy = match mode {
+        ApprovalMode::Ask => "on-request",
+        _ => "never",
+    };
+    let sandbox = if mode == ApprovalMode::Unrestricted {
+        "danger-full-access"
+    } else {
+        "workspace-write"
+    };
+    let sandbox_policy = if mode == ApprovalMode::Unrestricted {
+        json!({"type":"dangerFullAccess"})
+    } else {
+        json!({"type":"workspaceWrite","writableRoots":[path],"networkAccess":false})
+    };
     let setup = async {
         rpc.request("initialize", json!({"clientInfo":{"name":"relay","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":false}})).await?;
         rpc.send(json!({"method":"initialized"})).await?;
@@ -270,7 +259,7 @@ pub(super) async fn execute(
         } else {
             "thread/start"
         };
-        let mut params = json!({"cwd":path,"sandbox":"workspace-write","approvalPolicy":"never"});
+        let mut params = json!({"cwd":path,"sandbox":sandbox,"approvalPolicy":policy});
         if let Some(id) = previous_thread {
             params["threadId"] = json!(id);
         }
@@ -298,7 +287,7 @@ pub(super) async fn execute(
         })?;
         rpc.serial += 1;
         let request_id = rpc.serial;
-        rpc.send(json!({"id":request_id,"method":"turn/start","params":{"threadId":thread,"input":input,"cwd":path,"approvalPolicy":"never","sandboxPolicy":{"type":"workspaceWrite","writableRoots":[path],"networkAccess":false}}})).await?;
+        rpc.send(json!({"id":request_id,"method":"turn/start","params":{"threadId":thread,"input":input,"cwd":path,"approvalPolicy":policy,"sandboxPolicy":sandbox_policy}})).await?;
         Ok::<_, Error>((thread, request_id))
     };
     let (thread, request_id) =
@@ -323,7 +312,13 @@ pub(super) async fn execute(
                     let id=value["result"]["turn"]["id"].as_str().ok_or_else(||Error::invalid("Codex turn ID missing"))?;
                     if turn.as_deref().is_some_and(|expected|expected!=id){return Err(Error::invalid("Codex started a different turn"));}
                     turn=Some(id.to_owned());
-                } else if value.get("id").is_some() && value.get("method").is_some() { rpc.reject(&value).await?; }
+                } else if value.get("id").is_some() && value.get("method").is_some() {
+                    let method = value["method"].as_str().unwrap_or("");
+                    if matches!(method,"item/commandExecution/requestApproval" | "item/fileChange/requestApproval") {
+                        let allow = crate::harness::permission(workspace,session,run,method,&value["params"].to_string(),stop).await?;
+                        rpc.send(json!({"id":value["id"],"result":{"decision":if allow {"accept"} else {"decline"}}})).await?;
+                    } else { rpc.reject(&value).await?; }
+                }
                 else {
                     if value["method"]=="turn/started" && let Some(id)=value["params"]["turn"]["id"].as_str() && turn.is_none(){turn=Some(id.to_owned());}
                     if let Some(id)=value["params"]["turnId"].as_str().or_else(||value["params"]["turn"]["id"].as_str()) && turn.as_deref().is_some_and(|expected|expected!=id) { return Err(Error::invalid("Codex event belongs to a different turn")); }
@@ -332,4 +327,29 @@ pub(super) async fn execute(
             }
         }
     }
+}
+
+pub(super) async fn prepare(
+    workspace: &Workspace,
+    instructions: &str,
+    parts: &[Part],
+) -> Result<(tempfile::TempDir, Vec<Value>), Error> {
+    let workspace = workspace.clone();
+    let instructions = instructions
+        .split("\n\nRequested turn:\n")
+        .next()
+        .unwrap_or(instructions)
+        .to_owned();
+    let parts = parts.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let directory = tempfile::Builder::new()
+            .prefix("relay-inputs-")
+            .tempdir()
+            .map_err(Error::internal)?;
+        let mut input = vec![json!({"type":"text","text":instructions})];
+        inputs(&workspace, &parts, directory.path(), &mut input)?;
+        Ok((directory, input))
+    })
+    .await
+    .map_err(Error::internal)?
 }

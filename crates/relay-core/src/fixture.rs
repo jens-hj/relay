@@ -95,6 +95,9 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
         ("m7", "session-review", "Jens", "message", "Keep review keyboard-friendly. I should be able to jump between messages and comment without losing my place."),
     ].into_iter().map(|(id, session, author, kind, body)| Message { id: id.into(), session_id: session.into(), author: author.into(), kind: kind.into(), body: body.into(), parts: vec![] }).collect();
     Snapshot {
+        bindings: vec![],
+        installations: vec![],
+        tool_permissions: vec![],
         revision: 0,
         projects: vec![project],
         issues,

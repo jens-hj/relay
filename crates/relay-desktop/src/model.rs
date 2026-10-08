@@ -26,6 +26,7 @@ pub enum Saved {
     Start(String),
     Send(String),
     Action,
+    Project(String),
 }
 #[derive(Clone)]
 struct Pending {
@@ -35,6 +36,9 @@ struct Pending {
 
 #[derive(Clone, Copy)]
 pub struct Model {
+    pub harness_refresh: State<Option<UnboundedSender<()>>>,
+    pub harnesses: State<Vec<HarnessStatus>>,
+    pub harness_error: State<String>,
     pub buffer: State<crate::buffer::BufferState>,
     pub buffer_requests: State<Option<UnboundedSender<crate::buffer_network::Request>>>,
     pub preferences: State<crate::settings::Preferences>,
@@ -85,6 +89,9 @@ pub struct Model {
 impl Model {
     pub fn new(ui: &Ui, commands: UnboundedSender<CommandEnvelope>) -> Self {
         Self {
+            harness_refresh: State::new(None),
+            harnesses: State::new(vec![]),
+            harness_error: State::new(String::new()),
             buffer: State::new(crate::buffer::BufferState::default()),
             buffer_requests: State::new(None),
             preferences: State::new(crate::settings::Preferences::default()),
@@ -133,6 +140,8 @@ impl Model {
         }
     }
     pub fn receive(&self, update: NetworkState) {
+        self.harnesses.set(update.harnesses.clone());
+        self.harness_error.set(update.harness_error.clone());
         let select = !update
             .snapshot
             .projects
@@ -203,6 +212,7 @@ impl Model {
             }
             Saved::Send(body) => self.clear_worker_draft(&body),
             Saved::Action => {}
+            Saved::Project(project) => self.select_project(project),
             Saved::Profile => {
                 if self.editor.get_untracked() == EditTarget::New {
                     self.editor
@@ -224,6 +234,7 @@ impl Model {
         let id = pending.envelope.request_id.clone();
         let snapshot = self.snapshot.get_untracked();
         let applied = match &pending.saved {
+            Saved::Project(_) => false,
             Saved::Buffer(_) => snapshot
                 .submissions
                 .iter()
@@ -410,6 +421,22 @@ impl Model {
         self.page.set(Page::Directors);
     }
     pub fn select_project(&self, id: String) {
+        let snapshot = self.snapshot.get_untracked();
+        let id = snapshot
+            .bindings
+            .iter()
+            .find(|b| b.project_id() == id)
+            .and_then(|b| {
+                snapshot.projects.iter().find(|p| {
+                    !p.fixture
+                        && p.repository == b.repository
+                        && p.github
+                            .as_ref()
+                            .is_some_and(|g| g.owner == b.owner && g.number == b.number)
+                })
+            })
+            .map(|p| p.id.clone())
+            .unwrap_or(id);
         self.expanded_projects.update(|ids| {
             ids.insert(id.clone());
         });
@@ -576,9 +603,6 @@ impl Model {
     }
     pub fn worker_gate(&self, continuation: bool) -> Result<(), String> {
         let (profile, active) = self.worker_profile(continuation)?;
-        if profile.harness != Harness::Codex {
-            return Err("Select a Codex director".into());
-        }
         let issue_id = if continuation {
             self.snapshot
                 .get()
@@ -749,6 +773,7 @@ impl Model {
         update(&mut profile);
         if self.editor.get_untracked() != EditTarget::Defaults {
             self.editor_overrides.update(|overrides| match field {
+                "execution" => overrides.execution = Some(profile.execution.clone()),
                 "harness" => overrides.harness = Some(profile.harness),
                 "scope" => overrides.scope = Some(profile.scope.clone()),
                 "responsibilities" => {
@@ -764,6 +789,7 @@ impl Model {
     }
     pub fn inherit(&self, field: &str) {
         self.editor_overrides.update(|o| match field {
+            "execution" => o.execution = None,
             "harness" => o.harness = None,
             "scope" => o.scope = None,
             "responsibilities" => o.responsibilities = None,
@@ -784,6 +810,7 @@ impl Model {
         }
         let overrides = self.editor_overrides.get();
         let overridden = match field {
+            "execution" => overrides.execution.is_some(),
             "harness" => overrides.harness.is_some(),
             "scope" => overrides.scope.is_some(),
             "responsibilities" => overrides.responsibilities.is_some(),

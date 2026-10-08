@@ -5,7 +5,7 @@ use std::{
     process::{Command as ProcessCommand, Stdio},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, BufReader},
     sync::watch,
 };
 
@@ -21,6 +21,46 @@ pub struct RuntimeConfig {
     pub repository: Option<PathBuf>,
     pub(crate) gh: PathBuf,
     pub(crate) codex: PathBuf,
+    pub(crate) claude: PathBuf,
+}
+fn installed_binary(name: &str, variable: &str) -> PathBuf {
+    if let Some(path) = std::env::var_os(variable) {
+        return path.into();
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        for directory in [".local/bin", ".npm-global/bin", ".nix-profile/bin"] {
+            let path = PathBuf::from(&home).join(directory).join(name);
+            if executable(&path) {
+                return path;
+            }
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&paths) {
+            let path = directory.join(name);
+            if executable(&path) {
+                return path;
+            }
+        }
+    }
+    name.into()
+}
+fn executable(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -28,7 +68,8 @@ impl Default for RuntimeConfig {
             remote: None,
             repository: None,
             gh: "gh".into(),
-            codex: "codex".into(),
+            codex: installed_binary("codex", "RELAY_CODEX_BIN"),
+            claude: installed_binary("claude", "RELAY_CLAUDE_BIN"),
         }
     }
 }
@@ -116,6 +157,8 @@ pub(crate) fn authorize_turn(
     let project = snapshot
         .project(&issue.project_id)
         .map_err(Error::invalid)?;
+    let resolved = crate::harness::configuration(snapshot, &project.id, config);
+    let config = &resolved;
     let remote = config
         .remote
         .as_ref()
@@ -149,9 +192,6 @@ pub(crate) fn authorize_turn(
         .effective_profile(director)
         .map_err(Error::invalid)?;
     profile.validate().map_err(Error::invalid)?;
-    if profile.harness != Harness::Codex {
-        return Err(Error::invalid("Worker requires the Codex harness"));
-    }
     if let DirectorScope::Issues { issue_ids } = &profile.scope
         && !issue_ids.iter().any(|i| i == issue_id)
     {
@@ -374,6 +414,7 @@ pub(crate) fn changes(path: &str, base: &str) -> Result<ChangeSet, Error> {
     })
 }
 /// Only completed immutable items are published; deltas never mutate a message.
+#[cfg(test)]
 pub(crate) fn event(
     snapshot: &mut Snapshot,
     session_id: &str,
@@ -473,7 +514,7 @@ pub(super) async fn line(
         let buf = reader
             .fill_buf()
             .await
-            .map_err(|_| Error::invalid("Cannot read Codex output"))?;
+            .map_err(|_| Error::invalid("Cannot read agent output"))?;
         if buf.is_empty() {
             return if line.is_empty() {
                 Ok(None)
@@ -487,7 +528,9 @@ pub(super) async fn line(
             .map(|i| i + 1)
             .unwrap_or(buf.len());
         if line.len() + size > 1024 * 1024 {
-            return Err(Error::invalid("Codex JSONL event exceeds 1 MiB limit"));
+            return Err(Error::invalid(
+                "Harness streaming event exceeds 1 MiB limit",
+            ));
         }
         let done = buf[size - 1] == b'\n';
         line.extend_from_slice(&buf[..size]);
@@ -637,7 +680,8 @@ async fn execute(
         "source_issue": source,
         "source_truncated": context_truncated,
         "effective_profile": {
-            "harness": profile.harness,
+            "harness": worker.harness,
+            "execution": {"approval": crate::harness::mode(&snapshot, session_id)?},
             "scope": match profile.scope { DirectorScope::Issues { .. } => "selected issues", _ => "project" },
             "responsibilities": profile.responsibilities.iter().take(16).collect::<Vec<_>>(),
             "completion": profile.completion.iter().take(16).collect::<Vec<_>>(),
@@ -667,7 +711,8 @@ async fn execute(
     {
         (p.clone(), b.clone(), c.clone())
     } else {
-        let config = workspace.config.clone();
+        let config =
+            crate::harness::configuration(&snapshot, &session.project_id, &workspace.config);
         let session = session_id.to_owned();
         tokio::task::spawn_blocking(move || prepare(&config, &session))
             .await
@@ -687,26 +732,31 @@ async fn execute(
         w.base_commit = Some(base);
         Ok(())
     })?;
-    let mut cmd = tokio::process::Command::new(&workspace.config.codex);
     let structured = snapshot
         .submissions
         .iter()
         .find(|s| s.id == run_id)
         .cloned();
-    if structured.is_some() {
-        cmd.args(["app-server", "--stdio"]);
-    } else if let Some(id) = &worker.thread_id {
-        cmd.arg("exec");
-        cmd.args([
-            "resume",
-            "-c",
-            "sandbox_mode=\"workspace-write\"",
-            "--json",
-            id,
-            "-",
-        ]);
-    } else {
-        cmd.args(["exec", "--json", "--sandbox", "workspace-write", "-"]);
+    let parts = structured
+        .as_ref()
+        .map(|s| s.parts.clone())
+        .unwrap_or_else(|| vec![Part::text(prompt)]);
+    let (_directory, input) =
+        crate::app_server::prepare(workspace, &execution_prompt, &parts).await?;
+    let mode = crate::harness::mode(&snapshot, session_id)?;
+    let binary = crate::harness::selected_binary(&snapshot, worker.harness, &workspace.config);
+    let mut cmd = tokio::process::Command::new(binary);
+    match worker.harness {
+        Harness::Codex => {
+            cmd.args(["app-server", "--stdio"]);
+        }
+        Harness::ClaudeCode => crate::claude::arguments(
+            &mut cmd,
+            mode,
+            worker.thread_id.as_deref(),
+            &path,
+            &_directory.path().display().to_string(),
+        ),
     }
     cmd.current_dir(&path)
         .env_remove("RELAY_TOKEN")
@@ -784,6 +834,11 @@ async fn execute(
         // Queue edits may carry a fresh approval after the original submission.
         // The receipt establishes the turn's identity; its current durable
         // submission supplies the reviewed approval used for this launch.
+        if crate::harness::mode(&current, session_id)? != mode {
+            return Err(Error::invalid(
+                "Execution mode changed before launch; review and send again",
+            ));
+        }
         let approved = current
             .submissions
             .iter()
@@ -808,7 +863,7 @@ async fn execute(
         )?;
         let mut child = cmd.spawn().map_err(|_| {
             Error::invalid(
-                "Cannot launch codex; install Codex and configure existing authentication",
+                "Cannot launch agent harness; check its executable and authentication in Settings",
             )
         })?;
         if let Some(pid) = child.id()
@@ -840,51 +895,38 @@ async fn execute(
         terminate(&mut child).await;
         return Err(error);
     }
-    if let Some(submission) = structured {
-        let result = crate::app_server::execute(
-            workspace,
-            session_id,
-            run_id,
-            &execution_prompt,
-            &submission.parts,
-            worker.thread_id.as_deref(),
-            &path,
-            &mut child,
-            stop,
-        )
-        .await;
-        terminate(&mut child).await;
-        return result;
-    }
-    let mut stdin = child.stdin.take().unwrap();
-    let write = async {
-        stdin
-            .write_all(execution_prompt.as_bytes())
+    let result = match worker.harness {
+        Harness::Codex => {
+            crate::app_server::execute(
+                workspace,
+                session_id,
+                run_id,
+                input,
+                worker.thread_id.as_deref(),
+                &path,
+                mode,
+                &mut child,
+                stop,
+            )
             .await
-            .map_err(|_| Error::invalid("Cannot send prompt to Codex"))?;
-        drop(stdin);
-        Ok::<(), Error>(())
+        }
+        Harness::ClaudeCode => {
+            crate::claude::execute(
+                workspace,
+                session_id,
+                run_id,
+                input,
+                worker.thread_id.as_deref(),
+                &mut child,
+                stop,
+            )
+            .await
+        }
     };
-    tokio::select! { r=write=>if let Err(error) = r { terminate(&mut child).await; return Err(error); }, _=stop.changed()=>{terminate(&mut child).await;return Ok(());} }
-    let mut reader = BufReader::new(child.stdout.take().unwrap());
-    let mut completed = false;
-    let result:Result<(),Error>=async {
-        loop {tokio::select! {
-            _=stop.changed()=>{terminate(&mut child).await;return Ok(());},
-            output=line(&mut reader)=>match output? {None=>break,Some(line)=>{
-                let value=serde_json::from_slice(&line).map_err(|_|Error::invalid("Invalid Codex JSONL output"))?;
-                workspace.update_run(session_id,run_id,|s|{completed|=event(s,session_id,&value)?;Ok(())})?;
-            }}
-        }}
-        let status=tokio::select! {r=child.wait()=>r.map_err(|_|Error::invalid("Cannot wait for Codex"))?,_=stop.changed()=>{terminate(&mut child).await;return Ok(());}};
-        if !status.success() {return Err(Error::invalid("Codex process exited unsuccessfully; check authentication/configuration/network"));}
-        if !completed {return Err(Error::invalid("Codex exited without turn.completed"));}Ok(())
-    }.await;
-    if result.is_err() {
-        terminate(&mut child).await;
-    }
+    terminate(&mut child).await;
     result
 }
+
 async fn terminate(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(id) = child.id() {

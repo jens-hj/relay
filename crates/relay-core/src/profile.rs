@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Harness {
+    #[default]
     Codex,
     ClaudeCode,
 }
@@ -81,6 +82,8 @@ impl Permission {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DirectorProfile {
+    #[serde(default)]
+    pub execution: crate::ExecutionSettings,
     pub harness: Harness,
     pub scope: DirectorScope,
     pub responsibilities: Vec<Task>,
@@ -148,6 +151,8 @@ impl DirectorProfile {
 #[serde(deny_unknown_fields)]
 pub struct ProfileOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<crate::ExecutionSettings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub harness: Option<Harness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<DirectorScope>,
@@ -164,6 +169,10 @@ pub struct ProfileOverrides {
 impl ProfileOverrides {
     pub fn resolve(&self, base: &DirectorProfile) -> DirectorProfile {
         DirectorProfile {
+            execution: self
+                .execution
+                .clone()
+                .unwrap_or_else(|| base.execution.clone()),
             harness: self.harness.unwrap_or(base.harness),
             scope: self.scope.clone().unwrap_or_else(|| base.scope.clone()),
             responsibilities: self

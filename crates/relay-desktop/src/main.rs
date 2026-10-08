@@ -39,8 +39,9 @@ fn main() -> Result<(), String> {
         .run(move |ui, context| {
             fonts::configure(&mut ui.fonts().borrow_mut());
             let (updates, sender) = state_channel(network::NetworkState::default());
-            let commands = network::start(config.clone(), sender);
+            let (commands, harness_refresh) = network::start(config.clone(), sender);
             let model = model::Model::new(ui, commands);
+            model.harness_refresh.set(Some(harness_refresh));
             let (buffer_updates, buffer_sender) = state_channel(buffer_network::Update::default());
             model
                 .buffer_requests
@@ -50,7 +51,23 @@ fn main() -> Result<(), String> {
             model.preferences.set(preferences.clone());
             model.notice.set(warning.clone());
             settings::bind(model, context.clone(), Some(path.clone()));
-            Effect::new(move || model.receive(updates.get()));
+            let setup_offered = State::new(false);
+            Effect::new(move || {
+                model.receive(updates.get());
+                if model.connected.get_untracked() && !setup_offered.get_untracked() {
+                    setup_offered.set(true);
+                    if std::env::var("RELAY_DEMO").as_deref() != Ok("1")
+                        && !model
+                            .snapshot
+                            .get_untracked()
+                            .projects
+                            .iter()
+                            .any(|p| !p.fixture)
+                    {
+                        model.page.set(model::Page::Settings);
+                    }
+                }
+            });
             ui::shell(model)
         });
     Ok(())
