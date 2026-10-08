@@ -2032,6 +2032,7 @@ fn new_project_preserves_full_setup_draft_and_appends_on_acknowledgement() {
     mounted.click("New Project");
     type_in(&mounted, "Project name", "Second project");
     type_in(&mounted, "Absolute project root on server", "/srv/second");
+    mounted.click("Add connection");
     type_in(
         &mounted,
         "Connection address",
@@ -2424,6 +2425,16 @@ fn new_project_form_remains_keyboard_reachable_at_two_hundred_percent() {
     mounted.size = Size::new(820.0, 600.0);
     mounted.model.page.set(Page::NewProject);
     mounted.settle();
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Connection address"))
+    );
+    mounted.focus("Add connection");
+    mounted.click("Add connection");
     for label in [
         "Project name",
         "Absolute project root on server",

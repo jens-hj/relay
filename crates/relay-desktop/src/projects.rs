@@ -88,6 +88,14 @@ pub fn ProjectPage(model: Model) -> Element {
 fn ProjectSetup(model: Model) -> Element {
     let name = State::new(model.project_draft.get_untracked().name);
     let root = State::new(model.project_draft.get_untracked().root);
+    let connections_open = State::new(
+        !model
+            .project_draft
+            .get_untracked()
+            .connection_form
+            .address
+            .is_empty(),
+    );
     Effect::new(move || {
         model.project_draft.update(|d| {
             d.name = name.get();
@@ -96,13 +104,20 @@ fn ProjectSetup(model: Model) -> Element {
     });
     view! {
         col height:min-content max-width:{px(640.0)}px gap:{px(12.0)}px {
+            text font-family:sans-serif font-size:{px(13.0)}px "Name"
             input #input-field label:"Project name" placeholder:"Project name" name
+            text font-family:sans-serif font-size:{px(13.0)}px "Absolute root on server"
             input #input-field label:"Absolute project root on server"
                 placeholder:"/home/you/projects/project" root
             text font-color:muted font-size:{px(12.0)}px
                 "The root is on the connected server. A local board is created automatically."
-            text font-family:sans-serif "Initial connections (optional)"
-            ConnectionForm model:(model) initial:true
+            button #action @click:{connections_open.set(!connections_open.get_untracked());}
+                width:min-content
+                label:{if connections_open.get(){"Hide connection form"}else{"Add connection"}}
+                {if connections_open.get(){"Hide connection form"}else{"Add connection"}}
+            if connections_open.get() {
+                ConnectionForm model:(model) initial:true
+            }
             for (index, _connection) in {model.project_draft.get().connections.into_iter().enumerate()} {
                 let index = *index;
                 let connection = Derived::new(move || model.project_draft.get().connections.get(index).cloned());
