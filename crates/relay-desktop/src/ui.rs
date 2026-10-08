@@ -480,11 +480,14 @@ fn IssueCard(model: Model, issue: Issue) -> Element {
                     if state.get() != RunState::Ready {
                         StatusGlyph state:(state)
                     }
-                    text width:1fr text-wrap:none font-size:{px(11.0)}px
-                        font-color:{color(state.get().text_color())} { state.get().label() }
+                    row width:1fr min-width:0px align:center clip {
+                        text width:max-content text-wrap:none font-size:{px(11.0)}px
+                            font-color:{color(state.get().text_color())} { state.get().label() }
+                    }
                     if session_count.get() > 0 {
-                        text text-wrap:none font-size:{px(11.0)}px font-color:{color(muted)}
-                            { format!("{} linked sessions", session_count.get()) }
+                        text width:max-content shrink:0 text-wrap:none font-size:{px(11.0)}px
+                            font-color:{color(muted)}
+                            { format!("{} {}", session_count.get(), if session_count.get() == 1 { "session" } else { "sessions" }) }
                     }
                 }
             }
@@ -573,10 +576,13 @@ fn IssueDetail(model: Model) -> Element {
                                 label:{ model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default() }
                                 description:{ linked_state.get().label() } hover { fill:raised } {
                                 StatusGlyph state:(linked_state)
-                                text width:1fr text-wrap:none font-size:{px(12.0)}px
-                                    font-color:{color(ink)}
-                                    { model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default() }
-                                text text-wrap:none font-size:{px(11.0)}px
+                                row width:1fr min-width:0px align:center clip {
+                                    text width:max-content text-wrap:none font-size:{px(12.0)}px
+                                        font-color:{color(ink)}
+                                        { model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default() }
+                                }
+                                text width:max-content shrink:0 text-wrap:none
+                                    font-size:{px(11.0)}px
                                     font-color:{color(linked_state.get().text_color())}
                                     { linked_state.get().label() }
                             }
