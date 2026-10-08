@@ -93,7 +93,7 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
         ("m5", "session-worker", "Worker", "result", "Fixture verification: inherited fields follow project defaults; explicit director fields remain unchanged. A zero worker limit represents paused delegation."),
         ("m6", "session-review", "Review director", "review", "Feedback should reference the original message, with an optional selected quote. The transcript remains immutable while comments accumulate alongside it."),
         ("m7", "session-review", "Jens", "message", "Keep review keyboard-friendly. I should be able to jump between messages and comment without losing my place."),
-    ].into_iter().map(|(id, session, author, kind, body)| Message { id: id.into(), session_id: session.into(), author: author.into(), kind: kind.into(), body: body.into() }).collect();
+    ].into_iter().map(|(id, session, author, kind, body)| Message { id: id.into(), session_id: session.into(), author: author.into(), kind: kind.into(), body: body.into(), parts: vec![] }).collect();
     Snapshot {
         revision: 0,
         projects: vec![project],
@@ -102,5 +102,6 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
         sessions,
         messages,
         comments: vec![],
+        submissions: vec![],
     }
 }

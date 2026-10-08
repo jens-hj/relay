@@ -16,6 +16,9 @@ reqwest.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 uuid.workspace = true
+arboard = { version = "3.6.1", features = ["image-data", "wayland-data-control"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+percent-encoding = "2.3"
 
 [package.metadata.mosaic]
 name = "Relay"

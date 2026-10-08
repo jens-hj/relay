@@ -20,7 +20,7 @@ just dogfood
 
 Keep this server terminal running. In a second terminal, enter the same project's dev environment and run `just client`. `just dogfood` creates a random shared token in a Git-ignored, owner-readable `.env` when one does not exist; existing configuration is preserved. It connects `jens-hj/relay` to [GitHub Project 5](https://github.com/users/jens-hj/projects/5), uses the current repository as the server-owned source checkout, and defaults to `data/dogfood.sqlite3`. Supply another board with `just dogfood owner/repo owner NUMBER`; set `RELAY_REPO_PATH` to its matching local Git checkout.
 
-Choose the live project, sync its board, select an issue, and start a worker under a director. The default implementation permission is Ask, so starting or continuing a turn requires explicit approval in the form. Scope, harness, implementation permission, and active-worker limits are checked by the server. The first harness is Codex; a Claude Code profile cannot start a run yet.
+Choose the live project, sync its board, select an issue, and start a worker under a director. The default implementation permission is Ask, so starting or continuing a turn requires explicit approval when prompted. Scope, harness, implementation permission, and active-worker limits are checked by the server. The first harness is Codex; a Claude Code profile cannot start a run yet.
 
 Closing a desktop leaves the server and worker running. Reopen `just client` to reconnect, or use another machine with the same token and an SSH tunnel. Stopping the server interrupts active runs; they remain in history and must be continued explicitly after restart. `just dev` is a short-lived demo convenience: it stops its server when its desktop closes, so use separate server/client processes to exercise durable remote execution.
 
@@ -47,7 +47,6 @@ just server
 
 # Second terminal, using the first terminal's token:
 export RELAY_TOKEN="<same token>"
-export RELAY_NAME="Your name"
 just client
 ```
 
@@ -64,7 +63,6 @@ The default server address is `127.0.0.1:7331`. Both processes require the token
 | `RELAY_GITHUB_PROJECT_NUMBER` | Server | Projects v2 number from the board URL |
 | `RELAY_REPO_PATH` | Server | Matching local Git checkout; never supplied by a client |
 | `RELAY_ENDPOINT` | Client | `http://127.0.0.1:7331/` |
-| `RELAY_NAME` | Client | `Teammate`; editable in the comment composer |
 | `RELAY_THEME` | Client | Optional startup override: `dark`, `light`, or `system`; defaults to saved settings, initially dark |
 | `RELAY_SETTINGS_PATH` | Client | Optional settings file; otherwise the platform's local configuration directory, `relay/settings.toml` |
 
@@ -94,10 +92,14 @@ Use the server token and the default client endpoint locally. Alternatively, pla
 2. Open Directors. Change project defaults, save, then inspect the project director's inherited values and review director's overrides.
 3. Create another director. Choose a harness, scope, responsibilities, completion steps, worker limit, and permissions. `Inherit` removes a field override.
 4. Use `Export / edit TOML` to copy a declarative profile. Directors export overrides; omitted fields inherit. `Show effective profile` displays the full resolved profile. Import updates the draft; Save persists it.
-5. In Sessions, Tab to a message or use its Comment action. Select a passage and use Ctrl/Cmd+Enter on the message to include it as a quote. Arrow keys navigate between messages. Feedback persists beside its source message.
-6. Open a second client with the same token. Saved changes appear in both clients. Restart either client or the server; saved profiles and comments remain.
+5. Open a conversation. Click/select a recorded passage and type to create an anchored reply. Add more replies anywhere in the transcript; they share one next-message draft. Edit each reply beside its source or at the bottom. Paste text, copied files, or images at the cursor, including within replies. Recorded text stays unchanged.
+6. Enter inserts a newline. Ctrl/Cmd+Enter sends the whole draft after it is saved. While an agent runs, this queues the message. Press again with an empty next draft to interrupt the current turn and send the just-queued message; there is no timing window. Typing another draft starts another message. Queue actions also offer Edit, Cancel, Send now, and explicit Resume queue after interruption.
+7. Open the compact header menu for the linked issue, director profile, Changes, Details (usage/provenance), or Find. Tool activity and source context expand inline. Stop appears while the agent is active. Demo director/worker transcripts support drafting, but are fixtures and cannot execute turns.
+8. Open a second client with the same token. Saved changes appear in both clients. Restart either client or the server; saved profiles and comments remain.
 
-Cmd/Ctrl+K opens the command palette. Cmd/Ctrl+F opens transcript search. Escape closes the palette/search. Tab and Shift+Tab traverse controls. Unsaved comments remain after failed requests; the composer identifies their target message even if another session is opened.
+Cmd/Ctrl+K opens the command palette. Cmd/Ctrl+F opens literal transcript search with highlighted matches and previous/next navigation. Escape closes the palette/search. Tab and Shift+Tab traverse controls. Ctrl/Cmd+Home/End jumps to the conversation start or next message. Arrow keys cross text surfaces; Shift+arrows extend a draft selection across sibling text and inline files. Backspace/Delete at part boundaries join text or remove an inline object. Ctrl/Cmd+Z and redo restore shared draft edits and cursor targets.
+
+Drafts autosave independently of transcript updates. Disconnected edits remain local; sending requires reconnection. Concurrent edits retain the local version and show Load shared / Restore local choices. Exact save retries keep the same request ID. Pasted files retain their IDs and bytes in local recovery until acknowledged. A restarted client never sends recovered work automatically. Use separate server/client terminals to verify reconnect and shared drafts; use Ctrl/Cmd+Enter on a live worker to test execution.
 
 Conflicting saves do not overwrite newer server state. `Review latest state` retains your draft, refreshes its revision and inherited defaults, and lets you review before saving again. Network errors do not automatically retry writes. Retrying the same command reuses its request ID; the server prevents duplicate application, including after restart.
 

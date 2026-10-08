@@ -1,4 +1,5 @@
 use super::*;
+use axum::{body::Bytes, extract::Path as RoutePath};
 use std::os::unix::fs::PermissionsExt;
 use std::{path::PathBuf, time::Duration};
 fn live() -> Snapshot {
@@ -58,6 +59,7 @@ fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig) -> Workspa
     store.save(snapshot).unwrap();
     let (snapshots, _) = watch::channel(snapshot.clone());
     Workspace {
+        drafts: watch::channel(vec![]).0,
         transport_shutdown: watch::channel(false).0,
         transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         store: Arc::new(Mutex::new(store)),
@@ -929,7 +931,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            2
+            3
         );
         drop(store);
         let mut reopened = Store::open(&db, DirectorProfile::default()).unwrap();
@@ -960,7 +962,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 3)
+        .pragma_update(None, "user_version", 4)
         .unwrap();
     drop(store);
     let error = Store::open(&db, DirectorProfile::default()).err().unwrap();
@@ -970,7 +972,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        3
+        4
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -2262,4 +2264,566 @@ async fn hard_crash_child() {
     let w = workspace(&dir.join("db"), &s, c);
     let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
     runtime::run(w, id, run, prompt, rx).await;
+}
+
+async fn saved_turn(w: &Workspace, session: &str, parts: Vec<Part>) -> CommandEnvelope {
+    let revision = conversation::read_drafts(&w.store.lock().unwrap().connection)
+        .unwrap()
+        .into_iter()
+        .find(|d| d.session_id == session)
+        .map(|d| d.revision)
+        .unwrap_or(0);
+    let saved = conversation::save_draft(
+        State(w.clone()),
+        RoutePath(session.into()),
+        Json(SaveDraft {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            expected_revision: revision,
+            parts: parts.clone(),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    env(
+        w.snapshots.borrow().revision,
+        Command::SubmitTurn {
+            session_id: session.into(),
+            draft_revision: saved.revision,
+            parts,
+            approve_implementation: true,
+        },
+    )
+}
+
+fn completed_app_workspace(dir: &Path, code: &str) -> (Workspace, String, PathBuf) {
+    let repo = review_repo(dir);
+    let bin = dir.join("fake-app-server");
+    script(&bin, code);
+    let mut c = config();
+    c.repository = Some(repo.clone());
+    c.codex = bin;
+    let w = workspace(&dir.join("db"), &live(), c);
+    let (id, run, _rx, _prompt) = reserve(&w, env(0, start(&live())));
+    w.update_run(&id, &run, |s| {
+        let worker = s
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == id)
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap();
+        worker.status = WorkerStatus::Completed;
+        worker.thread_id = Some("12345678-1234-4234-8234-123456789abc".into());
+        worker.worktree = Some(repo.to_str().unwrap().into());
+        worker.branch = Some("main".into());
+        worker.base_commit = Some(
+            String::from_utf8(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .into(),
+        );
+        Ok(())
+    })
+    .unwrap();
+    (w, id, repo)
+}
+
+const APP_FAKE: &str = r#"
+[ "$1" = app-server ] && [ "$2" = --stdio ] || exit 9
+thread=12345678-1234-4234-8234-123456789abc
+while IFS= read -r line; do
+  method=$(printf '%s' "$line" | jq -r '.method')
+  id=$(printf '%s' "$line" | jq -c '.id')
+  printf '%s\n' "$line" >> rpc-input.jsonl
+  case "$method" in
+    initialize) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    thread/resume) printf '{"id":%s,"result":{"thread":{"id":"%s"}}}\n' "$id" "$thread" ;;
+    turn/start)
+      printf '{"method":"turn/started","params":{"threadId":"%s","turn":{"id":"turn-1"}}}\n' "$thread"
+      printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
+      if [ -f hold-first ] && [ ! -f first-started ]; then touch first-started; continue; fi
+      printf '{"method":"item/agentMessage/delta","params":{"threadId":"%s","turnId":"turn-1","itemId":"answer","delta":"Ordered "}}\n' "$thread"
+      printf '{"method":"item/completed","params":{"threadId":"%s","turnId":"turn-1","item":{"id":"answer","type":"agentMessage","text":"Ordered response λ"}}}\n' "$thread"
+      printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"%s","tokenUsage":{"last":{"inputTokens":31,"cachedInputTokens":7,"outputTokens":4}}}}\n' "$thread"
+      printf '{"method":"turn/completed","params":{"threadId":"%s","turn":{"id":"turn-1","status":"completed"}}}\n' "$thread" ;;
+    turn/interrupt)
+      printf '{"id":%s,"result":{}}\n' "$id"
+      printf '{"method":"turn/completed","params":{"threadId":"%s","turn":{"id":"turn-1","status":"interrupted"}}}\n' "$thread" ;;
+  esac
+done
+"#;
+
+#[tokio::test]
+async fn app_server_preserves_ordered_multimodal_context_and_exact_existing_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, id, repo) = completed_app_workspace(dir.path(), APP_FAKE);
+    let mut encoded = std::io::Cursor::new(vec![]);
+    image::RgbaImage::new(2, 2)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let image = conversation::upload_asset(
+        State(w.clone()),
+        RoutePath(uuid::Uuid::new_v4().to_string()),
+        HeaderMap::from_iter([
+            (
+                "content-type".parse().unwrap(),
+                "image/png".parse().unwrap(),
+            ),
+            (
+                "x-relay-filename".parse().unwrap(),
+                "context.png".parse().unwrap(),
+            ),
+        ]),
+        Bytes::from(encoded.into_inner()),
+    )
+    .await
+    .unwrap()
+    .0;
+    let file = conversation::upload_asset(
+        State(w.clone()),
+        RoutePath(uuid::Uuid::new_v4().to_string()),
+        HeaderMap::from_iter([(
+            "x-relay-filename".parse().unwrap(),
+            "notes.txt".parse().unwrap(),
+        )]),
+        Bytes::from_static(b"position dependent notes"),
+    )
+    .await
+    .unwrap()
+    .0;
+    let parts = vec![
+        Part::text("Before λ"),
+        Part {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: PartKind::Asset { asset: image },
+        },
+        Part::text("Between"),
+        Part {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: PartKind::Asset { asset: file },
+        },
+        Part::text("After"),
+    ];
+    let request = saved_turn(&w, &id, parts.clone()).await;
+    let request_id = request.request_id.clone();
+    let (session, run, rx, prompt) = reserve(&w, request.clone());
+    runtime::run(w.clone(), session, run, prompt, rx).await;
+    let s = finished(&w, &id).await;
+    let worker = s
+        .sessions
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap()
+        .worker
+        .as_ref()
+        .unwrap();
+    assert_eq!(worker.status, WorkerStatus::Completed, "{:?}", worker.error);
+    assert_eq!(
+        worker.thread_id.as_deref(),
+        Some("12345678-1234-4234-8234-123456789abc")
+    );
+    assert_eq!(
+        worker.usage,
+        Some(TokenUsage {
+            input_tokens: 31,
+            cached_input_tokens: 7,
+            output_tokens: 4
+        })
+    );
+    let answer = s
+        .messages
+        .iter()
+        .find(|m| m.id == format!("codex-{request_id}-answer"))
+        .unwrap();
+    assert_eq!(answer.body, "Ordered response λ");
+    assert_eq!(
+        s.messages
+            .iter()
+            .find(|m| m.id == format!("prompt-{request_id}"))
+            .unwrap()
+            .parts,
+        parts
+    );
+    assert_eq!(s.submissions[0].state, SubmissionState::Completed);
+    let lines = std::fs::read_to_string(repo.join("rpc-input.jsonl")).unwrap();
+    let rpc = lines
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rpc[2]["params"]["threadId"],
+        "12345678-1234-4234-8234-123456789abc"
+    );
+    let input = rpc.iter().find(|v| v["method"] == "turn/start").unwrap()["params"]["input"]
+        .as_array()
+        .unwrap();
+    assert_eq!(input[1]["text"], "Before λ");
+    assert_eq!(input[3]["type"], "localImage");
+    assert_eq!(input[4]["text"], "Between");
+    assert!(
+        input[6]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Read the user-provided file")
+    );
+    assert_eq!(input[7]["text"], "After");
+    assert!(!Path::new(input[3]["path"].as_str().unwrap()).exists());
+    assert!(
+        w.store
+            .lock()
+            .unwrap()
+            .apply(request, &w.config)
+            .unwrap()
+            .1
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn promoted_queue_interrupts_one_specific_turn_then_resumes_without_duplicate_submission() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, id, repo) = completed_app_workspace(dir.path(), APP_FAKE);
+    std::fs::write(repo.join("hold-first"), "").unwrap();
+    let first = saved_turn(&w, &id, vec![Part::text("First")]).await;
+    let first_id = first.request_id.clone();
+    let (session, run, rx, prompt) = reserve(&w, first);
+    let active = tokio::spawn(runtime::run(w.clone(), session, run, prompt, rx));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !repo.join("first-started").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let queued = saved_turn(&w, &id, vec![Part::text("Queued correction")]).await;
+    let queued_id = queued.request_id.clone();
+    {
+        let mut store = w.store.lock().unwrap();
+        let (s, a) = store.apply(queued.clone(), &w.config).unwrap();
+        assert!(a.is_none());
+        w.snapshots.send_replace(s);
+        assert!(store.apply(queued, &w.config).unwrap().1.is_none());
+    }
+    let stale = env(
+        w.snapshots.borrow().revision,
+        Command::PromoteTurn {
+            submission_id: queued_id.clone(),
+            active_run_id: Some("different-run".into()),
+        },
+    );
+    assert!(w.store.lock().unwrap().apply(stale, &w.config).is_err());
+    let promote = env(
+        w.snapshots.borrow().revision,
+        Command::PromoteTurn {
+            submission_id: queued_id.clone(),
+            active_run_id: Some(first_id.clone()),
+        },
+    );
+    {
+        let mut store = w.store.lock().unwrap();
+        let (s, a) = store.apply(promote, &w.config).unwrap();
+        assert!(matches!(a, Some(Action::Promote(_))));
+        w.snapshots.send_replace(s);
+        store.controls[&id].send_replace(true);
+    }
+    active.await.unwrap();
+    let s = finished(&w, &id).await;
+    assert_eq!(
+        s.submissions
+            .iter()
+            .find(|s| s.id == first_id)
+            .unwrap()
+            .state,
+        SubmissionState::Interrupted
+    );
+    assert_eq!(
+        s.submissions
+            .iter()
+            .find(|s| s.id == queued_id)
+            .unwrap()
+            .state,
+        SubmissionState::Completed
+    );
+    assert_eq!(
+        s.messages
+            .iter()
+            .filter(|m| m.id == format!("prompt-{queued_id}"))
+            .count(),
+        1
+    );
+    let rpc = std::fs::read_to_string(repo.join("rpc-input.jsonl")).unwrap();
+    assert_eq!(
+        rpc.lines()
+            .filter(|l| l.contains("\"method\":\"turn/interrupt\""))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn edited_queue_uses_fresh_approval_at_actual_process_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, id, repo) = completed_app_workspace(dir.path(), APP_FAKE);
+    let first = saved_turn(&w, &id, vec![Part::text("Previous turn")]).await;
+    let (_, first_id, _, _) = reserve(&w, first);
+    w.update_run(&id, &first_id, |s| {
+        s.projects[0]
+            .defaults
+            .permissions
+            .insert(Task::Implement, Permission::Allow);
+        Ok(())
+    })
+    .unwrap();
+    let mut queued = saved_turn(&w, &id, vec![Part::text("Original unapproved payload")]).await;
+    let Command::SubmitTurn {
+        approve_implementation,
+        ..
+    } = &mut queued.command
+    else {
+        panic!()
+    };
+    *approve_implementation = false;
+    let queued_id = queued.request_id.clone();
+    {
+        let mut store = w.store.lock().unwrap();
+        let (s, action) = store.apply(queued, &w.config).unwrap();
+        assert!(action.is_none());
+        w.snapshots.send_replace(s);
+    }
+    w.update_run(&id, &first_id, |s| {
+        s.sessions
+            .iter_mut()
+            .find(|session| session.id == id)
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .status = WorkerStatus::Completed;
+        s.projects[0]
+            .defaults
+            .permissions
+            .insert(Task::Implement, Permission::Ask);
+        s.submissions
+            .iter_mut()
+            .find(|submission| submission.id == first_id)
+            .unwrap()
+            .state = SubmissionState::Completed;
+        conversation::pause(s, &id, "Review changed permission");
+        Ok(())
+    })
+    .unwrap();
+    let edited = saved_turn(&w, &id, vec![Part::text("Reviewed and approved payload")]).await;
+    let Command::SubmitTurn {
+        draft_revision,
+        parts,
+        ..
+    } = edited.command
+    else {
+        panic!()
+    };
+    let edit = env(
+        w.snapshots.borrow().revision,
+        Command::EditQueuedTurn {
+            submission_id: queued_id.clone(),
+            draft_revision,
+            parts,
+            approve_implementation: true,
+        },
+    );
+    let (run, rx, prompt) = {
+        let mut store = w.store.lock().unwrap();
+        let (s, _) = store.apply(edit, &w.config).unwrap();
+        let (s, action) = store
+            .apply(
+                env(
+                    s.revision,
+                    Command::ResumeQueue {
+                        session_id: id.clone(),
+                    },
+                ),
+                &w.config,
+            )
+            .unwrap();
+        w.snapshots.send_replace(s);
+        let Some(Action::Run { prompt, .. }) = action else {
+            panic!()
+        };
+        let run = store.run_id(&id).unwrap().unwrap();
+        let (tx, rx) = watch::channel(false);
+        store.controls.insert(id.clone(), tx);
+        (run, rx, prompt)
+    };
+    assert_eq!(run, queued_id);
+    runtime::run(w.clone(), id.clone(), run, prompt, rx).await;
+    let s = finished(&w, &id).await;
+    let worker = s
+        .sessions
+        .iter()
+        .find(|session| session.id == id)
+        .unwrap()
+        .worker
+        .as_ref()
+        .unwrap();
+    assert_eq!(worker.status, WorkerStatus::Completed, "{:?}", worker.error);
+    assert_eq!(
+        s.submissions
+            .iter()
+            .find(|submission| submission.id == queued_id)
+            .unwrap()
+            .state,
+        SubmissionState::Completed
+    );
+    assert!(
+        std::fs::read_to_string(repo.join("rpc-input.jsonl"))
+            .unwrap()
+            .contains("Reviewed and approved payload")
+    );
+}
+
+#[tokio::test]
+async fn queue_cancel_edit_and_restart_preserve_payload_and_never_replay_delivered_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, id, _) = completed_app_workspace(dir.path(), APP_FAKE);
+    let first = saved_turn(&w, &id, vec![Part::text("Possibly delivered")]).await;
+    let first_id = first.request_id.clone();
+    let (_session, _run, _rx, _prompt) = reserve(&w, first);
+    let queued = saved_turn(&w, &id, vec![Part::text("Unsent")]).await;
+    let queued_id = queued.request_id.clone();
+    {
+        let mut store = w.store.lock().unwrap();
+        let (s, _) = store.apply(queued, &w.config).unwrap();
+        w.snapshots.send_replace(s);
+    }
+    let edited = saved_turn(&w, &id, vec![Part::text("Edited unsent")]).await;
+    let Command::SubmitTurn {
+        draft_revision,
+        parts,
+        ..
+    } = edited.command
+    else {
+        panic!()
+    };
+    let edit = env(
+        w.snapshots.borrow().revision,
+        Command::EditQueuedTurn {
+            submission_id: queued_id.clone(),
+            draft_revision,
+            parts,
+            approve_implementation: true,
+        },
+    );
+    {
+        let mut store = w.store.lock().unwrap();
+        let (s, _) = store.apply(edit, &w.config).unwrap();
+        w.snapshots.send_replace(s);
+    }
+    let c = (*w.config).clone();
+    drop(w);
+    let _router = router_with_config(
+        dir.path().join("db"),
+        "sixteen-character-token".into(),
+        DirectorProfile::default(),
+        c.clone(),
+    )
+    .unwrap();
+    let mut store = Store::open(&dir.path().join("db"), DirectorProfile::default()).unwrap();
+    let s = store.snapshot().unwrap();
+    assert_eq!(
+        s.submissions
+            .iter()
+            .find(|s| s.id == first_id)
+            .unwrap()
+            .state,
+        SubmissionState::Interrupted
+    );
+    let unsent = s.submissions.iter().find(|s| s.id == queued_id).unwrap();
+    assert_eq!(unsent.state, SubmissionState::Paused);
+    assert_eq!(plain_text(&unsent.parts), "Edited unsent");
+    assert!(
+        store
+            .apply(
+                env(
+                    s.revision,
+                    Command::PromoteTurn {
+                        submission_id: first_id,
+                        active_run_id: None
+                    }
+                ),
+                &c
+            )
+            .is_err()
+    );
+    let (s, _) = store
+        .apply(
+            env(
+                s.revision,
+                Command::CancelTurn {
+                    submission_id: queued_id.clone(),
+                },
+            ),
+            &c,
+        )
+        .unwrap();
+    assert_eq!(
+        s.submissions
+            .iter()
+            .find(|s| s.id == queued_id)
+            .unwrap()
+            .state,
+        SubmissionState::Cancelled
+    );
+}
+
+#[tokio::test]
+async fn app_server_rejects_foreign_turn_events_and_failure_pauses_unsent_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let altered = APP_FAKE.replace(
+        "\"turnId\":\"turn-1\",\"itemId\"",
+        "\"turnId\":\"foreign-turn\",\"itemId\"",
+    );
+    let (w, id, _) = completed_app_workspace(dir.path(), &altered);
+    let first = saved_turn(&w, &id, vec![Part::text("Fail on foreign turn")]).await;
+    let (session, run, rx, prompt) = reserve(&w, first);
+    let next = saved_turn(&w, &id, vec![Part::text("Must stay unsent")]).await;
+    let next_id = next.request_id.clone();
+    {
+        let mut store = w.store.lock().unwrap();
+        let (s, _) = store.apply(next, &w.config).unwrap();
+        w.snapshots.send_replace(s);
+    }
+    runtime::run(w.clone(), session, run, prompt, rx).await;
+    let s = finished(&w, &id).await;
+    let worker = s
+        .sessions
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap()
+        .worker
+        .as_ref()
+        .unwrap();
+    assert_eq!(worker.status, WorkerStatus::Failed);
+    assert!(worker.error.as_ref().unwrap().contains("different turn"));
+    assert_eq!(
+        s.submissions
+            .iter()
+            .find(|s| s.id == next_id)
+            .unwrap()
+            .state,
+        SubmissionState::Paused
+    );
+    assert!(
+        !s.messages
+            .iter()
+            .any(|m| m.id == format!("prompt-{next_id}"))
+    );
 }

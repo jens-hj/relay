@@ -19,6 +19,8 @@ pub enum EditTarget {
 }
 #[derive(Clone)]
 pub enum Saved {
+    Buffer(Draft),
+    #[cfg(test)]
     Comment(String),
     Profile,
     Start(String),
@@ -33,6 +35,8 @@ struct Pending {
 
 #[derive(Clone, Copy)]
 pub struct Model {
+    pub buffer: State<crate::buffer::BufferState>,
+    pub buffer_requests: State<Option<UnboundedSender<crate::buffer_network::Request>>>,
     pub preferences: State<crate::settings::Preferences>,
     pub snapshot: State<Snapshot>,
     pub connected: State<bool>,
@@ -50,9 +54,13 @@ pub struct Model {
     pub searching: State<bool>,
     pub palette: State<bool>,
     pub palette_query: State<String>,
+    #[cfg(test)]
     pub comment_target: State<String>,
+    #[cfg(test)]
     pub comment_quote: State<String>,
+    #[cfg(test)]
     pub comment_body: State<String>,
+    #[cfg(test)]
     pub author: State<String>,
     pub editor: State<EditTarget>,
     pub editor_name: State<String>,
@@ -77,6 +85,8 @@ pub struct Model {
 impl Model {
     pub fn new(ui: &Ui, commands: UnboundedSender<CommandEnvelope>) -> Self {
         Self {
+            buffer: State::new(crate::buffer::BufferState::default()),
+            buffer_requests: State::new(None),
             preferences: State::new(crate::settings::Preferences::default()),
             snapshot: State::new(Snapshot::default()),
             connected: State::new(false),
@@ -94,9 +104,13 @@ impl Model {
             searching: State::new(false),
             palette: State::new(false),
             palette_query: State::new(String::new()),
+            #[cfg(test)]
             comment_target: State::new(String::new()),
+            #[cfg(test)]
             comment_quote: State::new(String::new()),
+            #[cfg(test)]
             comment_body: State::new(String::new()),
+            #[cfg(test)]
             author: State::new(std::env::var("RELAY_NAME").unwrap_or_else(|_| "Teammate".into())),
             editor: State::new(EditTarget::Defaults),
             editor_name: State::new(String::new()),
@@ -161,6 +175,11 @@ impl Model {
                 self.notice.set("Server acknowledged the request.".into());
             }
             Err(message) => {
+                if !update.outcome_ambiguous
+                    && let Saved::Buffer(draft) = &pending.saved
+                {
+                    crate::buffer::rejected(*self, draft, &message);
+                }
                 self.pending_conflict.set(update.outcome_conflict);
                 self.pending_ambiguous.set(update.outcome_ambiguous);
                 self.notice.set(message);
@@ -169,6 +188,8 @@ impl Model {
     }
     fn acknowledge(&self, pending: Pending, id: &str) {
         match pending.saved {
+            Saved::Buffer(draft) => crate::buffer::acknowledge(*self, &draft, id),
+            #[cfg(test)]
             Saved::Comment(body) => {
                 if self.comment_body.get_untracked() == body {
                     self.comment_body.set(String::new());
@@ -203,6 +224,10 @@ impl Model {
         let id = pending.envelope.request_id.clone();
         let snapshot = self.snapshot.get_untracked();
         let applied = match &pending.saved {
+            Saved::Buffer(_) => snapshot
+                .submissions
+                .iter()
+                .any(|s| s.id == id || s.last_edit_request.as_deref() == Some(&id)),
             Saved::Start(_) => snapshot
                 .sessions
                 .iter()
@@ -211,6 +236,7 @@ impl Model {
                 .messages
                 .iter()
                 .any(|m| m.id == format!("prompt-{id}")),
+            #[cfg(test)]
             Saved::Comment(_) => snapshot
                 .comments
                 .iter()
@@ -286,6 +312,17 @@ impl Model {
                     } => format!(
                         "Prompt: {prompt} · implementation approval: {approve_implementation}"
                     ),
+                    Command::SubmitTurn {
+                        parts,
+                        approve_implementation,
+                        ..
+                    } => format!(
+                        "Message: {} · implementation approval: {approve_implementation}",
+                        plain_text(&parts)
+                    ),
+                    Command::EditQueuedTurn { parts, .. } => {
+                        format!("Queued message: {}", plain_text(&parts))
+                    }
                     Command::AddComment { body, .. } => format!("Comment: {body}"),
                     _ => "Original workspace action".into(),
                 };
@@ -646,6 +683,7 @@ impl Model {
             Saved::Action,
         );
     }
+    #[cfg(test)]
     pub fn start_comment(&self, message: &Message) {
         if !self.comment_body.get_untracked().trim().is_empty()
             && self.comment_target.get_untracked() != message.id
@@ -664,6 +702,7 @@ impl Model {
             .unwrap_or_default();
         self.comment_quote.set(quote);
     }
+    #[cfg(test)]
     pub fn save_comment(&self) {
         let body = self.comment_body.get_untracked();
         self.submit(

@@ -14,29 +14,41 @@ Execution belongs on the server. Clients can disconnect, reconnect, and share se
 
 The demo board and transcripts are immutable fixtures. Profiles and comments are real workspace data. A configured live GitHub Projects v2 board supplies ordered Status columns and repository issue items. The current live project sits alongside demo and retained historical projects. Local issue IDs include the stable board/project identity; provider references retain repository, number, and URL. Explicit synchronization keeps the last successful board on failure. Removed items with session or scope references remain in history, but cannot start or continue turns until restored to the board. Draft issues and pull requests are excluded. GitHub remains authoritative; local worker state does not move remote items.
 
-Live implementation sessions require an issue and a director. The server checks the director's current effective scope, Codex harness, implementation permission, and worker limit before starting each turn. Ask requires explicit approval; Deny is not overridable. The server creates an isolated worktree and owns the Codex process, independently of clients. Codex JSONL events provide immutable transcript messages, thread identity, lifecycle state, and measured turn usage. Follow-ups resume the exact saved thread in the same worktree. Completed means the turn ended, not independent acceptance of the issue's requirements. A bounded diff and worktree provenance support human review; merging, pushing, deploying, and remote status writes are not exposed by Relay.
+Live implementation sessions require an issue and a director. The server checks the director's current effective scope, Codex harness, implementation permission, and worker limit before starting each turn. Ask requires explicit approval; Deny is not overridable. The server creates an isolated worktree and owns the Codex process, independently of clients. The initial worker uses Codex exec; structured buffer turns use the pinned Codex app-server stdio protocol. Both provide transcript messages, thread identity, lifecycle state, and measured turn usage. Streaming agent text appends to a stable message; recorded prefixes and anchors remain unchanged. Follow-ups resume the exact saved thread in the same worktree. Completed means the turn ended, not independent acceptance of the issue's requirements. A bounded diff and worktree provenance support human review; merging, pushing, deploying, and remote status writes are not exposed by Relay.
 
 The first implementation boundary is Codex's workspace-write sandbox plus server-enforced launch policy. Other profile responsibilities and completion criteria remain workflow configuration; Relay does not yet turn every configured action into a separately enforceable harness tool permission. Context compaction/reset and predictive cache warnings require a later harness integration. Cached token counts are measurements from completed turns, not a cache-expiry estimate.
 
-One server process owns one SQLite database. Its schema is versioned with `PRAGMA user_version`; schema versions newer than the server are rejected. Schema 2 preserves existing snapshots and receipts while adding run, process, and sync records. Every mutation and receipt is committed in one transaction before publishing the snapshot. Run one server per database; horizontal scaling is not supported.
+One server process owns one SQLite database. Its schema is versioned with `PRAGMA user_version`; schema versions newer than the server are rejected. Schema 3 preserves previous snapshots, comments, profiles, receipts, and worker identities while adding shared drafts, draft receipts, immutable assets, and durable submissions. Every mutation and receipt is committed in one transaction before publishing the snapshot. Run one server per database; horizontal scaling is not supported.
 
 On shutdown, the server closes WebSocket handlers and terminates owned worker groups. On Linux, process identity includes boot/start information and Codex receives a parent-death signal; restart classifies unfinished runs as Interrupted without relaunching them. Processes that deliberately escape supervision are outside this guarantee. Non-Linux crash cleanup and native behavior still require platform validation. GitHub and Git subprocess captures have output limits and deadlines; transcript messages and review diffs explicitly report truncation.
 
 ## Protocol
 
-All routes require `Authorization: Bearer <token>`, including WebSocket upgrade. The shared token defines a trusted workspace, not individual accounts or project roles. Request bodies are bounded to 64 KiB.
+All routes require `Authorization: Bearer <token>`, including WebSocket upgrade. The shared token defines a trusted workspace, not individual accounts or project roles. Legacy command bodies are bounded to 64 KiB, structured conversation/draft envelopes to 512 KiB, and individual asset uploads to 20 MiB.
 
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /v1/snapshot` | Current authoritative snapshot, including monotonic revision |
 | `POST /v1/commands` | Typed command envelope; returns committed snapshot |
 | `GET /v1/events` | WebSocket: initial snapshot followed by committed snapshots |
+| `POST /v1/conversation/commands` | Structured turn/queue commands; returns committed snapshot |
+| `GET /v1/drafts` | Shared draft documents with independent per-session revisions |
+| `POST /v1/drafts/{session}` | Compare-and-swap draft save, with an immutable request receipt |
+| `GET /v1/drafts/events` | WebSocket: full draft state, independent of transcript streaming |
+| `POST /v1/assets/{uuid}` | Immutable binary upload and validated metadata acknowledgement |
+| `GET /v1/assets/{uuid}` | Authenticated inline file/image content |
 
 Command envelopes carry `request_id` (UUID), `expected_revision`, and a tagged command. Supported commands update project defaults, create/update directors, add comments, synchronize a configured project, and start/send/stop workers. Stale revisions return HTTP 409. Invalid references/configuration return 422; invalid credentials return 401. Unexpected storage failures return a sanitized 500 response. Reusing an ID for a different command is rejected. Execution and provider commands are server runtime operations, not pure domain mutations; durable command receipts prevent duplicate launch on deliberate retry.
 
 Event delivery uses a watch channel: intermediate snapshots may coalesce, but each event is complete state. Client revision checks prevent late responses from replacing newer snapshots. Reconnection reads authoritative state and resubscribes. Writes are not retried automatically. Durable receipts make deliberate retries idempotent.
 
-Comments anchor to immutable message IDs, with an optional quote verified against the original body. Repeated text is identified by its message and quotation, not a unique text range. Fine-grained range anchors and a full transcript cursor are later work.
+Legacy comments retain their message IDs and optional quotes. Buffer replies carry a message ID, exact UTF-8 byte range, and source quote, so repeated passages remain distinguishable. Recorded source text is immutable; typing there creates a reply in the shared next-message draft. Every inline and bottom-draft view edits the same ordered parts. Text, assets, and anchored replies survive serialization without flattening their positions.
+
+Draft saves compare their own revision, so token streaming cannot invalidate a save. Submitting compares the saved draft revision and exact content, atomically clears that draft, and creates one durable submission. Exact receipt retries never create another turn. Queue edits retain submission identity and atomically consume a reviewed shared draft. Other queue actions compare the workspace revision; promotion also requires the exact observed active run ID. The desktop retains the original envelope for ambiguous outcomes.
+
+A running agent finishes before queued turns launch, unless the user promotes a specific queued message. Promotion requests `turn/interrupt`, stops the owned process, and resumes the same thread with the promoted payload. Current issue membership, effective permissions, scope, harness, and capacity are checked again at launch. Failure, manual stop, shutdown, or restart pauses unsent work. Restart marks launching/running submissions Interrupted and never replays them; only unsent queued submissions can be explicitly resumed. A crash after delivery cannot guarantee a terminal outcome, and is never treated as permission to replay.
+
+Asset metadata must match an acknowledged upload. Drafts are limited to 64 KiB of text/quotes, 1024 parts, and 64 MiB of referenced files; images are validated and limited to 32 megapixels. On each turn the server materializes assets in a private temporary directory outside Git, removes it after the turn, and sends ordered text/localImage app-server inputs. Other files are referenced at their exact position and require the agent to use a read tool. Replies identify quoted source explicitly as context. Local recovery stores unsent drafts and pending asset bytes next to client settings with owner-only permissions on Unix. It does not automatically submit recovered work.
 
 ## Profiles
 
@@ -49,5 +61,5 @@ Profiles configure Codex or Claude Code, whole-project or selected-issue scope, 
 1. Expand the first GitHub/Codex loop to GitLab and Claude Code, preserving provider-specific board identity and semantics.
 2. Add autonomous director delegation, richer harness capability reporting, and enforceable permissions for additional actions.
 3. Add identities, membership, review permissions, and shared-session handoff.
-4. Implement full transcript cursor navigation, richer review anchors, and the three context lifecycle actions with actual harness support.
+4. Extend document selection across recorded messages, add richer file review, and implement the three context lifecycle actions with actual harness support.
 5. Add reliable usage/cache reporting, then validate macOS/Windows and consider the browser client.

@@ -553,6 +553,7 @@ fn board_issue_and_session_navigation_work_in_both_themes_and_widths() {
             mounted.click("Profile design");
             assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
             mounted.rect("Message m2");
+            mounted.click("Session actions");
             mounted.click("Linked issue");
             assert_eq!(mounted.model.page.get_untracked(), Page::Board);
             assert_eq!(
@@ -596,23 +597,34 @@ fn palette_and_search_open_with_keyboard_focus() {
         .filter_map(|n| n.label)
         .collect();
     assert!(labels.iter().any(|l| l == "Message m1"));
-    assert!(!labels.iter().any(|l| l == "Message m3"));
+    // Find does not remove the surrounding conversation from the buffer.
+    assert!(labels.iter().any(|l| l == "Message m3"));
     mounted.key(Key::Escape, false);
     assert!(!mounted.model.searching.get_untracked());
 }
 
 #[test]
-fn keyboard_message_navigation_opens_contextual_composer() {
+fn typing_in_recorded_text_creates_an_inline_reply_and_enter_is_a_newline() {
     let mounted = mount(false, 1380.0);
     mounted.model.open_session("session-plan".into());
     mounted.settle();
     mounted.click("Message m1");
-    mounted.key(Key::ArrowDown, false);
-    assert_eq!(mounted.model.focused_message.get_untracked(), "m2");
-    mounted.key(Key::Enter, true);
-    assert_eq!(mounted.model.comment_target.get_untracked(), "m2");
+    mounted.key(Key::Character("Feedback".into()), false);
+    mounted.key(Key::Enter, false);
+    mounted.key(Key::Character("Another line".into()), false);
+    let parts = crate::buffer::parts(mounted.model, "session-plan");
+    let PartKind::Reply {
+        anchor,
+        parts: reply,
+    } = &parts[0].kind
+    else {
+        panic!("No anchored reply")
+    };
+    assert_eq!(anchor.message_id, "m1");
+    assert_eq!(plain_text(reply), "Feedback\nAnother line");
+    assert_eq!(mounted.model.snapshot.get_untracked().comments.len(), 0);
     let focused = mounted.ui.focused().unwrap().id();
-    assert_eq!(
+    assert!(
         mounted
             .ui
             .inspection_snapshot()
@@ -621,8 +633,9 @@ fn keyboard_message_navigation_opens_contextual_composer() {
             .find(|n| n.id == focused)
             .unwrap()
             .label
-            .as_deref(),
-        Some("Comment body")
+            .as_deref()
+            .unwrap()
+            .starts_with("Draft text")
     );
 }
 
@@ -644,7 +657,16 @@ fn comments_keep_drafts_after_failure_and_clear_only_on_acknowledgment() {
     let mut mounted = mount(false, 1380.0);
     mounted.model.open_session("session-plan".into());
     mounted.settle();
-    mounted.click("Comment on m2");
+    let source = mounted
+        .model
+        .snapshot
+        .get_untracked()
+        .messages
+        .iter()
+        .find(|m| m.id == "m2")
+        .unwrap()
+        .clone();
+    mounted.model.start_comment(&source);
     mounted.model.comment_quote.set("project defaults".into());
     mounted
         .model
@@ -949,9 +971,10 @@ fn worker_running_stop_completed_review_and_continue_use_recorded_session() {
         ..Default::default()
     });
     mounted.settle();
+    mounted.click("Session actions");
     mounted.focus("Toggle change review");
     mounted.click("Toggle change review");
-    assert!(mounted.model.review_changes.get_untracked());
+    mounted.rect("Session details");
     mounted.model.worker_prompt.set("Review result".into());
     mounted.model.worker_approval.set(true);
     mounted.model.run_worker(true);
@@ -997,7 +1020,7 @@ fn worker_running_stop_completed_review_and_continue_use_recorded_session() {
             .update(|s| s.sessions[0].worker.as_mut().unwrap().status = status);
         mounted.settle();
         assert!(mounted.model.worker_gate(true).is_ok());
-        mounted.rect("Send worker prompt");
+        mounted.rect("Next message");
     }
 }
 
@@ -1392,6 +1415,7 @@ fn snapshot_prompt_and_comment_ids_confirm_ambiguous_writes() {
         author: "User".into(),
         kind: "prompt".into(),
         body: "Continue exact session".into(),
+        parts: vec![],
     });
     mounted.model.receive(NetworkState {
         snapshot,
@@ -1464,4 +1488,434 @@ fn failed_launch_without_thread_offers_new_linked_worker_instead_of_continue() {
             .contains("Approve")
     );
     mounted.rect("Start worker");
+}
+
+#[test]
+fn inline_reply_and_next_message_share_edits_images_and_undo_without_mutating_history() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let original = mounted.model.snapshot.get_untracked().messages.clone();
+    mounted.click("Message m1");
+    mounted.key(Key::Character("First reply λ".into()), false);
+    mounted.click("Message m2");
+    mounted.key(Key::Character("Second reply".into()), false);
+    let parts = crate::buffer::parts(mounted.model, "session-plan");
+    assert_eq!(
+        parts
+            .iter()
+            .filter(|p| matches!(p.kind, PartKind::Reply { .. }))
+            .count(),
+        2
+    );
+    let PartKind::Reply { parts: nested, .. } = &parts[0].kind else {
+        panic!()
+    };
+    let id = nested[0].id.clone();
+    let label = format!("Draft text {id}");
+    let targets = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .filter(|n| n.label.as_deref() == Some(&label))
+        .map(|n| n.id)
+        .collect::<Vec<_>>();
+    assert_eq!(targets.len(), 2);
+    for _ in 0..200 {
+        mounted.key(Key::Tab, false);
+        if mounted.ui.focused().is_some_and(|e| e.id() == targets[1]) {
+            break;
+        }
+    }
+    assert_eq!(mounted.ui.focused().unwrap().id(), targets[1]);
+    mounted.key(Key::Character(" edited below".into()), false);
+    assert!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan"))
+            .contains("First reply λ edited below")
+    );
+    mounted.key(Key::Character("z".into()), true);
+    assert!(
+        !plain_text(&crate::buffer::parts(mounted.model, "session-plan")).contains("edited below")
+    );
+    let mut parts = crate::buffer::parts(mounted.model, "session-plan");
+    let PartKind::Reply { parts: nested, .. } = &mut parts[0].kind else {
+        panic!()
+    };
+    nested.push(Part {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: PartKind::Asset {
+            asset: Asset {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "inline.txt".into(),
+                media_type: "text/plain".into(),
+                size: 1,
+            },
+        },
+    });
+    crate::buffer::edit(mounted.model, "session-plan", parts);
+    mounted.settle();
+    assert_eq!(
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .filter(|n| n.label.as_deref() == Some("Preview inline.txt"))
+            .count(),
+        2
+    );
+    mounted.click("Remove inline file");
+    assert!(assets(&crate::buffer::parts(mounted.model, "session-plan")).is_empty());
+    assert_eq!(mounted.model.snapshot.get_untracked().messages, original);
+}
+
+fn buffer_worker(mounted: &Mounted) {
+    let mut snapshot = live_snapshot();
+    let s = &mut snapshot.sessions[0];
+    s.fixture = false;
+    s.role = SessionRole::Worker;
+    s.worker = Some(WorkerRun {
+        status: WorkerStatus::Running,
+        thread_id: Some("thread".into()),
+        worktree: Some("/worktree".into()),
+        branch: None,
+        base_commit: None,
+        error: None,
+        usage: None,
+        changes: None,
+    });
+    let id = s.id.clone();
+    snapshot.messages.push(Message {
+        id: "prompt-active-run".into(),
+        session_id: id.clone(),
+        author: "You".into(),
+        kind: "prompt".into(),
+        body: "Original".into(),
+        parts: vec![],
+    });
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(id);
+    mounted.model.buffer.update(|b| {
+        b.initialized = true;
+        b.connected = true;
+    });
+    mounted.model.worker_approval.set(true);
+}
+
+#[test]
+fn rapid_second_send_waits_for_ack_then_promotes_exact_queue_and_keeps_newer_draft() {
+    use crate::{
+        buffer,
+        buffer_network::{Outcome, Request, Update},
+    };
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(tx));
+    buffer::edit(
+        mounted.model,
+        "session-plan",
+        vec![Part::text("Correction")],
+    );
+    buffer::send(mounted.model);
+    buffer::send(mounted.model);
+    let Request::Save { session, request } = rx.try_recv().unwrap() else {
+        panic!()
+    };
+    let saved = Draft {
+        session_id: session.clone(),
+        revision: 1,
+        parts: request.parts.clone(),
+    };
+    buffer::receive(
+        mounted.model,
+        Update {
+            serial: 1,
+            initialized: true,
+            connected: true,
+            drafts: vec![saved.clone()],
+            outcomes: std::collections::BTreeMap::from([(
+                request.request_id.clone(),
+                Outcome::Saved {
+                    session,
+                    request,
+                    result: Ok(saved),
+                },
+            )]),
+            ..Default::default()
+        },
+    );
+    let submitted = mounted.commands.try_recv().unwrap();
+    let Command::SubmitTurn { parts, .. } = &submitted.command else {
+        panic!()
+    };
+    assert_eq!(plain_text(parts), "Correction");
+    buffer::edit(
+        mounted.model,
+        "session-plan",
+        vec![Part::text("Newer next message")],
+    );
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot.revision += 1;
+    snapshot.submissions.push(Submission {
+        id: submitted.request_id.clone(),
+        session_id: "session-plan".into(),
+        parts: parts.clone(),
+        state: SubmissionState::Queued,
+        approve_implementation: true,
+        error: None,
+        interrupts_run: None,
+        last_edit_request: None,
+    });
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    buffer::flush(mounted.model);
+    let promoted = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(promoted.command,Command::PromoteTurn{submission_id,active_run_id:Some(run)} if submission_id==submitted.request_id && run=="active-run")
+    );
+    assert_eq!(
+        plain_text(&buffer::parts(mounted.model, "session-plan")),
+        "Newer next message"
+    );
+}
+
+#[test]
+fn shared_draft_conflicts_retain_local_content_and_streamed_receipts_confirm_ambiguous_saves() {
+    use crate::{
+        buffer,
+        buffer_network::{Request, Update},
+    };
+    let mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(tx));
+    buffer::edit(mounted.model, "session-plan", vec![Part::text("Local")]);
+    mounted.model.buffer.update(|s| {
+        s.documents.get_mut("session-plan").unwrap().changed =
+            std::time::Instant::now() - Duration::from_secs(1)
+    });
+    buffer::flush(mounted.model);
+    let Request::Save { session, request } = rx.try_recv().unwrap() else {
+        panic!()
+    };
+    buffer::edit(
+        mounted.model,
+        "session-plan",
+        vec![Part::text("Newer local")],
+    );
+    buffer::receive(
+        mounted.model,
+        Update {
+            serial: 1,
+            initialized: true,
+            connected: true,
+            drafts: vec![Draft {
+                session_id: session.clone(),
+                revision: 1,
+                parts: request.parts,
+            }],
+            ..Default::default()
+        },
+    );
+    let state = mounted.model.buffer.get_untracked();
+    let doc = &state.documents[&session];
+    assert!(doc.saving.is_none());
+    assert!(!doc.conflict);
+    assert_eq!(plain_text(&doc.parts), "Newer local");
+    buffer::receive(
+        mounted.model,
+        Update {
+            serial: 2,
+            initialized: true,
+            connected: true,
+            drafts: vec![Draft {
+                session_id: session.clone(),
+                revision: 2,
+                parts: vec![Part::text("Other client")],
+            }],
+            ..Default::default()
+        },
+    );
+    let state = mounted.model.buffer.get_untracked();
+    let doc = &state.documents[&session];
+    assert!(doc.conflict);
+    assert_eq!(plain_text(&doc.parts), "Newer local");
+    buffer::resolve(mounted.model, false);
+    let state = mounted.model.buffer.get_untracked();
+    let doc = &state.documents[&session];
+    assert_eq!(plain_text(&doc.parts), "Other client");
+    assert_eq!(plain_text(&doc.recovery[0]), "Newer local");
+}
+
+#[test]
+fn draft_ime_commits_unicode_and_local_recovery_preserves_pending_file_bytes_and_ids() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let label = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|l| l.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&label);
+    mounted.ui.dispatch_ime(ImeEvent::Preedit {
+        text: "仮".into(),
+        cursor: Some((0, 3)),
+    });
+    mounted.settle();
+    assert!(crate::buffer::parts(mounted.model, "session-plan").is_empty());
+    mounted.ui.dispatch_ime(ImeEvent::Commit("確定 λ".into()));
+    mounted.settle();
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "確定 λ"
+    );
+    let directory =
+        std::env::temp_dir().join(format!("relay-draft-recovery-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let config = crate::network::Config {
+        endpoint: "http://127.0.0.1:7331/".parse().unwrap(),
+        token: "recovery-test-token".into(),
+    };
+    let settings = directory.join("settings.toml");
+    crate::buffer::load_journal(mounted.model, &settings, &config);
+    let part = crate::buffer::insert_asset(
+        mounted.model,
+        "notes.txt".into(),
+        "text/plain".into(),
+        b"Recovered context".to_vec(),
+    )
+    .unwrap();
+    let PartKind::Asset { asset } = &part.kind else {
+        panic!()
+    };
+    let asset = asset.clone();
+    crate::buffer::edit(
+        mounted.model,
+        "session-plan",
+        vec![Part::text("Before"), part, Part::text("After")],
+    );
+    mounted.model.buffer.set(Default::default());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(tx));
+    crate::buffer::load_journal(mounted.model, &settings, &config);
+    let crate::buffer_network::Request::Upload {
+        asset: restored,
+        bytes,
+    } = rx.try_recv().unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(restored, asset);
+    assert_eq!(bytes.as_slice(), b"Recovered context");
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "Before[notes.txt]After"
+    );
+    assert!(mounted.commands.is_empty());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn long_buffer_lines_wrap_within_the_viewport_and_leave_a_reachable_next_message() {
+    let mounted = mount(false, 820.0);
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.messages[0].body = "A long recorded passage with spaces. ".repeat(40));
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let rect = mounted.rect("Message m1");
+    assert!(
+        rect.origin.x + rect.size.width <= mounted.size.width,
+        "{rect:?}"
+    );
+    assert!(rect.size.height > 200.0, "{rect:?}");
+    let next = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|l| l.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&next);
+}
+
+#[test]
+fn first_character_keeps_draft_focus_and_plain_paste_keeps_the_same_text_surface() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let label = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|l| l.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&label);
+    let focus = mounted.ui.focused().unwrap().id();
+    for character in ["H", "e", "l", "l", "o"] {
+        mounted.key(Key::Character(character.into()), false);
+        assert_eq!(mounted.ui.focused().unwrap().id(), focus);
+    }
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "Hello"
+    );
+    mounted.ui.set_clipboard_text(" pasted λ");
+    mounted.key(Key::Character("v".into()), true);
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "Hello pasted λ"
+    );
+    assert_eq!(crate::buffer::parts(mounted.model, "session-plan").len(), 1);
+    assert_eq!(mounted.ui.focused().unwrap().id(), focus);
+}
+
+#[test]
+fn composing_on_recorded_text_creates_one_reply_and_never_submits_an_empty_composition() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    mounted.focus("Message m1");
+    let source = mounted.model.snapshot.get_untracked().messages[0]
+        .body
+        .clone();
+    mounted.ui.dispatch_ime(ImeEvent::Preedit {
+        text: "仮".into(),
+        cursor: Some((0, 3)),
+    });
+    mounted.settle();
+    assert!(!has_content(&crate::buffer::parts(
+        mounted.model,
+        "session-plan"
+    )));
+    mounted.ui.dispatch_ime(ImeEvent::Commit("確定".into()));
+    mounted.settle();
+    let parts = crate::buffer::parts(mounted.model, "session-plan");
+    assert!(has_content(&parts));
+    assert_eq!(
+        parts
+            .iter()
+            .filter(|p| matches!(p.kind, PartKind::Reply { .. }))
+            .count(),
+        1
+    );
+    assert!(plain_text(&parts).ends_with("確定"));
+    assert_eq!(
+        mounted.model.snapshot.get_untracked().messages[0].body,
+        source
+    );
 }

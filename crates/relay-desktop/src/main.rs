@@ -1,4 +1,7 @@
+mod buffer;
+mod buffer_network;
 mod controls;
+mod conversation;
 mod fonts;
 mod model;
 mod network;
@@ -38,6 +41,12 @@ fn main() -> Result<(), String> {
             let (updates, sender) = state_channel(network::NetworkState::default());
             let commands = network::start(config.clone(), sender);
             let model = model::Model::new(ui, commands);
+            let (buffer_updates, buffer_sender) = state_channel(buffer_network::Update::default());
+            model
+                .buffer_requests
+                .set(Some(buffer_network::start(config.clone(), buffer_sender)));
+            buffer::load_journal(model, &path, &config);
+            Effect::new(move || buffer::receive(model, buffer_updates.get()));
             model.preferences.set(preferences.clone());
             model.notice.set(warning.clone());
             settings::bind(model, context.clone(), Some(path.clone()));

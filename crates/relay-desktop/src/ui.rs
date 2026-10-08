@@ -1,5 +1,6 @@
 use crate::{
     controls::{ButtonStyle, button},
+    conversation::{Conversation, ConversationProps},
     model::{EditTarget, Model, Page},
     sidebar::{Sidebar, SidebarProps},
     theme::*,
@@ -151,19 +152,21 @@ pub fn shell(model: Model) -> Element {
             row @layout:{ move |rect: Rect| width.set(rect.size.width) } {
                 Sidebar model:(model)
                 col width:1fr {
-                    row height:min-content min-height:{px(84.0)}px
-                        pad:(horizontal:{px(28.0)}px vertical:{px(18.0)}px) align:center
-                        justify:between shrink:0 {
-                        col height:min-content gap:{px(4.0)}px {
-                            text font-size:{px(22.0)}px font-weight:650 font-family:sans-serif
-                                {
+                    if model.page.get() != Page::Sessions {
+                        row height:min-content min-height:{px(84.0)}px
+                            pad:(horizontal:{px(28.0)}px vertical:{px(18.0)}px) align:center
+                            justify:between shrink:0 {
+                            col height:min-content gap:{px(4.0)}px {
+                                text font-size:{px(22.0)}px font-weight:650 font-family:sans-serif
+                                    {
                                 match model.page.get() { Page::Board => "Project board", Page::Sessions => "Sessions", Page::Directors => "Directors", Page::Settings => "Settings" }
                             }
-                            text font-size:{px(12.0)}px font-color:muted font-family:sans-serif
-                                { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| format!("{} · {}", p.repository, if p.fixture { "Fixture workspace" } else { "Remote GitHub board" })).unwrap_or_default() }
+                                text font-size:{px(12.0)}px font-color:muted font-family:sans-serif
+                                    { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| format!("{} · {}", p.repository, if p.fixture { "Fixture workspace" } else { "Remote GitHub board" })).unwrap_or_default() }
+                            }
+                            button #action @click:{ model.palette.set(true); }
+                                label:"Open command palette" "Commands"
                         }
-                        button #action @click:{ model.palette.set(true); }
-                            label:"Open command palette" "Commands"
                     }
                     if !model.notice.get().is_empty() {
                         row height:min-content fill:accent-soft pad:{px(12.0)}px gap:{px(12.0)}px
@@ -468,218 +471,9 @@ fn IssueDetail(model: Model) -> Element {
 
 #[component]
 fn Sessions(model: Model) -> Element {
-    let sessions = Derived::new(move || {
-        model
-            .snapshot
-            .get()
-            .sessions
-            .into_iter()
-            .filter(|s| s.project_id == model.project.get())
-            .collect::<Vec<_>>()
-    });
     view! {
-        col width:1fr pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) gap:{px(12.0)}px {
-            row height:min-content gap:{px(8.0)}px shrink:0 {
-                for (_, session) in { sessions.get().into_iter().map(|s| (s.id.clone(), s)) } {
-                    let id = State::new(session.id.clone());
-                    button #action @click:{ model.open_session(id.get_untracked()); }
-                        fill:if model.session.get() == id.get() { accent-soft } else { raised }
-                        { model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default() }
-                }
-            }
-            row height:min-content gap:{px(8.0)}px align:center shrink:0 {
-                button #action
-                    @click:{
-                    let snapshot = model.snapshot.get_untracked();
-                    if let Some(session) = snapshot.sessions.iter().find(|s| s.id == model.session.get_untracked()) {
-                        model.issue.set(session.issue_id.clone()); model.page.set(Page::Board);
-                    }
-                }
-                    "Linked issue"
-                button #action
-                    @click:{
-                    let snapshot = model.snapshot.get_untracked();
-                    if let Some(session) = snapshot.sessions.iter().find(|s| s.id == model.session.get_untracked()) {
-                        model.open_profile(EditTarget::Director(session.director_id.clone()));
-                    }
-                }
-                    "Director profile"
-                text font-size:{px(12.0)}px font-color:muted
-                    {
-                    let snapshot = model.snapshot.get();
-                    snapshot.sessions.iter().find(|s| s.id == model.session.get()).map(|s| {
-                        let issue = snapshot.issues.iter().find(|i| Some(&i.id) == s.issue_id.as_ref());
-                        format!("{} · {:?} session", issue.map(|i| format!("Issue #{}", i.reference.number)).unwrap_or_else(|| "Exploration".into()), s.role)
-                    }).unwrap_or_default()
-                }
-            }
-            row height:min-content align:center justify:between shrink:0 {
-                text font-size:{px(12.0)}px font-color:muted
-                    { if model.snapshot.get().sessions.iter().any(|s| s.id == model.session.get() && s.fixture) { "Fixture transcript · Ctrl/Cmd+Enter to comment" } else { "Immutable worker messages and tool results · Ctrl/Cmd+Enter to comment" } }
-                button #action @click:{ model.searching.set(!model.searching.get_untracked()); }
-                    label:"Search transcript" "Find  ⌘ / Ctrl F"
-            }
-            if model.searching.get() {
-                input #input-field placeholder:"Find messages…" model.search as search_field
-                { search_field.focus(); }
-            }
-            scroll {
-                col height:min-content gap:{px(14.0)}px {
-                    for (_, message) in { model.snapshot.get().messages.into_iter().filter(|m| m.session_id == model.session.get() && m.body.to_lowercase().contains(&model.search.get().to_lowercase())).map(|m| (m.id.clone(), m)).collect::<Vec<_>>() } {
-                        MessageView model:(model) message:(message.clone())
-                    }
-                }
-            }
-            WorkerPanel model:(model)
-            if !model.comment_target.get().is_empty() {
-                Composer model:(model)
-            }
-            row height:min-content gap:{px(8.0)}px shrink:0 {
-                button #action @click:{} disabled "Compact and continue"
-                button #action @click:{} disabled "Reset context"
-                button #action @click:{} disabled "Archive / start new"
-            }
-            text font-size:{px(11.0)}px font-color:muted shrink:0
-                "Context/reset controls unavailable until harness support. Cache expiry unknown."
-        }
-    }
-}
-
-#[component]
-fn MessageView(model: Model, message: Message) -> Element {
-    let details = matches!(
-        message.kind.as_str(),
-        "issue-context" | "command_execution" | "file_change"
-    );
-    let expanded = State::new(!details);
-    let kind_label = match message.kind.as_str() {
-        "issue-context" => "Source context",
-        "command_execution" => "Tool result",
-        "file_change" => "File changes",
-        other => other,
-    }
-    .to_owned();
-    let target = message.clone();
-    let keyboard = message.clone();
-    let id = message.id.clone();
-    let focused_id = message.id.clone();
-    let quote_model = model;
-    let content = view! {
-        col height:min-content fill:surface radius:{px(10.0)}px pad:{px(18.0)}px gap:{px(10.0)}px
-            focus label:(format!("Message {}", message.id))
-            @focus:{ move |focused| { if focused { model.focused_message.set(focused_id.clone()); } } }
-            focused { stroke:(width:{px(2.0)} color:accent offset:{px(-1.0)}) } {
-            row height:min-content justify:between align:center {
-                row height:min-content gap:{px(10.0)}px {
-                    text font-size:{px(13.0)}px font-weight:650 (message.author)
-                    text font-size:{px(11.0)}px font-color:muted (kind_label)
-                }
-                button #action @click:{ model.start_comment(&target); }
-                    label:(format!("Comment on {}", message.id)) "Comment"
-            }
-            if details {
-                button #action @click:{ expanded.set(!expanded.get_untracked()); }
-                    label:{ if expanded.get() { "Hide message details" } else { "Show message details" } }
-                    { if expanded.get() { "Hide details" } else { "Show details" } }
-            }
-            if expanded.get() {
-                col height:min-content selectable {
-                    text font-size:{px(15.0)}px (message.body.clone())
-                }
-            }
-            for (_, comment) in { model.snapshot.get().comments.into_iter().filter(|c| c.message_id == id).map(|c| (c.id.clone(), c)).collect::<Vec<_>>() } {
-                let quoted = State::new(comment.quote.clone());
-                col height:min-content fill:accent-soft radius:{px(6.0)}px pad:{px(12.0)}px
-                    gap:{px(6.0)}px selectable {
-                    text font-size:{px(12.0)}px font-weight:650 (comment.author.clone())
-                    if quoted.get().is_some() {
-                        text font-size:{px(12.0)}px font-color:muted
-                            { format!("“{}”", quoted.get().unwrap_or_default()) }
-                    }
-                    text font-size:{px(14.0)}px (comment.body.clone())
-                }
-            }
-        }
-    };
-    content.on_pointer(|event, ctx| {
-        if matches!(event.kind, PointerEventKind::Down(PointerButton::Primary)) {
-            ctx.request_focus();
-        }
-    });
-    content.on_key(move |event, ctx| {
-        if !matches!(event.kind, KeyEventKind::Down { .. }) {
-            return;
-        }
-        let command = if cfg!(target_os = "macos") {
-            event.modifiers.meta
-        } else {
-            event.modifiers.ctrl
-        };
-        if command && event.key == Key::Enter {
-            quote_model.start_comment(&keyboard);
-            ctx.stop_propagation();
-        } else if matches!(event.key, Key::ArrowUp | Key::ArrowDown) {
-            let ui = model.ui.get_untracked();
-            let snapshot = ui.inspection_snapshot();
-            let message_nodes: Vec<_> = snapshot
-                .nodes
-                .iter()
-                .filter(|n| {
-                    n.label
-                        .as_deref()
-                        .is_some_and(|l| l.starts_with("Message "))
-                })
-                .collect();
-            for _ in 0..snapshot.nodes.len() {
-                if event.key == Key::ArrowDown {
-                    ui.focus_next();
-                } else {
-                    ui.focus_prev();
-                }
-                if ui
-                    .focused()
-                    .is_some_and(|focused| message_nodes.iter().any(|n| n.id == focused.id()))
-                {
-                    if let Some(focused) = ui.focused() {
-                        focused.reveal();
-                    }
-                    break;
-                }
-            }
-            ctx.stop_propagation();
-        }
-    });
-    content
-}
-
-#[component]
-fn Composer(model: Model) -> Element {
-    view! {
-        col height:min-content fill:surface radius:{px(10.0)}px pad:{px(14.0)}px gap:{px(8.0)}px
-            shrink:0 {
-            row height:min-content gap:{px(12.0)}px justify:between align:center {
-                text font-size:{px(12.0)}px font-weight:650 font-family:sans-serif
-                    {
-                    model.snapshot.get().messages.iter().find(|m| m.id == model.comment_target.get()).map(|m| format!("Feedback on {}’s {}", m.author, m.kind)).unwrap_or_else(|| "Contextual feedback".into())
-                }
-                button #action
-                    @click:{ model.comment_body.set(String::new()); model.comment_quote.set(String::new()); model.comment_target.set(String::new()); }
-                    disabled:{ model.busy.get() } "Discard draft"
-            }
-            if !model.comment_quote.get().is_empty() {
-                text font-size:{px(12.0)}px font-color:muted
-                    { format!("“{}”", model.comment_quote.get()) }
-            }
-            row height:min-content gap:{px(10.0)}px align:center {
-                input #input-field width:{px(140.0)} label:"Comment author" placeholder:"Your name"
-                    model.author
-                input #area multiline height:{px(74.0)}px width:1fr label:"Comment body"
-                    placeholder:"Leave contextual feedback…" model.comment_body as comment_input
-                { comment_input.focus(); }
-                button #action @click:{ model.save_comment(); }
-                    disabled:{ model.busy.get() || !model.connected.get() || model.comment_body.get().trim().is_empty() }
-                    label:"Send comment" "Send"
-            }
+        col {
+            Conversation model:(model)
         }
     }
 }
@@ -1026,94 +820,6 @@ fn WorkerForm(model: Model, continuation: bool) -> Element {
                 label:if continuation { "Send worker prompt" } else { "Start worker" }
                 disabled:{ model.worker_gate(continuation).is_err() }
                 { if continuation { "Send / continue" } else { "Start worker" } }
-        }
-    }
-}
-
-#[component]
-fn WorkerPanel(model: Model) -> Element {
-    let worker = Derived::new(move || {
-        model
-            .snapshot
-            .get()
-            .sessions
-            .into_iter()
-            .find(|s| s.id == model.session.get())
-            .and_then(|s| s.worker)
-    });
-    let removed = Derived::new(move || {
-        let snapshot = model.snapshot.get();
-        snapshot
-            .sessions
-            .iter()
-            .find(|s| s.id == model.session.get())
-            .and_then(|s| {
-                snapshot
-                    .issues
-                    .iter()
-                    .find(|i| Some(&i.id) == s.issue_id.as_ref())
-            })
-            .is_some_and(|issue| {
-                snapshot
-                    .project(&issue.project_id)
-                    .is_ok_and(|project| !project.columns.iter().any(|c| c.id == issue.column_id))
-            })
-    });
-    view! {
-        col height:min-content {
-            if worker.get().is_some() {
-                scroll {
-                    col height:min-content gap:{px(10.0)}px {
-                        if removed.get() {
-                            text font-size:{px(12.0)}px font-color:muted
-                                label:"Session issue removed from board"
-                                "Issue no longer on this board. Active turns may finish or be stopped; new turns require restoration and sync."
-                        }
-                        text font-size:{px(13.0)}px font-weight:650 font-family:sans-serif
-                            { format!("Worker: {:?}", worker.get().unwrap().status) }
-                        text font-size:{px(12.0)}px font-color:muted
-                            { worker.get().unwrap().error.unwrap_or_default() }
-                        if worker.get().is_some_and(|w| matches!(w.status, WorkerStatus::Running | WorkerStatus::Queued)) {
-                            button #action @click:{ model.stop_worker(); } label:"Stop worker"
-                                disabled:{ model.busy.get() || !model.connected.get() }
-                                "Stop worker"
-                        } else if worker.get().is_some_and(|w| w.thread_id.is_some() && w.worktree.is_some()) {
-                            WorkerForm model:(model) continuation:true
-                        } else {
-                            text font-size:{px(12.0)}px font-color:muted
-                                label:"Worker cannot continue"
-                                "No resumable worker was recorded. Review the error above, then open the linked issue to start a new worker."
-                            button #action @click:{ model.open_worker_issue(); }
-                                label:"Start new worker from linked issue"
-                                disabled:{ !model.snapshot.get().sessions.iter().any(|s| s.id == model.session.get() && s.issue_id.as_ref().is_some_and(|id| model.snapshot.get().issues.iter().any(|i| &i.id == id))) }
-                                "Open issue / start new worker"
-                        }
-                        text font-size:{px(11.0)}px font-color:muted
-                            "Completed means the harness turn ended; issue acceptance still needs review."
-                        text font-size:{px(12.0)}px font-color:muted
-                            {
-                            worker.get().unwrap().usage.map(|u| format!("Latest measured turn · input {} · cached input {} · output {} tokens", u.input_tokens, u.cached_input_tokens, u.output_tokens)).unwrap_or_else(|| "Latest turn usage unavailable".into())
-                        }
-                        button #action
-                            @click:{ model.review_changes.set(!model.review_changes.get_untracked()); }
-                            label:"Toggle change review" "Changes and provenance"
-                        if model.review_changes.get() {
-                            col height:min-content gap:{px(8.0)}px selectable {
-                                text font-size:{px(12.0)}px
-                                    {
-                                    let w = worker.get().unwrap();
-                                    format!("Branch: {}\nBase: {}\nWorktree: {}\nThread: {}", w.branch.unwrap_or_else(|| "unavailable".into()), w.base_commit.unwrap_or_else(|| "unavailable".into()), w.worktree.unwrap_or_else(|| "unavailable".into()), w.thread_id.unwrap_or_else(|| "unavailable".into()))
-                                }
-                                text font-size:{px(12.0)}px
-                                    {
-                                    worker.get().unwrap().changes.map(|c| format!("Files: {}\n{}\n{}", c.files.join(", "), if c.truncated { "Review truncated by server" } else { "Bounded review" }, c.diff)).unwrap_or_else(|| "Change review unavailable".into())
-                                }
-                            }
-                        }
-                    }
-                } as panel
-                { panel.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(px(280.0)).shrink(0.0)); }
-            }
         }
     }
 }

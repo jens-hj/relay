@@ -11,6 +11,8 @@ use axum::{
     routing::{get, post},
 };
 use relay_core::*;
+mod app_server;
+mod conversation;
 mod github;
 mod process;
 mod runtime;
@@ -92,7 +94,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 2 {
+        if version > 3 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -104,7 +106,10 @@ impl Store {
              CREATE TABLE IF NOT EXISTS runs (session_id TEXT PRIMARY KEY, run_id TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS syncs (project_id TEXT PRIMARY KEY, request_id TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS processes (session_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, pid INTEGER NOT NULL, identity TEXT NOT NULL);
-             PRAGMA user_version = 2;
+             CREATE TABLE IF NOT EXISTS drafts(session_id TEXT PRIMARY KEY, draft TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS draft_receipts(request_id TEXT PRIMARY KEY, request TEXT NOT NULL, response TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY, metadata TEXT NOT NULL, bytes BLOB NOT NULL);
+             PRAGMA user_version = 3;
              COMMIT;"
         ).map_err(Error::internal)?;
         let seed = serde_json::to_string(&demo_snapshot(defaults)).map_err(Error::internal)?;
@@ -182,7 +187,9 @@ impl Store {
             }
             return Ok((snapshot, None));
         }
-        if snapshot.revision != envelope.expected_revision {
+        if snapshot.revision != envelope.expected_revision
+            && !matches!(envelope.command, Command::SubmitTurn { .. })
+        {
             return Err(Error::new(
                 StatusCode::CONFLICT,
                 "conflict",
@@ -191,6 +198,20 @@ impl Store {
         }
         let mut action = None;
         match envelope.command {
+            command @ (Command::SubmitTurn { .. }
+            | Command::PromoteTurn { .. }
+            | Command::CancelTurn { .. }
+            | Command::EditQueuedTurn { .. }
+            | Command::ResumeQueue { .. }) => {
+                action = conversation::apply(
+                    &transaction,
+                    &mut snapshot,
+                    &envelope.request_id,
+                    command,
+                    config,
+                    &self.controls,
+                )?;
+            }
             Command::SyncProject { project_id } => {
                 let project = snapshot.project(&project_id).map_err(Error::invalid)?;
                 if project.github.is_none() {
@@ -307,6 +328,11 @@ impl Store {
                         "Worker process is unavailable; restart to classify interrupted runs",
                     ));
                 }
+                conversation::pause(
+                    &mut snapshot,
+                    &session_id,
+                    "Queue paused after stopping the agent",
+                );
                 action = Some(Action::Stop(session_id));
             }
             command => {
@@ -322,7 +348,13 @@ impl Store {
                 .ok_or_else(|| Error::invalid("Revision exhausted"))?;
         }
         if let Some(Action::Run { session_id, .. }) = &action {
-            transaction.execute("INSERT INTO runs(session_id,run_id) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET run_id=excluded.run_id",params![session_id,envelope.request_id]).map_err(Error::internal)?;
+            let identity = snapshot
+                .submissions
+                .iter()
+                .find(|s| &s.session_id == session_id && s.state == SubmissionState::Launching)
+                .map(|s| &s.id)
+                .unwrap_or(&envelope.request_id);
+            transaction.execute("INSERT INTO runs(session_id,run_id) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET run_id=excluded.run_id",params![session_id,identity]).map_err(Error::internal)?;
         }
         if let Some(Action::Sync(project_id)) = &action {
             transaction.execute("INSERT INTO syncs(project_id,request_id) VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET request_id=excluded.request_id",params![project_id,envelope.request_id]).map_err(Error::internal)?;
@@ -346,6 +378,7 @@ impl Store {
 
 #[derive(Clone)]
 struct Workspace {
+    drafts: watch::Sender<Vec<Draft>>,
     transport_shutdown: watch::Sender<bool>,
     transports: Arc<std::sync::atomic::AtomicUsize>,
     store: Arc<Mutex<Store>>,
@@ -358,6 +391,7 @@ enum Action {
     Sync(String),
     Run { session_id: String, prompt: String },
     Stop(String),
+    Promote(String),
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -381,6 +415,7 @@ fn prompt_message(session: &str, request: &str, prompt: &str) -> Message {
         author: "You".into(),
         kind: "prompt".into(),
         body: prompt.into(),
+        parts: vec![],
     }
 }
 impl Workspace {
@@ -415,6 +450,15 @@ impl Workspace {
         worker.error = Some(
             "Server execution task ended before a terminal outcome; continuation is explicit"
                 .into(),
+        );
+        if let Some(submission) = snapshot.submissions.iter_mut().find(|s| s.id == run) {
+            submission.state = SubmissionState::Interrupted;
+            submission.error = Some("Execution task interrupted; this turn is not replayed".into());
+        }
+        conversation::pause(
+            &mut snapshot,
+            session,
+            "Execution interrupted; review and resume explicitly",
         );
         snapshot.revision = snapshot
             .revision
@@ -694,6 +738,21 @@ pub fn router_with_shutdown(
             changed = true;
         }
     }
+    for submission in &mut initial.submissions {
+        if matches!(
+            submission.state,
+            SubmissionState::Queued | SubmissionState::Launching | SubmissionState::Running
+        ) {
+            submission.state = if submission.state == SubmissionState::Queued {
+                SubmissionState::Paused
+            } else {
+                SubmissionState::Interrupted
+            };
+            submission.error = Some("Server restarted; delivered turns are never replayed, queued turns require explicit resume".into());
+            submission.interrupts_run = None;
+            changed = true;
+        }
+    }
     if let Some(remote) = &config.remote {
         let selected = if let Some(index) = initial.projects.iter().position(|project| {
             project.id != "demo" && runtime::configured_project(project, &config)
@@ -755,6 +814,7 @@ pub fn router_with_shutdown(
     }
     let (snapshots, _) = watch::channel(initial);
     let workspace = Workspace {
+        drafts: watch::channel(conversation::read_drafts(&store.connection)?).0,
         transport_shutdown: watch::channel(false).0,
         transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         store: Arc::new(Mutex::new(store)),
@@ -769,7 +829,23 @@ pub fn router_with_shutdown(
         Router::new()
             .route("/v1/snapshot", get(snapshot))
             .route("/v1/commands", post(command))
+            .route(
+                "/v1/conversation/commands",
+                post(command).layer(DefaultBodyLimit::max(512 * 1024)),
+            )
             .route("/v1/events", get(events))
+            .route("/v1/drafts", get(conversation::drafts))
+            .route("/v1/drafts/events", get(conversation::draft_events))
+            .route(
+                "/v1/drafts/{session}",
+                post(conversation::save_draft).layer(DefaultBodyLimit::max(512 * 1024)),
+            )
+            .route(
+                "/v1/assets/{id}",
+                get(conversation::get_asset)
+                    .post(conversation::upload_asset)
+                    .layer(DefaultBodyLimit::max(ASSET_LIMIT)),
+            )
             .layer(DefaultBodyLimit::max(64 * 1024))
             .layer(axum::middleware::from_fn_with_state(
                 workspace.clone(),
@@ -817,9 +893,15 @@ async fn command(
         }
         let run_id = envelope.request_id.clone();
         let (snapshot, action) = store.apply(envelope, &workspace.config)?;
+        workspace
+            .drafts
+            .send_replace(conversation::read_drafts(&store.connection)?);
         workspace.snapshots.send_replace(snapshot.clone());
         match action {
             Some(Action::Run { session_id, prompt }) => {
+                let run_id = store
+                    .run_id(&session_id)?
+                    .ok_or_else(|| Error::invalid("Run identity missing"))?;
                 let (sender, receiver) = watch::channel(false);
                 store.controls.insert(session_id.clone(), sender);
                 handle.spawn(runtime::run(
@@ -832,6 +914,11 @@ async fn command(
             }
             Some(Action::Stop(session_id)) => {
                 store.controls.get(&session_id).unwrap().send_replace(true);
+            }
+            Some(Action::Promote(session_id)) => {
+                if let Some(control) = store.controls.get(&session_id) {
+                    control.send_replace(true);
+                }
             }
             Some(Action::Sync(project_id)) => {
                 let workspace = workspace.clone();

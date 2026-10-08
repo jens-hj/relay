@@ -457,6 +457,7 @@ pub(crate) fn event(
                     author: "Codex".into(),
                     kind: kind.into(),
                     body,
+                    parts: vec![],
                 });
             }
         }
@@ -464,7 +465,7 @@ pub(crate) fn event(
     }
     Ok(false)
 }
-async fn line(
+pub(super) async fn line(
     reader: &mut BufReader<tokio::process::ChildStdout>,
 ) -> Result<Option<Vec<u8>>, Error> {
     let mut line = Vec::new();
@@ -562,6 +563,9 @@ pub(crate) async fn run(
         }
         Ok(())
     });
+    if let Err(error) = crate::conversation::advance(&workspace, &session_id, &run_id) {
+        eprintln!("Queue advancement failed: {error}");
+    }
 }
 struct RunGuard {
     workspace: Workspace,
@@ -653,6 +657,7 @@ async fn execute(
                 author: "Relay".into(),
                 kind: "issue-context".into(),
                 body: context.clone(),
+                parts: vec![],
             });
         }
         Ok(())
@@ -683,8 +688,15 @@ async fn execute(
         Ok(())
     })?;
     let mut cmd = tokio::process::Command::new(&workspace.config.codex);
-    cmd.arg("exec");
-    if let Some(id) = &worker.thread_id {
+    let structured = snapshot
+        .submissions
+        .iter()
+        .find(|s| s.id == run_id)
+        .cloned();
+    if structured.is_some() {
+        cmd.args(["app-server", "--stdio"]);
+    } else if let Some(id) = &worker.thread_id {
+        cmd.arg("exec");
         cmd.args([
             "resume",
             "-c",
@@ -694,7 +706,7 @@ async fn execute(
             "-",
         ]);
     } else {
-        cmd.args(["--json", "--sandbox", "workspace-write", "-"]);
+        cmd.args(["exec", "--json", "--sandbox", "workspace-write", "-"]);
     }
     cmd.current_dir(&path)
         .env_remove("RELAY_TOKEN")
@@ -762,9 +774,22 @@ async fn execute(
                 approve_implementation,
                 ..
             } => approve_implementation,
+            Command::SubmitTurn {
+                approve_implementation,
+                ..
+            } => approve_implementation,
             _ => return Err(Error::invalid("Run receipt does not authorize a turn")),
         };
         let mut current = store.snapshot()?;
+        // Queue edits may carry a fresh approval after the original submission.
+        // The receipt establishes the turn's identity; its current durable
+        // submission supplies the reviewed approval used for this launch.
+        let approved = current
+            .submissions
+            .iter()
+            .find(|submission| submission.id == run_id)
+            .map(|submission| submission.approve_implementation)
+            .unwrap_or(approved);
         let index = current
             .sessions
             .iter()
@@ -814,6 +839,22 @@ async fn execute(
     if let Err(error) = publication {
         terminate(&mut child).await;
         return Err(error);
+    }
+    if let Some(submission) = structured {
+        let result = crate::app_server::execute(
+            workspace,
+            session_id,
+            run_id,
+            &execution_prompt,
+            &submission.parts,
+            worker.thread_id.as_deref(),
+            &path,
+            &mut child,
+            stop,
+        )
+        .await;
+        terminate(&mut child).await;
+        return result;
     }
     let mut stdin = child.stdin.take().unwrap();
     let write = async {

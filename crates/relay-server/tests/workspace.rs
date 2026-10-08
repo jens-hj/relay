@@ -64,7 +64,13 @@ async fn authentication_covers_reads_writes_and_event_upgrade() {
     let db = tempfile::tempdir().unwrap();
     let server = start(&db.path().join("relay.sqlite3")).await;
     let client = reqwest::Client::new();
-    for path in ["snapshot", "events"] {
+    for path in [
+        "snapshot",
+        "events",
+        "drafts",
+        "drafts/events",
+        "assets/unknown",
+    ] {
         assert_eq!(
             client
                 .get(format!("{}/v1/{path}", server.endpoint))
@@ -245,6 +251,248 @@ async fn next(socket: &mut Socket) -> Snapshot {
 }
 
 #[tokio::test]
+async fn shared_draft_revisions_are_independent_idempotent_and_survive_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("drafts.sqlite3");
+    let server = start(&db).await;
+    let client = reqwest::Client::new();
+    let source = snapshot(&server)
+        .await
+        .messages
+        .into_iter()
+        .find(|m| m.id == "m2")
+        .unwrap();
+    let offset = source.body.find("project defaults").unwrap();
+    let parts = vec![
+        Part::text("Overall feedback\n"),
+        Part {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: PartKind::Reply {
+                anchor: Anchor {
+                    message_id: source.id,
+                    start: offset,
+                    end: offset + 16,
+                    quote: "project defaults".into(),
+                },
+                parts: vec![Part::text("Keep inheritance.")],
+            },
+        },
+    ];
+    let request = SaveDraft {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        expected_revision: 0,
+        parts: parts.clone(),
+    };
+    let url = format!("{}/v1/drafts/session-plan", server.endpoint);
+    let saved: Draft = client
+        .post(&url)
+        .bearer_auth(TOKEN)
+        .json(&request)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(saved.revision, 1);
+    assert_eq!(saved.parts, parts);
+    assert_eq!(snapshot(&server).await.revision, 0);
+    let duplicate: Draft = client
+        .post(&url)
+        .bearer_auth(TOKEN)
+        .json(&request)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(saved, duplicate);
+    let stale = SaveDraft {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        expected_revision: 0,
+        parts: vec![Part::text("Other client")],
+    };
+    assert_eq!(
+        client
+            .post(&url)
+            .bearer_auth(TOKEN)
+            .json(&stale)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+    let invalid = SaveDraft {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        expected_revision: 1,
+        parts: vec![Part {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: PartKind::Reply {
+                anchor: Anchor {
+                    message_id: "m2".into(),
+                    start: 0,
+                    end: 1,
+                    quote: "wrong".into(),
+                },
+                parts: vec![Part::text("No")],
+            },
+        }],
+    };
+    assert_eq!(
+        client
+            .post(&url)
+            .bearer_auth(TOKEN)
+            .json(&invalid)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        422
+    );
+    drop(server);
+    let restarted = start(&db).await;
+    let drafts: Vec<Draft> = client
+        .get(format!("{}/v1/drafts", restarted.endpoint))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(drafts, vec![saved]);
+}
+
+#[tokio::test]
+async fn inline_assets_are_authenticated_bounded_immutable_and_validated_in_drafts() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(&dir.path().join("assets.sqlite3")).await;
+    let client = reqwest::Client::new();
+    let id = uuid::Uuid::new_v4().to_string();
+    let url = format!("{}/v1/assets/{id}", server.endpoint);
+    let bytes = b"hello inline context";
+    assert_eq!(
+        client
+            .post(&url)
+            .body(bytes.as_slice())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    let asset: Asset = client
+        .post(&url)
+        .bearer_auth(TOKEN)
+        .header("x-relay-filename", "notes%20%CE%BB.txt")
+        .header("content-type", "application/octet-stream")
+        .body(bytes.as_slice())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(asset.name, "notes λ.txt");
+    assert_eq!(
+        client
+            .get(&url)
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        bytes
+    );
+    assert_eq!(
+        client
+            .post(&url)
+            .bearer_auth(TOKEN)
+            .header("x-relay-filename", "notes%20%CE%BB.txt")
+            .body("different")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        422
+    );
+    let mut tampered = asset.clone();
+    tampered.name = "other.txt".into();
+    let request = SaveDraft {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        expected_revision: 0,
+        parts: vec![
+            Part::text("Before "),
+            Part {
+                id: uuid::Uuid::new_v4().to_string(),
+                kind: PartKind::Asset { asset: tampered },
+            },
+            Part::text(" after"),
+        ],
+    };
+    let draft_url = format!("{}/v1/drafts/session-plan", server.endpoint);
+    assert_eq!(
+        client
+            .post(&draft_url)
+            .bearer_auth(TOKEN)
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        422
+    );
+    let mut valid = request;
+    valid.request_id = uuid::Uuid::new_v4().to_string();
+    valid.parts[1].kind = PartKind::Asset { asset };
+    assert_eq!(
+        client
+            .post(&draft_url)
+            .bearer_auth(TOKEN)
+            .json(&valid)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let large_url = format!("{}/v1/assets/{}", server.endpoint, uuid::Uuid::new_v4());
+    assert_eq!(
+        client
+            .post(large_url)
+            .bearer_auth(TOKEN)
+            .body(vec![0; ASSET_LIMIT + 1])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        413
+    );
+    let image_url = format!("{}/v1/assets/{}", server.endpoint, uuid::Uuid::new_v4());
+    assert_eq!(
+        client
+            .post(image_url)
+            .bearer_auth(TOKEN)
+            .header("content-type", "image/png")
+            .body("invalid PNG")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        422
+    );
+}
+
+#[tokio::test]
 async fn two_clients_receive_committed_changes_and_reconnect_to_latest_state() {
     let db = tempfile::tempdir().unwrap();
     let server = start(&db.path().join("relay.sqlite3")).await;
@@ -259,4 +507,72 @@ async fn two_clients_receive_committed_changes_and_reconnect_to_latest_state() {
     drop(first);
     let mut reconnect = connect(&server).await;
     assert_eq!(next(&mut reconnect).await, a);
+}
+
+#[tokio::test]
+async fn shared_draft_websocket_publishes_and_reconnects_without_workspace_revision_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(&dir.path().join("draft-events.sqlite3")).await;
+    let mut upgrade = format!(
+        "{}/v1/drafts/events",
+        server.endpoint.replace("http://", "ws://")
+    )
+    .into_client_request()
+    .unwrap();
+    upgrade.headers_mut().insert(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {TOKEN}")).unwrap(),
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(upgrade.clone())
+        .await
+        .unwrap();
+    let initial = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<Draft>>(&initial.into_text().unwrap()).unwrap(),
+        vec![]
+    );
+    let parts = vec![Part::text("Shared next turn")];
+    let request = SaveDraft {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        expected_revision: 0,
+        parts: parts.clone(),
+    };
+    let saved: Draft = reqwest::Client::new()
+        .post(format!("{}/v1/drafts/session-plan", server.endpoint))
+        .bearer_auth(TOKEN)
+        .json(&request)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<Draft>>(&event.into_text().unwrap()).unwrap(),
+        vec![saved.clone()]
+    );
+    assert_eq!(snapshot(&server).await.revision, 0);
+    socket.close(None).await.unwrap();
+    let (mut reopened, _) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(2), reopened.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Vec<Draft>>(&event.into_text().unwrap()).unwrap(),
+        vec![saved]
+    );
+    reopened.close(None).await.unwrap();
 }

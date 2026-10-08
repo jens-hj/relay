@@ -34,7 +34,7 @@ impl Config {
             .map_err(|_| "RELAY_TOKEN is not a valid header value")?;
         Ok(Self { endpoint, token })
     }
-    fn url(&self, path: &str) -> reqwest::Url {
+    pub(crate) fn url(&self, path: &str) -> reqwest::Url {
         self.endpoint
             .join(path)
             .expect("constant relative API path")
@@ -207,7 +207,15 @@ async fn write(
     events: mpsc::UnboundedSender<Event>,
 ) {
     while let Some(command) = commands.recv().await {
-        let (result, conflict, ambiguous) = match client.post(config.url("v1/commands")).bearer_auth(&config.token).json(&command).send().await {
+        let endpoint = if matches!(
+            command.command,
+            relay_core::Command::SubmitTurn { .. } | relay_core::Command::EditQueuedTurn { .. }
+        ) {
+            "v1/conversation/commands"
+        } else {
+            "v1/commands"
+        };
+        let (result, conflict, ambiguous) = match client.post(config.url(endpoint)).bearer_auth(&config.token).json(&command).send().await {
             Ok(response) => {
                 let status = response.status();
                 let result = decode(response).await;

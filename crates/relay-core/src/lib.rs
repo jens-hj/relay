@@ -1,7 +1,9 @@
 //! Relay's domain and versioned client/server contract. No UI or execution dependencies.
 
+mod conversation;
 mod fixture;
 mod profile;
+pub use conversation::*;
 
 pub use fixture::demo_snapshot;
 pub use profile::*;
@@ -133,6 +135,8 @@ pub struct Message {
     pub author: String,
     pub kind: String,
     pub body: String,
+    #[serde(default)]
+    pub parts: Vec<Part>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,6 +160,8 @@ pub struct Snapshot {
     pub sessions: Vec<Session>,
     pub messages: Vec<Message>,
     pub comments: Vec<Comment>,
+    #[serde(default)]
+    pub submissions: Vec<Submission>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -169,6 +175,29 @@ pub struct CommandEnvelope {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    SubmitTurn {
+        session_id: String,
+        draft_revision: u64,
+        parts: Vec<Part>,
+        approve_implementation: bool,
+    },
+    PromoteTurn {
+        submission_id: String,
+        active_run_id: Option<String>,
+    },
+    CancelTurn {
+        submission_id: String,
+    },
+    EditQueuedTurn {
+        submission_id: String,
+        draft_revision: u64,
+        parts: Vec<Part>,
+        #[serde(default)]
+        approve_implementation: bool,
+    },
+    ResumeQueue {
+        session_id: String,
+    },
     SyncProject {
         project_id: String,
     },
@@ -255,6 +284,11 @@ impl Snapshot {
             Command::SyncProject { .. }
             | Command::StartWorker { .. }
             | Command::SendWorker { .. }
+            | Command::SubmitTurn { .. }
+            | Command::PromoteTurn { .. }
+            | Command::CancelTurn { .. }
+            | Command::EditQueuedTurn { .. }
+            | Command::ResumeQueue { .. }
             | Command::StopWorker { .. } => {
                 return Err("This command requires the server runtime".into());
             }
