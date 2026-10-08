@@ -4244,7 +4244,7 @@ fn profile_fields_remain_reachable_at_double_scale_without_rebuilding_the_draft(
     for label in [
         "Increase worker limit",
         "Inherit max_workers",
-        "Whole project",
+        "Scope: Whole project",
     ] {
         mounted.focus(label);
         let rect = mounted.rect(label);

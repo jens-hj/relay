@@ -541,6 +541,7 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
                 FieldHead model:(model) title:"Scope" field:"scope" {
                     button #relay.action
                         @click:{ model.modify_profile("scope", |p| p.scope = DirectorScope::Project); }
+                        label:"Scope: Whole project"
                         pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px) role:checkbox
                         fill:{color(if whole_project.get() {ink.inverse} else {surface.panel})}
                         hover {
