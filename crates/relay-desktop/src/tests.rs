@@ -3823,6 +3823,18 @@ fn provenance_names_connections_and_omits_unrecorded_values() {
             .all(|(key, _)| *key != "Branch" && *key != "Base")
     );
     assert!(worker.changes.is_none());
+    // Groups keep their identity when recorded values change, so the details
+    // pane updates them in place.
+    let mut moved = session.clone();
+    moved.workspaces[0].path = "/srv/project/other".into();
+    moved.worker.as_mut().unwrap().worktree = Some("/srv/worktrees/next".into());
+    let keys = |groups: &[crate::conversation::ProvenanceGroup]| {
+        groups.iter().map(|g| g.key.clone()).collect::<Vec<_>>()
+    };
+    let changed = crate::conversation::provenance(&snapshot, &moved, false);
+    assert_eq!(keys(&groups), ["workspace-project-1", "worker"]);
+    assert_eq!(keys(&changed), keys(&groups));
+    assert_ne!(changed, groups);
 }
 
 #[test]

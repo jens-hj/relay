@@ -735,23 +735,28 @@ pub fn Conversation(model: Model) -> Element {
                                     "Usage unavailable for the latest turn"
                             }
                         }
-                        for (_, group) in {session.get().map(|s| provenance(&model.snapshot.get(), &s, details.get() == "changes")).unwrap_or_default().into_iter().enumerate().map(|(i, g)| (format!("{i}:{g:?}"), g)).collect::<Vec<_>>()} {
-                            let block = group.clone();
-                            let diff = group.changes.clone();
+                        for (_, group) in {session.get().map(|s| provenance(&model.snapshot.get(), &s, details.get() == "changes")).unwrap_or_default().into_iter().map(|g| (g.key.clone(), g)).collect::<Vec<_>>()} {
+                            let key = group.key.clone();
+                            let fallback = group.clone();
+                            let block = Derived::new(move || session.get().map(|s| provenance(&model.snapshot.get(), &s, details.get() == "changes")).unwrap_or_default().into_iter().find(|g| g.key == key).unwrap_or_else(|| fallback.clone()));
                             col height:min-content gap:{px(8.0)}px pad:(top:{px(10.0)}px)
                                 stroke:(width:{px(1.0)} color:rule.hair edges:top) {
-                                text font-family:sans-serif font-size:{px(13.0)}px font-weight:650
-                                    (block.title.clone())
+                                row #relay.title height:min-content font-size:{px(13.0)}px {
+                                    text {block.get().title}
+                                }
                                 grid
                                     cols:{GridTracks::auto_fit(GridTrack::minmax(px(160.0).into(), GridTrack::fr(1.0)))}
                                     height:min-content gap:{px(10.0)}px {
-                                    for (_, row) in {block.rows.clone().into_iter().map(|r| (r.0.to_string(), r)).collect::<Vec<_>>()} {
-                                        Readout key:(row.0.to_string())
-                                            value:({let value = row.1.clone(); Derived::new(move || value.clone())})
+                                    for (_, field) in {block.get().rows.into_iter().map(|r| (r.0, r.0)).collect::<Vec<_>>()} {
+                                        let name: &'static str = field;
+                                        Readout key:(name.to_string())
+                                            value:(Derived::new(move || block.get().rows.into_iter().find(|r| r.0 == name).map(|r| r.1).unwrap_or_default()))
                                     }
                                 }
-                                if block.changes.is_some() {
-                                    text font-size:{px(12.0)}px (diff.clone().unwrap_or_default())
+                                if block.get().changes.is_some() {
+                                    row height:min-content font-size:{px(12.0)}px {
+                                        text {block.get().changes.unwrap_or_default()}
+                                    }
                                 }
                             }
                         }
@@ -1900,6 +1905,8 @@ fn BufferText(
 /// only the values that are actually recorded.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ProvenanceGroup {
+    /// Stable identity: the workspace connection, or "worker" for the run.
+    pub key: String,
     pub title: String,
     pub rows: Vec<(&'static str, String)>,
     pub changes: Option<String>,
@@ -1962,6 +1969,7 @@ pub(crate) fn provenance(
                 rows.push(("Base", commit.chars().take(12).collect()));
             }
             ProvenanceGroup {
+                key: w.connection_id.clone(),
                 title,
                 rows,
                 changes: changes.then(|| change_text(w.changes.as_ref())),
@@ -1988,6 +1996,7 @@ pub(crate) fn provenance(
             }
         }
         groups.push(ProvenanceGroup {
+            key: "worker".into(),
             title: "Worker run".into(),
             rows,
             changes: (changes && session.workspaces.is_empty())
