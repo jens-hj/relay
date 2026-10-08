@@ -847,24 +847,22 @@ fn HarnessCard(model: Model, harness: Harness) -> Element {
         Harness::Codex => "Codex",
         Harness::ClaudeCode => "Claude Code",
     };
+    let width = State::new(0.0f32);
     view! {
-        col height:min-content max-width:{px(720.0)}px gap:{px(8.0)}px {
-            col height:min-content gap:{px(12.0)}px {
-                text font-family:sans-serif font-size:{px(14.0)}px font-weight:650
-                    {format!("{} {name}", if harness==Harness::Codex {"◇"} else {"✳"})}
-                text font-size:{px(12.0)}px
-                    font-color:{mosaic::core::theme::color(if !model.connected.get() || !model.harness_error.get().is_empty() {muted} else {match status.get().map(|s|s.state).as_deref(){Some("ready")=>success,Some("signed_out"|"incompatible")=>warning,Some("unknown"|"error"|"failed")=>danger,_=>muted}})}
-                    {if !model.connected.get() {"○ Disconnected".to_owned()} else if !model.harness_error.get().is_empty() {format!("○ Refresh failed · last check: {}",status.get().map(|s|match s.state.as_str(){"ready"=>"Ready","signed_out"=>"Sign in","missing"=>"Missing","incompatible"=>"Incompatible",_=>"Check failed"}.to_owned()).unwrap_or_else(||"Unavailable".into()))} else {status.get().map(|s|match s.state.as_str(){"ready"=>"✓ Ready","signed_out"=>"! Sign in","missing"=>"○ Missing","incompatible"=>"! Incompatible","unknown"|"error"|"failed"=>"× Check failed",_=>"○ Check unavailable"}.to_owned()).unwrap_or_else(||"○ Checking".to_owned())}}
-                button #action
-                    @click:{if let Some(sender)=model.harness_refresh.get_untracked(){let _=sender.send(());}}
-                    disabled:{!model.connected.get()} label:{format!("Refresh {name} status")}
-                    "Refresh"
-                button #action
-                    @click:{
-                    if let Some(status) = status.get_untracked() {executable.set(status.executable);}
-                    advanced.set(!advanced.get_untracked());
+        col height:min-content max-width:{px(720.0)}px gap:{px(8.0)}px
+            @layout:{move |rect:Rect|width.set(rect.size.width)} {
+            if width.get() < px(520.0) {
+                col height:min-content gap:{px(6.0)}px {
+                    HarnessSummary model:(model) harness:(harness)
+                    HarnessActions model:(model) harness:(harness) advanced:(advanced)
+                        executable:(executable)
                 }
-                    label:{format!("{name} executable and status details")} "Details"
+            } else {
+                row height:min-content align:center gap:{px(12.0)}px {
+                    HarnessSummary model:(model) harness:(harness)
+                    HarnessActions model:(model) harness:(harness) advanced:(advanced)
+                        executable:(executable)
+                }
             }
             if advanced.get() {
                 col height:min-content gap:{px(8.0)}px {
@@ -881,6 +879,61 @@ fn HarnessCard(model: Model, harness: Harness) -> Element {
                         label:{format!("Save {name} executable and check status")} "Save and check"
                 }
             }
+        }
+    }
+}
+
+#[component]
+fn HarnessSummary(model: Model, harness: Harness) -> Element {
+    let status = Derived::new(move || {
+        model
+            .harnesses
+            .get()
+            .into_iter()
+            .find(|s| s.harness == harness)
+    });
+    let state = Derived::new(move || {
+        if !model.connected.get() || !model.harness_error.get().is_empty() {
+            String::new()
+        } else {
+            status.get().map(|s| s.state).unwrap_or_default()
+        }
+    });
+    view! {
+        row height:min-content width:1fr align:center gap:{px(8.0)}px {
+            icon size:{px(20.0)}px shrink:0
+                {if harness==Harness::Codex{harness_codex}else{harness_claude}}
+            text font-family:sans-serif font-size:{px(14.0)}px font-weight:650
+                {if harness==Harness::Codex{"Codex"}else{"Claude Code"}}
+            icon size:{px(14.0)}px shrink:0
+                font-color:{mosaic::core::theme::color(match state.get().as_str(){"ready"=>success,"signed_out"|"incompatible"=>warning,"unknown"|"error"|"failed"=>danger,_=>muted})}
+                {match state.get().as_str(){"ready"=>harness_ready,"signed_out"|"incompatible"=>harness_warning,"unknown"|"error"|"failed"=>harness_failed,_=>harness_neutral}}
+            text font-size:{px(12.0)}px
+                font-color:{mosaic::core::theme::color(match state.get().as_str(){"ready"=>success,"signed_out"|"incompatible"=>warning,"unknown"|"error"|"failed"=>danger,_=>muted})}
+                {if !model.connected.get(){"Disconnected".into()}else if !model.harness_error.get().is_empty(){format!("Refresh failed · last check: {}",status.get().map(|s|match s.state.as_str(){"ready"=>"Ready","signed_out"=>"Sign in","missing"=>"Missing","incompatible"=>"Incompatible",_=>"Check failed"}).unwrap_or("Unavailable"))}else{match state.get().as_str(){"ready"=>"Ready","signed_out"=>"Sign in","missing"=>"Missing","incompatible"=>"Incompatible","unknown"|"error"|"failed"=>"Check failed",""=>"Checking",_=>"Check unavailable"}.into()}}
+        }
+    }
+}
+#[component]
+fn HarnessActions(
+    model: Model,
+    harness: Harness,
+    advanced: State<bool>,
+    executable: State<String>,
+) -> Element {
+    let name = if harness == Harness::Codex {
+        "Codex"
+    } else {
+        "Claude Code"
+    };
+    view! {
+        row height:min-content width:min-content gap:{px(6.0)}px {
+            button #action
+                @click:{if let Some(sender)=model.harness_refresh.get_untracked(){let _=sender.send(());}}
+                disabled:{!model.connected.get()} label:{format!("Refresh {name} status")} "Refresh"
+            button #action
+                @click:{if let Some(status)=model.harnesses.get_untracked().iter().find(|s|s.harness==harness){executable.set(status.executable.clone());}advanced.set(!advanced.get_untracked());}
+                label:{format!("{name} executable and status details")} "Details"
         }
     }
 }

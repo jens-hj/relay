@@ -533,6 +533,9 @@ impl Model {
                 ids.insert(session.director_id.clone());
             });
             self.worker_director.set(session.director_id.clone());
+            if let Some(issue_id) = &session.issue_id {
+                self.select_task_board(issue_id);
+            }
             self.issue.set(session.issue_id.clone());
         }
         self.worker_approval.set(false);
@@ -586,6 +589,9 @@ impl Model {
             .find(|s| s.id == self.session.get_untracked())
         {
             self.project.set(session.project_id.clone());
+            if let Some(issue_id) = &session.issue_id {
+                self.select_task_board(issue_id);
+            }
             self.issue.set(session.issue_id.clone());
             self.worker_director.set(session.director_id.clone());
             self.worker_approval.set(false);
@@ -646,6 +652,7 @@ impl Model {
             .iter()
             .filter(|s| {
                 s.director_id == director_id
+                    && s.role != SessionRole::Director
                     && s.worker.as_ref().is_some_and(|w| {
                         matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running)
                     })
@@ -681,7 +688,14 @@ impl Model {
             }
             _ => {}
         }
-        if active >= usize::from(profile.max_workers) {
+        let director_continuation = continuation
+            && self
+                .snapshot
+                .get()
+                .sessions
+                .iter()
+                .any(|s| s.id == self.session.get() && s.role == SessionRole::Director);
+        if !director_continuation && active >= usize::from(profile.max_workers) {
             return Err("No worker slots available".into());
         }
         if self.worker_prompt.get().trim().is_empty() {
@@ -739,6 +753,36 @@ impl Model {
                 result: Some(Err(
                     "Cannot read destination statuses. Reconnect and try again.".into(),
                 )),
+            });
+        }
+    }
+    fn select_task_board(&self, issue_id: &str) {
+        let snapshot = self.snapshot.get_untracked();
+        let candidates: Vec<_> = snapshot
+            .boards
+            .iter()
+            .filter(|b| {
+                b.project_id == self.project.get_untracked()
+                    && snapshot.board_active(&b.id)
+                    && snapshot.memberships.iter().any(|m| {
+                        m.board_id == b.id
+                            && m.issue_id == issue_id
+                            && m.column_ids
+                                .iter()
+                                .any(|id| b.columns.iter().any(|c| &c.id == id))
+                    })
+            })
+            .collect();
+        if self
+            .selected_board()
+            .is_some_and(|b| candidates.iter().any(|c| c.id == b.id))
+        {
+            return;
+        }
+        if let Some(board) = candidates.first() {
+            self.preferences.update(|p| {
+                p.selected_boards
+                    .insert(board.project_id.clone(), board.id.clone());
             });
         }
     }

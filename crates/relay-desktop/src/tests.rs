@@ -2954,3 +2954,138 @@ fn imported_task_recovery_marker_is_hidden_and_preserved_when_editing() {
     );
     assert_eq!(crate::projects::preserve_task_markers(&body, &body), body);
 }
+
+#[test]
+fn director_execution_does_not_consume_worker_capacity_or_block_director_continuation() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.worker_prompt.set("Continue planning".into());
+    let mut snapshot = live_snapshot();
+    snapshot.projects[0].defaults.max_workers = 1;
+    snapshot.projects[0]
+        .defaults
+        .permissions
+        .insert(Task::Implement, Permission::Allow);
+    let director_id = snapshot.directors[0].id.clone();
+    let session = &mut snapshot.sessions[0];
+    session.fixture = false;
+    session.director_id = director_id.clone();
+    session.issue_id = Some("issue-2".into());
+    session.role = SessionRole::Director;
+    session.worker = Some(WorkerRun {
+        harness: Harness::Codex,
+        execution: None,
+        status: WorkerStatus::Running,
+        thread_id: Some("thread".into()),
+        worktree: Some("/server/work".into()),
+        branch: None,
+        base_commit: None,
+        error: None,
+        usage: None,
+        changes: None,
+    });
+    let director_session = session.id.clone();
+    mounted.model.snapshot.set(snapshot.clone());
+    mounted.model.worker_director.set(director_id);
+    mounted.model.issue.set(Some("issue-2".into()));
+    assert_eq!(mounted.model.worker_profile(false).unwrap().1, 0);
+    assert!(mounted.model.worker_gate(false).is_ok());
+    let mut worker = snapshot.sessions[0].clone();
+    worker.id = "active-worker".into();
+    worker.role = SessionRole::Worker;
+    snapshot.sessions.push(worker);
+    snapshot.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed;
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_session(director_session);
+    assert_eq!(mounted.model.worker_profile(true).unwrap().1, 1);
+    assert!(mounted.model.worker_gate(true).is_ok());
+    assert!(
+        mounted
+            .model
+            .worker_gate(false)
+            .unwrap_err()
+            .contains("slots")
+    );
+}
+
+#[test]
+fn session_and_issue_navigation_choose_matching_active_boards_and_keep_current_matches() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    let original = snapshot.boards[0].clone();
+    let mut second = original.clone();
+    second.id = "second-board".into();
+    second.name = "Second board".into();
+    snapshot.boards.push(second.clone());
+    snapshot.memberships.retain(|m| m.issue_id != "issue-2");
+    snapshot.memberships.push(BoardMembership {
+        board_id: second.id.clone(),
+        issue_id: "issue-2".into(),
+        column_ids: vec![second.columns[0].id.clone()],
+        remote_item_id: None,
+    });
+    snapshot.sessions[0].issue_id = Some("issue-2".into());
+    let session_id = snapshot.sessions[0].id.clone();
+    mounted.model.snapshot.set(snapshot.clone());
+    mounted.model.preferences.update(|p| {
+        p.selected_boards.insert("demo".into(), original.id.clone());
+    });
+    mounted.model.open_session(session_id);
+    assert_eq!(mounted.model.selected_board().unwrap().id, second.id);
+    mounted.model.preferences.update(|p| {
+        p.selected_boards.insert("demo".into(), original.id.clone());
+    });
+    mounted.model.open_worker_issue();
+    assert_eq!(mounted.model.selected_board().unwrap().id, second.id);
+    snapshot.memberships.push(BoardMembership {
+        board_id: original.id.clone(),
+        issue_id: "issue-2".into(),
+        column_ids: vec![original.columns[0].id.clone()],
+        remote_item_id: None,
+    });
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.preferences.update(|p| {
+        p.selected_boards.insert("demo".into(), original.id.clone());
+    });
+    mounted.model.open_worker_issue();
+    assert_eq!(mounted.model.selected_board().unwrap().id, original.id);
+}
+
+#[test]
+fn harness_cards_keep_summary_and_actions_compact_and_responsive() {
+    for width in [1380.0, 820.0] {
+        let mounted = mount(false, width);
+        mounted.model.receive(NetworkState {
+            snapshot: live_snapshot(),
+            connected: true,
+            harnesses: vec![HarnessStatus {
+                harness: Harness::ClaudeCode,
+                executable: "/server/claude".into(),
+                version: Some("2.test".into()),
+                state: "ready".into(),
+                detail: "Lengthy private diagnostic".into(),
+                checked_at: 1,
+            }],
+            ..Default::default()
+        });
+        mounted.model.page.set(Page::Settings);
+        if width < 1000.0 {
+            mounted.model.preferences.update(|p| p.scale = 2.0);
+            mounted
+                ._scope
+                .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+        }
+        mounted.settle();
+        let refresh = mounted.rect("Refresh Claude Code status");
+        let details = mounted.rect("Claude Code executable and status details");
+        assert!((refresh.origin.y - details.origin.y).abs() < 1.0);
+        assert!(details.origin.x + details.size.width <= mounted.size.width);
+        assert!(
+            !mounted
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .iter()
+                .any(|n| n.label.as_deref() == Some("Lengthy private diagnostic"))
+        );
+    }
+}
