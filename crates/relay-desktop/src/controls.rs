@@ -9,6 +9,7 @@ impl ButtonStyle {
     pub fn default() -> mosaic::prelude::ButtonStyle {
         mosaic::prelude::ButtonStyle {
             label: TextStyle::inherited(),
+            radius: 0.0,
             ..Default::default()
         }
     }

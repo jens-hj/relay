@@ -8,6 +8,7 @@ mosaic::scheme! {
         run-fill:Color, run-text:Color, on-run:Color,
         attention-fill:Color, attention-text:Color, on-attention:Color,
         tint-lilac:Color, tint-sky:Color, tint-mint:Color, tint-sand:Color, scrim:Color,
+        meter-input:Color, meter-cached:Color, meter-output:Color,
         success:Color, warning:Color, danger:Color, ui-scale:Scalar = 1,
         tree-chevron-right:Svg, tree-chevron-down:Svg, board-icon:Svg,
         harness-codex:Svg, harness-claude:Svg, harness-ready:Svg, harness-warning:Svg, harness-failed:Svg, harness-neutral:Svg,
@@ -76,6 +77,9 @@ pub struct Colors {
     pub attention_text: Color,
     pub on_attention: Color,
     pub tints: [Color; 4],
+    /// Usage meter fills: uncached input (blue), cached input (lavender),
+    /// output (peach).
+    pub meter: [Color; 3],
     pub scrim: Color,
     pub success: Color,
     pub warning: Color,
@@ -132,6 +136,7 @@ fn soft_light(n: Neutrals) -> Colors {
         attention_text: hex(0x8E3F22),
         on_attention: hex(0x3A2A24),
         tints: [hex(0xD9D3EE), hex(0xCADDED), hex(0xD2E6D8), hex(0xEFE3B8)],
+        meter: [hex(0x8FA9CF), hex(0xB3A7DE), hex(0xF2B8A0)],
         scrim: Color::from_srgb8(0x1C, 0x1E, 0x22, 0x66),
         success: hex(0x2F6347),
         warning: hex(0x6E4E08),
@@ -162,6 +167,7 @@ fn soft_dark(n: Neutrals) -> Colors {
         attention_text: hex(0xEFB39A),
         on_attention: hex(0x2A1D18),
         tints: [hex(0x45475B), hex(0x3F4A5A), hex(0x3F4D4F), hex(0x4F4F47)],
+        meter: [hex(0x8DA3BD), hex(0xB4ABD6), hex(0xE8A78C)],
         scrim: Color::from_srgb8(0x08, 0x09, 0x0B, 0x8C),
         success: hex(0xA7D3B9),
         warning: hex(0xE6C37A),
@@ -243,6 +249,7 @@ pub fn colors(palette: Palette) -> Colors {
             attention_text: hex(0xA33600),
             on_attention: hex(0x15181D),
             tints: [hex(0xC9CED4), hex(0xB8BFC6), hex(0xD7DBDF), hex(0xA9B0B7)],
+            meter: [hex(0x4A6FB0), hex(0x8A7CC2), hex(0xFF4E00)],
             scrim: Color::from_srgb8(0x15, 0x18, 0x1D, 0x66),
             success: hex(0x1F5A3C),
             warning: hex(0x664500),
@@ -269,6 +276,7 @@ pub fn colors(palette: Palette) -> Colors {
             attention_text: hex(0xFF6A2A),
             on_attention: hex(0x0D0E10),
             tints: [hex(0x3A3F45), hex(0x4A5057), hex(0x2F3338), hex(0x5A6168)],
+            meter: [hex(0x7FA0FF), hex(0xB8A8FF), hex(0xFF5A14)],
             scrim: Color::from_srgb8(0x00, 0x00, 0x00, 0x99),
             success: hex(0x8FD3A8),
             warning: hex(0xF0C670),
@@ -294,6 +302,7 @@ pub fn configured_palette(
 ) -> RelayTheme {
     let c = colors(Palette::select(light, alternate, high_contrast));
     let [lilac, sky, mint, sand] = c.tints;
+    let [input_fill, cached_fill, output_fill] = c.meter;
     mosaic::theme! { RelayTheme {
         base:(c.base), sidebar:(c.sidebar), surface:(c.surface), raised:(c.raised), selected-fill:(c.selected),
         ink:(c.ink), muted:(c.muted), edge:(c.edge), rule:(c.line), accent:(c.accent),
@@ -301,6 +310,7 @@ pub fn configured_palette(
         run-fill:(c.run), run-text:(c.run_text), on-run:(c.on_run),
         attention-fill:(c.attention), attention-text:(c.attention_text), on-attention:(c.on_attention),
         tint-lilac:lilac, tint-sky:sky, tint-mint:mint, tint-sand:sand,
+        meter-input:input_fill, meter-cached:cached_fill, meter-output:output_fill,
         scrim:(c.scrim), success:(c.success), warning:(c.warning), danger:(c.danger), ui-scale:scale,
         tree-chevron-right:"assets/icons/chevron-right.svg", tree-chevron-down:"assets/icons/chevron-down.svg",
         board-icon:"assets/icons/board.svg", director-icon:"assets/icons/director.svg",

@@ -283,28 +283,28 @@ pub fn BoardActions(model: Model) -> Element {
     let managing = State::new(false);
     view! {
         col height:min-content gap:{px(8.0)}px {
-            for (_, board) in {model.snapshot.get().boards.into_iter().filter(|b|b.project_id==model.project.get() && model.snapshot.get().board_active(&b.id)).map(|b|(b.id.clone(),b)).collect::<Vec<_>>()} {
-                let id = State::new(board.id.clone());
-                let board_name = State::new(board.name.clone());
-                button #action
-                    @click:{model.preferences.update(|p| {p.selected_boards.insert(model.project.get_untracked(),id.get_untracked());});model.issue.set(None);}
-                    label:{format!("Select board {}",board_name.get())}
-                    fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {inverse} else {surface}
-                    font-color:{color(if model.selected_board().is_some_and(|b|b.id==id.get()) {on_inverse} else {ink})}
-                    font-weight:{if model.selected_board().is_some_and(|b|b.id==id.get()) {700} else {400}}
-                    {board_name.get()}
+            if model.snapshot.get().boards.iter().filter(|b| b.project_id == model.project.get() && model.snapshot.get().board_active(&b.id)).count() > 1 {
+                row height:min-content gap:{px(6.0)}px label:"Boards" {
+                    for (_, board) in {model.snapshot.get().boards.into_iter().filter(|b|b.project_id==model.project.get() && model.snapshot.get().board_active(&b.id)).map(|b|(b.id.clone(),b)).collect::<Vec<_>>()} {
+                        let id = State::new(board.id.clone());
+                        let board_name = State::new(board.name.clone());
+                        button #action
+                            @click:{model.preferences.update(|p| {p.selected_boards.insert(model.project.get_untracked(),id.get_untracked());});model.issue.set(None);}
+                            label:{format!("Select board {}",board_name.get())}
+                            fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {inverse} else {surface}
+                            font-color:{color(if model.selected_board().is_some_and(|b|b.id==id.get()) {on_inverse} else {ink})}
+                            font-weight:{if model.selected_board().is_some_and(|b|b.id==id.get()) {700} else {400}}
+                            {board_name.get()}
+                    }
+                }
             }
             if model.selected_board().is_some() {
-                grid
-                    cols:{GridTracks::auto_fit(GridTrack::minmax(px(120.0).into(),GridTrack::fr(1.0)))}
-                    height:min-content gap:{px(8.0)}px {
-                    button #action @click:{creating.set(!creating.get_untracked());} width:fill
-                        "New task"
+                row height:min-content gap:{px(8.0)}px label:"Board actions" {
+                    button #action @click:{creating.set(!creating.get_untracked());} "New task"
                     if model.selected_board().is_some_and(|b|b.source==BoardSource::Local) {
-                        button #action @click:{managing.set(!managing.get_untracked());} width:fill
+                        button #action @click:{managing.set(!managing.get_untracked());}
                             "Manage columns"
-                        button #action @click:{model.page.set(Page::Publish);} width:fill
-                            "Publish board"
+                        button #action @click:{model.page.set(Page::Publish);} "Publish board"
                     }
                 }
                 if creating.get() {
@@ -329,9 +329,13 @@ pub fn BoardActions(model: Model) -> Element {
                         disabled:{model.busy.get() || !model.connected.get() || title.get().trim().is_empty() || (model.selected_board().is_some_and(|b|b.source!=BoardSource::Local) && repository.get().is_none())}
                         "Create task"
                 }
-                Columns model:(model) open:(managing)
+                if managing.get() {
+                    Columns model:(model) open:(managing)
+                }
             }
-            Operations model:(model)
+            if model.snapshot.get().operations.iter().any(|o| o.project_id == model.project.get() && o.state != OperationState::Completed) {
+                Operations model:(model)
+            }
         }
     }
 }

@@ -294,36 +294,42 @@ pub fn grouped(value: u64) -> String {
 }
 
 /// Measured usage of the latest reported turn: raw counts plus a meter of
-/// uncached input, cached input and output.
+/// uncached input, cached input and output. Bound to the session's current
+/// usage, so a new report for the same session updates it in place.
 #[component]
-pub fn UsageReadout(usage: relay_core::TokenUsage) -> Element {
-    let split = UsageSplit::new(&usage);
-    let input = State::new(grouped(usage.input_tokens));
-    let cached = State::new(grouped(usage.cached_input_tokens));
-    let output = State::new(grouped(usage.output_tokens));
-    let fractions = split.fractions();
-    let reported = fractions.is_some();
-    let [uncached, cached_part, output_part] = fractions.unwrap_or([0.0; 3]);
+pub fn UsageReadout(usage: Derived<Option<relay_core::TokenUsage>>) -> Element {
+    let split = Derived::new(move || usage.get().map(|u| UsageSplit::new(&u)));
+    let fractions = Derived::new(move || split.get().and_then(|s| s.fractions()));
+    let raw = move |pick: fn(&relay_core::TokenUsage) -> u64| {
+        Derived::new(move || {
+            usage
+                .get()
+                .map(|u| grouped(pick(&u)))
+                .unwrap_or_else(|| "—".into())
+        })
+    };
+    let input = raw(|u| u.input_tokens);
+    let cached = raw(|u| u.cached_input_tokens);
+    let output = raw(|u| u.output_tokens);
+    let share = move |i: usize| fractions.get().map(|f| f[i]).unwrap_or(0.0);
     view! {
         col height:min-content gap:{px(8.0)}px label:"Latest turn usage" {
             text font-size:{px(11.0)}px font-color:muted text-transform:uppercase
                 letter-spacing:{px(0.6)}px "Latest reported turn · measured"
             grid cols:(1fr 1fr 1fr) height:min-content gap:{px(12.0)}px {
-                Readout key:("Input · includes cached".to_string())
-                    value:(Derived::new(move || input.get()))
-                Readout key:("Cached · subset of input".to_string())
-                    value:(Derived::new(move || cached.get()))
-                Readout key:("Output".to_string()) value:(Derived::new(move || output.get()))
+                Readout key:("Input · includes cached".to_string()) value:(input)
+                Readout key:("Cached · subset of input".to_string()) value:(cached)
+                Readout key:("Output".to_string()) value:(output)
             }
-            if reported {
-                row height:{px(12.0)}px stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
-                    label:"Usage meter" {
-                    el width:{uncached}fr height:fill fill:rule {}
-                    el width:{cached_part}fr height:fill fill:accent {}
-                    el width:{output_part}fr height:fill fill:ink {}
+            if fractions.get().is_some() {
+                row height:{px(12.0)}px gap:{px(1.0)}px fill:surface
+                    stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) label:"Usage meter" {
+                    el width:{share(0)}fr height:fill fill:meter-input {}
+                    el width:{share(1)}fr height:fill fill:meter-cached {}
+                    el width:{share(2)}fr height:fill fill:meter-output {}
                 }
                 row height:min-content gap:{px(12.0)}px {
-                    for (name, tint) in [("Uncached input", rule), ("Cached input", accent), ("Output", ink)] {
+                    for (name, tint) in [("Uncached input", meter_input), ("Cached input", meter_cached), ("Output", meter_output)] {
                         row width:max-content height:min-content align:center gap:{px(5.0)}px {
                             el width:{px(9.0)}px height:{px(9.0)}px fill:{color(tint)}
                                 stroke:(width:{px(1.0)} color:rule offset:{px(-0.5)}) {}
@@ -335,7 +341,7 @@ pub fn UsageReadout(usage: relay_core::TokenUsage) -> Element {
                 text font-size:{px(12.0)}px font-color:muted
                     "No tokens reported for the latest turn"
             }
-            if split.clamped {
+            if split.get().is_some_and(|s| s.clamped) {
                 text font-size:{px(12.0)}px font-color:warning
                     "Reported cached tokens exceed input; meter clamped"
             }

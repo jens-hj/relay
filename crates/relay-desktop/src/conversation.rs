@@ -3,8 +3,8 @@ use crate::{
     buffer,
     controls::{ButtonStyle, button},
     labels::{
-        RunState, SlidingSegments, SlidingSegmentsProps, StatusGlyph, StatusGlyphProps,
-        UsageReadout, UsageReadoutProps,
+        Readout, ReadoutProps, RunState, SlidingSegments, SlidingSegmentsProps, StatusGlyph,
+        StatusGlyphProps, UsageReadout, UsageReadoutProps,
     },
     model::{EditTarget, Model},
     theme::*,
@@ -561,6 +561,8 @@ pub fn Conversation(model: Model) -> Element {
             .into_iter()
             .find(|s| s.id == model.session.get())
     });
+    let session_usage =
+        Derived::new(move || session.get().and_then(|s| s.worker).and_then(|w| w.usage));
     let header_state = Derived::new(move || {
         session
             .get()
@@ -720,24 +722,42 @@ pub fn Conversation(model: Model) -> Element {
             }
             if !details.get().is_empty() {
                 scroll {
-                    col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
-                        selectable label:"Session details" {
+                    col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(10.0)}px)
+                        gap:{px(12.0)}px selectable label:"Session details" {
                         if details.get() == "usage" {
-                            for (_, usage) in {session.get().and_then(|s| s.worker).and_then(|w| w.usage).map(|u| (format!("{}-{}-{}", u.input_tokens, u.cached_input_tokens, u.output_tokens), u)).into_iter().collect::<Vec<_>>()} {
-                                col height:min-content pad:(bottom:{px(12.0)}px) {
-                                    UsageReadout usage:(usage.clone())
+                            if session_usage.get().is_some() {
+                                UsageReadout usage:(session_usage)
+                            } else {
+                                text font-size:{px(12.0)}px font-color:muted
+                                    "Usage unavailable for the latest turn"
+                            }
+                        }
+                        for (_, group) in {session.get().map(|s| provenance(&model.snapshot.get(), &s, details.get() == "changes")).unwrap_or_default().into_iter().enumerate().map(|(i, g)| (format!("{i}:{g:?}"), g)).collect::<Vec<_>>()} {
+                            let block = group.clone();
+                            let diff = group.changes.clone();
+                            col height:min-content gap:{px(8.0)}px pad:(top:{px(10.0)}px)
+                                stroke:(width:{px(1.0)} color:edge edges:top) {
+                                text font-family:sans-serif font-size:{px(13.0)}px font-weight:650
+                                    (block.title.clone())
+                                grid
+                                    cols:{GridTracks::auto_fit(GridTrack::minmax(px(160.0).into(), GridTrack::fr(1.0)))}
+                                    height:min-content gap:{px(10.0)}px {
+                                    for (_, row) in {block.rows.clone().into_iter().map(|r| (r.0.to_string(), r)).collect::<Vec<_>>()} {
+                                        Readout key:(row.0.to_string())
+                                            value:({let value = row.1.clone(); Derived::new(move || value.clone())})
+                                    }
+                                }
+                                if block.changes.is_some() {
+                                    text font-size:{px(12.0)}px (diff.clone().unwrap_or_default())
                                 }
                             }
                         }
-                        text font-size:{px(12.0)}px
-                            {session.get().map(|s|workspace_review(&s,details.get()=="changes")).unwrap_or_default()}
-                        text font-size:{px(12.0)}px
-                            {
-                            session.get().and_then(|s|s.worker).map(|w| if details.get()=="changes" { w.changes.map(|c|format!("{}\n{}{}",c.files.join("\n"),c.diff,if c.truncated {"\nReview truncated"}else{""})).unwrap_or_else(||"Changes unavailable".into()) } else {format!("Branch: {}\nBase: {}\nWorktree: {}\nThread: {}\n{}",w.branch.unwrap_or_default(),w.base_commit.unwrap_or_default(),w.worktree.unwrap_or_default(),w.thread_id.unwrap_or_default(),if w.usage.is_some() {""} else {"Usage unavailable for the latest turn"})}).unwrap_or_else(||"No execution metadata".into())
+                        if session.get().is_some_and(|s| s.workspaces.is_empty() && s.worker.is_none()) {
+                            text font-size:{px(12.0)}px font-color:muted "No execution metadata"
                         }
                     }
                 } as review
-                { review.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(px(260.0)).shrink(0.0)); }
+                { review.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(Dimension::Auto).max_height(px(280.0)).shrink(0.0)); }
             }
             if model.searching.get() {
                 row height:min-content pad:(horizontal:{px(24.0)}px vertical:0px) shrink:0 {
@@ -1870,46 +1890,105 @@ fn BufferText(
     field
 }
 
-fn workspace_review(session: &Session, changes: bool) -> String {
-    session
+/// One block of session provenance: a workspace or the worker run, with
+/// only the values that are actually recorded.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ProvenanceGroup {
+    pub title: String,
+    pub rows: Vec<(&'static str, String)>,
+    pub changes: Option<String>,
+}
+
+fn change_text(changes: Option<&ChangeSet>) -> String {
+    changes
+        .map(|c| {
+            format!(
+                "{}\n\n{}{}",
+                c.files.join("\n"),
+                c.diff,
+                if c.truncated {
+                    "\n\nReview truncated"
+                } else {
+                    ""
+                }
+            )
+        })
+        .unwrap_or_else(|| "Changes unavailable".into())
+}
+
+pub(crate) fn provenance(
+    snapshot: &Snapshot,
+    session: &Session,
+    changes: bool,
+) -> Vec<ProvenanceGroup> {
+    let mut groups: Vec<ProvenanceGroup> = session
         .workspaces
         .iter()
         .map(|w| {
-            let provenance = format!(
-                "{} · {}\n{}\nBranch: {} · Base: {}",
-                w.connection_id,
-                if w.repository {
-                    "Repository"
-                } else {
-                    "Directory"
-                },
-                w.path,
-                w.branch.as_deref().unwrap_or("—"),
-                w.base_commit.as_deref().unwrap_or("—")
-            );
-            if changes {
-                format!(
-                    "{provenance}\n{}",
-                    w.changes
-                        .as_ref()
-                        .map(|c| format!(
-                            "{}\n{}{}",
-                            c.files.join("\n"),
-                            c.diff,
-                            if c.truncated {
-                                "\nReview truncated"
-                            } else {
-                                ""
-                            }
-                        ))
-                        .unwrap_or_else(|| "Changes unavailable".into())
-                )
-            } else {
-                provenance
+            let title = snapshot
+                .connections
+                .iter()
+                .find(|c| c.id == w.connection_id)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| {
+                    if w.connection_id.starts_with("workspace-") {
+                        "Project workspace".into()
+                    } else {
+                        w.connection_id.clone()
+                    }
+                });
+            let mut rows = vec![
+                (
+                    "Kind",
+                    if w.repository {
+                        "Repository"
+                    } else {
+                        "Directory"
+                    }
+                    .to_string(),
+                ),
+                ("Path", w.path.clone()),
+            ];
+            if let Some(branch) = &w.branch {
+                rows.push(("Branch", branch.clone()));
+            }
+            if let Some(commit) = &w.base_commit {
+                rows.push(("Base", commit.chars().take(12).collect()));
+            }
+            ProvenanceGroup {
+                title,
+                rows,
+                changes: changes.then(|| change_text(w.changes.as_ref())),
             }
         })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        .collect();
+    if let Some(worker) = &session.worker {
+        let mut rows = vec![(
+            "Harness",
+            match worker.harness {
+                Harness::Codex => "Codex",
+                Harness::ClaudeCode => "Claude Code",
+            }
+            .to_string(),
+        )];
+        for (key, value) in [
+            ("Thread", &worker.thread_id),
+            ("Worktree", &worker.worktree),
+            ("Branch", &worker.branch),
+            ("Base", &worker.base_commit),
+        ] {
+            if let Some(value) = value {
+                rows.push((key, value.clone()));
+            }
+        }
+        groups.push(ProvenanceGroup {
+            title: "Worker run".into(),
+            rows,
+            changes: (changes && session.workspaces.is_empty())
+                .then(|| change_text(worker.changes.as_ref())),
+        });
+    }
+    groups
 }
 
 #[cfg(test)]

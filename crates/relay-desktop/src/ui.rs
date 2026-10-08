@@ -336,21 +336,26 @@ fn Board(model: Model, narrow: Derived<bool>) -> Element {
     view! {
         col width:1fr pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) gap:{px(12.0)}px {
             scroll {
-                col height:min-content gap:{px(12.0)}px {
-                    text font-size:{px(12.0)}px font-color:{color(muted)}
-                        {
-                if let Some(board)=model.selected_board() {board_caption(&board) } else {
+                col height:min-content gap:{px(14.0)}px {
+                    row height:min-content min-height:{px(36.0)}px align:center gap:{px(12.0)}px
+                        pad:(bottom:{px(8.0)}px) stroke:(width:{px(1.0)} color:rule edges:bottom) {
+                        text width:1fr font-size:{px(12.0)}px font-color:{color(muted)}
+                            label:"Board source"
+                            {
+                if let Some(board)=model.selected_board() {board_source_caption(&board) } else {
                     model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| match &p.github {
                         Some(g) => with_board_error(format!("{} · board {} #{} · {}",g.url,g.owner,g.number,sync_label(g.last_synced_at)),g.sync_error.as_deref()),
                         None => "Fixture board".into()
                     }).unwrap_or_default()
                 }
             }
-                    BoardActions model:(model)
-                    if model.selected_board().is_some_and(|b| b.source != BoardSource::Local) || (model.selected_board().is_none() && model.snapshot.get().projects.iter().any(|p| p.id==model.project.get() && p.github.is_some()) && !model.snapshot.get().boards.iter().any(|b|b.project_id==model.project.get())) {
-                        button #action @click:{ model.sync_project(); } label:"Sync project"
-                            disabled:{ model.busy.get() || !model.connected.get() } "Sync project"
+                        if model.selected_board().is_some_and(|b| b.source != BoardSource::Local) || (model.selected_board().is_none() && model.snapshot.get().projects.iter().any(|p| p.id==model.project.get() && p.github.is_some()) && !model.snapshot.get().boards.iter().any(|b|b.project_id==model.project.get())) {
+                            button #action @click:{ model.sync_project(); } label:"Sync project"
+                                disabled:{ model.busy.get() || !model.connected.get() }
+                                "Sync project"
+                        }
                     }
+                    BoardActions model:(model)
                     if narrow.get() {
                         col height:min-content gap:{px(18.0)}px {
                             for (_, column) in { columns.get().into_iter().map(|c| (c.id.clone(), c)) } {
@@ -457,10 +462,17 @@ fn IssueCard(model: Model, issue: Issue) -> Element {
                         }
                     }
                 }
-                col height:min-content pad:(horizontal:{px(12.0)}px vertical:{px(12.0)}px) {
+                col height:min-content gap:{px(6.0)}px
+                    pad:(horizontal:{px(12.0)}px vertical:{px(12.0)}px) {
                     text font-size:{px(15.0)}px font-weight:{600}
                         font-family:{FontFamily::SansSerif} font-color:{color(ink)}
                         label:{ current.get().title } { current.get().title }
+                    if !body_preview(&current.get().body).is_empty() {
+                        col height:min-content max-height:{px(52.0)}px clip label:"Task preview" {
+                            text font-size:{px(12.0)}px font-color:{color(muted)}
+                                { body_preview(&current.get().body) }
+                        }
+                    }
                 }
                 row height:{px(28.0)}px align:center gap:{px(6.0)}px
                     pad:(horizontal:{px(10.0)}px vertical:0px)
@@ -596,6 +608,8 @@ fn Sessions(model: Model) -> Element {
 
 #[component]
 fn Profiles(model: Model) -> Element {
+    let width = State::new(0.0f32);
+    let wide = Derived::new(move || width.get() >= px(1040.0));
     let profile_kind = Derived::new(move || {
         String::from(if model.editor.get() == EditTarget::Defaults {
             "ALL"
@@ -610,36 +624,9 @@ fn Profiles(model: Model) -> Element {
             "Director profile"
         })
     });
-    let harness_index = Derived::new(move || {
-        usize::from(model.editor_profile.get().harness == Harness::ClaudeCode)
-    });
-    let choose_harness: crate::labels::Select = std::rc::Rc::new(move |slot: usize| {
-        model.modify_profile("harness", |p| {
-            p.harness = if slot == 1 {
-                Harness::ClaudeCode
-            } else {
-                Harness::Codex
-            }
-        });
-    });
-    let approval_index = Derived::new(move || {
-        let mode = model.editor_profile.get().execution.approval;
-        ApprovalMode::ALL
-            .iter()
-            .position(|m| *m == mode)
-            .unwrap_or(0)
-    });
-    let choose_approval: crate::labels::Select = std::rc::Rc::new(move |slot: usize| {
-        model.modify_profile("execution", |p| {
-            p.execution.approval = ApprovalMode::ALL[slot]
-        });
-    });
-    let capacity = Derived::new(move || match model.editor.get() {
-        EditTarget::Director(id) => crate::labels::director_capacity(&model.snapshot.get(), &id),
-        _ => (0, 0, 0),
-    });
     view! {
-        col width:1fr pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) gap:{px(14.0)}px {
+        col width:1fr pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) gap:{px(14.0)}px
+            @layout:{move |rect: Rect| width.set(rect.size.width)} {
             scroll width:max-content {
                 row height:min-content width:max-content gap:0px
                     stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) {
@@ -696,99 +683,16 @@ fn Profiles(model: Model) -> Element {
                     if model.editor.get() != EditTarget::Defaults {
                         input #input-field label:"Director name" model.editor_name
                     }
-                    ProfileField model:(model) title:"Agent harness" field:"harness"
-                    SlidingSegments name:("Agent harness".to_string())
-                        options:(vec!["Codex".to_string(), "Claude Code".to_string()])
-                        index:(harness_index) select:(choose_harness) attention:(None)
-                        cell-width:(130.0) disabled:(Derived::new(|| false))
-                    ProfileField model:(model) title:"Execution approval" field:"execution"
-                    SlidingSegments name:("Execution approval".to_string())
-                        options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
-                        index:(approval_index) select:(choose_approval) attention:(None)
-                        cell-width:(150.0) disabled:(Derived::new(|| false))
-                    text font-size:{px(12.0)}px font-color:muted
-                        "Execution mode configures the harness. Action permissions are separate workflow settings."
-                    ProfileField model:(model) title:"Scope" field:"scope"
-                    row height:min-content gap:{px(6.0)}px {
-                        button #action
-                            @click:{ model.modify_profile("scope", |p| p.scope = DirectorScope::Project); }
-                            fill:{color(if model.editor_profile.get().scope == DirectorScope::Project {inverse} else {surface})}
-                            font-color:{color(if model.editor_profile.get().scope == DirectorScope::Project {on_inverse} else {ink})}
-                            font-weight:{if model.editor_profile.get().scope == DirectorScope::Project {700} else {400}}
-                            "Whole project"
-                        for (_, issue) in { model.snapshot.get().issues.into_iter().filter(|i| i.project_id == model.project.get() && model.snapshot.get().canonical_issue_id(&i.id) == i.id).map(|i| (i.id.clone(), i)).collect::<Vec<_>>() } {
-                            let id = issue.id.clone();
-                            let issue_id = State::new(id.clone());
-                            let number = issue.reference.as_ref().map(|r|format!("#{}",r.number)).unwrap_or_else(||issue.title.clone());
-                            button #action
-                                @click:{
-                                model.modify_profile("scope", |p| {
-                                    let mut ids = match &p.scope { DirectorScope::Issues { issue_ids } => issue_ids.clone(), _ => vec![] };
-                                    if model.scope_contains(&ids, &id) { let snapshot = model.snapshot.get_untracked(); ids.retain(|x| snapshot.canonical_issue_id(x) != snapshot.canonical_issue_id(&id)); } else { ids.push(id.clone()); }
-                                    p.scope = if ids.is_empty() { DirectorScope::Project } else { DirectorScope::Issues { issue_ids: ids } };
-                                });
-                            }
-                                fill:{color(if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {inverse} else {surface})}
-                                font-color:{color(if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {on_inverse} else {ink})}
-                                font-weight:{if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {700} else {400}}
-                                { format!("{} {}", if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) { "✓" } else { "+" }, number) }
+                    // One grid for both layouts: the track template changes with the
+                    // width, the controls themselves are never rebuilt.
+                    grid height:min-content gap:{px(24.0)}px align:start
+                        cols:{if wide.get() { GridTracks::new([GridTrack::fr(1.0), px(460.0).into()]) } else { GridTracks::new([GridTrack::fr(1.0)]) }} {
+                        col height:min-content min-width:0px label:"Action matrix column" {
+                            ActionMatrix model:(model)
                         }
-                    }
-                    text font-size:{px(12.0)}px font-color:{color(muted)}
-                        {
-                        match model.editor_profile.get().scope {
-                            DirectorScope::Project => "All project issues".into(),
-                            DirectorScope::Issues { issue_ids } => issue_ids.iter()
-                                .filter_map(|id| model.snapshot.get().issue(id).ok().cloned())
-                                .map(|issue|issue.reference.as_ref().map(|r|format!("#{}",r.number)).unwrap_or_else(||issue.title.clone()))
-                                .collect::<Vec<_>>().join(", "),
+                        col height:min-content min-width:0px {
+                            ProfileControls model:(model)
                         }
-                    }
-                    ProfileField model:(model) title:"Concurrent workers" field:"max_workers"
-                    row height:min-content gap:{px(10.0)}px align:center {
-                        button #action
-                            @click:{ model.modify_profile("max_workers", |p| p.max_workers = p.max_workers.saturating_sub(1)); }
-                            label:"Decrease worker limit" "−"
-                        text font-size:{px(18.0)}px
-                            { format!("{:02}", model.editor_profile.get().max_workers) }
-                        button #action
-                            @click:{ model.modify_profile("max_workers", |p| p.max_workers = (p.max_workers + 1).min(64)); }
-                            label:"Increase worker limit" "+"
-                        SlotMeter running:(Derived::new(move || capacity.get().0))
-                            active:(Derived::new(move || capacity.get().1))
-                            limit:(Derived::new(move || model.editor_profile.get().max_workers as usize))
-                        text font-size:{px(12.0)}px font-color:{color(muted)}
-                            { if model.editor_profile.get().max_workers == 0 { "0 pauses delegation".to_string() } else if matches!(model.editor.get(), EditTarget::Director(_)) { format!("{} active now", capacity.get().1) } else { "0 pauses delegation".to_string() } }
-                    }
-                    col height:min-content gap:0px
-                        stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
-                        label:"Action matrix" {
-                        grid cols:(1fr 1fr 1fr) height:min-content gap:{px(12.0)}px pad:{px(12.0)}px
-                            stroke:(width:{px(1.0)} color:rule edges:bottom) {
-                            ProfileField model:(model) title:"Responsibilities"
-                                field:"responsibilities"
-                            ProfileField model:(model) title:"Required for completion"
-                                field:"completion"
-                            ProfileField model:(model) title:"Action permissions"
-                                field:"permissions"
-                        }
-                        row height:{px(30.0)}px align:center
-                            pad:(horizontal:{px(12.0)}px vertical:0px)
-                            stroke:(width:{px(1.0)} color:edge edges:bottom) {
-                            text width:1fr font-size:{px(11.0)}px font-color:muted
-                                text-transform:uppercase letter-spacing:{px(0.6)}px "Action"
-                            text width:{px(110.0)}px font-size:{px(11.0)}px font-color:muted
-                                text-transform:uppercase letter-spacing:{px(0.6)}px "Responsible"
-                            text width:{px(110.0)}px font-size:{px(11.0)}px font-color:muted
-                                text-transform:uppercase letter-spacing:{px(0.6)}px "Required"
-                            text width:{px(234.0)}px font-size:{px(11.0)}px font-color:muted
-                                text-transform:uppercase letter-spacing:{px(0.6)}px "Permission"
-                        }
-                        for task in Task::ALL {
-                            ActionRow model:(model) task:(task)
-                        }
-                        text font-size:{px(12.0)}px font-color:muted pad:{px(12.0)}px
-                            "Implement: Deny blocks worker turns; Ask requires approval each turn. Other actions are workflow settings."
                     }
                     row height:min-content gap:{px(8.0)}px {
                         button #action @click:{ model.export_toml(); } "Export / edit TOML"
@@ -881,23 +785,22 @@ fn StepToggle(model: Model, task: Task, completion: bool) -> Element {
             profile.responsibilities.contains(&task)
         }
     });
-    let toggle = view! {
-        button #tree-control
-            @click:{ model.modify_profile(if completion { "completion" } else { "responsibilities" }, |p| {
+    view! {
+        row height:min-content width:max-content {
+            button #tree-control
+                @click:{ model.modify_profile(if completion { "completion" } else { "responsibilities" }, |p| {
                 let steps = if completion { &mut p.completion } else { &mut p.responsibilities };
                 if steps.contains(&task) { steps.retain(|t| t != &task); } else { steps.push(task); }
             }); }
-            width:{px(110.0)}px justify:start role:checkbox
-            label:{ format!("{} {}", task.label(), if completion { "required for completion" } else { "responsibility" }) } {
-            el width:{px(14.0)}px height:{px(14.0)}px fill:{color(if on.get() {ink} else {surface})}
-                stroke:(width:{px(1.0)} color:rule offset:{px(-0.5)}) {}
+                width:{px(110.0)}px justify:start role:checkbox
+                label:{ format!("{} {}", task.label(), if completion { "required for completion" } else { "responsibility" }) } {
+                el width:{px(14.0)}px height:{px(14.0)}px
+                    fill:{color(if on.get() {ink} else {surface})}
+                    stroke:(width:{px(1.0)} color:rule offset:{px(-0.5)}) {}
+            } as toggle
+            {let semantic = toggle.clone(); Effect::new(move || { semantic.toggled(on.get()); });}
         }
-    };
-    let semantic = toggle.clone();
-    Effect::new(move || {
-        semantic.toggled(on.get());
-    });
-    toggle
+    }
 }
 
 #[component]
@@ -1215,30 +1118,6 @@ fn with_board_error(mut caption: String, error: Option<&str>) -> String {
     }
     caption
 }
-pub(crate) fn board_caption(board: &Board) -> String {
-    let caption = match &board.source {
-        BoardSource::Local if board.name == "Local board" => board.name.clone(),
-        BoardSource::Local => format!("{} · Local board", board.name),
-        BoardSource::Github { owner, number, .. } => format!(
-            "{} · GitHub {owner} · {number} · {}",
-            board.name,
-            sync_label(board.last_synced_at)
-        ),
-        BoardSource::Gitlab {
-            host,
-            path,
-            number,
-            group,
-            ..
-        } => format!(
-            "{} · GitLab {host}/{path} · {} · {number} · {}",
-            board.name,
-            if *group { "group" } else { "project" },
-            sync_label(board.last_synced_at)
-        ),
-    };
-    with_board_error(caption, board.error.as_deref())
-}
 
 fn worker_policy(model: Model, continuation: bool) -> Vec<(&'static str, String)> {
     let Ok((profile, active)) = model.worker_profile(continuation) else {
@@ -1268,4 +1147,177 @@ fn worker_policy(model: Model, continuation: bool) -> Vec<(&'static str, String)
             format!("{active} / {} active", profile.max_workers),
         ),
     ]
+}
+
+/// The board's source without repeating its name, which the page header and
+/// board selector already show.
+pub(crate) fn board_source_caption(board: &Board) -> String {
+    let caption = match &board.source {
+        BoardSource::Local => "Local board".to_string(),
+        BoardSource::Github { owner, number, .. } => {
+            format!(
+                "GitHub {owner} · board {number} · {}",
+                sync_label(board.last_synced_at)
+            )
+        }
+        BoardSource::Gitlab {
+            host,
+            path,
+            number,
+            group,
+            ..
+        } => format!(
+            "GitLab {host}/{path} · {} board {number} · {}",
+            if *group { "group" } else { "project" },
+            sync_label(board.last_synced_at)
+        ),
+    };
+    with_board_error(caption, board.error.as_deref())
+}
+
+/// A short card preview of a task body: recovery markers removed, whitespace
+/// collapsed and long text shortened at a word boundary.
+pub(crate) fn body_preview(body: &str) -> String {
+    const LIMIT: usize = 150;
+    let text = crate::projects::task_body(body)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.chars().count() <= LIMIT {
+        return text;
+    }
+    let cut: String = text.chars().take(LIMIT).collect();
+    let trimmed = cut.rsplit_once(' ').map(|(head, _)| head).unwrap_or(&cut);
+    format!("{}…", trimmed.trim_end_matches(['.', ',', ';', ':']))
+}
+
+#[component]
+fn ProfileControls(model: Model) -> Element {
+    let harness_index = Derived::new(move || {
+        usize::from(model.editor_profile.get().harness == Harness::ClaudeCode)
+    });
+    let choose_harness: crate::labels::Select = std::rc::Rc::new(move |slot: usize| {
+        model.modify_profile("harness", |p| {
+            p.harness = if slot == 1 {
+                Harness::ClaudeCode
+            } else {
+                Harness::Codex
+            }
+        });
+    });
+    let approval_index = Derived::new(move || {
+        let mode = model.editor_profile.get().execution.approval;
+        ApprovalMode::ALL
+            .iter()
+            .position(|m| *m == mode)
+            .unwrap_or(0)
+    });
+    let choose_approval: crate::labels::Select = std::rc::Rc::new(move |slot: usize| {
+        model.modify_profile("execution", |p| {
+            p.execution.approval = ApprovalMode::ALL[slot]
+        });
+    });
+    let capacity = Derived::new(move || match model.editor.get() {
+        EditTarget::Director(id) => crate::labels::director_capacity(&model.snapshot.get(), &id),
+        _ => (0, 0, 0),
+    });
+    view! {
+        col height:min-content gap:{px(20.0)}px {
+            ProfileField model:(model) title:"Agent harness" field:"harness"
+            SlidingSegments name:("Agent harness".to_string())
+                options:(vec!["Codex".to_string(), "Claude Code".to_string()]) index:(harness_index)
+                select:(choose_harness) attention:(None) cell-width:(130.0)
+                disabled:(Derived::new(|| false))
+            ProfileField model:(model) title:"Execution approval" field:"execution"
+            SlidingSegments name:("Execution approval".to_string())
+                options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
+                index:(approval_index) select:(choose_approval) attention:(None) cell-width:(150.0)
+                disabled:(Derived::new(|| false))
+            text font-size:{px(12.0)}px font-color:muted
+                "Execution mode configures the harness. Action permissions are separate workflow settings."
+            ProfileField model:(model) title:"Scope" field:"scope"
+            row height:min-content gap:{px(6.0)}px {
+                button #action
+                    @click:{ model.modify_profile("scope", |p| p.scope = DirectorScope::Project); }
+                    fill:{color(if model.editor_profile.get().scope == DirectorScope::Project {inverse} else {surface})}
+                    font-color:{color(if model.editor_profile.get().scope == DirectorScope::Project {on_inverse} else {ink})}
+                    font-weight:{if model.editor_profile.get().scope == DirectorScope::Project {700} else {400}}
+                    "Whole project"
+                for (_, issue) in { model.snapshot.get().issues.into_iter().filter(|i| i.project_id == model.project.get() && model.snapshot.get().canonical_issue_id(&i.id) == i.id).map(|i| (i.id.clone(), i)).collect::<Vec<_>>() } {
+                    let id = issue.id.clone();
+                    let issue_id = State::new(id.clone());
+                    let number = issue.reference.as_ref().map(|r|format!("#{}",r.number)).unwrap_or_else(||issue.title.clone());
+                    button #action
+                        @click:{
+                                model.modify_profile("scope", |p| {
+                                    let mut ids = match &p.scope { DirectorScope::Issues { issue_ids } => issue_ids.clone(), _ => vec![] };
+                                    if model.scope_contains(&ids, &id) { let snapshot = model.snapshot.get_untracked(); ids.retain(|x| snapshot.canonical_issue_id(x) != snapshot.canonical_issue_id(&id)); } else { ids.push(id.clone()); }
+                                    p.scope = if ids.is_empty() { DirectorScope::Project } else { DirectorScope::Issues { issue_ids: ids } };
+                                });
+                            }
+                        fill:{color(if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {inverse} else {surface})}
+                        font-color:{color(if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {on_inverse} else {ink})}
+                        font-weight:{if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {700} else {400}}
+                        { format!("{} {}", if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) { "✓" } else { "+" }, number) }
+                }
+            }
+            text font-size:{px(12.0)}px font-color:{color(muted)}
+                {
+                        match model.editor_profile.get().scope {
+                            DirectorScope::Project => "All project issues".into(),
+                            DirectorScope::Issues { issue_ids } => issue_ids.iter()
+                                .filter_map(|id| model.snapshot.get().issue(id).ok().cloned())
+                                .map(|issue|issue.reference.as_ref().map(|r|format!("#{}",r.number)).unwrap_or_else(||issue.title.clone()))
+                                .collect::<Vec<_>>().join(", "),
+                        }
+                    }
+            ProfileField model:(model) title:"Concurrent workers" field:"max_workers"
+            row height:min-content gap:{px(10.0)}px align:center {
+                button #action
+                    @click:{ model.modify_profile("max_workers", |p| p.max_workers = p.max_workers.saturating_sub(1)); }
+                    label:"Decrease worker limit" "−"
+                text font-size:{px(18.0)}px
+                    { format!("{:02}", model.editor_profile.get().max_workers) }
+                button #action
+                    @click:{ model.modify_profile("max_workers", |p| p.max_workers = (p.max_workers + 1).min(64)); }
+                    label:"Increase worker limit" "+"
+                SlotMeter running:(Derived::new(move || capacity.get().0))
+                    active:(Derived::new(move || capacity.get().1))
+                    limit:(Derived::new(move || model.editor_profile.get().max_workers as usize))
+                text font-size:{px(12.0)}px font-color:{color(muted)}
+                    { if model.editor_profile.get().max_workers == 0 { "0 pauses delegation".to_string() } else if matches!(model.editor.get(), EditTarget::Director(_)) { format!("{} active now", capacity.get().1) } else { "0 pauses delegation".to_string() } }
+            }
+        }
+    }
+}
+
+#[component]
+fn ActionMatrix(model: Model) -> Element {
+    view! {
+        col height:min-content gap:0px stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
+            label:"Action matrix" {
+            grid cols:(1fr 1fr 1fr) height:min-content gap:{px(12.0)}px pad:{px(12.0)}px
+                stroke:(width:{px(1.0)} color:rule edges:bottom) {
+                ProfileField model:(model) title:"Responsibilities" field:"responsibilities"
+                ProfileField model:(model) title:"Required for completion" field:"completion"
+                ProfileField model:(model) title:"Action permissions" field:"permissions"
+            }
+            row height:{px(30.0)}px align:center pad:(horizontal:{px(12.0)}px vertical:0px)
+                stroke:(width:{px(1.0)} color:edge edges:bottom) {
+                text width:1fr font-size:{px(11.0)}px font-color:muted text-transform:uppercase
+                    letter-spacing:{px(0.6)}px "Action"
+                text width:{px(110.0)}px font-size:{px(11.0)}px font-color:muted
+                    text-transform:uppercase letter-spacing:{px(0.6)}px "Responsible"
+                text width:{px(110.0)}px font-size:{px(11.0)}px font-color:muted
+                    text-transform:uppercase letter-spacing:{px(0.6)}px "Required"
+                text width:{px(234.0)}px font-size:{px(11.0)}px font-color:muted
+                    text-transform:uppercase letter-spacing:{px(0.6)}px "Permission"
+            }
+            for task in Task::ALL {
+                ActionRow model:(model) task:(task)
+            }
+            text font-size:{px(12.0)}px font-color:muted pad:{px(12.0)}px
+                "Implement: Deny blocks worker turns; Ask requires approval each turn. Other actions are workflow settings."
+        }
+    }
 }

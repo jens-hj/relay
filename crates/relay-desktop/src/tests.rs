@@ -2608,11 +2608,13 @@ fn multi_repository_review_and_followup_keep_recorded_workspace_selection() {
     mounted.settle();
     mounted.click("Session actions");
     mounted.click("Toggle change review");
+    assert!(has_label(&mounted, "repo-two"));
     assert!(mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
-        n.label.as_deref().is_some_and(|text| {
-            text.contains("repo-two") && text.contains("second repository diff")
-        })
+        n.label
+            .as_deref()
+            .is_some_and(|text| text.contains("two.rs") && text.contains("second repository diff"))
     }));
+    assert!(has_label(&mounted, "worker/two"));
     mounted
         .model
         .workspace_selection
@@ -3291,7 +3293,6 @@ fn backups_never_replace_existing_files() {
 #[test]
 fn unreadable_settings_are_never_overwritten_until_explicitly_recovered() {
     use crate::settings::{Persistence, Store};
-    use std::os::unix::fs::PermissionsExt;
     let directory = settings_directory();
     let path = directory.join("settings.toml");
     let original = b"mode = \"dark\"\nfuture_setting = 3\n".to_vec();
@@ -3319,17 +3320,6 @@ fn unreadable_settings_are_never_overwritten_until_explicitly_recovered() {
     mounted.key(Key::Character(",".into()), true);
     mounted.rect("Display settings not saved");
 
-    // A failed backup keeps the original and stays suspended.
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555)).unwrap();
-    mounted.click("Back up file and save current settings");
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), original);
-    assert!(matches!(
-        mounted.model.settings_store.get_untracked().persistence,
-        Persistence::Suspended { .. }
-    ));
-    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
-
     // Retrying a still-invalid file changes nothing.
     mounted.click("Retry reading settings file");
     assert!(matches!(
@@ -3337,6 +3327,7 @@ fn unreadable_settings_are_never_overwritten_until_explicitly_recovered() {
         Persistence::Suspended { .. }
     ));
     assert_eq!(mounted.model.preferences.get_untracked().scale, 1.5);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
 
     mounted.click("Back up file and save current settings");
     let store = mounted.model.settings_store.get_untracked();
@@ -3354,6 +3345,67 @@ fn unreadable_settings_are_never_overwritten_until_explicitly_recovered() {
         crate::settings::Preferences::load(&path).unwrap().scale,
         1.25
     );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn failed_settings_backup_keeps_everything_and_stays_suspended() {
+    use crate::settings::{Persistence, Store};
+    // A directory where the settings file should be cannot be read for a
+    // backup on any platform or user, so recovery must fail without writing.
+    let directory = settings_directory();
+    let path = directory.join("settings.toml");
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("keep.txt"), b"untouched").unwrap();
+    let (preferences, persistence) = crate::settings::open(&path);
+    assert!(matches!(persistence, Persistence::Suspended { .. }));
+    let mounted = mount(false, 1380.0);
+    mounted.model.preferences.set(preferences);
+    mounted.model.settings_store.set(Store {
+        path: Some(path.clone()),
+        persistence,
+        backup: None,
+    });
+    crate::settings::recover_by_backup(mounted.model);
+    let store = mounted.model.settings_store.get_untracked();
+    assert!(matches!(store.persistence, Persistence::Suspended { .. }));
+    assert!(store.backup.is_none());
+    assert!(path.is_dir());
+    assert_eq!(std::fs::read(path.join("keep.txt")).unwrap(), b"untouched");
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn backup_that_cannot_be_created_keeps_the_original_file() {
+    use crate::settings::{Persistence, Store};
+    use std::os::unix::fs::PermissionsExt;
+    let directory = settings_directory();
+    let path = directory.join("settings.toml");
+    let original = b"future_setting = 3\n".to_vec();
+    std::fs::write(&path, &original).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Privileged users can still write; there is nothing to verify then.
+    let denied = std::fs::write(directory.join("probe"), b"").is_err();
+    if denied {
+        let (preferences, persistence) = crate::settings::open(&path);
+        let mounted = mount(false, 1380.0);
+        mounted.model.preferences.set(preferences);
+        mounted.model.settings_store.set(Store {
+            path: Some(path.clone()),
+            persistence,
+            backup: None,
+        });
+        crate::settings::recover_by_backup(mounted.model);
+        assert!(matches!(
+            mounted.model.settings_store.get_untracked().persistence,
+            Persistence::Suspended { .. }
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -3678,4 +3730,161 @@ fn permission_rows_set_exact_values_for_every_action_by_click_and_keyboard() {
             .contains(&Task::Merge),
         responsible
     );
+}
+
+fn has_label(mounted: &Mounted, label: &str) -> bool {
+    mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .iter()
+        .any(|n| n.label.as_deref() == Some(label))
+}
+
+#[test]
+fn usage_readout_follows_new_reports_for_the_same_session() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = live_snapshot();
+    snapshot.sessions[0].fixture = false;
+    snapshot.sessions[0].issue_id = Some("issue-2".into());
+    snapshot.sessions[0].director_id = snapshot.directors[0].id.clone();
+    let mut run = worker_run(WorkerStatus::Running);
+    run.usage = Some(TokenUsage {
+        input_tokens: 1_000,
+        cached_input_tokens: 400,
+        output_tokens: 50,
+    });
+    snapshot.sessions[0].worker = Some(run);
+    let session_id = snapshot.sessions[0].id.clone();
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(session_id);
+    mounted.settle();
+    mounted.click("Session actions");
+    mounted.click("Session usage and provenance");
+    assert!(has_label(&mounted, "1,000"));
+    assert!(has_label(&mounted, "400"));
+
+    snapshot.sessions[0].worker.as_mut().unwrap().usage = Some(TokenUsage {
+        input_tokens: 48_213,
+        cached_input_tokens: 31_004,
+        output_tokens: 2_910,
+    });
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(has_label(&mounted, "48,213"));
+    assert!(has_label(&mounted, "31,004"));
+    assert!(has_label(&mounted, "2,910"));
+    assert!(!has_label(&mounted, "1,000"));
+    mounted.rect("Usage meter");
+}
+
+#[test]
+fn provenance_names_connections_and_omits_unrecorded_values() {
+    let mut snapshot = live_snapshot();
+    let mut session = snapshot.sessions[0].clone();
+    session.workspaces = vec![SessionWorkspace {
+        connection_id: "workspace-project-1".into(),
+        path: "/srv/project/workspace".into(),
+        repository: false,
+        branch: None,
+        base_commit: None,
+        changes: None,
+    }];
+    let mut run = worker_run(WorkerStatus::Completed);
+    run.branch = None;
+    run.base_commit = None;
+    session.worker = Some(run);
+    snapshot.sessions[0] = session.clone();
+    let groups = crate::conversation::provenance(&snapshot, &session, false);
+    assert_eq!(groups[0].title, "Project workspace");
+    assert_eq!(
+        groups[0].rows,
+        vec![
+            ("Kind", "Directory".to_string()),
+            ("Path", "/srv/project/workspace".to_string())
+        ]
+    );
+    let worker = &groups[1];
+    assert_eq!(worker.title, "Worker run");
+    assert!(
+        worker
+            .rows
+            .iter()
+            .all(|(key, _)| *key != "Branch" && *key != "Base")
+    );
+    assert!(worker.changes.is_none());
+}
+
+#[test]
+fn card_preview_strips_markers_and_bounds_length() {
+    let marker = "<!-- relay-operation:publish-1:task:issue-2 -->";
+    assert_eq!(
+        crate::ui::body_preview(&format!("Short   body\n\nwith lines\n\n{marker}")),
+        "Short body with lines"
+    );
+    let long = "word ".repeat(80);
+    let preview = crate::ui::body_preview(&long);
+    assert!(preview.ends_with('…'));
+    assert!(preview.chars().count() <= 151);
+    assert_eq!(crate::ui::body_preview(marker), "");
+}
+
+#[test]
+fn controls_resolve_to_square_corners() {
+    let mounted = mount(false, 1380.0);
+    mounted.key(Key::Character(",".into()), true);
+    for label in [
+        "Reset interface scale",
+        "Theme: Light",
+        "Settings",
+        "Open command palette",
+    ] {
+        let node = mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("missing {label}"))
+            .id;
+        let details = mounted.ui.inspection_details(node).unwrap();
+        let radius = details
+            .attributes
+            .iter()
+            .find(|a| a.name == "radius")
+            .map(|a| a.value.clone())
+            .unwrap_or_default();
+        assert!(
+            radius.is_empty() || radius.trim_start_matches(['(', '[']).starts_with('0'),
+            "{label}: radius {radius}"
+        );
+    }
+}
+
+#[test]
+fn wide_profiles_show_the_action_matrix_beside_the_controls() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_profile(EditTarget::Defaults);
+    mounted.settle();
+    let matrix = mounted.rect("Action matrix");
+    let harness = mounted.rect("Agent harness");
+    assert!(matrix.origin.y + mounted.rect("Deploy permission").size.height < mounted.size.height);
+    assert!(harness.origin.x > matrix.origin.x + matrix.size.width - 1.0);
+    assert!(mounted.rect("Deploy permission").origin.y < mounted.size.height);
+
+    let narrow = mount(false, 820.0);
+    narrow.model.open_profile(EditTarget::Defaults);
+    narrow.settle();
+    let matrix = narrow.rect("Action matrix");
+    let harness = narrow.rect("Agent harness");
+    assert!(harness.origin.y > matrix.origin.y + matrix.size.height - 1.0);
+    assert!((harness.origin.x - matrix.origin.x).abs() < 1.0);
 }
