@@ -40,6 +40,43 @@ pub enum BoardSource {
     },
 }
 
+impl BoardSource {
+    pub fn same_board(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Local, Self::Local) => true,
+            (
+                Self::Github {
+                    owner: a,
+                    number: an,
+                    ..
+                },
+                Self::Github {
+                    owner: b,
+                    number: bn,
+                    ..
+                },
+            ) => a.eq_ignore_ascii_case(b) && an == bn,
+            (
+                Self::Gitlab {
+                    host: a,
+                    group: ag,
+                    path: ap,
+                    number: an,
+                    ..
+                },
+                Self::Gitlab {
+                    host: b,
+                    group: bg,
+                    path: bp,
+                    number: bn,
+                    ..
+                },
+            ) => a.eq_ignore_ascii_case(b) && ag == bg && ap == bp && an == bn,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Board {
     pub id: String,
