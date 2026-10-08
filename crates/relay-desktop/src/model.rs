@@ -205,7 +205,7 @@ impl Model {
         match result {
             Ok(()) => {
                 self.acknowledge(pending, &id);
-                self.notice.set("Server acknowledged the request.".into());
+                self.notice.set(String::new());
             }
             Err(message) => {
                 if !update.outcome_ambiguous
@@ -299,8 +299,7 @@ impl Model {
         };
         if applied {
             self.acknowledge(pending, &id);
-            self.notice
-                .set("Request confirmed by the workspace snapshot.".into());
+            self.notice.set(String::new());
         }
     }
     pub fn submit(&self, command: Command, revision: u64, saved: Saved) {

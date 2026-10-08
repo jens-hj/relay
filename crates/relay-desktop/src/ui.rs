@@ -174,8 +174,10 @@ pub fn shell(model: Model) -> Element {
                                     text font-size:{px(11.0)}px { model.retry_summary() }
                                 }
                             }
-                            button #action @click:{ model.review_latest(); }
-                                disabled:{ model.busy.get() } "Review latest state"
+                            if model.can_rebase() {
+                                button #action @click:{ model.review_latest(); }
+                                    disabled:{ model.busy.get() } "Review latest state"
+                            }
                             if model.can_rebase() {
                                 button #action @click:{ model.rebase_conflict(); }
                                     label:"Review conflict for new request"

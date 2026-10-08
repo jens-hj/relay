@@ -711,6 +711,7 @@ fn comments_keep_drafts_after_failure_and_clear_only_on_acknowledgment() {
         ..Default::default()
     });
     assert!(mounted.model.comment_body.get_untracked().is_empty());
+    assert!(mounted.model.notice.get_untracked().is_empty());
     assert_eq!(mounted.model.snapshot.get_untracked().comments.len(), 1);
 }
 
@@ -1360,6 +1361,7 @@ fn ambiguous_start_is_reconciled_from_snapshot_without_duplicate_launch() {
     );
     assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
     assert_eq!(mounted.model.worker_prompt.get_untracked(), "Next draft");
+    assert!(mounted.model.notice.get_untracked().is_empty());
     assert!(!mounted.model.can_retry());
     mounted.model.retry_pending();
     assert!(mounted.commands.try_recv().is_err());
@@ -2086,6 +2088,7 @@ fn new_project_preserves_full_setup_draft_and_appends_on_acknowledgement() {
     assert_eq!(mounted.model.project.get_untracked(), project.id);
     assert_eq!(mounted.model.snapshot.get_untracked().projects.len(), 2);
     assert!(mounted.model.project_draft.get_untracked().name.is_empty());
+    assert!(mounted.model.notice.get_untracked().is_empty());
 }
 
 #[test]
