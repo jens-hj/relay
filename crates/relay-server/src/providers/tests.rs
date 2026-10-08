@@ -1236,3 +1236,291 @@ fn gitlab_hosts_cannot_be_cli_options_or_embedded_credentials() {
         assert!(validate_source(&source).is_err());
     }
 }
+
+#[test]
+fn new_board_discovery_is_read_only_and_returns_supported_mapping_ids() {
+    let fake = Fake::new(vec![
+        ("users/owner", json!({"type":"User","node_id":"OWNER"}), 0),
+        ("user --method GET", json!({"login":"owner"}), 0),
+    ]);
+    let mut source = gh_source();
+    if let BoardSource::Github { number, .. } = &mut source {
+        *number = 0;
+    }
+    let board = discover(&fake.config(), &source).unwrap();
+    assert_eq!(board.source, source);
+    assert_eq!(
+        board
+            .columns
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "name:Todo",
+            "name:In Progress",
+            "name:Done",
+            "name:No status"
+        ]
+    );
+    assert!(!fake.calls().contains("mutation"));
+    let fake = Fake::new(vec![(
+        "projects/group%2Frepo --method GET",
+        json!({"permissions":{"project_access":{"access_level":40}}}),
+        0,
+    )]);
+    let mut source = gl_source(false);
+    if let BoardSource::Gitlab { number, .. } = &mut source {
+        *number = 0;
+    }
+    let board = discover(&fake.config(), &source).unwrap();
+    assert_eq!(
+        board
+            .columns
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect::<Vec<_>>(),
+        ["gitlab-open", "gitlab-closed"]
+    );
+    assert!(!fake.calls().contains("POST"));
+}
+
+fn recovery_snapshot(
+    kind: OperationKind,
+    task: Issue,
+    source: BoardSource,
+    pending: &str,
+) -> Snapshot {
+    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    snapshot.boards.push(board_record(source));
+    snapshot.issues.push(task);
+    snapshot.memberships.push(membership_record());
+    snapshot.connections.push(repository_connection());
+    let mut op = sample_operation(kind);
+    op.state = OperationState::NeedsReconciliation;
+    op.results.insert("pending".into(), pending.into());
+    snapshot.operations.push(op);
+    snapshot
+}
+#[test]
+fn recovery_lookup_reads_marked_issue_and_returns_typed_known_result_without_writes() {
+    let fake = Fake::new(vec![(
+        "issues/1 --method GET",
+        json!({"number":1,"html_url":"https://github.com/elsewhere/repo/issues/1","body":"body\n<!-- relay-operation:operation:task:task -->"}),
+        0,
+    )]);
+    let snapshot = recovery_snapshot(
+        OperationKind::CreateTask {
+            board_id: "board".into(),
+            issue_id: "task".into(),
+        },
+        pending_task(),
+        gh_source(),
+        "issue/task",
+    );
+    let (key, result, description) = lookup_reconciliation(
+        &fake.config(),
+        &snapshot,
+        "operation",
+        "https://github.com/elsewhere/repo/issues/1",
+    )
+    .unwrap();
+    assert_eq!(key, "issue/task");
+    assert_eq!(decode::<IssueRef>(&result).unwrap().number, 1);
+    assert!(description.contains("elsewhere/repo"));
+    assert!(!fake.calls().contains("POST"));
+    assert!(
+        snapshot
+            .issues
+            .iter()
+            .find(|i| i.id == "task")
+            .unwrap()
+            .reference
+            .is_none()
+    );
+}
+#[test]
+fn recovery_issue_lookup_rejects_wrong_repository_host_and_missing_marker() {
+    let snapshot = recovery_snapshot(
+        OperationKind::CreateTask {
+            board_id: "board".into(),
+            issue_id: "task".into(),
+        },
+        pending_task(),
+        gh_source(),
+        "issue/task",
+    );
+    let fake = Fake::new(vec![]);
+    assert!(
+        lookup_reconciliation(
+            &fake.config(),
+            &snapshot,
+            "operation",
+            "https://wrong.host/elsewhere/repo/issues/1"
+        )
+        .is_err()
+    );
+    assert!(
+        lookup_reconciliation(
+            &fake.config(),
+            &snapshot,
+            "operation",
+            "https://github.com/wrong/repo/issues/1"
+        )
+        .is_err()
+    );
+    assert!(fake.calls().is_empty());
+    let fake = Fake::new(vec![(
+        "issues/1 --method GET",
+        json!({"number":1,"html_url":"https://github.com/elsewhere/repo/issues/1","body":"No operation marker"}),
+        0,
+    )]);
+    assert!(
+        lookup_reconciliation(
+            &fake.config(),
+            &snapshot,
+            "operation",
+            "https://github.com/elsewhere/repo/issues/1"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("marker")
+    );
+}
+#[test]
+fn recovery_board_lookup_requires_explicit_scope_matched_destination() {
+    let fake = Fake::new(gh_metadata());
+    let mut source = gh_source();
+    if let BoardSource::Github { number, .. } = &mut source {
+        *number = 0;
+    }
+    let snapshot = recovery_snapshot(
+        OperationKind::Publish {
+            board_id: "board".into(),
+            target: PublishTarget {
+                source,
+                name: "Requested".into(),
+            },
+            columns: vec![],
+            tasks: vec![],
+        },
+        pending_task(),
+        BoardSource::Local,
+        "board",
+    );
+    let (key, result, _) = lookup_reconciliation(
+        &fake.config(),
+        &snapshot,
+        "operation",
+        "https://github.com/users/owner/projects/1",
+    )
+    .unwrap();
+    assert_eq!(key, "board");
+    assert!(matches!(
+        decode::<BoardSource>(&result).unwrap(),
+        BoardSource::Github { number: 1, .. }
+    ));
+    assert!(!fake.calls().contains("mutation"));
+    assert!(
+        lookup_reconciliation(
+            &fake.config(),
+            &snapshot,
+            "operation",
+            "https://github.com/users/wrong/projects/1"
+        )
+        .is_err()
+    );
+}
+#[test]
+fn recovery_edit_checks_actual_title_and_body_before_returning_confirmed() {
+    let mut task = pending_task();
+    task.reference = Some(reference_for(&gh_source(), "elsewhere/repo", 1));
+    let snapshot = recovery_snapshot(
+        OperationKind::EditTask {
+            issue_id: "task".into(),
+            title: "Requested".into(),
+            body: "Body".into(),
+        },
+        task,
+        gh_source(),
+        "edit/task",
+    );
+    let fake = Fake::new(vec![(
+        "issues/1 --method GET",
+        json!({"title":"Requested","body":"Body"}),
+        0,
+    )]);
+    let (_, result, _) = lookup_reconciliation(
+        &fake.config(),
+        &snapshot,
+        "operation",
+        "https://github.com/elsewhere/repo/issues/1",
+    )
+    .unwrap();
+    assert_eq!(result, "confirmed");
+    let fake = Fake::new(vec![(
+        "issues/1 --method GET",
+        json!({"title":"Other","body":"Body"}),
+        0,
+    )]);
+    assert!(
+        lookup_reconciliation(
+            &fake.config(),
+            &snapshot,
+            "operation",
+            "https://github.com/elsewhere/repo/issues/1"
+        )
+        .is_err()
+    );
+}
+#[test]
+fn recovery_membership_and_status_require_confirmed_authoritative_board_state() {
+    for (key, kind) in [
+        (
+            "membership/task",
+            OperationKind::CreateTask {
+                board_id: "board".into(),
+                issue_id: "task".into(),
+            },
+        ),
+        (
+            "status/task",
+            OperationKind::MoveTask {
+                board_id: "board".into(),
+                issue_id: "task".into(),
+                column_id: "done".into(),
+            },
+        ),
+    ] {
+        let mut task = pending_task();
+        task.reference = Some(reference_for(&gh_source(), "elsewhere/repo", 1));
+        let snapshot = recovery_snapshot(kind, task, gh_source(), key);
+        let mut steps = gh_metadata();
+        steps.push((
+            "items(first",
+            json!({"data":{"node":{"items":page(json!([gh_item(1,Some("done"))]),None)}}}),
+            0,
+        ));
+        steps.push((
+            "labels(first",
+            json!({"data":{"node":{"labels":page(json!([]),None)}}}),
+            0,
+        ));
+        let fake = Fake::new(steps);
+        let (_, result, _) = lookup_reconciliation(
+            &fake.config(),
+            &snapshot,
+            "operation",
+            "https://github.com/elsewhere/repo/issues/1",
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            if key.starts_with("membership") {
+                "ITEM1"
+            } else {
+                "confirmed"
+            }
+        );
+        assert!(!fake.calls().contains("mutation"));
+    }
+}

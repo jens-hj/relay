@@ -119,24 +119,70 @@ struct RemoteTask {
     item_id: String,
 }
 /// Metadata only: no task writes. IDs/project IDs are empty; caller attaches them.
-/// A destination with number=0 must first be created by an explicit Publish operation.
+/// For number=0, return supported default mappings after checking scope access.
+/// Discovery never creates a board; only an explicit Publish operation does.
 pub fn discover(config: &RuntimeConfig, source: &BoardSource) -> Result<Board, Error> {
+    if source_number(source) == 0 {
+        validate_source(source)?;
+        let columns = match source {
+            BoardSource::Github { owner, .. } => {
+                github::check_creation(config, owner)?;
+                ["Todo", "In Progress", "Done", "No status"]
+                    .into_iter()
+                    .map(|title| BoardColumn {
+                        id: format!("name:{title}"),
+                        title: title.into(),
+                    })
+                    .collect()
+            }
+            BoardSource::Gitlab { .. } => {
+                if !gitlab::can_write(config, source)? {
+                    return Err(Error::invalid(
+                        "Destination board scope write permission required",
+                    ));
+                }
+                [("gitlab-open", "Open"), ("gitlab-closed", "Closed")]
+                    .into_iter()
+                    .map(|(id, title)| BoardColumn {
+                        id: id.into(),
+                        title: title.into(),
+                    })
+                    .collect()
+            }
+            BoardSource::Local => return Err(Error::invalid("Select a remote board destination")),
+        };
+        return Ok(Board {
+            id: String::new(),
+            project_id: String::new(),
+            name: String::new(),
+            source: source.clone(),
+            columns,
+            last_synced_at: None,
+            error: None,
+        });
+    }
     Ok(metadata(config, source)?.board)
 }
 fn metadata(config: &RuntimeConfig, source: &BoardSource) -> Result<RemoteBoard, Error> {
     validate_source(source)?;
-    match source {
+    let remote = match source {
         BoardSource::Github { .. } => github::metadata(config, source),
         BoardSource::Gitlab { .. } => gitlab::metadata(config, source),
         BoardSource::Local => Err(Error::invalid("Local boards do not require discovery")),
-    }
+    }?;
+    validate_source(&remote.board.source)?;
+    Ok(remote)
 }
 fn tasks(config: &RuntimeConfig, board: &RemoteBoard) -> Result<Vec<RemoteTask>, Error> {
-    match &board.board.source {
+    let tasks = match &board.board.source {
         BoardSource::Github { .. } => github::tasks(config, board),
         BoardSource::Gitlab { .. } => gitlab::tasks(config, board),
         BoardSource::Local => Err(Error::invalid("Cannot fetch local board")),
+    }?;
+    for task in &tasks {
+        validate_reference(&task.reference)?;
     }
+    Ok(tasks)
 }
 fn merge(
     snapshot: &mut Snapshot,
@@ -1139,4 +1185,299 @@ impl ReadBudget {
             Ok(())
         }
     }
+}
+
+/// Resolve an explicit known remote URL into a typed reconciliation result.
+/// This function is read-only: it neither journals nor retries any provider write.
+/// The dispatcher must still require the exact pending key when accepting it.
+pub fn lookup_reconciliation(
+    config: &RuntimeConfig,
+    snapshot: &Snapshot,
+    operation_id: &str,
+    url: &str,
+) -> Result<(String, String, String), Error> {
+    let op = operation(snapshot, operation_id)?;
+    if op.state != OperationState::NeedsReconciliation {
+        return Err(Error::invalid("Operation does not need reconciliation"));
+    }
+    let key = op
+        .results
+        .get("pending")
+        .ok_or_else(|| Error::invalid("Operation has no pending provider step"))?
+        .clone();
+    if op.results.contains_key(&key) {
+        return Err(Error::invalid(
+            "Pending provider step already has a known result",
+        ));
+    }
+    if key == "board" {
+        let OperationKind::Publish { target, .. } = &op.kind else {
+            return Err(Error::invalid("Operation has no board creation step"));
+        };
+        let source = board_source_from_url(&target.source, url)?;
+        let board = metadata(config, &source)?;
+        return Ok((
+            key,
+            encode(&board.board.source)?,
+            format!("Board: {}", board.board.name),
+        ));
+    }
+    let (namespace, task_id) = key
+        .split_once('/')
+        .ok_or_else(|| Error::invalid("Unknown provider recovery step"))?;
+    let task = snapshot
+        .issues
+        .iter()
+        .find(|i| i.id == task_id && i.project_id == op.project_id)
+        .ok_or_else(|| Error::invalid("Recovery task not found"))?;
+    let source = match &op.kind {
+        OperationKind::Publish { target, tasks, .. }
+            if tasks.iter().any(|t| t.issue_id == task_id) =>
+        {
+            if source_number(&target.source) == 0 {
+                decode(
+                    op.results
+                        .get("board")
+                        .ok_or_else(|| Error::invalid("Resolve board creation first"))?,
+                )?
+            } else {
+                target.source.clone()
+            }
+        }
+        OperationKind::CreateTask { board_id, issue_id }
+        | OperationKind::MoveTask {
+            board_id, issue_id, ..
+        } if issue_id == task_id => snapshot
+            .board(board_id)
+            .map_err(Error::invalid)?
+            .source
+            .clone(),
+        OperationKind::EditTask { issue_id, .. } if issue_id == task_id => {
+            let reference = task
+                .reference
+                .as_ref()
+                .ok_or_else(|| Error::invalid("Recovery task has no remote reference"))?;
+            match reference.provider {
+                Provider::Github => BoardSource::Github {
+                    owner: reference
+                        .repository
+                        .split('/')
+                        .next()
+                        .unwrap_or_default()
+                        .into(),
+                    number: 1,
+                    url: String::new(),
+                },
+                Provider::Gitlab => BoardSource::Gitlab {
+                    host: reference_host(reference)?,
+                    group: false,
+                    path: reference.repository.clone(),
+                    number: 1,
+                    url: String::new(),
+                },
+            }
+        }
+        _ => {
+            return Err(Error::invalid(
+                "Pending step does not belong to this operation",
+            ));
+        }
+    };
+    validate_source(&source)?;
+    let reference = issue_reference_from_url(&source, url)?;
+    if namespace == "issue" {
+        let connection = match &op.kind {
+            OperationKind::Publish { tasks, .. } => tasks
+                .iter()
+                .find(|t| t.issue_id == task_id)
+                .map(|t| t.repository_connection_id.as_str()),
+            OperationKind::CreateTask { .. } => task.repository_connection_id.as_deref(),
+            _ => None,
+        }
+        .ok_or_else(|| Error::invalid("Operation has no task creation step"))?;
+        let repo = repository(snapshot, &op.project_id, connection, &source)?;
+        if repo != reference.repository {
+            return Err(Error::invalid(
+                "Known issue does not match selected repository",
+            ));
+        }
+        let issue = read_issue(config, &reference)?;
+        let accepted_number = number(
+            &issue,
+            if reference.provider == Provider::Github {
+                "number"
+            } else {
+                "iid"
+            },
+        )?;
+        let accepted_url = text(
+            &issue,
+            if reference.provider == Provider::Github {
+                "html_url"
+            } else {
+                "web_url"
+            },
+        )?;
+        if accepted_number != reference.number || accepted_url != reference.url {
+            return Err(Error::invalid("Provider returned a different issue"));
+        }
+        let body = issue[if reference.provider == Provider::Github {
+            "body"
+        } else {
+            "description"
+        }]
+        .as_str()
+        .unwrap_or_default();
+        let marker = format!("<!-- relay-operation:{}:task:{} -->", op.id, task.id);
+        if !body.contains(&marker) {
+            return Err(Error::invalid(
+                "Known issue does not contain this operation's creation marker; verify the issue before supplying an advanced known result",
+            ));
+        }
+        return Ok((
+            key,
+            encode(&reference)?,
+            format!("Issue: {} #{}", reference.repository, reference.number),
+        ));
+    }
+    if task.reference.as_ref() != Some(&reference) {
+        return Err(Error::invalid("Known issue URL does not match this task"));
+    }
+    if namespace == "edit" {
+        let OperationKind::EditTask { title, body, .. } = &op.kind else {
+            return Err(Error::invalid("Operation has no edit step"));
+        };
+        let accepted = read_issue(config, &reference)?;
+        let remote_body = accepted[if reference.provider == Provider::Github {
+            "body"
+        } else {
+            "description"
+        }]
+        .as_str()
+        .unwrap_or_default();
+        if text(&accepted, "title")? != *title || remote_body != body {
+            return Err(Error::invalid(
+                "Remote issue does not match the requested edit",
+            ));
+        }
+        return Ok((key, "confirmed".into(), "Task edit confirmed".into()));
+    }
+    let board = metadata(config, &source)?;
+    let incoming = tasks(config, &board)?;
+    let member = incoming
+        .iter()
+        .find(|t| t.reference == reference)
+        .ok_or_else(|| Error::invalid("Known issue is not a member of the destination board"))?;
+    if namespace == "membership" {
+        if !matches!(
+            op.kind,
+            OperationKind::Publish { .. } | OperationKind::CreateTask { .. }
+        ) {
+            return Err(Error::invalid("Operation has no membership creation step"));
+        }
+        return Ok((
+            key,
+            member.item_id.clone(),
+            format!("Board membership: {}", board.board.name),
+        ));
+    }
+    if namespace == "status" {
+        let column = match &op.kind {
+            OperationKind::MoveTask { column_id, .. } => column_id.clone(),
+            OperationKind::CreateTask { .. } => task.column_id.clone(),
+            OperationKind::Publish { board_id, .. } => {
+                let local_column = snapshot
+                    .memberships
+                    .iter()
+                    .find(|m| m.board_id == *board_id && m.issue_id == task.id)
+                    .and_then(|m| m.column_ids.first())
+                    .ok_or_else(|| Error::invalid("Local publication column is missing"))?;
+                op.results
+                    .get(&format!("column/{local_column}"))
+                    .cloned()
+                    .ok_or_else(|| Error::invalid("Resolved publication column is missing"))?
+            }
+            _ => return Err(Error::invalid("Operation has no status step")),
+        };
+        if !member.columns.contains(&column) {
+            return Err(Error::invalid(
+                "Remote board does not confirm the requested status",
+            ));
+        }
+        return Ok((key, "confirmed".into(), "Task status confirmed".into()));
+    }
+    Err(Error::invalid("Unsupported provider recovery step"))
+}
+fn positive_number(text: &str) -> Result<u64, Error> {
+    text.parse::<u64>()
+        .ok()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| Error::invalid("Remote URL requires a positive number"))
+}
+fn board_source_from_url(scope: &BoardSource, url: &str) -> Result<BoardSource, Error> {
+    let source = match scope {
+        BoardSource::Github { owner, .. } => {
+            let suffix = [
+                format!("https://github.com/users/{owner}/projects/"),
+                format!("https://github.com/orgs/{owner}/projects/"),
+            ]
+            .into_iter()
+            .find_map(|p| url.strip_prefix(&p))
+            .ok_or_else(|| Error::invalid("Known board URL is outside destination owner"))?;
+            BoardSource::Github {
+                owner: owner.clone(),
+                number: positive_number(suffix)?,
+                url: url.into(),
+            }
+        }
+        BoardSource::Gitlab {
+            host, group, path, ..
+        } => {
+            let prefix = format!(
+                "https://{host}/{}{path}/-/boards/",
+                if *group { "groups/" } else { "" }
+            );
+            let suffix = url
+                .strip_prefix(&prefix)
+                .ok_or_else(|| Error::invalid("Known board URL is outside destination scope"))?;
+            BoardSource::Gitlab {
+                host: host.clone(),
+                group: *group,
+                path: path.clone(),
+                number: positive_number(suffix)?,
+                url: url.into(),
+            }
+        }
+        BoardSource::Local => return Err(Error::invalid("Remote destination required")),
+    };
+    validate_source(&source)?;
+    Ok(source)
+}
+fn issue_reference_from_url(source: &BoardSource, url: &str) -> Result<IssueRef, Error> {
+    let (provider, host, separator) = match source {
+        BoardSource::Github { .. } => (Provider::Github, "github.com", "/issues/"),
+        BoardSource::Gitlab { host, .. } => (Provider::Gitlab, host.as_str(), "/-/issues/"),
+        BoardSource::Local => return Err(Error::invalid("Remote board required")),
+    };
+    let path = url
+        .strip_prefix(&format!("https://{host}/"))
+        .ok_or_else(|| Error::invalid("Known issue URL does not match destination host"))?;
+    let (repo, number) = path
+        .rsplit_once(separator)
+        .ok_or_else(|| Error::invalid("Enter a remote issue URL"))?;
+    let reference = IssueRef {
+        provider,
+        repository: repo.into(),
+        number: positive_number(number)?,
+        url: url.into(),
+    };
+    validate_reference(&reference)?;
+    if let BoardSource::Gitlab { group, path, .. } = source
+        && (!*group && path != repo || *group && !repo.starts_with(&format!("{path}/")))
+    {
+        return Err(Error::invalid(
+            "Known issue is outside destination board scope",
+        ));
+    }
+    Ok(reference)
 }
