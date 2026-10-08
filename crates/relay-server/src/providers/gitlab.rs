@@ -157,7 +157,8 @@ pub(super) fn metadata(config: &RuntimeConfig, source: &BoardSource) -> Result<R
     {
         return Err(Error::invalid("Scoped GitLab boards are unsupported"));
     }
-    let lists = paged(config, host, &format!("{base}/boards/{number}/lists"))?;
+    let mut lists = paged(config, host, &format!("{base}/boards/{number}/lists"))?;
+    lists.sort_by_key(|list| list["position"].as_i64().unwrap_or(i64::MAX));
     let mut columns = Vec::new();
     let mut label_lists = Vec::new();
     if v["hide_backlog_list"] != true {

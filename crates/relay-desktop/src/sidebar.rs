@@ -1,4 +1,5 @@
 use crate::{
+    controls::button,
     model::{EditTarget, Model, Page},
     theme::*,
 };
@@ -36,13 +37,14 @@ fn tooltip(
 }
 
 #[component]
-pub fn Sidebar(model: Model) -> Element {
+pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     let edges = State::new(ResizeEdges::RIGHT);
     let focus: TreeFocus = Rc::default();
     view! {
         col width:{px(model.preferences.get().sidebar_width)}px min-width:{px(160.0)}
-            max-width:{px(360.0)} fill:sidebar pad:(horizontal:{px(10.0)}px vertical:{px(14.0)}px)
-            gap:{px(18.0)}px shrink:0 clip resizable:($edges) label:"Sidebar"
+            max-width:{(viewport.get()*0.4).max(px(160.0)).min(px(360.0))} fill:sidebar
+            pad:(horizontal:{px(10.0)}px vertical:{px(14.0)}px) gap:{px(18.0)}px shrink:0 clip
+            resizable:($edges) label:"Sidebar"
             @resize:{ move |event: &ResizeEvent, _| if event.phase == ResizePhase::End {
                 model.preferences.update(|p| p.sidebar_width = (event.size.width / p.scale).clamp(160.0, 360.0));
             } } {

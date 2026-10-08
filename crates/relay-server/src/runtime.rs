@@ -160,6 +160,18 @@ pub(crate) fn authorize_turn(
         config,
     )
 }
+fn matches_repository(remote: &str, reference: &IssueRef) -> bool {
+    let host = reference.url.split('/').nth(2).unwrap_or_default();
+    crate::projects::repository(remote).is_ok_and(|(remote_host, path, _)| {
+        remote_host.eq_ignore_ascii_case(host)
+            && if reference.provider == Provider::Github {
+                path.eq_ignore_ascii_case(&reference.repository)
+            } else {
+                path == reference.repository
+            }
+    })
+}
+
 pub(crate) fn authorize_session(
     snapshot: &Snapshot,
     issue_id: &str,
@@ -199,6 +211,7 @@ pub(crate) fn authorize_session(
         if let Some(reference) = &issue.reference {
             if !snapshot.memberships.iter().any(|m| {
                 m.issue_id == issue_id
+                    && snapshot.board_active(&m.board_id)
                     && snapshot.boards.iter().any(|b| {
                         b.id == m.board_id
                             && b.source != BoardSource::Local
@@ -209,15 +222,9 @@ pub(crate) fn authorize_session(
                     "Sync the remote board before working on its issue",
                 ));
             }
-            let issue_host = reference
-                .url
-                .split('/')
-                .nth(2)
-                .unwrap_or(match reference.provider {
-                    Provider::Github => "github.com",
-                    Provider::Gitlab => "gitlab.com",
-                });
-            if !snapshot.connections.iter().any(|c|c.project_id==project.id&&c.enabled&&c.state==ConnectionState::Ready&&matches!(&c.kind,ConnectionKind::Repository{remote,checkout:Some(_),..} if crate::projects::repository(remote).is_ok_and(|(host,path,_)|host==issue_host&&path==reference.repository))) {return Err(Error::invalid("Connect this issue's repository before starting agents"));}
+            if !snapshot.connections.iter().any(|c| c.project_id == project.id && c.enabled && c.state == ConnectionState::Ready && matches!(&c.kind, ConnectionKind::Repository { remote, checkout: Some(_), .. } if matches_repository(remote, reference))) {
+                return Err(Error::invalid("Connect this issue's repository before starting agents"));
+            }
         }
     } else {
         let resolved = crate::harness::configuration(snapshot, &project.id, config);
@@ -415,7 +422,7 @@ fn prepare_workspaces(
         .issue_id
         .as_ref()
         .and_then(|id| snapshot.issue(id).ok());
-    let primary = issue.and_then(|i| i.reference.as_ref()).and_then(|reference| snapshot.connections.iter().find(|c| session.connection_ids.contains(&c.id) && matches!(&c.kind,ConnectionKind::Repository{remote,..} if crate::projects::repository(remote).is_ok_and(|(_,path,_)|path==reference.repository))).map(|c|c.id.clone()));
+    let primary = issue.and_then(|i| i.reference.as_ref()).and_then(|reference| snapshot.connections.iter().find(|c| session.connection_ids.contains(&c.id) && matches!(&c.kind,ConnectionKind::Repository{remote,..} if matches_repository(remote, reference))).map(|c|c.id.clone()));
     if issue.is_some_and(|i| i.reference.is_some()) && primary.is_none() {
         return Err(Error::invalid(
             "Select the issue's repository in the session workspaces",
@@ -1293,5 +1300,34 @@ pub(crate) fn reap_owned(pid: u32, identity: &str) {
     #[cfg(not(unix))]
     {
         let _ = (pid, identity);
+    }
+}
+
+#[cfg(test)]
+mod repository_identity_tests {
+    use super::*;
+    #[test]
+    fn primary_repository_matches_host_and_provider_case_rules() {
+        let mut reference = IssueRef {
+            provider: Provider::Gitlab,
+            repository: "group/repo".into(),
+            number: 1,
+            url: "https://gitlab.example/group/repo/-/issues/1".into(),
+        };
+        assert!(matches_repository(
+            "git@gitlab.example:group/repo.git",
+            &reference
+        ));
+        assert!(!matches_repository(
+            "git@another.example:group/repo.git",
+            &reference
+        ));
+        reference.provider = Provider::Github;
+        reference.repository = "Owner/Repo".into();
+        reference.url = "https://github.com/Owner/Repo/issues/1".into();
+        assert!(matches_repository(
+            "git@github.com:owner/repo.git",
+            &reference
+        ));
     }
 }

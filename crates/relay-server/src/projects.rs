@@ -461,19 +461,32 @@ pub(super) fn apply(
             connection.enabled = false;
         }
         Command::RetryConnection { connection_id } => {
+            if snapshot.connections.iter().any(|c| c.id == connection_id && matches!(&c.kind,ConnectionKind::Board{board_id} if snapshot.canonical_board_id(board_id) != board_id)) {
+                return Err(Error::invalid("This board was combined with the published board"));
+            }
+            let local_board = snapshot.connections.iter().find(|c| c.id == connection_id).is_some_and(|c| matches!(&c.kind, ConnectionKind::Board {board_id} if snapshot.board(board_id).is_ok_and(|b| b.source == BoardSource::Local)));
             let connection = snapshot
                 .connections
                 .iter_mut()
-                .find(|c| c.id == connection_id && c.enabled)
+                .find(|c| c.id == connection_id)
                 .ok_or_else(|| Error::invalid("Connection not found"))?;
-            if !matches!(
-                connection.state,
-                ConnectionState::Failed | ConnectionState::Interrupted
-            ) {
+            if connection.enabled
+                && !matches!(
+                    connection.state,
+                    ConnectionState::Failed | ConnectionState::Interrupted
+                )
+            {
                 return Err(Error::invalid("Connection is not awaiting retry"));
             }
+            connection.enabled = true;
             let kind = match &connection.kind {
                 ConnectionKind::Repository { .. } => OperationKind::Clone { connection_id },
+                ConnectionKind::Board { .. } if local_board => {
+                    connection.state = ConnectionState::Ready;
+                    connection.error = None;
+                    snapshot.revision += 1;
+                    return Ok(None);
+                }
                 ConnectionKind::Board { board_id } => OperationKind::Sync {
                     board_id: board_id.clone(),
                 },
@@ -860,6 +873,11 @@ pub(super) fn apply(
 }
 
 fn editable_board(snapshot: &Snapshot, board_id: &str) -> Result<(), Error> {
+    if !snapshot.board_active(board_id) {
+        return Err(Error::invalid(
+            "Restore the board connection before changing tasks",
+        ));
+    }
     let board = snapshot.board(board_id).map_err(Error::invalid)?;
     if snapshot
         .project(&board.project_id)
@@ -868,15 +886,19 @@ fn editable_board(snapshot: &Snapshot, board_id: &str) -> Result<(), Error> {
     {
         return Err(Error::invalid("Fixture boards are read-only"));
     }
-    if snapshot.operations.iter().any(|o|matches!(o.state,OperationState::Pending|OperationState::Running|OperationState::NeedsReconciliation|OperationState::Interrupted) && matches!(&o.kind,OperationKind::Publish{board_id:id,..}|OperationKind::Sync{board_id:id}|OperationKind::MoveTask{board_id:id,..}|OperationKind::CreateTask{board_id:id,..} if id==board_id)) {return Err(Error::invalid("Resolve the pending board operation first"));}
+    if snapshot.operations.iter().any(|o| (matches!(o.state,OperationState::Pending|OperationState::Running|OperationState::NeedsReconciliation) || (o.state == OperationState::Interrupted && !matches!(o.kind,OperationKind::Sync{..}))) && matches!(&o.kind,OperationKind::Publish{board_id:id,..}|OperationKind::Sync{board_id:id}|OperationKind::MoveTask{board_id:id,..}|OperationKind::CreateTask{board_id:id,..} if snapshot.canonical_board_id(id)==snapshot.canonical_board_id(board_id))) {return Err(Error::invalid("Resolve the pending board operation first"));}
     Ok(())
 }
 fn editable_task(snapshot: &Snapshot, issue_id: &str) -> Result<(), Error> {
-    for membership in snapshot
-        .memberships
-        .iter()
-        .filter(|m| m.issue_id == issue_id)
-    {
+    if !snapshot.visible_task(issue_id) {
+        return Err(Error::invalid(
+            "Restore the task's board connection before editing",
+        ));
+    }
+    for membership in snapshot.memberships.iter().filter(|m| {
+        snapshot.canonical_issue_id(&m.issue_id) == snapshot.canonical_issue_id(issue_id)
+            && snapshot.board_active(&m.board_id)
+    }) {
         editable_board(snapshot, &membership.board_id)?;
     }
     if snapshot.operations.iter().any(|o| {
@@ -886,7 +908,7 @@ fn editable_task(snapshot: &Snapshot, issue_id: &str) -> Result<(), Error> {
                 | OperationState::Running
                 | OperationState::NeedsReconciliation
                 | OperationState::Interrupted
-        ) && matches!(&o.kind,OperationKind::EditTask{issue_id:id,..} if id==issue_id)
+        ) && matches!(&o.kind,OperationKind::EditTask{issue_id:id,..} if snapshot.canonical_issue_id(id)==snapshot.canonical_issue_id(issue_id))
     }) {
         return Err(Error::invalid("Resolve the pending task edit first"));
     }
@@ -1293,6 +1315,18 @@ mod tests {
             issue_ids: vec!["historical-task".into()],
         });
         let director_id = director.id.clone();
+        let mut retired = s.boards[0].clone();
+        let board_id = retired.id.clone();
+        retired.id = "retired-board".into();
+        s.boards.push(retired);
+        s.board_aliases
+            .insert("retired-board".into(), board_id.clone());
+        s.memberships.push(BoardMembership {
+            board_id: "retired-board".into(),
+            issue_id: "task-canonical".into(),
+            column_ids: vec!["backlog".into()],
+            remote_item_id: None,
+        });
         for id in ["historical-task", "task-canonical"] {
             runtime::authorize_session(
                 &s,
@@ -1317,6 +1351,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.issue("historical-task").unwrap().title, "Updated");
+        s.operations.push(ProjectOperation {
+            id: "older-edit".into(),
+            project_id: project.clone(),
+            kind: OperationKind::EditTask {
+                issue_id: "historical-task".into(),
+                title: "Older edit".into(),
+                body: String::new(),
+            },
+            state: OperationState::NeedsReconciliation,
+            error: None,
+            results: Default::default(),
+        });
+        assert!(editable_task(&s, "task-canonical").is_err());
+        s.operations.last_mut().unwrap().kind = OperationKind::MoveTask {
+            board_id: "retired-board".into(),
+            issue_id: "historical-task".into(),
+            column_id: "done".into(),
+        };
+        assert!(editable_board(&s, &board_id).is_err());
         assert_eq!(
             s.issues
                 .iter()
@@ -1336,6 +1389,68 @@ mod tests {
                 issue_ids: vec!["historical-task".into()]
             })
         );
+    }
+
+    #[test]
+    fn removed_board_blocks_mutations_and_explicit_restore_keeps_its_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Snapshot::default();
+        let project = create(&mut s, &dir.path().join("root"), "Restore");
+        let board_id = s.boards[0].id.clone();
+        s.connections.push(ProjectConnection {
+            id: "local-board-connection".into(),
+            project_id: project,
+            name: "Board".into(),
+            enabled: false,
+            state: ConnectionState::Ready,
+            error: None,
+            kind: ConnectionKind::Board {
+                board_id: board_id.clone(),
+            },
+        });
+        assert!(
+            apply(
+                &mut s,
+                Command::CreateTask {
+                    board_id: board_id.clone(),
+                    title: "Task".into(),
+                    body: String::new(),
+                    repository_connection_id: None
+                },
+                "blocked",
+                DirectorProfile::default(),
+                &RuntimeConfig::default()
+            )
+            .is_err()
+        );
+        assert!(s.issues.is_empty());
+        apply(
+            &mut s,
+            Command::RetryConnection {
+                connection_id: "local-board-connection".into(),
+            },
+            "restore",
+            DirectorProfile::default(),
+            &RuntimeConfig::default(),
+        )
+        .unwrap();
+        assert!(s.board_active(&board_id));
+        assert_eq!(s.connections.last().unwrap().state, ConnectionState::Ready);
+        assert!(s.operations.is_empty());
+        apply(
+            &mut s,
+            Command::CreateTask {
+                board_id,
+                title: "Task".into(),
+                body: String::new(),
+                repository_connection_id: None,
+            },
+            "accepted",
+            DirectorProfile::default(),
+            &RuntimeConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(s.issues.len(), 1);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use crate::{
+    controls::{ButtonStyle, button},
     model::{Model, Page, Saved},
     theme::*,
 };
@@ -233,7 +234,7 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
 fn Connections(model: Model) -> Element {
     view! {
         col height:min-content gap:{px(16.0)}px {
-            for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get()).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
+            for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && match &c.kind { ConnectionKind::Board{board_id} => model.snapshot.get().canonical_board_id(board_id) == board_id, _ => true }).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
                 let id = State::new(connection.id.clone());
                 let fallback=connection.clone();
                 let connection = Derived::new(move || model.snapshot.get().connections.into_iter().find(|c|c.id==id.get()).unwrap_or_else(||fallback.clone()));
@@ -244,14 +245,23 @@ fn Connections(model: Model) -> Element {
                     text font-size:{px(12.0)}px font-color:muted
                         {match &connection.get().kind {ConnectionKind::Repository{remote,checkout,..}=>format!("{remote}\n{}",checkout.as_deref().unwrap_or("Clone pending")),ConnectionKind::Directory{path}=>path.clone(),ConnectionKind::Board{board_id}=>model.snapshot.get().boards.iter().find(|b| &b.id==board_id).map(|b|source_label(&b.source)).unwrap_or_else(||"Board unavailable".into())}}
                     text font-color:danger {connection.get().error.unwrap_or_default()}
-                    if matches!(connection.get().state,ConnectionState::Failed|ConnectionState::Interrupted) {
+                    if !connection.get().enabled {
+                        button #action
+                            @click:{model.action(Command::RetryConnection{connection_id:id.get_untracked()});}
+                            label:{format!("Restore connection {}",connection.get().name)}
+                            disabled:{model.busy.get() || !model.connected.get()}
+                            "Restore connection"
+                    } else if matches!(connection.get().state,ConnectionState::Failed|ConnectionState::Interrupted) {
                         button #action
                             @click:{model.action(Command::RetryConnection{connection_id:id.get_untracked()});}
                             disabled:{model.busy.get() || !model.connected.get()} "Retry connection"
                     }
-                    button #action
-                        @click:{model.action(Command::RemoveConnection{connection_id:id.get_untracked()});}
-                        disabled:{model.busy.get() || !model.connected.get()} "Remove connection"
+                    if connection.get().enabled {
+                        button #action
+                            @click:{model.action(Command::RemoveConnection{connection_id:id.get_untracked()});}
+                            disabled:{model.busy.get() || !model.connected.get()}
+                            "Remove connection"
+                    }
                 }
             }
             text font-family:sans-serif "Add connection"
@@ -321,12 +331,11 @@ pub fn BoardActions(model: Model) -> Element {
 
 #[component]
 pub fn TaskEditor(model: Model) -> Element {
+    let snapshot = model.snapshot.get_untracked();
     let issue = model
-        .snapshot
+        .issue
         .get_untracked()
-        .issues
-        .into_iter()
-        .find(|i| Some(&i.id) == model.issue.get_untracked().as_ref());
+        .and_then(|id| snapshot.issue(&id).ok().cloned());
     let title = State::new(issue.as_ref().map(|i| i.title.clone()).unwrap_or_default());
     let body = State::new(issue.map(|i| task_body(&i.body)).unwrap_or_default());
     let editing = State::new(false);

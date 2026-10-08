@@ -2021,7 +2021,7 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
     let bin = dir.path().join("gh");
     script(
         &bin,
-        "case \"$*\" in\n *users/*) echo '{\"type\":\"User\"}';;\n *projectV2*) echo '{\"data\":{\"user\":{\"projectV2\":{\"id\":\"P1\",\"title\":\"Live Relay\",\"url\":\"board\"}}}}';;\n *fields*) echo '{\"data\":{\"node\":{\"fields\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}';;\n *items*) echo '{\"data\":{\"node\":{\"items\":{\"nodes\":[{\"type\":\"ISSUE\",\"content\":{\"__typename\":\"Issue\",\"number\":3,\"title\":\"Live task\",\"body\":\"Implement\",\"url\":\"issue\",\"repository\":{\"nameWithOwner\":\"jens-hj/relay\"},\"labels\":{\"nodes\":[]}}}],\"pageInfo\":{\"hasNextPage\":false}}}}}';;\n *) exit 1;;\nesac",
+        "case \"$*\" in\n *users/*) echo '{\"type\":\"User\"}';;\n *projectV2*) echo '{\"data\":{\"user\":{\"projectV2\":{\"id\":\"P1\",\"title\":\"Live Relay\",\"url\":\"board\"}}}}';;\n *fields*) echo '{\"data\":{\"node\":{\"fields\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}';;\n *items*) echo '{\"data\":{\"node\":{\"items\":{\"nodes\":[{\"type\":\"ISSUE\",\"content\":{\"__typename\":\"Issue\",\"number\":3,\"title\":\"Live task\",\"body\":\"Implement\",\"url\":\"https://github.com/jens-hj/relay/issues/3\",\"repository\":{\"nameWithOwner\":\"jens-hj/relay\"},\"labels\":{\"nodes\":[]}}}],\"pageInfo\":{\"hasNextPage\":false}}}}}';;\n *) exit 1;;\nesac",
     );
     let mut c = config();
     c.gh = bin;

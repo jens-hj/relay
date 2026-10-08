@@ -421,9 +421,9 @@ fn sidebar_drag_clamps_width_and_settings_remain_keyboard_reachable_in_short_win
     }
     assert_eq!(
         mounted.model.preferences.get_untracked().sidebar_width,
-        360.0
+        328.0
     );
-    assert!((mounted.rect("Sidebar").size.width - 360.0).abs() < 1.0);
+    assert!((mounted.rect("Sidebar").size.width - 328.0).abs() < 1.0);
     mounted.size = Size::new(820.0, 360.0);
     mounted.settle();
     mounted.focus("Settings");
@@ -3102,4 +3102,64 @@ fn harness_cards_keep_summary_and_actions_compact_and_responsive() {
                 .any(|n| n.label.as_deref() == Some("Lengthy private diagnostic"))
         );
     }
+}
+
+#[test]
+fn published_aliases_preserve_selected_board_scope_and_linked_sessions() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    let canonical = snapshot.issues[0].id.clone();
+    let mut historical = snapshot.issues[0].clone();
+    historical.id = "imported-history".into();
+    snapshot.issues.push(historical);
+    snapshot
+        .issue_aliases
+        .insert("imported-history".into(), canonical.clone());
+    snapshot.sessions[0].issue_id = Some("imported-history".into());
+    let director = snapshot.directors[0].id.clone();
+    snapshot.directors[0].overrides.scope = Some(DirectorScope::Issues {
+        issue_ids: vec!["imported-history".into()],
+    });
+    let mut old_board = snapshot.boards[0].clone();
+    let current_board = old_board.id.clone();
+    old_board.id = "existing-destination".into();
+    snapshot.boards.push(old_board);
+    snapshot
+        .board_aliases
+        .insert("existing-destination".into(), current_board.clone());
+    mounted.model.preferences.update(|p| {
+        p.selected_boards.insert(
+            snapshot.projects[0].id.clone(),
+            "existing-destination".into(),
+        );
+    });
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.issue.set(Some(canonical.clone()));
+    mounted.model.worker_director.set(director);
+    mounted.model.worker_prompt.set("Continue this task".into());
+    mounted.settle();
+    assert_eq!(mounted.model.selected_board().unwrap().id, current_board);
+    assert!(mounted.model.worker_gate(false).is_ok());
+    assert!(
+        mounted
+            .model
+            .sessions_for_task(&canonical)
+            .iter()
+            .any(|s| s.id == snapshot.sessions[0].id)
+    );
+    mounted.model.open_session(snapshot.sessions[0].id.clone());
+    assert_eq!(
+        mounted.model.issue.get_untracked().as_deref(),
+        Some(canonical.as_str())
+    );
+    assert_eq!(
+        mounted.model.snapshot.get_untracked().sessions[0]
+            .issue_id
+            .as_deref(),
+        Some("imported-history")
+    );
 }

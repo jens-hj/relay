@@ -172,6 +172,7 @@ impl Model {
             .iter()
             .any(|p| p.id == self.project.get_untracked());
         self.snapshot.set(update.snapshot);
+
         if select {
             let snapshot = self.snapshot.get_untracked();
             if let Some(project) = snapshot
@@ -535,7 +536,12 @@ impl Model {
             if let Some(issue_id) = &session.issue_id {
                 self.select_task_board(issue_id);
             }
-            self.issue.set(session.issue_id.clone());
+            self.issue.set(session.issue_id.as_ref().map(|id| {
+                self.snapshot
+                    .get_untracked()
+                    .canonical_issue_id(id)
+                    .to_owned()
+            }));
         }
         self.worker_approval.set(false);
         self.review_changes.set(false);
@@ -591,11 +597,35 @@ impl Model {
             if let Some(issue_id) = &session.issue_id {
                 self.select_task_board(issue_id);
             }
-            self.issue.set(session.issue_id.clone());
+            self.issue.set(session.issue_id.as_ref().map(|id| {
+                self.snapshot
+                    .get_untracked()
+                    .canonical_issue_id(id)
+                    .to_owned()
+            }));
             self.worker_director.set(session.director_id.clone());
             self.worker_approval.set(false);
             self.page.set(Page::Board);
         }
+    }
+    pub fn scope_contains(&self, ids: &[String], id: &str) -> bool {
+        let snapshot = self.snapshot.get();
+        ids.iter().any(|candidate| {
+            snapshot.canonical_issue_id(candidate) == snapshot.canonical_issue_id(id)
+        })
+    }
+    pub fn sessions_for_task(&self, id: &str) -> Vec<Session> {
+        let snapshot = self.snapshot.get();
+        snapshot
+            .sessions
+            .iter()
+            .filter(|s| {
+                s.issue_id.as_deref().is_some_and(|task| {
+                    snapshot.canonical_issue_id(task) == snapshot.canonical_issue_id(id)
+                })
+            })
+            .cloned()
+            .collect()
     }
     pub fn worker_profile(&self, continuation: bool) -> Result<(DirectorProfile, usize), String> {
         let snapshot = self.snapshot.get();
@@ -628,11 +658,7 @@ impl Model {
                 self.issue.get().ok_or("Select an issue")?,
             )
         };
-        let issue = snapshot
-            .issues
-            .iter()
-            .find(|i| i.id == issue_id)
-            .ok_or("Issue is unavailable")?;
+        let issue = snapshot.issue(&issue_id)?;
         let project = snapshot.project(&issue.project_id)?;
         if project.fixture {
             return Err("Fixture issue: execution unavailable".into());
@@ -671,7 +697,7 @@ impl Model {
         } else {
             self.issue.get()
         };
-        if matches!(&profile.scope, DirectorScope::Issues { issue_ids } if !issue_id.is_some_and(|id| issue_ids.contains(&id)))
+        if matches!(&profile.scope, DirectorScope::Issues { issue_ids } if !issue_id.is_some_and(|id| self.scope_contains(issue_ids, &id)))
         {
             return Err("Issue is outside director scope".into());
         }
@@ -757,6 +783,7 @@ impl Model {
     }
     fn select_task_board(&self, issue_id: &str) {
         let snapshot = self.snapshot.get_untracked();
+        let issue_id = snapshot.canonical_issue_id(issue_id);
         let candidates: Vec<_> = snapshot
             .boards
             .iter()
@@ -800,7 +827,9 @@ impl Model {
             .find(|b| {
                 b.project_id == project
                     && snapshot.board_active(&b.id)
-                    && selected.as_ref() == Some(&b.id)
+                    && selected
+                        .as_ref()
+                        .is_some_and(|id| snapshot.canonical_board_id(id) == b.id)
             })
             .or_else(|| {
                 snapshot
@@ -852,12 +881,7 @@ impl Model {
     }
     pub fn action(&self, mut command: Command) {
         if let Command::UpdateTask { issue_id, body, .. } = &mut command
-            && let Some(issue) = self
-                .snapshot
-                .get_untracked()
-                .issues
-                .iter()
-                .find(|i| &i.id == issue_id)
+            && let Some(issue) = self.snapshot.get_untracked().issue(issue_id).ok()
         {
             *body = crate::projects::preserve_task_markers(body, &issue.body);
         }

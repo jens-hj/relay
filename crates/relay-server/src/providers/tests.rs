@@ -722,6 +722,39 @@ async fn publication_reuses_existing_issue_and_fetches_preexisting_destination_t
         }],
     });
     install_task(&workspace, op, task, board_record(BoardSource::Local));
+    workspace
+        .update_project(|s| {
+            let mut imported = s.issues.iter().find(|i| i.id == "task").unwrap().clone();
+            imported.id = "imported-history".into();
+            imported.result = Some("Historical result".into());
+            s.issues.insert(0, imported);
+            let mut existing = board_record(gh_source());
+            existing.id = "existing-destination".into();
+            s.boards.push(existing);
+            s.connections.push(ProjectConnection {
+                id: "existing-board-connection".into(),
+                project_id: "project".into(),
+                name: "Remote".into(),
+                enabled: true,
+                state: ConnectionState::Ready,
+                error: None,
+                kind: ConnectionKind::Board {
+                    board_id: "existing-destination".into(),
+                },
+            });
+            s.memberships.push(BoardMembership {
+                board_id: "existing-destination".into(),
+                issue_id: "imported-history".into(),
+                column_ids: vec!["todo".into()],
+                remote_item_id: Some("ITEM1".into()),
+            });
+            s.sessions[0].issue_id = Some("imported-history".into());
+            s.directors[0].overrides.scope = Some(DirectorScope::Issues {
+                issue_ids: vec!["imported-history".into()],
+            });
+            Ok(())
+        })
+        .unwrap();
     execute(&workspace, "operation").unwrap();
     let snapshot = workspace.snapshots.borrow();
     assert!(matches!(
@@ -755,6 +788,109 @@ async fn publication_reuses_existing_issue_and_fetches_preexisting_destination_t
     );
     drop(snapshot);
     execute(&workspace, "operation").unwrap(); // completed publication does not replay
+    let snapshot = workspace.snapshots.borrow();
+    assert_eq!(snapshot.canonical_board_id("existing-destination"), "board");
+    assert!(!snapshot.board_active("existing-destination"));
+    assert_eq!(snapshot.canonical_issue_id("imported-history"), "task");
+    assert_eq!(
+        snapshot.sessions[0].issue_id.as_deref(),
+        Some("imported-history")
+    );
+    assert_eq!(
+        snapshot
+            .issues
+            .iter()
+            .find(|i| i.id == "imported-history")
+            .unwrap()
+            .result
+            .as_deref(),
+        Some("Historical result")
+    );
+    assert_eq!(
+        snapshot.directors[0].overrides.scope,
+        Some(DirectorScope::Issues {
+            issue_ids: vec!["imported-history".into()]
+        })
+    );
+    assert_eq!(
+        snapshot
+            .connections
+            .iter()
+            .filter(|c| c.enabled
+                && matches!(&c.kind, ConnectionKind::Board { board_id } if board_id == "board"))
+            .count(),
+        1
+    );
+    assert!(
+        snapshot
+            .connections
+            .iter()
+            .any(|c| c.id == "existing-board-connection"
+                && matches!(&c.kind, ConnectionKind::Board { board_id } if board_id == "board"))
+    );
+    assert!(
+        snapshot
+            .memberships
+            .iter()
+            .filter(|m| m.board_id == "board")
+            .all(|m| m.issue_id != "imported-history")
+    );
+    let restored = crate::Store::open(&_temp.path().join("db"), DirectorProfile::default())
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    assert_eq!(restored.issue_aliases, snapshot.issue_aliases);
+    assert_eq!(restored.board_aliases, snapshot.board_aliases);
+    assert_eq!(
+        restored
+            .operations
+            .iter()
+            .find(|o| o.id == "operation")
+            .unwrap()
+            .results,
+        snapshot
+            .operations
+            .iter()
+            .find(|o| o.id == "operation")
+            .unwrap()
+            .results
+    );
+}
+
+#[test]
+fn gitlab_label_columns_follow_remote_positions() {
+    let mut steps = gl_metadata();
+    steps[1].1 = json!([
+        {"id":4,"position":2,"label":{"name":"Review"}},
+        {"id":3,"position":1,"label":{"name":"Working"}}
+    ]);
+    let fake = Fake::new(steps);
+    let board = metadata(&fake.config(), &gl_source(false)).unwrap();
+    assert_eq!(
+        board
+            .board
+            .columns
+            .iter()
+            .map(|c| c.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Open", "Working", "Review", "Closed"]
+    );
+}
+
+#[test]
+fn successful_publication_creates_one_ready_connection_and_is_idempotent() {
+    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    snapshot.boards.push(board_record(gh_source()));
+    preserve_board_identity(&mut snapshot, "board").unwrap();
+    preserve_board_identity(&mut snapshot, "board").unwrap();
+    let connections: Vec<_> = snapshot
+        .connections
+        .iter()
+        .filter(|c| c.project_id == "project")
+        .collect();
+    assert_eq!(connections.len(), 1);
+    assert_eq!(connections[0].state, ConnectionState::Ready);
+    assert!(connections[0].enabled);
 }
 #[tokio::test]
 async fn failed_explicit_edit_retains_confirmed_task_and_visible_unknown_result() {

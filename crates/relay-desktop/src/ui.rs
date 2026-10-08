@@ -125,9 +125,8 @@ fn scope_label(scope: &DirectorScope, snapshot: &Snapshot) -> String {
                 .iter()
                 .map(|id| {
                     snapshot
-                        .issues
-                        .iter()
-                        .find(|i| &i.id == id)
+                        .issue(id)
+                        .ok()
                         .map(|i| {
                             i.reference
                                 .as_ref()
@@ -147,7 +146,7 @@ pub fn shell(model: Model) -> Element {
     let root = view! {
         stack fill:base font-family:monospace font-color:ink font-size:{px(14.0)}px {
             row @layout:{ move |rect: Rect| width.set(rect.size.width) } {
-                Sidebar model:(model)
+                Sidebar model:(model) viewport:(width)
                 col width:1fr {
                     if model.page.get() != Page::Sessions {
                         row height:min-content min-height:{px(84.0)}px
@@ -161,8 +160,15 @@ pub fn shell(model: Model) -> Element {
                                 text font-size:{px(12.0)}px font-color:muted font-family:sans-serif
                                     { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| p.name.clone()).unwrap_or_default() }
                             }
-                            button #action @click:{ model.palette.set(true); }
-                                label:"Open command palette" "Commands"
+                            if width.get() < px(900.0) {
+                                button #action @click:{ model.palette.set(true); }
+                                    width:{px(36.0)}px label:"Open command palette" {
+                                    icon size:{px(16.0)}px command-icon
+                                }
+                            } else {
+                                button #action @click:{ model.palette.set(true); }
+                                    label:"Open command palette" "Commands"
+                            }
                         }
                     }
                     if !model.notice.get().is_empty() {
@@ -372,15 +378,7 @@ fn IssueCard(model: Model, issue: Issue) -> Element {
             .unwrap_or_else(|| issue.clone())
     });
     let count_id = id.clone();
-    let session_count = Derived::new(move || {
-        model
-            .snapshot
-            .get()
-            .sessions
-            .iter()
-            .filter(|s| s.issue_id.as_ref() == Some(&count_id))
-            .count()
-    });
+    let session_count = Derived::new(move || model.sessions_for_task(&count_id).len());
     view! {
         button @click:{ model.issue.set(Some(id.clone())); model.worker_approval.set(false); }
             width:fill height:min-content fill:surface radius:{px(10.0)}px pad:{px(16.0)}px
@@ -425,7 +423,7 @@ fn IssueDetail(model: Model) -> Element {
                 for (_, detail) in { issue.get().into_iter().map(|i| (i.id.clone(), i)) } {
                     let detail_id = State::new(detail.id.clone());
                     let fallback = detail.clone();
-                    let current = Derived::new(move || model.snapshot.get().issues.into_iter().find(|i| i.id == detail_id.get()).unwrap_or_else(|| fallback.clone()));
+                    let current = Derived::new(move || model.snapshot.get().issue(&detail_id.get()).cloned().unwrap_or_else(|_| fallback.clone()));
                     col height:min-content gap:{px(18.0)}px selectable {
                         text font-size:{px(12.0)}px font-color:accent (current.get().label())
                         text font-size:{px(21.0)}px font-weight:650 font-family:sans-serif
@@ -443,7 +441,7 @@ fn IssueDetail(model: Model) -> Element {
                         WorkerForm model:(model) continuation:false
                         text font-size:{px(12.0)}px font-weight:650 font-family:sans-serif
                             "LINKED SESSIONS"
-                        for (_, session) in { model.snapshot.get().sessions.into_iter().filter(|s| s.issue_id.as_ref() == Some(&detail_id.get())).map(|s| (s.id.clone(), s)).collect::<Vec<_>>() } {
+                        for (_, session) in { model.sessions_for_task(&detail_id.get()).into_iter().map(|s| (s.id.clone(), s)).collect::<Vec<_>>() } {
                             let id = State::new(session.id.clone());
                             button #action @click:{ model.open_session(id.get_untracked()); }
                                 { model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default() }
@@ -528,7 +526,7 @@ fn Profiles(model: Model) -> Element {
                         button #action
                             @click:{ model.modify_profile("scope", |p| p.scope = DirectorScope::Project); }
                             "Whole project"
-                        for (_, issue) in { model.snapshot.get().issues.into_iter().filter(|i| i.project_id == model.project.get()).map(|i| (i.id.clone(), i)).collect::<Vec<_>>() } {
+                        for (_, issue) in { model.snapshot.get().issues.into_iter().filter(|i| i.project_id == model.project.get() && model.snapshot.get().canonical_issue_id(&i.id) == i.id).map(|i| (i.id.clone(), i)).collect::<Vec<_>>() } {
                             let id = issue.id.clone();
                             let issue_id = State::new(id.clone());
                             let number = issue.reference.as_ref().map(|r|format!("#{}",r.number)).unwrap_or_else(||issue.title.clone());
@@ -536,19 +534,19 @@ fn Profiles(model: Model) -> Element {
                                 @click:{
                                 model.modify_profile("scope", |p| {
                                     let mut ids = match &p.scope { DirectorScope::Issues { issue_ids } => issue_ids.clone(), _ => vec![] };
-                                    if ids.contains(&id) { ids.retain(|x| x != &id); } else { ids.push(id.clone()); }
+                                    if model.scope_contains(&ids, &id) { let snapshot = model.snapshot.get_untracked(); ids.retain(|x| snapshot.canonical_issue_id(x) != snapshot.canonical_issue_id(&id)); } else { ids.push(id.clone()); }
                                     p.scope = if ids.is_empty() { DirectorScope::Project } else { DirectorScope::Issues { issue_ids: ids } };
                                 });
                             }
-                                { format!("{} {}", if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if issue_ids.contains(&issue_id.get())) { "✓" } else { "+" }, number) }
+                                { format!("{} {}", if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) { "✓" } else { "+" }, number) }
                         }
                     }
                     text font-size:{px(12.0)}px font-color:muted
                         {
                         match model.editor_profile.get().scope {
                             DirectorScope::Project => "All project issues".into(),
-                            DirectorScope::Issues { issue_ids } => model.snapshot.get().issues.iter()
-                                .filter(|issue| issue_ids.contains(&issue.id))
+                            DirectorScope::Issues { issue_ids } => issue_ids.iter()
+                                .filter_map(|id| model.snapshot.get().issue(id).ok().cloned())
                                 .map(|issue|issue.reference.as_ref().map(|r|format!("#{}",r.number)).unwrap_or_else(||issue.title.clone()))
                                 .collect::<Vec<_>>().join(", "),
                         }

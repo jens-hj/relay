@@ -190,13 +190,24 @@ fn merge(
     remote: &RemoteBoard,
     incoming: Vec<RemoteTask>,
 ) -> Result<(), Error> {
+    let resolved_id = snapshot.canonical_board_id(id).to_owned();
+    let id = resolved_id.as_str();
     let old = snapshot.board(id).map_err(Error::invalid)?.clone();
     let mut memberships = Vec::new();
     for task in incoming {
-        let existing = snapshot.issues.iter_mut().find(|i| {
-            i.project_id == old.project_id && i.reference.as_ref() == Some(&task.reference)
-        });
-        let issue_id = if let Some(issue) = existing {
+        let existing = snapshot
+            .issues
+            .iter()
+            .find(|i| {
+                i.project_id == old.project_id && i.reference.as_ref() == Some(&task.reference)
+            })
+            .map(|i| snapshot.canonical_issue_id(&i.id).to_owned());
+        let issue_id = if let Some(issue_id) = existing {
+            let issue = snapshot
+                .issues
+                .iter_mut()
+                .find(|i| i.id == issue_id)
+                .ok_or_else(|| Error::invalid("Task redirect is missing"))?;
             issue.title = task.title;
             issue.body = task.body;
             issue.labels = task.labels;
@@ -246,6 +257,115 @@ fn operation(snapshot: &Snapshot, id: &str) -> Result<ProjectOperation, Error> {
         .find(|o| o.id == id)
         .cloned()
         .ok_or_else(|| Error::invalid("Operation not found"))
+}
+
+fn preserve_issue_identity(
+    snapshot: &mut Snapshot,
+    id: &str,
+    reference: &IssueRef,
+) -> Result<(), Error> {
+    let id = snapshot.canonical_issue_id(id).to_owned();
+    let project = snapshot
+        .issue(&id)
+        .map_err(Error::invalid)?
+        .project_id
+        .clone();
+    let duplicates: Vec<_> = snapshot
+        .issues
+        .iter()
+        .filter(|i| {
+            i.project_id == project && i.id != id && i.reference.as_ref() == Some(reference)
+        })
+        .map(|i| i.id.clone())
+        .collect();
+    for duplicate in duplicates {
+        snapshot.issue_aliases.insert(duplicate, id.clone());
+    }
+    // Keep original task/session/scope records, while every current board shows
+    // one task. This also handles a sync that imported the accepted issue before
+    // publication finished storing its source reference.
+    let mut memberships: Vec<BoardMembership> = Vec::new();
+    for mut member in std::mem::take(&mut snapshot.memberships) {
+        member.issue_id = snapshot.canonical_issue_id(&member.issue_id).to_owned();
+        if let Some(existing) = memberships
+            .iter_mut()
+            .find(|m| m.board_id == member.board_id && m.issue_id == member.issue_id)
+        {
+            for column in member.column_ids {
+                if !existing.column_ids.contains(&column) {
+                    existing.column_ids.push(column);
+                }
+            }
+            if existing.remote_item_id.is_none() {
+                existing.remote_item_id = member.remote_item_id;
+            }
+        } else {
+            memberships.push(member);
+        }
+    }
+    snapshot.memberships = memberships;
+    Ok(())
+}
+
+fn preserve_board_identity(snapshot: &mut Snapshot, id: &str) -> Result<(), Error> {
+    let board = snapshot.board(id).map_err(Error::invalid)?.clone();
+    let duplicates: Vec<_> = snapshot
+        .boards
+        .iter()
+        .filter(|b| {
+            b.project_id == board.project_id
+                && b.id != board.id
+                && b.source.same_board(&board.source)
+        })
+        .map(|b| b.id.clone())
+        .collect();
+    let matches = |connection: &ProjectConnection| {
+        connection.project_id == board.project_id
+            && matches!(&connection.kind, ConnectionKind::Board {board_id} if board_id == id || duplicates.contains(board_id))
+    };
+    let preferred = snapshot
+        .connections
+        .iter()
+        .position(|c| {
+            matches(c) && matches!(&c.kind,ConnectionKind::Board{board_id} if board_id == id)
+        })
+        .or_else(|| {
+            snapshot
+                .connections
+                .iter()
+                .position(|c| matches(c) && c.enabled)
+        })
+        .or_else(|| snapshot.connections.iter().position(matches));
+    for (index, connection) in snapshot.connections.iter_mut().enumerate() {
+        if matches(connection) {
+            connection.enabled = preferred == Some(index);
+            if connection.enabled {
+                connection.kind = ConnectionKind::Board {
+                    board_id: board.id.clone(),
+                };
+                connection.name = board.name.clone();
+                connection.state = ConnectionState::Ready;
+                connection.error = None;
+            }
+        }
+    }
+    if preferred.is_none() {
+        snapshot.connections.push(ProjectConnection {
+            id: format!("connection-published-{}", board.id),
+            project_id: board.project_id.clone(),
+            name: board.name.clone(),
+            enabled: true,
+            state: ConnectionState::Ready,
+            error: None,
+            kind: ConnectionKind::Board {
+                board_id: board.id.clone(),
+            },
+        });
+    }
+    for duplicate in duplicates {
+        snapshot.board_aliases.insert(duplicate, board.id.clone());
+    }
+    Ok(())
 }
 fn journal(workspace: &Workspace, id: &str, key: &str, value: String) -> Result<(), Error> {
     workspace.update_project(|s| {
@@ -382,10 +502,11 @@ fn execute_inner(workspace: &Workspace, id: &str) -> Result<(), Error> {
             })?)?;
             let accepted = read_issue(&workspace.config, reference)?;
             workspace.update_project(|s| {
+                let resolved_issue_id = s.canonical_issue_id(issue_id).to_owned();
                 let issue = s
                     .issues
                     .iter_mut()
-                    .find(|i| i.id == *issue_id)
+                    .find(|i| i.id == resolved_issue_id)
                     .ok_or_else(|| Error::invalid("Task not found"))?;
                 issue.title = text(&accepted, "title")?;
                 issue.body = if reference.provider == Provider::Github {
@@ -422,7 +543,10 @@ fn execute_inner(workspace: &Workspace, id: &str) -> Result<(), Error> {
             let member = snapshot
                 .memberships
                 .iter()
-                .find(|m| m.board_id == *board_id && m.issue_id == *issue_id)
+                .find(|m| {
+                    m.board_id == snapshot.canonical_board_id(board_id)
+                        && m.issue_id == snapshot.canonical_issue_id(issue_id)
+                })
                 .ok_or_else(|| Error::invalid("Task is not on board"))?;
             let item = member
                 .remote_item_id
@@ -841,6 +965,7 @@ fn attach_task(
     }
     // Durable source assignment precedes membership. Local membership survives partial publish.
     workspace.update_project(|s| {
+        preserve_issue_identity(s, &task.id, &reference)?;
         let issue = s
             .issues
             .iter_mut()
@@ -1176,6 +1301,7 @@ fn publish(
     let incoming = tasks(&workspace.config, &remote)?;
     workspace.update_project(|s| {
         merge(s, board_id, &remote, incoming)?;
+        preserve_board_identity(s, board_id)?;
         let operation = s
             .operations
             .iter_mut()

@@ -7,7 +7,7 @@ mosaic::scheme! {
         success:Color, warning:Color, danger:Color, ui-scale:Scalar = 1,
         tree-chevron-right:Svg, tree-chevron-down:Svg, board-icon:Svg,
         harness-codex:Svg, harness-claude:Svg, harness-ready:Svg, harness-warning:Svg, harness-failed:Svg, harness-neutral:Svg,
-        director-icon:Svg, worker-icon:Svg, gear-icon:Svg, plus-icon:Svg, sliders-icon:Svg,
+        director-icon:Svg, worker-icon:Svg, gear-icon:Svg, plus-icon:Svg, sliders-icon:Svg, command-icon:Svg,
     }
 }
 
@@ -66,7 +66,7 @@ pub fn configured_palette(light: bool, alternate: bool, scale: f32) -> RelayThem
         board-icon:"assets/icons/board.svg", director-icon:"assets/icons/director.svg",
         worker-icon:"assets/icons/worker.svg", gear-icon:"assets/icons/gear.svg",
         harness-codex:"assets/icons/harness-codex.svg", harness-claude:"assets/icons/harness-claude.svg", harness-ready:"assets/icons/harness-ready.svg", harness-warning:"assets/icons/harness-warning.svg", harness-failed:"assets/icons/harness-failed.svg", harness-neutral:"assets/icons/harness-neutral.svg",
-        plus-icon:"assets/icons/plus.svg", sliders-icon:"assets/icons/sliders.svg",
+        plus-icon:"assets/icons/plus.svg", sliders-icon:"assets/icons/sliders.svg", command-icon:"assets/icons/command.svg",
     } }
 }
 
