@@ -4,6 +4,13 @@ use crate::*;
 pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardDiscovery {
+    pub source: BoardSource,
+    pub name: String,
+    pub columns: Vec<BoardColumn>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BoardSource {
     Local,
