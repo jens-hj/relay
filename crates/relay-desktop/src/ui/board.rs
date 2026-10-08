@@ -129,6 +129,7 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
     let stacked = Derived::new(move || narrow.get() || width.get() < px(620.0));
     let creating = State::new(false);
     let managing = State::new(false);
+    let history = State::new(false);
     let menu = State::new(false);
     let trigger_slot: Rc<RefCell<Option<Element>>> = Rc::default();
     let project_name = Derived::new(move || {
@@ -206,9 +207,9 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                                         @click:{model.page.set(Page::Publish); menu.set(false);}
                                         label:"Publish board" "Publish board"
                                 }
-                                if !local.get() && full.get() {
-                                    row #relay.caption height:min-content { text "No board actions" }
-                                }
+                                button #relay.action width:fill justify:start
+                                    @click:{history.set(!history.get_untracked()); menu.set(false);}
+                                    label:"Operation history" "Operation history"
                             }
                         }
                     } as menu_anchor
@@ -237,6 +238,12 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                 col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
                     stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
                     Operations model:(model)
+                }
+            }
+            if history.get() {
+                col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
+                    stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
+                    OperationHistory model:(model) open:(history)
                 }
             }
             if stacked.get() {
@@ -454,12 +461,7 @@ pub(crate) fn IssueCard(model: Model, issue: Issue) -> Element {
                         font-size:{px(11.0)}px {
                         text text-wrap:none { issue_number(&current.get()) }
                     }
-                    row width:1fr align:center gap:{px(4.0)}px
-                        pad:(horizontal:{px(6.0)}px vertical:0px) clip {
-                        for (_, label) in { current.get().labels.into_iter().map(|label| (label.clone(), label)) } {
-                            Tag text:(label.clone())
-                        }
-                    }
+                    LabelStrip labels:(Derived::new(move || current.get().labels))
                 }
                 col height:min-content gap:{px(6.0)}px
                     pad:(left:{px(10.0)}px right:{px(10.0)}px top:{px(10.0)}px bottom:{px(12.0)}px) {
@@ -519,6 +521,10 @@ fn DetailRow(key: String, value: Derived<String>) -> Element {
 /// sessions and the worker form.
 #[component]
 pub(crate) fn IssueDetail(model: Model) -> Element {
+    // A tall inspector keeps the worker setup anchored at the bottom; a short
+    // one (small window, large scale) scrolls it with the details.
+    let height = State::new(0.0f32);
+    let anchored = Derived::new(move || height.get() >= px(760.0));
     let issue = Derived::new(move || {
         model
             .snapshot
@@ -529,7 +535,8 @@ pub(crate) fn IssueDetail(model: Model) -> Element {
     });
     view! {
         col width:{px(392.0)} shrink:1 fill:surface.panel
-            stroke:(width:{px(1.0)} color:rule.line edges:left) label:"Issue details" {
+            stroke:(width:{px(1.0)} color:rule.line edges:left)
+            @layout:{move |rect: Rect| height.set(rect.size.height)} label:"Issue details" {
             if issue.get().is_none() {
                 row #relay.strip height:{px(56.0)}px shrink:0 align:center justify:between
                     pad:(horizontal:{px(14.0)}px vertical:0px) {
@@ -640,7 +647,6 @@ pub(crate) fn IssueDetail(model: Model) -> Element {
                             col height:min-content
                                 pad:(horizontal:{px(14.0)}px vertical:{px(12.0)}px)
                                 gap:{px(12.0)}px {
-                                WorkerForm model:(model) continuation:false
                                 TaskEditor model:(model)
                                 if current.get().result.is_some() {
                                     col height:min-content gap:{px(6.0)}px pad:(top:{px(8.0)}px)
@@ -655,6 +661,17 @@ pub(crate) fn IssueDetail(model: Model) -> Element {
                                     }
                                 }
                             }
+                            if !anchored.get() {
+                                col height:min-content pad:(horizontal:{px(14.0)}px vertical:{px(12.0)}px) {
+                                    WorkerForm model:(model) continuation:false
+                                }
+                            }
+                        }
+                    }
+                    if anchored.get() {
+                        col height:min-content shrink:0 pad:(horizontal:{px(14.0)}px vertical:{px(12.0)}px)
+                            stroke:(width:{px(1.0)} color:rule.line edges:top) {
+                            WorkerForm model:(model) continuation:false
                         }
                     }
                 }
@@ -703,49 +720,94 @@ pub(crate) fn WorkerApproval(model: Model) -> Element {
 
 #[component]
 pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
+    let choosing = State::new(false);
+    // Which director and resources the next worker uses, in one line.
+    let setup = Derived::new(move || {
+        let snapshot = model.snapshot.get();
+        let director = snapshot
+            .directors
+            .iter()
+            .find(|d| d.id == model.worker_director.get())
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| "No director".into());
+        let resources = match model.workspace_selection.get() {
+            None => "automatic resources".to_string(),
+            Some(ids) => format!(
+                "{} resource{}",
+                ids.len(),
+                if ids.len() == 1 { "" } else { "s" }
+            ),
+        };
+        format!("{director} · {resources}")
+    });
+    // One status line: why the worker cannot start, or that it can.
+    let gate_status = Derived::new(move || {
+        model
+            .worker_gate(continuation)
+            .err()
+            .or_else(|| model.worker_profile(continuation).err())
+            .unwrap_or_else(|| "Ready · server rechecks policy and revision".into())
+    });
     view! {
-        col height:min-content gap:{px(10.0)}px {
-            text font-size:{px(13.0)}px font-weight:{650} font-family:{FontFamily::SansSerif}
-                { if continuation { "Continue this session" } else { "Start task worker" } }
-            if !continuation {
-                WorkspaceChoices model:(model)
-                for (_, director) in { model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
-                    let id = State::new(director.id.clone());
-                    button #relay.action
-                        @click:{ model.worker_director.set(id.get_untracked()); model.worker_approval.set(false); }
-                        width:fill justify:start role:radio
-                        fill:if model.worker_director.get() == id.get() {surface.selected} else {surface.panel}
-                        stroke:(width:{px(if model.worker_director.get() == id.get() {3.0} else {1.0})} color:{color(if model.worker_director.get() == id.get() {ink.fg} else {rule.line})} edges:left)
-                        { model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| format!("Director: {}", d.name)).unwrap_or_default() }
+        col #relay.module label:"Worker setup" {
+            row #relay.module-head gap:{px(8.0)}px {
+                row #relay.eyebrow height:min-content width:max-content {
+                    text text-transform:uppercase letter-spacing:{px(0.6)}px
+                        (if continuation { "Continue this session" } else { "Start task worker" })
+                }
+                if !continuation {
+                    row #relay.caption height:min-content width:1fr min-width:0px clip {
+                        text text-wrap:none {setup.get()}
+                    }
+                    button #relay.action @click:{ choosing.set(!choosing.get_untracked()); }
+                        pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
+                        label:"Choose director and resources"
+                        { if choosing.get() { "Done" } else { "Change" } }
+                }
+            }
+            if choosing.get() && !continuation {
+                col height:min-content gap:{px(6.0)}px pad:{px(12.0)}px
+                    stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                    for (_, director) in { model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
+                        let id = State::new(director.id.clone());
+                        button #relay.action
+                            @click:{ model.worker_director.set(id.get_untracked()); model.worker_approval.set(false); }
+                            width:fill justify:start role:radio
+                            fill:if model.worker_director.get() == id.get() {surface.selected} else {surface.panel}
+                            stroke:(width:{px(if model.worker_director.get() == id.get() {3.0} else {1.0})} color:{color(if model.worker_director.get() == id.get() {ink.fg} else {rule.line})} edges:left)
+                            { model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| format!("Director: {}", d.name)).unwrap_or_default() }
+                    }
+                    WorkspaceChoices model:(model)
                 }
             }
             if model.worker_profile(continuation).is_ok() {
-                grid
-                    cols:{GridTracks::auto_fit(GridTrack::minmax(px(120.0).into(), GridTrack::fr(1.0)))}
-                    height:min-content gap:{px(10.0)}px pad:{px(10.0)}px
-                    stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)})
+                grid cols:{GridTracks::auto_fit(GridTrack::minmax(px(80.0).into(), GridTrack::fr(1.0)))}
+                    height:min-content gap:0px stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
                     label:"Worker policy" {
                     for (_, key) in { worker_policy(model, continuation).into_iter().map(|(k, _)| (k, k)).collect::<Vec<_>>() } {
                         let field: &'static str = key;
-                        Readout key:(field.to_string())
-                            value:(Derived::new(move || worker_policy(model, continuation).into_iter().find(|(k, _)| *k == field).map(|(_, v)| v).unwrap_or_default()))
+                        col height:min-content min-width:0px pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px)
+                            stroke:(width:{px(1.0)} color:rule.hair edges:right) {
+                            Readout key:(field.to_string())
+                                value:(Derived::new(move || worker_policy(model, continuation).into_iter().find(|(k, _)| *k == field).map(|(_, v)| v).unwrap_or_default()))
+                        }
                     }
                 }
-            } else {
-                text font-size:{px(12.0)}px font-color:{color(ink.muted)}
-                    { model.worker_profile(continuation).err().unwrap_or_default() }
             }
-            input #relay.field label:"Worker prompt" placeholder:"Prompt for this turn…"
-                model.worker_prompt
-            if model.worker_profile(continuation).is_ok_and(|(p, _)| p.permissions.get(&Task::Implement) == Some(&Permission::Ask)) {
-                WorkerApproval model:(model)
+            col height:min-content gap:{px(10.0)}px pad:{px(12.0)}px {
+                input #relay.area multiline height:{px(92.0)}px label:"Worker prompt"
+                    placeholder:"Prompt for this turn…" model.worker_prompt
+                if model.worker_profile(continuation).is_ok_and(|(p, _)| p.permissions.get(&Task::Implement) == Some(&Permission::Ask)) {
+                    WorkerApproval model:(model)
+                }
+                row height:min-content align:center gap:{px(12.0)}px {
+                    row #relay.caption width:1fr min-width:0px height:min-content { text {gate_status.get()} }
+                    button #relay.primary @click:{ model.run_worker(continuation); }
+                        label:if continuation { "Send worker prompt" } else { "Start worker" }
+                        disabled:{ model.worker_gate(continuation).is_err() }
+                        { if continuation { "Send / continue" } else { "Start worker" } }
+                }
             }
-            text font-size:{px(11.0)}px font-color:{color(ink.muted)}
-                { model.worker_gate(continuation).err().unwrap_or_else(|| "Ready · server rechecks policy and revision".into()) }
-            button #relay.primary @click:{ model.run_worker(continuation); }
-                label:if continuation { "Send worker prompt" } else { "Start worker" }
-                disabled:{ model.worker_gate(continuation).is_err() }
-                { if continuation { "Send / continue" } else { "Start worker" } }
         }
     }
 }
@@ -881,12 +943,34 @@ fn BoardFooter(model: Model) -> Element {
             .fold((0, 0), |(a, l), (_, active, limit)| (a + active, l + limit));
         format!("{active} / {limit} active")
     });
+    // Narrow strips (small windows, large scales) read as one summary cell.
+    let width = State::new(0.0f32);
+    let compact = Derived::new(move || width.get() < px(560.0));
+    let summary = Derived::new(move || {
+        let count = |state: RunState| tasks.get().iter().filter(|s| **s == state).count();
+        if fixture.get() {
+            format!("{} tasks", tasks.get().len())
+        } else {
+            format!(
+                "{} tasks · {} running · {} waiting · workers {}",
+                tasks.get().len(),
+                count(RunState::Running),
+                count(RunState::Waiting),
+                workers.get()
+            )
+        }
+    });
     view! {
         row height:{px(52.0)}px shrink:0 stroke:(width:{px(1.0)} color:rule.line edges:top)
-            label:"Board summary" {
-            HeaderCell key:("Tasks".to_string())
-                value:(Derived::new(move || format!("{:02}", tasks.get().len())))
-            if !fixture.get() {
+            @layout:{move |rect: Rect| width.set(rect.size.width)} label:"Board summary" {
+            if compact.get() {
+                HeaderCell key:("Board".to_string()) value:(summary)
+            }
+            if !compact.get() {
+                HeaderCell key:("Tasks".to_string())
+                    value:(Derived::new(move || format!("{:02}", tasks.get().len())))
+            }
+            if !fixture.get() && !compact.get() {
                 HeaderCell key:("Running".to_string()) value:(with_state(RunState::Running))
                 HeaderCell key:("Waiting".to_string()) value:(with_state(RunState::Waiting))
                 HeaderCell key:("Project workers".to_string()) value:(workers)
@@ -895,9 +979,9 @@ fn BoardFooter(model: Model) -> Element {
     }
 }
 
-/// Owns the board actions menu's dismissal, as Mosaic's select does: Escape
-/// closes it and returns focus to its trigger, and a completed click outside
-/// the trigger and menu closes it. Clearing `open` also clears the tooltip's
+/// Owns the board actions menu's dismissal: Escape closes it and returns
+/// focus to its trigger, and a press anywhere outside the trigger and menu,
+/// including on another control, closes it. Clearing `open` also clears the tooltip's
 /// own Escape suppression, so the next click on the trigger reopens it.
 fn bind_menu(
     model: Model,
@@ -918,12 +1002,15 @@ fn bind_menu(
         }
     });
     anchor.on_pointer(|event, ctx| {
-        if matches!(event.kind, PointerEventKind::Click(_)) {
+        if matches!(
+            event.kind,
+            PointerEventKind::Down(_) | PointerEventKind::Click(_)
+        ) {
             ctx.stop_propagation();
         }
     });
     // Views are built under a placeholder root that mounting replaces, so
-    // the outside-click handler joins the mounted root when the menu first
+    // the outside-press handler joins the mounted root when the menu first
     // opens. It lives as long as the anchor.
     let anchor = anchor.clone();
     let watching = std::cell::Cell::new(false);
@@ -936,7 +1023,7 @@ fn bind_menu(
             .get_untracked()
             .root()
             .on_pointer_for(&anchor, move |event, _| {
-                if matches!(event.kind, PointerEventKind::Click(PointerButton::Primary))
+                if matches!(event.kind, PointerEventKind::Down(PointerButton::Primary))
                     && open.get_untracked()
                 {
                     open.set(false);

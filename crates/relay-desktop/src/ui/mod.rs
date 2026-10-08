@@ -11,9 +11,9 @@ use crate::{
     controls::{AppearanceSegments, AppearanceSegmentsProps, ButtonStyle, button},
     conversation::{Conversation, ConversationProps},
     labels::{
-        DirectorMark, DirectorMarkProps, Readout, ReadoutProps, RunState, SlidingSegments,
-        SlidingSegmentsProps, SlotMeter, SlotMeterProps, StatusGlyph, StatusGlyphProps, Tag,
-        TagProps,
+        DirectorMark, DirectorMarkProps, LabelStrip, LabelStripProps, Readout, ReadoutProps,
+        RunState, SlidingSegments, SlidingSegmentsProps, SlotMeter, SlotMeterProps, StatusGlyph,
+        StatusGlyphProps, Tag, TagProps,
     },
     model::{EditTarget, Model, Page},
     projects::*,
@@ -37,7 +37,7 @@ pub fn shell(model: Model) -> Element {
             row @layout:{ move |rect: Rect| width.set(rect.size.width) } {
                 Sidebar model:(model) viewport:(width)
                 col width:1fr {
-                    if !matches!(model.page.get(), Page::Sessions | Page::Board) {
+                    if !matches!(model.page.get(), Page::Sessions | Page::Board | Page::Directors) {
                         PageHeader model:(model)
                             eyebrow:(page_label(model.page.get_untracked()).to_string())
                             title:(Derived::new(move || model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| p.name.clone()).unwrap_or_default()))

@@ -2194,6 +2194,8 @@ fn initial_workspace_choice_is_explicit_and_followup_keeps_recorded_resources() 
     mounted.model.snapshot.set(snapshot);
     mounted.model.issue.set(Some("issue-2".into()));
     mounted.settle();
+    // Director and resource choices are disclosed from the worker setup head.
+    mounted.click("Choose director and resources");
     mounted.focus("Choose session resources");
     mounted.click("Choose session resources");
     mounted.focus("Workspace resource Directory");
@@ -4070,6 +4072,17 @@ fn board_actions_menu_closes_on_escape_and_outside_clicks_and_reopens_at_once() 
     assert!(has_label(&mounted, "Manage columns"));
     mounted.click("Board actions");
     assert!(closed(&mounted), "trigger toggle");
+    // Pressing another control closes the menu and still activates it.
+    mounted.click("Board actions");
+    assert!(has_label(&mounted, "Manage columns"));
+    mounted.click("New task");
+    assert!(closed(&mounted), "another control");
+    assert!(has_label(&mounted, "New task title"));
+    // Menu items act before the menu closes.
+    mounted.click("Board actions");
+    mounted.click("Operation history");
+    assert!(closed(&mounted));
+    assert!(has_label(&mounted, "Completed operations"));
 }
 
 #[test]
@@ -4138,4 +4151,50 @@ fn session_header_and_run_strip_show_only_recorded_values() {
     let send = mounted.rect("Send message");
     assert!(send.origin.x < draft.origin.x + 92.0);
     assert!(has_label(&mounted, "Stop worker"));
+}
+
+#[test]
+fn live_readout_values_keep_their_container_typography_after_updates() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = live_snapshot();
+    snapshot.projects[0].defaults.max_workers = 4;
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.issue.set(Some("issue-2".into()));
+    mounted.settle();
+    // The text leaf showing `value`, with its resolved type attributes.
+    let typography = |value: &str| {
+        let snapshot = mounted.ui.inspection_snapshot();
+        let node = snapshot
+            .nodes
+            .iter()
+            .find(|n| {
+                n.element_name.as_deref() == Some("text") && n.label.as_deref() == Some(value)
+            })
+            .unwrap_or_else(|| panic!("Missing text: {value}"));
+        let details = mounted.ui.inspection_details(node.id).unwrap();
+        ["font-size", "font-family", "text-color", "font-weight"].map(|name| {
+            details
+                .attributes
+                .iter()
+                .find(|a| a.name == name)
+                .map(|a| a.value.clone())
+                .unwrap_or_default()
+        })
+    };
+    let before = typography("0 / 4 active");
+    assert_eq!(before[0], "13.0");
+    assert_eq!(before[1], "Monospace");
+    snapshot.revision += 1;
+    snapshot.projects[0].defaults.max_workers = 5;
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert_eq!(typography("0 / 5 active"), before);
 }
