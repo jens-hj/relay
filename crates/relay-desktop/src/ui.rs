@@ -1,7 +1,8 @@
 use crate::{
-    controls::{ButtonStyle, button},
+    controls::{AppearanceSegments, AppearanceSegmentsProps, ButtonStyle, button},
     conversation::{Conversation, ConversationProps},
     model::{EditTarget, Model, Page},
+    projects::*,
     sidebar::{Sidebar, SidebarProps},
     theme::*,
 };
@@ -10,19 +11,19 @@ use relay_core::*;
 
 #[component]
 fn Settings(model: Model) -> Element {
-    use crate::settings::ThemeMode;
-    let checkout = State::new(String::new());
-    let repository = State::new(String::new());
-    let owner = State::new(String::new());
-    let number = State::new(String::new());
-    let setup = State::new(
-        !model
-            .snapshot
-            .get_untracked()
-            .projects
-            .iter()
-            .any(|p| !p.fixture),
-    );
+    let scale = State::new(model.preferences.get_untracked().scale * 100.0);
+    Effect::new(move || {
+        let value = (scale.get() / 100.0).clamp(0.8, 2.0);
+        if model.preferences.get_untracked().scale != value {
+            model.preferences.update(|p| p.scale = value);
+        }
+    });
+    Effect::new(move || {
+        let value = model.preferences.get().scale * 100.0;
+        if (scale.get_untracked() - value).abs() > 0.01 {
+            scale.set(value);
+        }
+    });
     view! {
         scroll {
             col height:min-content pad:{px(28.0)}px gap:{px(24.0)}px {
@@ -42,97 +43,25 @@ fn Settings(model: Model) -> Element {
                     }
                 }
                 col height:min-content gap:{px(10.0)}px {
-                    row height:min-content align:center gap:{px(10.0)}px {
-                        text font-family:sans-serif font-size:{px(18.0)}px font-weight:650
-                            "Projects"
-                        button #action @click:{setup.set(!setup.get_untracked());}
-                            label:"Add project" "+ Project"
-                    }
-                    for (_, binding) in {model.snapshot.get().bindings.into_iter().map(|b|(b.project_id(),b)).collect::<Vec<_>>()} {
-                        let id = State::new(binding.project_id());
-                        button #action @click:{model.select_project(id.get_untracked());}
-                            {model.snapshot.get().bindings.iter().find(|b|b.project_id()==id.get()).map(|b|format!("{} · board {}",b.repository,b.number)).unwrap_or_default()}
-                    }
-                    if setup.get() {
-                        col max-width:{px(600.0)}px height:min-content gap:{px(8.0)}px {
-                            text font-size:{px(12.0)}px font-color:muted
-                                "Connect a GitHub board. The checkout path is on the server; project setup and sessions are saved there."
-                            input #input-field label:"Checkout path on server"
-                                placeholder:"/home/you/repos/project" checkout
-                            input #input-field label:"GitHub repository"
-                                placeholder:"owner/repository" repository
-                            input #input-field label:"GitHub project owner"
-                                placeholder:"user or organization" owner
-                            input #input-field label:"GitHub board number" placeholder:"5" number
-                            button #action
-                                @click:{
-                                    if let Ok(number) = number.get_untracked().trim().parse::<u64>() {
-                                        let binding = ProjectBinding { checkout: checkout.get_untracked().trim().into(), repository: repository.get_untracked().trim().into(), owner: owner.get_untracked().trim().into(), number };
-                                        model.submit(Command::ConfigureProject {binding:binding.clone()},model.snapshot.get_untracked().revision,crate::model::Saved::Project(binding.project_id()));
-                                    } else {model.notice.set("Enter a positive board number".into());}
-                                }
-                                disabled:{!model.connected.get() || model.busy.get()}
-                                label:"Save project and sync board" "Connect project"
-                        }
-                    }
-                }
-                col height:min-content gap:{px(10.0)}px {
                     text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Appearance"
-                    grid
-                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(100.0).into(), GridTrack::fr(1.0)))}
-                        max-width:{px(480.0)}px height:min-content gap:{px(8.0)}px {
-                        for (label, mode) in [("Dark", ThemeMode::Dark), ("Light", ThemeMode::Light), ("System", ThemeMode::System)] {
-                            button #action @click:{ model.preferences.update(|p| p.mode = mode); }
-                                width:fill
-                                fill:if model.preferences.get().mode == mode { accent-soft } else { raised }
-                                label:{format!("Theme: {label}")} (label)
-                        }
-                    }
+                    AppearanceSegments model:(model) field:(0usize)
                     text font-family:sans-serif font-size:{px(14.0)}px "Light palette"
-                    grid
-                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(100.0).into(), GridTrack::fr(1.0)))}
-                        max-width:{px(480.0)}px height:min-content gap:{px(8.0)}px {
-                        for (label, warm) in [("Paper", false), ("Warm", true)] {
-                            button #action
-                                @click:{ model.preferences.update(|p| p.light_warm = warm); }
-                                width:fill
-                                fill:if model.preferences.get().light_warm == warm { accent-soft } else { raised }
-                                label:{format!("Light palette: {label}")} (label)
-                        }
-                    }
+                    AppearanceSegments model:(model) field:(1usize)
                     text font-family:sans-serif font-size:{px(14.0)}px "Dark palette"
-                    grid
-                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(100.0).into(), GridTrack::fr(1.0)))}
-                        max-width:{px(480.0)}px height:min-content gap:{px(8.0)}px {
-                        for (label, neutral) in [("Slate", false), ("Neutral", true)] {
-                            button #action
-                                @click:{ model.preferences.update(|p| p.dark_neutral = neutral); }
-                                width:fill
-                                fill:if model.preferences.get().dark_neutral == neutral { accent-soft } else { raised }
-                                label:{format!("Dark palette: {label}")} (label)
-                        }
-                    }
+                    AppearanceSegments model:(model) field:(2usize)
                 }
                 col height:min-content gap:{px(10.0)}px {
                     text font-family:sans-serif font-size:{px(18.0)}px font-weight:650
                         "Interface scale"
                     text font-size:{px(12.0)}px font-color:muted
                         "Display scaling follows your operating system. Adjust the interface size here."
-                    grid
-                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(100.0).into(), GridTrack::fr(1.0)))}
-                        max-width:{px(480.0)}px height:min-content gap:{px(8.0)}px align:center {
-                        button #action
-                            @click:{ model.preferences.update(|p| p.scale = (p.scale - 0.1).max(0.8)); }
-                            width:fill label:"Decrease interface scale"
-                            disabled:{model.preferences.get().scale <= 0.8} "−"
-                        text {format!("{:.0}%", model.preferences.get().scale * 100.0)}
-                        button #action
-                            @click:{ model.preferences.update(|p| p.scale = (p.scale + 0.1).min(2.0)); }
-                            width:fill label:"Increase interface scale"
-                            disabled:{model.preferences.get().scale >= 2.0} "+"
-                        button #action @click:{model.preferences.update(|p| p.scale = 1.0);}
-                            width:fill label:"Reset interface scale" "Reset"
+                    row height:min-content gap:{px(8.0)}px align:center {
+                        stepper #scale-stepper min:80 max:200 step:10 label:"Interface scale percent" scale as scale_control
+                        {scale_control.decrement().label("Decrease interface scale");scale_control.increment().label("Increase interface scale");}
+                        text "%"
                     }
+                    button #action @click:{model.preferences.update(|p|p.scale=1.0);}
+                        label:"Reset interface scale" "Reset"
                 }
                 col height:min-content gap:{px(10.0)}px {
                     text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Sidebar"
@@ -199,7 +128,12 @@ fn scope_label(scope: &DirectorScope, snapshot: &Snapshot) -> String {
                         .issues
                         .iter()
                         .find(|i| &i.id == id)
-                        .map(|i| format!("#{}", i.reference.number))
+                        .map(|i| {
+                            i.reference
+                                .as_ref()
+                                .map(|r| format!("#{}", r.number))
+                                .unwrap_or_else(|| i.title.clone())
+                        })
                         .unwrap_or_else(|| "unavailable issue".into())
                 })
                 .collect::<Vec<_>>()
@@ -222,10 +156,10 @@ pub fn shell(model: Model) -> Element {
                             col height:min-content gap:{px(4.0)}px {
                                 text font-size:{px(22.0)}px font-weight:650 font-family:sans-serif
                                     {
-                                match model.page.get() { Page::Board => "Project board", Page::Sessions => "Sessions", Page::Directors => "Directors", Page::Settings => "Settings" }
+                                match model.page.get() { Page::Board => "Project board", Page::Sessions => "Sessions", Page::Directors => "Directors", Page::Settings => "Settings", Page::NewProject => "New Project", Page::Connections => "Project Connections", Page::Publish => "Publish board", Page::DirectorStart => "Director conversation" }
                             }
                                 text font-size:{px(12.0)}px font-color:muted font-family:sans-serif
-                                    { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| format!("{} · {}", p.repository, if p.fixture { "Fixture workspace" } else { "Remote GitHub board" })).unwrap_or_default() }
+                                    { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| p.name.clone()).unwrap_or_default() }
                             }
                             button #action @click:{ model.palette.set(true); }
                                 label:"Open command palette" "Commands"
@@ -258,6 +192,8 @@ pub fn shell(model: Model) -> Element {
                         col {
                             Settings model:(model)
                         }
+                    } else if matches!(model.page.get(), Page::NewProject | Page::Connections | Page::Publish | Page::DirectorStart) {
+                        ProjectPage model:(model)
                     } else {
                         col {
                             if model.snapshot.get().projects.is_empty() {
@@ -349,48 +285,38 @@ pub fn shell(model: Model) -> Element {
 
 #[component]
 fn Board(model: Model, narrow: Derived<bool>) -> Element {
-    let columns = Derived::new(move || {
-        model
-            .snapshot
-            .get()
-            .projects
-            .iter()
-            .find(|p| p.id == model.project.get())
-            .map(|p| {
-                p.columns
-                    .iter()
-                    .filter(|c| c.id != "github-removed-from-board")
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    });
+    let columns = Derived::new(move || model.board_columns());
     view! {
         col width:1fr pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) gap:{px(12.0)}px {
-            text font-size:{px(12.0)}px font-color:muted
-                {
-                model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| match &p.github {
-                    Some(g) => format!("{} · board {} #{} · {}\n{}", g.url, g.owner, g.number, sync_label(g.last_synced_at), g.sync_error.clone().unwrap_or_default()),
-                    None => "Fixture board · no remote synchronization".into()
-                }).unwrap_or_default()
-            }
-            button #action @click:{ model.sync_project(); } label:"Sync project"
-                disabled:{ model.busy.get() || !model.connected.get() || !model.snapshot.get().projects.iter().any(|p| p.id == model.project.get() && p.github.is_some()) }
-                "Sync project"
             scroll {
-                if narrow.get() {
-                    col height:min-content gap:{px(18.0)}px {
-                        for (_, column) in { columns.get().into_iter().map(|c| (c.id.clone(), c)) } {
-                            col width:1fr height:min-content {
-                                BoardColumnView model:(model) column:(column.clone())
+                col height:min-content gap:{px(12.0)}px {
+                    text font-size:{px(12.0)}px font-color:muted
+                        {
+                if let Some(board)=model.selected_board() {format!("{} · {}\n{}",board.name,match board.source {BoardSource::Local=>"Local board".to_owned(),BoardSource::Github{owner,number,..}=>format!("GitHub {owner} · {number} · {}",sync_label(board.last_synced_at)),BoardSource::Gitlab{host,path,number,group,..}=>format!("GitLab {host}/{path} · {} · {number} · {}",if group {"group"}else{"project"},sync_label(board.last_synced_at))},board.error.unwrap_or_default())} else {
+                    model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| match &p.github {
+                        Some(g) => format!("{} · board {} #{} · {}\n{}",g.url,g.owner,g.number,sync_label(g.last_synced_at),g.sync_error.clone().unwrap_or_default()),
+                        None => "Fixture board".into()
+                    }).unwrap_or_default()
+                }
+            }
+                    BoardActions model:(model)
+                    button #action @click:{ model.sync_project(); } label:"Sync project"
+                        disabled:{ model.busy.get() || !model.connected.get() || model.selected_board().is_some_and(|b| b.source == BoardSource::Local) }
+                        "Sync project"
+                    if narrow.get() {
+                        col height:min-content gap:{px(18.0)}px {
+                            for (_, column) in { columns.get().into_iter().map(|c| (c.id.clone(), c)) } {
+                                col width:1fr height:min-content {
+                                    BoardColumnView model:(model) column:(column.clone())
+                                }
                             }
                         }
-                    }
-                } else {
-                    row height:min-content gap:{px(16.0)}px align:start {
-                        for (_, column) in { columns.get().into_iter().map(|c| (c.id.clone(), c)) } {
-                            col width:1fr height:min-content {
-                                BoardColumnView model:(model) column:(column.clone())
+                    } else {
+                        row height:min-content gap:{px(16.0)}px align:start {
+                            for (_, column) in { columns.get().into_iter().map(|c| (c.id.clone(), c)) } {
+                                col width:1fr height:min-content {
+                                    BoardColumnView model:(model) column:(column.clone())
+                                }
                             }
                         }
                     }
@@ -410,7 +336,7 @@ fn BoardColumnView(model: Model, column: BoardColumn) -> Element {
             .get()
             .issues
             .into_iter()
-            .filter(|i| i.project_id == model.project.get() && i.column_id == id)
+            .filter(|i| model.task_in_column(i, &id))
             .collect::<Vec<_>>()
     });
     view! {
@@ -419,7 +345,7 @@ fn BoardColumnView(model: Model, column: BoardColumn) -> Element {
                 pad:(horizontal:{px(4.0)}px vertical:{px(10.0)}px) {
                 text font-size:{px(13.0)}px font-weight:650 font-family:sans-serif
                     label:{ format!("Column {}", column_id.get()) }
-                    { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).and_then(|p| p.columns.iter().find(|c| c.id == column_id.get())).map(|c| c.title.clone()).unwrap_or_default() }
+                    { model.board_columns().iter().find(|c| c.id == column_id.get()).map(|c| c.title.clone()).unwrap_or_default() }
                 text font-size:{px(12.0)}px font-color:muted { issues.get().len().to_string() }
             }
             for (_, issue) in { issues.get().into_iter().map(|i| (i.id.clone(), i)) } {
@@ -455,12 +381,11 @@ fn IssueCard(model: Model, issue: Issue) -> Element {
     view! {
         button @click:{ model.issue.set(Some(id.clone())); model.worker_approval.set(false); }
             width:fill height:min-content fill:surface radius:{px(10.0)}px pad:{px(16.0)}px
-            label:{ format!("Open issue #{}", current.get().reference.number) }
+            label:{ current.get().reference.map(|r|format!("Open issue #{}",r.number)).unwrap_or_else(||format!("Open local task {}",current.get().title)) }
             hover { fill:raised }
             focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) } {
             col height:min-content gap:{px(14.0)}px align:start {
-                text font-size:{px(11.0)}px font-color:muted
-                    { format!("#{} · {}", current.get().reference.number, if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "FIXTURE" } else { "GITHUB" }) }
+                text font-size:{px(11.0)}px font-color:muted { current.get().label() }
                 text font-size:{px(15.0)}px font-weight:600 font-family:sans-serif font-color:ink
                     label:{ current.get().title } { current.get().title }
                 for (_, label) in { current.get().labels.into_iter().map(|label| (label.clone(), label)) } {
@@ -499,15 +424,14 @@ fn IssueDetail(model: Model) -> Element {
                     let fallback = detail.clone();
                     let current = Derived::new(move || model.snapshot.get().issues.into_iter().find(|i| i.id == detail_id.get()).unwrap_or_else(|| fallback.clone()));
                     col height:min-content gap:{px(18.0)}px selectable {
-                        text font-size:{px(12.0)}px font-color:accent
-                            (format!("{} #{}", current.get().reference.repository, current.get().reference.number))
+                        text font-size:{px(12.0)}px font-color:accent (current.get().label())
                         text font-size:{px(21.0)}px font-weight:650 font-family:sans-serif
                             label:{ current.get().title } { current.get().title }
                         text font-size:{px(14.0)}px label:{ current.get().body }
                             { current.get().body }
                         text font-size:{px(11.0)}px font-color:muted
-                            { if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "Fixture issue · execution unavailable".to_string() } else { current.get().reference.url } }
-                        if model.snapshot.get().projects.iter().find(|p| p.id == current.get().project_id).is_some_and(|p| !p.columns.iter().any(|c| c.id == current.get().column_id)) {
+                            { if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "Fixture issue · execution unavailable".to_string() } else { current.get().reference.map(|r| r.url).unwrap_or_default() } }
+                        if !model.snapshot.get().visible_task(&current.get().id) {
                             text font-size:{px(12.0)}px font-color:muted
                                 label:"Issue removed from board"
                                 "No longer on this board · history retained. Restore and sync before starting or continuing a worker. Active turns may finish or be stopped."
@@ -520,6 +444,7 @@ fn IssueDetail(model: Model) -> Element {
                             button #action @click:{ model.open_session(id.get_untracked()); }
                                 { model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default() }
                         }
+                        TaskEditor model:(model)
                         if current.get().result.is_some() {
                             text font-size:{px(12.0)}px font-weight:650 font-family:sans-serif
                                 "RESULT"
@@ -602,7 +527,7 @@ fn Profiles(model: Model) -> Element {
                         for (_, issue) in { model.snapshot.get().issues.into_iter().filter(|i| i.project_id == model.project.get()).map(|i| (i.id.clone(), i)).collect::<Vec<_>>() } {
                             let id = issue.id.clone();
                             let issue_id = State::new(id.clone());
-                            let number = issue.reference.number;
+                            let number = issue.reference.as_ref().map(|r|format!("#{}",r.number)).unwrap_or_else(||issue.title.clone());
                             button #action
                                 @click:{
                                 model.modify_profile("scope", |p| {
@@ -611,7 +536,7 @@ fn Profiles(model: Model) -> Element {
                                     p.scope = if ids.is_empty() { DirectorScope::Project } else { DirectorScope::Issues { issue_ids: ids } };
                                 });
                             }
-                                { format!("{} #{}", if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if issue_ids.contains(&issue_id.get())) { "✓" } else { "+" }, number) }
+                                { format!("{} {}", if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if issue_ids.contains(&issue_id.get())) { "✓" } else { "+" }, number) }
                         }
                     }
                     text font-size:{px(12.0)}px font-color:muted
@@ -620,7 +545,7 @@ fn Profiles(model: Model) -> Element {
                             DirectorScope::Project => "All project issues".into(),
                             DirectorScope::Issues { issue_ids } => model.snapshot.get().issues.iter()
                                 .filter(|issue| issue_ids.contains(&issue.id))
-                                .map(|issue| format!("#{}", issue.reference.number))
+                                .map(|issue|issue.reference.as_ref().map(|r|format!("#{}",r.number)).unwrap_or_else(||issue.title.clone()))
                                 .collect::<Vec<_>>().join(", "),
                         }
                     }
@@ -739,7 +664,7 @@ fn Palette(model: Model) -> Element {
                 input #input-field placeholder:"Find an action…" label:"Command search" query
                     as command_search
                 { command_search.focus(); }
-                for (label, index) in [("Open board", 0), ("Open sessions", 1), ("Edit project defaults", 2), ("Create director", 3), ("Search transcript", 4), ("Sync project", 5), ("Stop worker", 6), ("Open settings", 7)] {
+                for (label, index) in [("Open board", 0), ("Open sessions", 1), ("Edit project defaults", 2), ("Create director", 3), ("Search transcript", 4), ("Sync project", 5), ("Stop worker", 6), ("Open settings", 7), ("Project Connections", 8), ("New Project", 9), ("Publish board", 10)] {
                     if label.to_lowercase().contains(&query.get().to_lowercase()) {
                         button #action
                             @click:{
@@ -769,6 +694,9 @@ fn Palette(model: Model) -> Element {
                     "Sync project",
                     "Stop worker",
                     "Open settings",
+                    "Project Connections",
+                    "New Project",
+                    "Publish board",
                 ]
                 .iter()
                 .position(|label| {
@@ -815,6 +743,9 @@ fn palette_action(model: Model, index: usize) {
         5 => model.sync_project(),
         6 => model.stop_worker(),
         7 => model.page.set(Page::Settings),
+        8 => model.page.set(Page::Connections),
+        9 => model.page.set(Page::NewProject),
+        10 => model.page.set(Page::Publish),
         _ => {
             model.page.set(Page::Sessions);
             model.searching.set(true);
@@ -867,8 +798,9 @@ fn WorkerForm(model: Model, continuation: bool) -> Element {
     view! {
         col height:min-content gap:{px(10.0)}px {
             text font-size:{px(13.0)}px font-weight:650 font-family:sans-serif
-                { if continuation { "Continue this session" } else { "Start issue worker" } }
+                { if continuation { "Continue this session" } else { "Start task worker" } }
             if !continuation {
+                WorkspaceChoices model:(model)
                 for (_, director) in { model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
                     let id = State::new(director.id.clone());
                     button #action
@@ -916,14 +848,16 @@ fn HarnessCard(model: Model, harness: Harness) -> Element {
     };
     view! {
         col height:min-content max-width:{px(720.0)}px gap:{px(8.0)}px {
-            row height:min-content gap:{px(12.0)}px align:center {
-                text font-family:sans-serif font-size:{px(14.0)}px font-weight:650 (name)
+            col height:min-content gap:{px(12.0)}px {
+                text font-family:sans-serif font-size:{px(14.0)}px font-weight:650
+                    {format!("{} {name}", if harness==Harness::Codex {"◇"} else {"✳"})}
                 text font-size:{px(12.0)}px
-                    {if !model.connected.get() {"Disconnected".to_owned()} else {status.get().map(|s|match s.state.as_str(){"ready"=>"Ready","signed_out"=>"Signed out","missing"=>"Not installed","incompatible"=>"Incompatible",_=>"Check unavailable"}.to_owned()).unwrap_or_else(||"Checking…".to_owned())}}
+                    font-color:{mosaic::core::theme::color(if !model.connected.get() || !model.harness_error.get().is_empty() {muted} else {match status.get().map(|s|s.state).as_deref(){Some("ready")=>success,Some("signed_out"|"incompatible")=>warning,Some("unknown"|"error"|"failed")=>danger,_=>muted}})}
+                    {if !model.connected.get() {"○ Disconnected".to_owned()} else if !model.harness_error.get().is_empty() {format!("○ Refresh failed · last check: {}",status.get().map(|s|match s.state.as_str(){"ready"=>"Ready","signed_out"=>"Sign in","missing"=>"Missing","incompatible"=>"Incompatible",_=>"Check failed"}.to_owned()).unwrap_or_else(||"Unavailable".into()))} else {status.get().map(|s|match s.state.as_str(){"ready"=>"✓ Ready","signed_out"=>"! Sign in","missing"=>"○ Missing","incompatible"=>"! Incompatible","unknown"|"error"|"failed"=>"× Check failed",_=>"○ Check unavailable"}.to_owned()).unwrap_or_else(||"○ Checking".to_owned())}}
                 button #action
                     @click:{if let Some(sender)=model.harness_refresh.get_untracked(){let _=sender.send(());}}
                     disabled:{!model.connected.get()} label:{format!("Refresh {name} status")}
-                    "Check again"
+                    "Refresh"
                 button #action
                     @click:{
                     if let Some(status) = status.get_untracked() {executable.set(status.executable);}
@@ -931,12 +865,10 @@ fn HarnessCard(model: Model, harness: Harness) -> Element {
                 }
                     label:{format!("{name} executable and status details")} "Details"
             }
-            if status.get().is_some() {
-                text font-size:{px(12.0)}px font-color:muted
-                    {status.get().map(|s|s.detail).unwrap_or_default()}
-            }
             if advanced.get() {
                 col height:min-content gap:{px(8.0)}px {
+                    text font-size:{px(12.0)}px font-color:muted
+                        {status.get().map(|s|s.detail).unwrap_or_default()}
                     text font-size:{px(12.0)}px font-color:muted
                         {status.get().map(|s|format!("{} · {}",s.version.unwrap_or_else(||"Version unavailable".into()),sync_label(Some(s.checked_at)).replacen("Last synced", "Checked", 1))).unwrap_or_default()}
                     text font-size:{px(12.0)}px font-color:muted

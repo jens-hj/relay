@@ -562,11 +562,7 @@ pub fn Conversation(model: Model) -> Element {
             .get()
             .and_then(|s| s.issue_id)
             .and_then(|id| snapshot.issues.iter().find(|i| i.id == id))
-            .is_some_and(|issue| {
-                snapshot
-                    .project(&issue.project_id)
-                    .is_ok_and(|p| !p.columns.iter().any(|c| c.id == issue.column_id))
-            })
+            .is_some_and(|issue| !snapshot.visible_task(&issue.id))
     });
     let documents = controller.get_untracked();
     Effect::new(move || {
@@ -672,6 +668,8 @@ pub fn Conversation(model: Model) -> Element {
                 scroll {
                     col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
                         selectable label:"Session details" {
+                        text font-size:{px(12.0)}px
+                            {session.get().map(|s|workspace_review(&s,details.get()=="changes")).unwrap_or_default()}
                         text font-size:{px(12.0)}px
                             {
                             session.get().and_then(|s|s.worker).map(|w| if details.get()=="changes" { w.changes.map(|c|format!("{}\n{}{}",c.files.join("\n"),c.diff,if c.truncated {"\nReview truncated"}else{""})).unwrap_or_else(||"Changes unavailable".into()) } else {format!("Branch: {}\nBase: {}\nWorktree: {}\nThread: {}\n{}",w.branch.unwrap_or_default(),w.base_commit.unwrap_or_default(),w.worktree.unwrap_or_default(),w.thread_id.unwrap_or_default(),w.usage.map(|u|format!("Latest turn: {} input · {} cached · {} output tokens",u.input_tokens,u.cached_input_tokens,u.output_tokens)).unwrap_or_else(||"Usage unavailable · cache expiry unknown".into()))}).unwrap_or_else(||"No execution metadata".into())
@@ -1787,6 +1785,48 @@ fn BufferText(
         ctx.stop_propagation();
     });
     field
+}
+
+fn workspace_review(session: &Session, changes: bool) -> String {
+    session
+        .workspaces
+        .iter()
+        .map(|w| {
+            let provenance = format!(
+                "{} · {}\n{}\nBranch: {} · Base: {}",
+                w.connection_id,
+                if w.repository {
+                    "Repository"
+                } else {
+                    "Directory"
+                },
+                w.path,
+                w.branch.as_deref().unwrap_or("—"),
+                w.base_commit.as_deref().unwrap_or("—")
+            );
+            if changes {
+                format!(
+                    "{provenance}\n{}",
+                    w.changes
+                        .as_ref()
+                        .map(|c| format!(
+                            "{}\n{}{}",
+                            c.files.join("\n"),
+                            c.diff,
+                            if c.truncated {
+                                "\nReview truncated"
+                            } else {
+                                ""
+                            }
+                        ))
+                        .unwrap_or_else(|| "Changes unavailable".into())
+                )
+            } else {
+                provenance
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 #[cfg(test)]

@@ -66,7 +66,7 @@ pub fn start(config: Config, sender: StateSender<Update>) -> mpsc::UnboundedSend
                     request = receiver.recv() => match request {
                         Some(Request::Forget(ids)) => { for id in ids { state.outcomes.remove(&id); } },
                         Some(Request::Save {session, request}) => {
-                            let result = match client.post(config.url(&format!("v1/drafts/{}", percent_encoding::utf8_percent_encode(&session, percent_encoding::NON_ALPHANUMERIC)))).bearer_auth(&config.token).json(&request).send().await {
+                            let result = match client.post(config.url(&format!("v1/drafts/{}", percent_encoding::utf8_percent_encode(&session, percent_encoding::NON_ALPHANUMERIC)))).bearer_auth(&config.token).header("X-Relay-Protocol", "2").json(&request).send().await {
                                 Ok(response) => { let conflict = response.status() == reqwest::StatusCode::CONFLICT; if response.status().is_success() { response.json::<Draft>().await.map_err(|_| (false,"Draft save could not be confirmed; exact retry is retained".into())) } else { Err((conflict,response.json::<ApiError>().await.map(|e| e.message).unwrap_or_else(|_| "Draft save was rejected".into()))) } },
                                 Err(_) => Err((false,"Cannot confirm draft save; local content is retained".into())),
                             };
@@ -74,7 +74,7 @@ pub fn start(config: Config, sender: StateSender<Update>) -> mpsc::UnboundedSend
                             state.outcomes.insert(request.request_id.clone(), Outcome::Saved {session,request,result});
                         },
                         Some(Request::Upload {asset, bytes}) => {
-                            let result = match client.post(config.url(&format!("v1/assets/{}",asset.id))).bearer_auth(&config.token).header("content-type", &asset.media_type).header("x-relay-filename",percent_encoding::utf8_percent_encode(&asset.name, percent_encoding::NON_ALPHANUMERIC).to_string()).body(bytes.as_ref().clone()).send().await {
+                            let result = match client.post(config.url(&format!("v1/assets/{}",asset.id))).bearer_auth(&config.token).header("X-Relay-Protocol", "2").header("content-type", &asset.media_type).header("x-relay-filename",percent_encoding::utf8_percent_encode(&asset.name, percent_encoding::NON_ALPHANUMERIC).to_string()).body(bytes.as_ref().clone()).send().await {
                                 Ok(response) if response.status().is_success() => response.json::<Asset>().await.map_err(|_| "File upload acknowledgement was invalid".into()).and_then(|saved| if saved == asset { Ok(()) } else { Err("Uploaded file metadata changed".into()) }),
                                 Ok(response) => Err(response.json::<ApiError>().await.map(|e| e.message).unwrap_or_else(|_| "File upload failed".into())),
                                 Err(_) => Err("File upload could not be confirmed; retry retains its ID".into()),

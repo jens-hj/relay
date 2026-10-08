@@ -5,6 +5,8 @@ mod conversation;
 mod fonts;
 mod model;
 mod network;
+mod project_network;
+mod projects;
 mod settings;
 mod sidebar;
 #[cfg(test)]
@@ -42,6 +44,13 @@ fn main() -> Result<(), String> {
             let (commands, harness_refresh) = network::start(config.clone(), sender);
             let model = model::Model::new(ui, commands);
             model.harness_refresh.set(Some(harness_refresh));
+            let (discovery_updates, discovery_sender) =
+                state_channel(project_network::DiscoveryUpdate::default());
+            model.discovery_requests.set(Some(project_network::start(
+                config.clone(),
+                discovery_sender,
+            )));
+            Effect::new(move || model.discovery.set(discovery_updates.get()));
             let (buffer_updates, buffer_sender) = state_channel(buffer_network::Update::default());
             model
                 .buffer_requests
@@ -64,7 +73,7 @@ fn main() -> Result<(), String> {
                             .iter()
                             .any(|p| !p.fixture)
                     {
-                        model.page.set(model::Page::Settings);
+                        model.page.set(model::Page::NewProject);
                     }
                 }
             });

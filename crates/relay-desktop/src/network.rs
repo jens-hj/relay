@@ -94,6 +94,7 @@ pub fn start(
                     let result = async {
                         let response = if refresh { status_client.post(status_config.url("v1/harnesses/refresh")) } else {status_client.get(status_config.url("v1/harnesses"))}
                             .bearer_auth(&status_config.token)
+                            .header("X-Relay-Protocol", "2")
                             .send()
                             .await
                             .map_err(|_| "Harness status unavailable".to_owned())?;
@@ -176,12 +177,25 @@ async fn read(client: &reqwest::Client, config: &Config) -> Result<Snapshot, Str
     .await
 }
 
+fn validate_protocol(snapshot: &Snapshot) -> Result<(), String> {
+    if snapshot.protocol_version != relay_core::PROTOCOL_VERSION {
+        return Err(format!(
+            "Incompatible Relay server protocol {}. This client requires protocol {}. Update the server before making changes.",
+            snapshot.protocol_version,
+            relay_core::PROTOCOL_VERSION
+        ));
+    }
+    Ok(())
+}
+
 async fn decode(response: reqwest::Response) -> Result<Snapshot, String> {
     if response.status().is_success() {
-        return response
+        let snapshot: Snapshot = response
             .json()
             .await
-            .map_err(|_| "Server returned an incompatible snapshot".into());
+            .map_err(|_| "Server returned an incompatible snapshot".to_owned())?;
+        validate_protocol(&snapshot)?;
+        return Ok(snapshot);
     }
     let status = response.status();
     Err(response
@@ -213,6 +227,7 @@ async fn stream(config: Config, client: reqwest::Client, events: mpsc::Unbounded
                         Some(Ok(Message::Text(json))) => {
                             last_response = tokio::time::Instant::now();
                             let snapshot = serde_json::from_str(&json).map_err(|_| "Invalid server event")?;
+                            validate_protocol(&snapshot)?;
                             events.send(Event::Snapshot(snapshot)).map_err(|_| "Client closed")?;
                         },
                         Some(Ok(Message::Ping(data))) => { last_response = tokio::time::Instant::now(); socket.send(Message::Pong(data)).await.map_err(|_| "Event connection lost")?; },
@@ -257,7 +272,7 @@ async fn write(
         } else {
             "v1/commands"
         };
-        let (result, conflict, ambiguous) = match client.post(config.url(endpoint)).bearer_auth(&config.token).json(&command).send().await {
+        let (result, conflict, ambiguous) = match client.post(config.url(endpoint)).bearer_auth(&config.token).header("X-Relay-Protocol", "2").json(&command).send().await {
             Ok(response) => {
                 let status = response.status();
                 let result = decode(response).await;
@@ -288,6 +303,21 @@ async fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejects_old_servers_without_rejecting_protocol_two() {
+        assert!(
+            validate_protocol(&Snapshot::default())
+                .unwrap_err()
+                .contains("requires protocol 2")
+        );
+        assert!(
+            validate_protocol(&Snapshot {
+                protocol_version: 2,
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
     #[test]
     fn late_responses_never_replace_newer_state() {
         let mut state = NetworkState {
@@ -340,6 +370,13 @@ mod outcome_tests {
                         assert_ne!(length, 0);
                         request.extend_from_slice(&buffer[..length]);
                     }
+                    if first {
+                        assert!(
+                            String::from_utf8_lossy(&request)
+                                .to_lowercase()
+                                .contains("x-relay-protocol: 2")
+                        );
+                    }
                     if first && status.is_none() {
                         continue;
                     }
@@ -347,7 +384,11 @@ mod outcome_tests {
                     let body = if first {
                         "invalid or rejected response".into()
                     } else {
-                        serde_json::to_string(&Snapshot::default()).unwrap()
+                        serde_json::to_string(&Snapshot {
+                            protocol_version: relay_core::PROTOCOL_VERSION,
+                            ..Default::default()
+                        })
+                        .unwrap()
                     };
                     write!(socket, "HTTP/1.1 {code} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
                 }

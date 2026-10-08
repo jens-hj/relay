@@ -61,6 +61,14 @@ pub fn Sidebar(model: Model) -> Element {
                                 focus:(focus.clone())
                         }
                     }
+                    button #tree-control @click:{model.page.set(Page::NewProject);} width:fill
+                        gap:{px(8.0)}px pad:(horizontal:{px(4.0)}px vertical:0px)
+                        label:"New Project" {
+                        icon size:{px(13.0)}px plus-icon
+                        row #tree-label {
+                            text text-wrap:none font-size:{px(12.0)}px "New Project"
+                        }
+                    }
                 }
             }
             row height:{px(40.0)}px gap:{px(10.0)}px align:center shrink:0
@@ -89,6 +97,7 @@ pub fn Sidebar(model: Model) -> Element {
 #[component]
 fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
     let id = State::new(project_id);
+    let menu = State::new(false);
     let name = Derived::new(move || {
         model
             .snapshot
@@ -102,7 +111,8 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
     let open = Derived::new(move || model.expanded_projects.get().contains(&id.get()));
     view! {
         col height:min-content gap:{px(3.0)}px {
-            row height:{px(34.0)}px gap:{px(2.0)}px align:center role:list-item {
+            row #tree-row height:{px(34.0)}px gap:{px(2.0)}px align:center role:list-item
+                label:{format!("Project row {}",name.get())} pad:(left:{px(4.0)}px) {
                 button #tree-control @click:{toggle(model.expanded_projects, id.get_untracked());}
                     width:1fr shrink:1 gap:{px(8.0)}px pad:(horizontal:{px(4.0)}px vertical:0px)
                     label:{format!("Toggle project {}", name.get())}
@@ -125,6 +135,18 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
                     icon size:{px(16.0)}px board-icon
                     tooltip #tree-tooltip summary:"Open project board" {text "Open project board"}
                 }
+                button #tree-control @click:{menu.set(!menu.get_untracked());} width:{px(24.0)}px
+                    label:{format!("Project actions for {}",name.get())} {
+                    text "⋯"
+                }
+            }
+            if menu.get() {
+                col height:min-content {
+                    button #action
+                        @click:{model.select_project(id.get_untracked());model.page.set(Page::Connections);menu.set(false);}
+                        label:{format!("Project Connections for {}",name.get())}
+                        "Project Connections"
+                }
             }
             if open.get() {
                 col height:min-content gap:{px(2.0)}px pad:(left:{px(12.0)}px) {
@@ -135,15 +157,15 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
                                 focus:(focus.clone())
                         }
                     }
-                    row height:{px(32.0)}px align:center gap:{px(2.0)}px pad:(left:{px(24.0)}px) {
+                    row height:{px(32.0)}px align:center gap:{px(2.0)}px pad:(left:{px(4.0)}px) {
                         button #tree-control
                             @click:{model.select_project(id.get_untracked()); model.open_profile(EditTarget::New);}
                             width:1fr shrink:1 gap:{px(6.0)}px
                             label:{format!("Create director in {}", name.get())}
                             {
-                            icon size:{px(13.0)}px plus-icon
+                            el width:{px(24.0)}px height:fill align:center justify:center {icon size:{px(13.0)}px plus-icon}
                             row #tree-label {
-                                text text-wrap:none font-size:{px(11.0)}px "Director"
+                                text text-wrap:none font-size:{px(11.0)}px "New Director"
                             }
                             tooltip #tree-tooltip summary:"Create director" {text "Create director"}
                         }
@@ -189,8 +211,9 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
     });
     let selected = Derived::new(move || {
         let snapshot = model.snapshot.get();
-        (model.page.get() == Page::Directors
-            && model.editor.get() == EditTarget::Director(id.get()))
+        (model.page.get() == Page::DirectorStart && model.worker_director.get() == id.get())
+            || (model.page.get() == Page::Directors
+                && model.editor.get() == EditTarget::Director(id.get()))
             || (model.page.get() == Page::Sessions
                 && snapshot.sessions.iter().any(|s| {
                     s.id == model.session.get()
@@ -200,8 +223,10 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
     });
     view! {
         col height:min-content gap:{px(2.0)}px {
-            row height:{px(34.0)}px gap:{px(2.0)}px align:center radius:{px(5.0)}px role:list-item
-                fill:{if selected.get() {color(accent_soft)} else {Color::TRANSPARENT}} {
+            row #tree-row height:{px(34.0)}px gap:{px(2.0)}px align:center radius:{px(5.0)}px
+                role:list-item label:{format!("Director row {}",name.get())} pad:(left:{px(4.0)}px)
+                fill:{if selected.get() {color(accent_soft)} else {Color::TRANSPARENT}}
+                hover { fill:raised } {
                 button #tree-control @click:{toggle(model.expanded_directors, id.get_untracked());}
                     width:{px(24.0)}px label:{format!("Toggle director {}", name.get())}
                     description:{if open.get() {"Expanded"} else {"Collapsed"}}
@@ -211,7 +236,7 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
                 }
                 button #tree-control @click:{model.open_director(id.get_untracked());} width:1fr
                     shrink:1 gap:{px(6.0)}px label:{format!("Open director {}", name.get())}
-                    description:{if model.snapshot.get().sessions.iter().any(|s| s.director_id == id.get() && s.role == SessionRole::Director) {"Open director conversation"} else {"Open director profile · no conversation yet"}}
+                    description:{if model.snapshot.get().sessions.iter().any(|s| s.director_id == id.get() && s.role == SessionRole::Director) {"Open director conversation"} else {"Send first director prompt"}}
                     font-color:{color(if selected.get() {accent} else {ink})}
                     {
                     icon size:{px(15.0)}px shrink:0 director-icon
@@ -222,7 +247,7 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
                         col height:min-content gap:{px(4.0)}px {
                             text {name.get()}
                             text font-color:muted font-size:{px(11.0)}px
-                                {if model.snapshot.get().sessions.iter().any(|s| s.director_id == id.get() && s.role == SessionRole::Director) {"Open director conversation"} else {"Open director profile · no conversation yet"}}
+                                {if model.snapshot.get().sessions.iter().any(|s| s.director_id == id.get() && s.role == SessionRole::Director) {"Open director conversation"} else {"Send first director prompt"}}
                         }
                     }
                 }
@@ -292,7 +317,7 @@ fn WorkerTree(model: Model, session_id: String, focus: TreeFocus) -> Element {
                     .issues
                     .iter()
                     .find(|i| Some(&i.id) == s.issue_id.as_ref())
-                    .map(|i| format!("Issue #{} · ", i.reference.number))
+                    .map(|i| format!("{} · ", i.label()))
                     .unwrap_or_default();
                 format!("{issue}{}", worker_status(&s))
             })
@@ -301,12 +326,12 @@ fn WorkerTree(model: Model, session_id: String, focus: TreeFocus) -> Element {
     let selected =
         Derived::new(move || model.page.get() == Page::Sessions && model.session.get() == id.get());
     let navigation = view! {
-        button #tree-control @click:{model.open_session(id.get_untracked());} width:fill shrink:1
+        button #tree-control #tree-leaf @click:{model.open_session(id.get_untracked());} width:fill shrink:1
             pad:(horizontal:{px(6.0)}px vertical:0px) gap:{px(6.0)}px
             label:{format!("Open worker {}", title.get())} description:{detail.get()}
             fill:{if selected.get() {color(accent_soft)} else {Color::TRANSPARENT}}
             font-color:{color(if selected.get() {accent} else {muted})}
-            {
+            hover { fill:raised } {
             icon size:{px(14.0)}px shrink:0 worker-icon
             row #tree-label {
                 text text-wrap:none font-size:{px(12.0)}px {title.get()}

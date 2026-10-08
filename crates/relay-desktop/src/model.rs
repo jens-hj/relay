@@ -10,6 +10,10 @@ pub enum Page {
     Sessions,
     Directors,
     Settings,
+    NewProject,
+    Connections,
+    Publish,
+    DirectorStart,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditTarget {
@@ -24,9 +28,13 @@ pub enum Saved {
     Comment(String),
     Profile,
     Start(String),
+    DirectorStart {
+        director_id: String,
+        prompt: String,
+    },
     Send(String),
     Action,
-    Project(String),
+    CreatedProject(crate::projects::ProjectDraft),
 }
 #[derive(Clone)]
 struct Pending {
@@ -49,6 +57,10 @@ pub struct Model {
     pub busy: State<bool>,
     pub page: State<Page>,
     pub project: State<String>,
+    pub discovery_requests: State<Option<UnboundedSender<BoardSource>>>,
+    pub discovery: State<crate::project_network::DiscoveryUpdate>,
+    pub project_draft: State<crate::projects::ProjectDraft>,
+    pub workspace_selection: State<Option<Vec<String>>>,
     pub expanded_projects: State<BTreeSet<String>>,
     pub expanded_directors: State<BTreeSet<String>>,
     pub issue: State<Option<String>>,
@@ -75,6 +87,7 @@ pub struct Model {
     pub toml: State<String>,
     pub advanced: State<bool>,
     pub worker_prompt: State<String>,
+    pub director_prompts: State<std::collections::BTreeMap<String, String>>,
     pub worker_director: State<String>,
     pub worker_approval: State<bool>,
     pub review_changes: State<bool>,
@@ -102,6 +115,10 @@ impl Model {
             busy: State::new(false),
             page: State::new(Page::Board),
             project: State::new(String::new()),
+            discovery_requests: State::new(None),
+            discovery: State::new(Default::default()),
+            project_draft: State::new(Default::default()),
+            workspace_selection: State::new(None),
             expanded_projects: State::new(BTreeSet::new()),
             expanded_directors: State::new(BTreeSet::new()),
             issue: State::new(None),
@@ -128,6 +145,7 @@ impl Model {
             toml: State::new(String::new()),
             advanced: State::new(false),
             worker_prompt: State::new(String::new()),
+            director_prompts: State::new(Default::default()),
             worker_director: State::new(String::new()),
             worker_approval: State::new(false),
             review_changes: State::new(false),
@@ -210,9 +228,25 @@ impl Model {
                 self.clear_worker_draft(&body);
                 self.open_session(format!("session-{id}"));
             }
+            Saved::DirectorStart {
+                director_id,
+                prompt,
+            } => {
+                self.director_prompts.update(|drafts| {
+                    if drafts.get(&director_id) == Some(&prompt) {
+                        drafts.remove(&director_id);
+                    }
+                });
+                self.open_session(format!("session-{id}"));
+            }
             Saved::Send(body) => self.clear_worker_draft(&body),
             Saved::Action => {}
-            Saved::Project(project) => self.select_project(project),
+            Saved::CreatedProject(draft) => {
+                if self.project_draft.get_untracked() == draft {
+                    self.project_draft.set(Default::default());
+                }
+                self.select_project(format!("project-{id}"));
+            }
             Saved::Profile => {
                 if self.editor.get_untracked() == EditTarget::New {
                     self.editor
@@ -234,12 +268,15 @@ impl Model {
         let id = pending.envelope.request_id.clone();
         let snapshot = self.snapshot.get_untracked();
         let applied = match &pending.saved {
-            Saved::Project(_) => false,
+            Saved::CreatedProject(_) => snapshot
+                .projects
+                .iter()
+                .any(|p| p.id == format!("project-{id}")),
             Saved::Buffer(_) => snapshot
                 .submissions
                 .iter()
                 .any(|s| s.id == id || s.last_edit_request.as_deref() == Some(&id)),
-            Saved::Start(_) => snapshot
+            Saved::Start(_) | Saved::DirectorStart { .. } => snapshot
                 .sessions
                 .iter()
                 .any(|s| s.id == format!("session-{id}")),
@@ -312,6 +349,16 @@ impl Model {
             .map(|p| {
                 let content = match p.envelope.command {
                     Command::StartWorker {
+                        prompt,
+                        approve_implementation,
+                        ..
+                    }
+                    | Command::StartSession {
+                        prompt,
+                        approve_implementation,
+                        ..
+                    }
+                    | Command::StartDirector {
                         prompt,
                         approve_implementation,
                         ..
@@ -452,6 +499,7 @@ impl Model {
                 .unwrap_or_default(),
         );
         self.worker_approval.set(false);
+        self.workspace_selection.set(None);
         let snapshot = self.snapshot.get_untracked();
         self.session.set(
             snapshot
@@ -500,7 +548,9 @@ impl Model {
         }) {
             self.open_session(session.id.clone());
         } else {
-            self.open_director_profile(id);
+            self.project.set(director.project_id.clone());
+            self.worker_director.set(id);
+            self.page.set(Page::DirectorStart);
         }
     }
     pub fn open_director_profile(&self, id: String) {
@@ -576,11 +626,7 @@ impl Model {
         if project.fixture {
             return Err("Fixture issue: execution unavailable".into());
         }
-        if !project
-            .columns
-            .iter()
-            .any(|column| column.id == issue.column_id)
-        {
+        if !snapshot.visible_task(&issue.id) {
             return Err("Issue is no longer on this board. Restore it and sync before starting or continuing.".into());
         }
         let director = snapshot
@@ -653,8 +699,10 @@ impl Model {
                 approve_implementation: self.worker_approval.get_untracked(),
             }
         } else {
-            Command::StartWorker {
-                issue_id: self.issue.get_untracked().unwrap(),
+            Command::StartSession {
+                issue_id: self.issue.get_untracked(),
+                role: SessionRole::Worker,
+                connection_ids: self.workspace_selection.get_untracked(),
                 director_id: self.worker_director.get_untracked(),
                 prompt: prompt.clone(),
                 approve_implementation: self.worker_approval.get_untracked(),
@@ -670,7 +718,59 @@ impl Model {
             },
         );
     }
+    pub fn selected_board(&self) -> Option<Board> {
+        let snapshot = self.snapshot.get();
+        let project = self.project.get();
+        let selected = self
+            .preferences
+            .get()
+            .selected_boards
+            .get(&project)
+            .cloned();
+        snapshot
+            .boards
+            .iter()
+            .find(|b| b.project_id == project && selected.as_ref() == Some(&b.id))
+            .or_else(|| snapshot.boards.iter().find(|b| b.project_id == project))
+            .cloned()
+    }
+    pub fn board_columns(&self) -> Vec<BoardColumn> {
+        self.selected_board().map(|b| b.columns).unwrap_or_else(|| {
+            self.snapshot
+                .get()
+                .projects
+                .iter()
+                .find(|p| p.id == self.project.get())
+                .map(|p| p.columns.clone())
+                .unwrap_or_default()
+        })
+    }
+    pub fn task_in_column(&self, issue: &Issue, column: &str) -> bool {
+        if issue.project_id != self.project.get() {
+            return false;
+        }
+        if let Some(board) = self.selected_board() {
+            self.snapshot.get().memberships.iter().any(|m| {
+                m.board_id == board.id
+                    && m.issue_id == issue.id
+                    && m.column_ids.iter().any(|c| c == column)
+            })
+        } else {
+            issue.column_id == column
+        }
+    }
+    pub fn action(&self, command: Command) {
+        self.submit(
+            command,
+            self.snapshot.get_untracked().revision,
+            Saved::Action,
+        );
+    }
     pub fn sync_project(&self) {
+        if let Some(board) = self.selected_board() {
+            self.action(Command::SyncBoard { board_id: board.id });
+            return;
+        }
         if !self
             .snapshot
             .get_untracked()

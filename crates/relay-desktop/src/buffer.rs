@@ -303,11 +303,7 @@ pub fn execution_problem(model: Model) -> Option<String> {
     let snapshot = model.snapshot.get();
     let id = model.session.get();
     let session = snapshot.sessions.iter().find(|s| s.id == id)?;
-    let Some(worker) = session
-        .worker
-        .as_ref()
-        .filter(|_| !session.fixture && session.role == SessionRole::Worker)
-    else {
+    let Some(worker) = session.worker.as_ref().filter(|_| !session.fixture) else {
         return Some("This transcript cannot execute turns".into());
     };
     let Some(issue) = snapshot
@@ -317,10 +313,10 @@ pub fn execution_problem(model: Model) -> Option<String> {
     else {
         return Some("Linked issue is unavailable".into());
     };
-    let Some(project) = snapshot.projects.iter().find(|p| p.id == issue.project_id) else {
+    let Some(_project) = snapshot.projects.iter().find(|p| p.id == issue.project_id) else {
         return Some("Project is unavailable".into());
     };
-    if !project.columns.iter().any(|c| c.id == issue.column_id) {
+    if !snapshot.visible_task(&issue.id) {
         return Some("Issue is no longer on the board; restore it and sync".into());
     }
     let Some(director) = snapshot

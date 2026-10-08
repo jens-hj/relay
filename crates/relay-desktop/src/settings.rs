@@ -20,6 +20,7 @@ pub struct Preferences {
     pub dark_neutral: bool,
     pub scale: f32,
     pub sidebar_width: f32,
+    pub selected_boards: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Preferences {
@@ -30,6 +31,7 @@ impl Default for Preferences {
             dark_neutral: false,
             scale: 1.0,
             sidebar_width: 220.0,
+            selected_boards: Default::default(),
         }
     }
 }

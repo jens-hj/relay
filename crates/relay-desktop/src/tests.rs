@@ -244,11 +244,12 @@ fn sidebar_tree_groups_by_project_and_director_and_reacts_without_losing_expansi
                 .any(|n| n.role == Role::Tooltip && n.label.as_deref() == Some("Worker"))
         );
         mounted.click("Open director Other director");
-        assert_eq!(mounted.model.page.get_untracked(), Page::Directors);
+        assert_eq!(mounted.model.page.get_untracked(), Page::DirectorStart);
         assert_eq!(
-            mounted.model.editor.get_untracked(),
-            EditTarget::Director("director-other".into())
+            mounted.model.worker_director.get_untracked(),
+            "director-other"
         );
+        mounted.rect("First director prompt");
         mounted.click("Create director in Relay · demo");
         assert_eq!(mounted.model.project.get_untracked(), "demo");
         assert_eq!(mounted.model.editor.get_untracked(), EditTarget::New);
@@ -794,7 +795,7 @@ fn live_worker_approval_failure_retry_and_ack_open_exact_session() {
     let request = mounted.commands.try_recv().unwrap();
     assert!(matches!(
         request.command,
-        Command::StartWorker {
+        Command::StartSession {
             approve_implementation: true,
             ..
         }
@@ -1228,7 +1229,7 @@ fn unmodified_default_director_can_delegate_automatically() {
     mounted.model.run_worker(false);
     assert!(matches!(
         mounted.commands.try_recv().unwrap().command,
-        Command::StartWorker {
+        Command::StartSession {
             approve_implementation: false,
             ..
         }
@@ -2003,5 +2004,649 @@ fn inline_permission_answers_exact_run_and_disappears_when_expired() {
             .nodes
             .iter()
             .any(|n| n.label.as_deref() == Some("Allow once tool request"))
+    );
+}
+
+fn local_project_snapshot() -> Snapshot {
+    let mut snapshot = live_snapshot();
+    snapshot.projects[0].github = None;
+    snapshot.projects[0].root = Some("/server/projects/relay".into());
+    snapshot.projects[0].defaults = DirectorProfile::default();
+    for issue in &mut snapshot.issues {
+        issue.reference = None;
+    }
+    snapshot.migrate_projects();
+    snapshot
+}
+
+fn type_in(mounted: &Mounted, label: &str, text: &str) {
+    mounted.focus(label);
+    mounted.key(Key::Character("a".into()), true);
+    mounted.ui.dispatch_ime(ImeEvent::Commit(text.into()));
+    mounted.settle();
+}
+
+#[test]
+fn new_project_preserves_full_setup_draft_and_appends_on_acknowledgement() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.click("New Project");
+    type_in(&mounted, "Project name", "Second project");
+    type_in(&mounted, "Absolute project root on server", "/srv/second");
+    type_in(
+        &mounted,
+        "Connection address",
+        "git@example.com:team/second.git",
+    );
+    mounted.click("Settings");
+    mounted.click("New Project");
+    assert_eq!(
+        mounted.model.project_draft.get_untracked().name,
+        "Second project"
+    );
+    assert_eq!(
+        mounted
+            .model
+            .project_draft
+            .get_untracked()
+            .connection_form
+            .address,
+        "git@example.com:team/second.git"
+    );
+    mounted.focus("Add connection");
+    mounted.click("Add connection");
+    assert_eq!(
+        mounted
+            .model
+            .project_draft
+            .get_untracked()
+            .connections
+            .len(),
+        1
+    );
+    mounted.focus("Create project");
+    mounted.click("Create project");
+    let request = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(&request.command,Command::CreateProject{name,root,connections} if name=="Second project" && root=="/srv/second" && matches!(&connections[..],[ConnectionInput::Repository{remote}] if remote=="git@example.com:team/second.git"))
+    );
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    let mut project = snapshot.projects[0].clone();
+    project.id = format!("project-{}", request.request_id);
+    project.name = "Second project".into();
+    project.fixture = false;
+    snapshot.projects.push(project.clone());
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        outcome: Some((request.request_id, Ok(()))),
+        outcome_serial: 1,
+        ..Default::default()
+    });
+    assert_eq!(mounted.model.project.get_untracked(), project.id);
+    assert_eq!(mounted.model.snapshot.get_untracked().projects.len(), 2);
+    assert!(mounted.model.project_draft.get_untracked().name.is_empty());
+}
+
+#[test]
+fn board_memberships_selection_and_project_switching_preserve_running_sessions() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    let mut second = snapshot.boards[0].clone();
+    second.id = "second-board".into();
+    second.name = "Second board".into();
+    second.columns = local_columns();
+    snapshot.boards.push(second);
+    snapshot.memberships.push(BoardMembership {
+        board_id: "second-board".into(),
+        issue_id: "issue-2".into(),
+        column_ids: vec!["done".into()],
+        remote_item_id: None,
+    });
+    let mut other = snapshot.projects[0].clone();
+    other.id = "other-project".into();
+    other.name = "Other".into();
+    snapshot.projects.push(other);
+    let original_projects = snapshot.projects.clone();
+    let original_sessions = snapshot.sessions.clone();
+    mounted.model.snapshot.set(snapshot);
+    mounted.settle();
+    let task = mounted
+        .model
+        .snapshot
+        .get_untracked()
+        .issues
+        .iter()
+        .find(|i| i.id == "issue-2")
+        .unwrap()
+        .clone();
+    assert!(mounted.model.task_in_column(&task, &task.column_id));
+    mounted.click("Select board Second board");
+    assert!(mounted.model.task_in_column(&task, "done"));
+    assert!(!mounted.model.task_in_column(&task, &task.column_id));
+    mounted.model.select_project("other-project".into());
+    mounted.model.select_project("demo".into());
+    assert_eq!(mounted.model.selected_board().unwrap().id, "second-board");
+    assert_eq!(
+        mounted.model.snapshot.get_untracked().projects,
+        original_projects
+    );
+    assert_eq!(
+        mounted.model.snapshot.get_untracked().sessions,
+        original_sessions
+    );
+}
+
+#[test]
+fn local_tasks_render_without_remote_reference_and_move_on_selected_board() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(local_project_snapshot());
+    mounted.settle();
+    let task = mounted
+        .model
+        .snapshot
+        .get_untracked()
+        .issues
+        .iter()
+        .find(|i| i.id == "issue-2")
+        .unwrap()
+        .clone();
+    let label = format!("Open local task {}", task.title);
+    mounted.click(&label);
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref().is_some_and(|s| s.contains("#0")))
+    );
+    mounted.focus("Edit task");
+    mounted.click("Edit task");
+    mounted.focus("Move task to In review");
+    mounted.click("Move task to In review");
+    assert!(
+        matches!(mounted.commands.try_recv().unwrap().command,Command::MoveTask{board_id,issue_id,column_id} if board_id=="board-demo" && issue_id=="issue-2" && column_id=="review")
+    );
+}
+
+#[test]
+fn initial_workspace_choice_is_explicit_and_followup_keeps_recorded_resources() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    for (id, name) in [("repo", "Repository"), ("directory", "Directory")] {
+        snapshot.connections.push(ProjectConnection {
+            id: id.into(),
+            project_id: "demo".into(),
+            name: name.into(),
+            enabled: true,
+            state: ConnectionState::Ready,
+            error: None,
+            kind: ConnectionKind::Directory {
+                path: format!("/server/{id}"),
+            },
+        });
+    }
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.issue.set(Some("issue-2".into()));
+    mounted.settle();
+    mounted.focus("Choose session resources");
+    mounted.click("Choose session resources");
+    mounted.focus("Workspace resource Directory");
+    mounted.click("Workspace resource Directory");
+    assert_eq!(
+        mounted.model.workspace_selection.get_untracked(),
+        Some(vec!["repo".into()])
+    );
+    mounted.model.worker_prompt.set("Run local task".into());
+    mounted.model.run_worker(false);
+    assert!(
+        matches!(mounted.commands.try_recv().unwrap().command,Command::StartSession{issue_id:Some(issue_id),connection_ids:Some(ids),role:SessionRole::Worker,..} if issue_id=="issue-2" && ids==vec!["repo"])
+    );
+}
+
+#[test]
+fn reconciliation_has_no_retry_and_tracks_live_operation_state() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    snapshot.operations.push(ProjectOperation {
+        id: "publish-1".into(),
+        project_id: "demo".into(),
+        kind: OperationKind::Sync {
+            board_id: "board-demo".into(),
+        },
+        state: OperationState::NeedsReconciliation,
+        error: Some("Unknown provider write outcome".into()),
+        results: Default::default(),
+    });
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.page.set(Page::Connections);
+    mounted.settle();
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Retry operation"))
+    );
+    type_in(&mounted, "Provider operation key", "membership/issue-2");
+    type_in(&mounted, "Confirmed provider result", "remote-item-42");
+    mounted.focus("Confirm provider result");
+    mounted.click("Confirm provider result");
+    assert!(
+        matches!(mounted.commands.try_recv().unwrap().command,Command::ReconcileOperation{operation_id,key,result} if operation_id=="publish-1" && key=="membership/issue-2" && result=="remote-item-42")
+    );
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.operations[0].state = OperationState::Running);
+    mounted.settle();
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Confirm provider result"))
+    );
+}
+
+#[test]
+fn appearance_radios_arrow_keys_and_scale_stepper_keep_accessible_semantics() {
+    let mounted = mount(false, 1380.0);
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+    mounted.click("Settings");
+    mounted.focus("Theme: Dark");
+    assert_eq!(
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some("Theme: Dark"))
+            .unwrap()
+            .role,
+        Role::Radio
+    );
+    mounted.key(Key::ArrowRight, false);
+    assert_eq!(
+        mounted.model.preferences.get_untracked().mode,
+        crate::settings::ThemeMode::Light
+    );
+    assert_eq!(
+        mounted
+            .ui
+            .inspection_snapshot()
+            .node(mounted.ui.focused().unwrap().id())
+            .unwrap()
+            .label
+            .as_deref(),
+        Some("Theme: Light")
+    );
+    mounted.key(Key::ArrowRight, false);
+    assert_eq!(
+        mounted.model.preferences.get_untracked().mode,
+        crate::settings::ThemeMode::System
+    );
+    mounted.focus("Interface scale percent");
+    mounted.key(Key::ArrowUp, false);
+    assert!((mounted.model.preferences.get_untracked().scale - 1.1).abs() < 0.001);
+    mounted.focus("Reset interface scale");
+    mounted.key(Key::Enter, false);
+    assert_eq!(mounted.model.preferences.get_untracked().scale, 1.0);
+}
+
+#[test]
+fn first_director_prompt_uses_planning_session_without_issue_or_implementation_approval() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(local_project_snapshot());
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.sessions.retain(|s| s.role != SessionRole::Director));
+    mounted
+        .model
+        .worker_prompt
+        .set("Unrelated worker draft".into());
+    mounted.model.open_director("director-main".into());
+    mounted.settle();
+    assert_eq!(mounted.model.page.get_untracked(), Page::DirectorStart);
+    type_in(&mounted, "First director prompt", "Plan the project");
+    mounted.model.open_director("director-review".into());
+    mounted.settle();
+    type_in(&mounted, "First director prompt", "Review plan");
+    mounted.model.open_director("director-main".into());
+    mounted.settle();
+    assert_eq!(
+        mounted
+            .model
+            .director_prompts
+            .get_untracked()
+            .get("director-main")
+            .unwrap(),
+        "Plan the project"
+    );
+    assert_eq!(
+        mounted.model.worker_prompt.get_untracked(),
+        "Unrelated worker draft"
+    );
+    mounted.click("Send first prompt");
+    assert!(
+        matches!(mounted.commands.try_recv().unwrap().command,Command::StartDirector{director_id,prompt,approve_implementation:false} if director_id=="director-main" && prompt=="Plan the project")
+    );
+}
+
+#[test]
+fn sidebar_hover_surface_spans_sibling_controls_and_new_director_marker_aligns() {
+    let mounted = mount(false, 1380.0);
+    let snapshot = mounted.ui.inspection_snapshot();
+    let row = snapshot
+        .nodes
+        .iter()
+        .find(|n| n.label.as_deref() == Some("Director row Project director"))
+        .unwrap();
+    let fill = || {
+        mounted
+            .ui
+            .inspection_details(row.id)
+            .unwrap()
+            .attributes
+            .into_iter()
+            .find(|a| a.name == "fill")
+            .map(|a| a.value)
+    };
+    let baseline = fill();
+    for label in [
+        "Toggle director Project director",
+        "Open director Project director",
+        "Profile for Project director",
+    ] {
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Move,
+            position: mounted.rect(label).center(),
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+        mounted.settle();
+        assert_ne!(fill(), baseline, "Hovering {label} must fill the whole row");
+        for sibling in [
+            "Toggle director Project director",
+            "Open director Project director",
+            "Profile for Project director",
+        ] {
+            let rect = mounted.rect(sibling);
+            assert!(
+                rect.origin.x >= row.rect.origin.x
+                    && rect.origin.x + rect.size.width
+                        <= row.rect.origin.x + row.rect.size.width + 0.01
+            );
+        }
+    }
+    let create = snapshot
+        .nodes
+        .iter()
+        .find(|n| n.label.as_deref() == Some("Create director in Relay · demo"))
+        .unwrap();
+    let marker = snapshot.node(create.children[0]).unwrap();
+    assert!(
+        (marker.rect.center().x - mounted.rect("Toggle director Project director").center().x)
+            .abs()
+            < 0.1
+    );
+    assert!(
+        mounted.rect("New Project").origin.y
+            > mounted.rect("Create director in Relay · demo").origin.y
+    );
+}
+
+#[test]
+fn nonempty_columns_cannot_be_deleted_without_explicit_task_moves() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(local_project_snapshot());
+    mounted.settle();
+    mounted.click("Manage columns");
+    mounted.focus("Column title");
+    mounted.click("Delete empty column");
+    assert!(mounted.commands.is_empty());
+    assert_eq!(mounted.model.selected_board().unwrap().columns.len(), 3);
+}
+
+#[test]
+fn new_project_form_remains_keyboard_reachable_at_two_hundred_percent() {
+    let mut mounted = mount(false, 820.0);
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+    mounted.model.preferences.update(|p| {
+        p.scale = 2.0;
+        p.sidebar_width = 160.0;
+    });
+    mounted.size = Size::new(820.0, 600.0);
+    mounted.model.page.set(Page::NewProject);
+    mounted.settle();
+    for label in [
+        "Project name",
+        "Absolute project root on server",
+        "Connection address",
+        "Add connection",
+        "Create project",
+    ] {
+        mounted.focus(label);
+        let rect = mounted.rect(label);
+        assert!(
+            rect.origin.x >= 320.0 && rect.origin.x + rect.size.width <= 820.01,
+            "{label}: {rect:?}"
+        );
+    }
+}
+
+#[test]
+fn connection_states_update_and_retry_and_remove_use_stable_connection_ids() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    snapshot
+        .connections
+        .retain(|c| !matches!(c.kind, ConnectionKind::Board { .. }));
+    snapshot.connections.push(ProjectConnection {
+        id: "repo-1".into(),
+        project_id: "demo".into(),
+        name: "Repository".into(),
+        enabled: true,
+        state: ConnectionState::Failed,
+        error: Some("Clone failed".into()),
+        kind: ConnectionKind::Repository {
+            remote: "git@example.com:team/repo.git".into(),
+            checkout: None,
+            owned: true,
+        },
+    });
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.page.set(Page::Connections);
+    mounted.settle();
+    mounted.click("Retry connection");
+    let retry = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(retry.command,Command::RetryConnection{connection_id} if connection_id=="repo-1")
+    );
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        outcome: Some((retry.request_id, Ok(()))),
+        outcome_serial: 1,
+        ..Default::default()
+    });
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.connections[0].state = ConnectionState::Ready);
+    mounted.settle();
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Retry connection"))
+    );
+    mounted.click("Remove connection");
+    assert!(
+        matches!(mounted.commands.try_recv().unwrap().command,Command::RemoveConnection{connection_id} if connection_id=="repo-1")
+    );
+    mounted.model.snapshot.update(|s| s.connections.clear());
+    mounted.settle();
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Remove connection"))
+    );
+}
+
+#[test]
+fn publish_maps_columns_and_task_repositories_without_pretending_board_is_remote() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    snapshot.connections.push(ProjectConnection {
+        id: "repository-1".into(),
+        project_id: "demo".into(),
+        name: "Repository".into(),
+        enabled: true,
+        state: ConnectionState::Ready,
+        error: None,
+        kind: ConnectionKind::Repository {
+            remote: "git@example.com:team/repo.git".into(),
+            checkout: Some("/srv/repo".into()),
+            owned: true,
+        },
+    });
+    let tasks = snapshot.issues.clone();
+    let columns = snapshot.boards[0].columns.clone();
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.page.set(Page::Publish);
+    mounted.settle();
+    type_in(&mounted, "Destination owner or path", "team");
+    type_in(&mounted, "Destination title", "Published work");
+    mounted.focus("Enter status IDs");
+    mounted.click("Enter status IDs");
+    for column in columns {
+        type_in(
+            &mounted,
+            &format!("Destination status for {}", column.title),
+            &format!("name:{}", column.title),
+        );
+    }
+    for task in tasks {
+        let label = format!("Issue repository Repository for {}", task.title);
+        mounted.focus(&label);
+        mounted.click(&label);
+    }
+    mounted.focus("Confirm board publication");
+    mounted.click("Confirm board publication");
+    let request = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(request.command,Command::PublishBoard{board_id,target,columns,tasks} if board_id=="board-demo" && matches!(&target.source,BoardSource::Github{owner,number:0,..} if owner=="team") && target.name=="Published work" && columns.len()==3 && tasks.len()==4 && tasks.iter().all(|t|t.repository_connection_id=="repository-1"))
+    );
+    assert_eq!(
+        mounted.model.selected_board().unwrap().source,
+        BoardSource::Local
+    );
+}
+
+#[test]
+fn multi_repository_review_and_followup_keep_recorded_workspace_selection() {
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    mounted.model.snapshot.update(|s| {
+        let session = &mut s.sessions[0];
+        session.connection_ids = vec!["repo-one".into(), "repo-two".into()];
+        session.worker.as_mut().unwrap().status = WorkerStatus::Completed;
+        session.workspaces = vec![SessionWorkspace {
+            connection_id: "repo-two".into(),
+            path: "/srv/repo-two/worktree".into(),
+            repository: true,
+            branch: Some("worker/two".into()),
+            base_commit: Some("base-two".into()),
+            changes: Some(ChangeSet {
+                files: vec!["two.rs".into()],
+                diff: "second repository diff".into(),
+                truncated: false,
+            }),
+        }];
+    });
+    mounted.settle();
+    mounted.click("Session actions");
+    mounted.click("Toggle change review");
+    assert!(mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+        n.label.as_deref().is_some_and(|text| {
+            text.contains("repo-two") && text.contains("second repository diff")
+        })
+    }));
+    mounted
+        .model
+        .workspace_selection
+        .set(Some(vec!["unrelated".into()]));
+    mounted
+        .model
+        .worker_prompt
+        .set("Continue recorded resources".into());
+    mounted.model.worker_approval.set(true);
+    mounted.model.run_worker(true);
+    assert!(
+        matches!(mounted.commands.try_recv().unwrap().command,Command::SendWorker{session_id,..} if session_id=="session-plan")
+    );
+    assert_eq!(
+        mounted.model.snapshot.get_untracked().sessions[0].connection_ids,
+        vec!["repo-one", "repo-two"]
+    );
+}
+
+#[test]
+fn destination_discovery_uses_server_metadata_and_ignores_a_different_destination() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(local_project_snapshot());
+    mounted.model.page.set(Page::Publish);
+    mounted.settle();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.discovery_requests.set(Some(sender));
+    type_in(&mounted, "Destination owner or path", "team");
+    type_in(&mounted, "Destination number (0 creates new)", "7");
+    mounted.focus("Read destination statuses");
+    mounted.click("Read destination statuses");
+    let source = requests.try_recv().unwrap();
+    assert!(matches!(&source,BoardSource::Github{owner,number:7,..} if owner=="team"));
+    mounted
+        .model
+        .discovery
+        .set(crate::project_network::DiscoveryUpdate {
+            source: Some(source.clone()),
+            result: Some(Ok(BoardDiscovery {
+                source: source.clone(),
+                name: "Remote destination".into(),
+                columns: vec![BoardColumn {
+                    id: "real-status-id".into(),
+                    title: "Ready".into(),
+                }],
+            })),
+        });
+    mounted.settle();
+    mounted.focus("Map Backlog to Ready");
+    mounted.click("Map Backlog to Ready");
+    type_in(&mounted, "Destination owner or path", "other-team");
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Map Backlog to Ready"))
+    );
+    assert_eq!(
+        mounted.model.selected_board().unwrap().source,
+        BoardSource::Local
     );
 }
