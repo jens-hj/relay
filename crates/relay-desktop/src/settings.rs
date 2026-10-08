@@ -131,7 +131,10 @@ pub fn open(path: &Path) -> (Preferences, Persistence) {
 }
 
 pub fn suspended_notice(reason: &str) -> String {
-    format!("{reason}. Display changes apply to this session only until settings are recovered.")
+    format!(
+        "{}. Display changes apply to this session only until settings are recovered.",
+        reason.trim_end().trim_end_matches('.')
+    )
 }
 
 /// Keep a byte-for-byte copy of the existing settings file, then save the

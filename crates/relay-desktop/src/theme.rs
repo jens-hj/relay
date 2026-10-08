@@ -325,9 +325,9 @@ mosaic::style! {
     pub #scale-stepper width:{px(160.0)}px height:{px(36.0)}px fill:surface radius:0px
         stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
         focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) } {
-        decrement fill:raised font-color:ink hover { fill:selected-fill }
+        decrement fill:raised font-color:ink radius:0px hover { fill:selected-fill }
         field font-size:{px(14.0)}px font-color:ink
-        increment fill:raised font-color:ink hover { fill:selected-fill }
+        increment fill:raised font-color:ink radius:0px hover { fill:selected-fill }
     }
     pub #tree-control height:{px(34.0)}px min-width:0px shrink:0 justify:center radius:0px
         pad:0px fill:(Color::TRANSPARENT) font-color:muted font-size:{px(12.0)}px
