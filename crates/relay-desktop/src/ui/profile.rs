@@ -596,14 +596,17 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
                     row min-height:{px(30.0)}px width:max-content align:center {
                         button #relay.header-action
                             @click:{ model.modify_profile("max_workers", |p| p.max_workers = p.max_workers.saturating_sub(1)); }
-                            width:{px(30.0)}px pad:0px label:"Decrease worker limit" "−"
+                            width:{px(30.0)}px pad:0px stroke:(width:0px)
+                            label:"Decrease worker limit" "−"
                         row #relay.value height:fill width:{px(40.0)}px align:center justify:center
-                            stroke:(width:{px(1.0)} color:rule.hair edges:right) {
+                            stroke:(width:{px(1.0)} color:rule.hair edges:left) {
                             text { format!("{:02}", model.editor_profile.get().max_workers) }
                         }
                         button #relay.header-action
                             @click:{ model.modify_profile("max_workers", |p| p.max_workers = (p.max_workers + 1).min(64)); }
-                            width:{px(30.0)}px pad:0px label:"Increase worker limit" "+"
+                            width:{px(30.0)}px pad:0px
+                            stroke:(width:{px(1.0)} color:rule.hair edges:left)
+                            label:"Increase worker limit" "+"
                     }
                 }
                 row height:min-content gap:{px(10.0)}px align:center pad:{px(12.0)}px {

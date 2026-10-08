@@ -302,6 +302,64 @@ fn sidebar_footer_stays_fixed_while_large_trees_scroll_and_scale() {
 }
 
 #[test]
+fn sidebar_connection_details_fit_narrow_widths_and_connection_states() {
+    for sidebar_width in [160.0, 220.0, 360.0] {
+        let mounted = mount(false, 1380.0);
+        mounted
+            .model
+            .preferences
+            .update(|p| p.sidebar_width = sidebar_width);
+        mounted
+            .model
+            .server_endpoint
+            .set("https://relay.example:7440/".into());
+        mounted.click("Server connection details");
+        let settings = mounted.rect("Settings");
+        let revision = mounted.rect("Workspace revision");
+        assert!((revision.size.width - settings.size.width).abs() < 1.0);
+        assert!((revision.origin.x - settings.origin.x - settings.size.width).abs() < 1.0);
+        for sample in [Some(42), Some(180), Some(480), None] {
+            mounted.model.round_trip_ms.set(sample);
+            mounted.settle();
+            let snapshot = mounted.ui.inspection_snapshot();
+            let sidebar = mounted.rect("Sidebar");
+            for label in [
+                "Workspace revision",
+                "Server address",
+                "Connection transport",
+                "Server protocol",
+                "Connection quality",
+                "Connection status",
+                "Revision meaning",
+            ] {
+                let head = snapshot
+                    .nodes
+                    .iter()
+                    .find(|n| n.label.as_deref() == Some(label))
+                    .unwrap();
+                for node in &snapshot.nodes {
+                    let mut parent = node.parent;
+                    while let Some(id) = parent {
+                        if id == head.id {
+                            let rect = node.rect;
+                            assert!(
+                                rect.origin.x >= sidebar.origin.x - 1.0
+                                    && rect.origin.x + rect.size.width
+                                        <= sidebar.origin.x + sidebar.size.width + 1.0,
+                                "{label} at {sidebar_width}px, {sample:?}: {:?} {rect:?} outside {sidebar:?}",
+                                node.label
+                            );
+                            break;
+                        }
+                        parent = snapshot.nodes.iter().find(|n| n.id == id).unwrap().parent;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn sidebar_server_details_expose_endpoint_quality_and_revision_meaning() {
     let mounted = mount(false, 1380.0);
     mounted
@@ -2397,6 +2455,19 @@ fn first_director_prompt_uses_planning_session_without_issue_or_implementation_a
 #[test]
 fn sidebar_hover_surface_spans_sibling_controls_and_new_director_marker_aligns() {
     let mounted = mount(false, 1380.0);
+    let sidebar = mounted.rect("Sidebar");
+    let first = mounted.rect("Director row Project director");
+    let second = mounted.rect("Director row Review director");
+    assert!((first.origin.x + first.size.width - sidebar.size.width).abs() < 0.1);
+    assert!((first.origin.y + first.size.height - second.origin.y).abs() < 0.1);
+    for label in [
+        "Profile for Project director",
+        "Project defaults for Relay · demo",
+    ] {
+        let action = mounted.rect(label);
+        assert!((action.origin.x + action.size.width - sidebar.size.width).abs() < 0.1);
+        assert!((action.size.height - first.size.height).abs() < 0.1);
+    }
     let snapshot = mounted.ui.inspection_snapshot();
     let row = snapshot
         .nodes

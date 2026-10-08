@@ -21,6 +21,21 @@ This pass implements the 17 screenshot comments following the Labelism design re
 | 14 | Theme mode, light palette, dark palette and scale each have a reset icon, disabled at their default. Persistence stores only overrides. |
 | 15 | Agent marks use status/accent colours. Running marks rotate over 2.4 seconds; waiting, queued and inactive marks stay still. A director's mark represents its own run, independently of worker capacity. |
 
+## Connection footer follow-up
+
+The connection footer follow-up keeps Settings and Revision in adjacent square cells,
+with a divider on each side of Settings. At narrow sidebar widths, the Server
+heading uses a status square; wider sidebars also show the status word. Expanded
+connection details use contiguous sections for the selectable endpoint, round-trip
+latency, transport/protocol, status, and revision explanation. Latency has a large
+numeric reading plus a labelled, coloured three-bar indicator using the existing
+Good/Fair/Slow thresholds. No inner cards or additional control frames are added.
+Desktop layout coverage checks 160, 220, and 360px sidebars with good, fair, slow,
+and missing latency samples, including square footer cells and contained text.
+Sidebar project, director, and worker rows also meet the right edge without gaps
+between their backgrounds. Tree indentation stays on the left; row actions fill
+their cells, with aligned director profile and project-default controls.
+
 ## Settings compatibility
 
 New local settings use `version = 2`. Missing fields follow application defaults. A file at all defaults contains only its version; selected board choices remain independent of appearance resets. Legacy settings still load, and are written in the sparse format when saved. Unsupported versions and malformed files retain the existing backup/recovery flow. Writes remain atomic.

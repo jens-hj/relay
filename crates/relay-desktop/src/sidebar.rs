@@ -62,18 +62,25 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     let compact_footer = Derived::new(move || actual_width.get() < px(200.0));
     let server_details_open = State::new(false);
     let server_identity = Derived::new(move || server_identity(&model.server_endpoint.get()));
-    let connection_quality = Derived::new(move || match model.round_trip_ms.get() {
-        Some(ms) if ms < 100 => format!("Good · {ms} ms"),
-        Some(ms) if ms < 300 => format!("Fair · {ms} ms"),
-        Some(ms) => format!("Slow · {ms} ms"),
-        None if model.connected.get() => "Waiting for sample".into(),
-        None => "Unavailable".into(),
-    });
+    let connection_quality: Derived<String> =
+        Derived::new(move || match model.round_trip_ms.get() {
+            Some(ms) if ms < 100 => "Good".into(),
+            Some(ms) if ms < 300 => "Fair".into(),
+            Some(_) => "Slow".into(),
+            None if model.connected.get() => "Measuring".into(),
+            None => "Unavailable".into(),
+        });
     let connection_quality_color = Derived::new(move || match model.round_trip_ms.get() {
         Some(ms) if ms < 100 => status.success,
         Some(ms) if ms < 300 => status.warning,
         Some(_) => status.danger,
         None => ink.muted,
+    });
+    let signal_bars = Derived::new(move || match model.round_trip_ms.get() {
+        Some(ms) if model.connected.get() && ms < 100 => 3,
+        Some(ms) if model.connected.get() && ms < 300 => 2,
+        Some(_) if model.connected.get() => 1,
+        _ => 0,
     });
     let focus: TreeFocus = Rc::default();
     let view = view! {
@@ -102,8 +109,7 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                 }
             }
             scroll {
-                col height:min-content gap:{px(4.0)}px
-                    pad:(horizontal:{px(8.0)}px vertical:{px(10.0)}px) role:list
+                col height:min-content gap:0px pad:(left:{px(8.0)}px) role:list
                     label:"Project agents" {
                     for (_, project) in {model.snapshot.get().projects.into_iter().map(|p| (p.id.clone(), p))} {
                         col height:min-content {
@@ -143,9 +149,12 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                                     row height:min-content align:center gap:{px(5.0)}px {
                                         el width:{px(6.0)}px height:{px(6.0)}px shrink:0
                                             fill:if model.connected.get() {status.success} else {status.danger} {}
-                                        row #relay.eyebrow height:min-content {
-                                            text text-wrap:none
-                                                {if model.connected.get() {"Connected"} else if model.status.get().starts_with("Connecting") {"Connecting"} else {"Offline"}}
+                                        if actual_width.get() >= px(300.0) {
+                                            row #relay.eyebrow height:min-content
+                                                font-color:{color(if model.connected.get() {status.success} else {status.danger})} {
+                                                text text-wrap:none
+                                                    {if model.connected.get() {"Connected"} else if model.status.get().starts_with("Connecting") {"Connecting"} else {"Offline"}}
+                                            }
                                         }
                                     }
                                 }
@@ -167,8 +176,9 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                         icon size:{px(18.0)}px gear-icon
                         tooltip #relay.tooltip summary:"Settings" {text "Settings · Ctrl/Cmd+,"}
                     }
-                    col width:max-content justify:center gap:{px(3.0)}px
-                        pad:(horizontal:{px(12.0)}px vertical:0px) label:"Workspace revision"
+                    col width:{px(52.0)}px shrink:0 align:center justify:center gap:{px(3.0)}px
+                        stroke:(width:{px(1.0)} color:rule.hair edges:left) pad:0px
+                        label:"Workspace revision"
                         description:"Shared workspace state version used to detect stale edits" {
                         row #relay.eyebrow height:min-content {
                             text text-transform:uppercase letter-spacing:{px(0.6)}px "Revision"
@@ -183,75 +193,104 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                     }
                 }
                 if server_details_open.get() {
-                    col height:min-content gap:{px(8.0)}px
-                        pad:(horizontal:{px(12.0)}px vertical:{px(10.0)}px) fill:surface.panel
+                    col height:min-content gap:0px fill:surface.panel
                         stroke:(width:{px(1.0)} color:rule.hair edges:top)
                         label:"Server connection details" {
-                        row height:min-content justify:between align:center {
-                            row #relay.eyebrow height:min-content {
-                                text text-transform:uppercase letter-spacing:{px(0.6)}px
-                                    "Connection details"
+                        row height:{px(34.0)}px align:center gap:{px(7.0)}px
+                            pad:(horizontal:{px(12.0)}px vertical:0px)
+                            stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                            icon size:{px(13.0)}px connections-icon
+                            row #relay.eyebrow width:1fr height:min-content {
+                                text "Connection"
                             }
-                            row #relay.eyebrow height:min-content font-family:monospace {
-                                text {if model.connected.get() {"UP"} else {"DOWN"}}
-                            }
-                        }
-                        col min-width:0px gap:{px(3.0)}px clip label:"Server address" {
-                            row #relay.eyebrow height:min-content {
-                                text text-transform:uppercase letter-spacing:{px(0.6)}px "Address"
-                            }
-                            row #relay.value height:min-content width:fill font-size:{px(11.0)}px {
-                                text selectable text-wrap:none font-family:monospace
-                                    {model.server_endpoint.get()}
+                            el width:{px(6.0)}px height:{px(6.0)}px shrink:0
+                                fill:if model.connected.get() {status.success} else {status.danger} {}
+                            row height:min-content font-size:{px(11.0)}px
+                                font-color:{color(if model.connected.get() {status.success} else {status.danger})} {
+                                text {if model.connected.get() {"Online"} else {"Offline"}}
                             }
                         }
-                        row height:min-content gap:{px(14.0)}px {
-                            col width:1fr gap:{px(3.0)}px label:"Connection transport" {
-                                row #relay.eyebrow height:min-content {
-                                    text text-transform:uppercase letter-spacing:{px(0.6)}px
-                                        "Transport"
-                                }
-                                row #relay.value height:min-content font-size:{px(11.0)}px {
-                                    text "HTTP + WebSocket"
+                        col height:min-content min-width:0px gap:{px(4.0)}px pad:{px(12.0)}px
+                            label:"Server address" {
+                            row #relay.eyebrow height:min-content {
+                                text "Endpoint"
+                            }
+                            row #relay.value height:min-content width:fill font-size:{px(12.0)}px {
+                                text selectable font-family:monospace {model.server_endpoint.get()}
+                            }
+                        }
+                        row height:min-content align:center gap:{px(10.0)}px
+                            pad:(horizontal:{px(12.0)}px vertical:{px(10.0)}px)
+                            stroke:(width:{px(1.0)} color:rule.hair edges:top)
+                            label:"Connection quality" {
+                            row width:{px(20.0)}px height:{px(20.0)}px align:end gap:{px(3.0)}px
+                                shrink:0 label:"Latency quality indicator"
+                                description:{connection_quality.get()} {
+                                for i in 0..3 {
+                                    el width:{px(4.0)}px height:{px(6.0 + i as f32 * 6.0)}px
+                                        fill:{if i < signal_bars.get() {color(connection_quality_color.get())} else {color(rule.line)}} {}
                                 }
                             }
-                            col width:1fr gap:{px(3.0)}px label:"Server protocol" {
+                            col width:1fr min-width:0px height:min-content gap:{px(3.0)}px {
                                 row #relay.eyebrow height:min-content {
-                                    text text-transform:uppercase letter-spacing:{px(0.6)}px
-                                        "Protocol"
+                                    text "Round trip"
                                 }
-                                row #relay.value height:min-content font-size:{px(11.0)}px {
-                                    text
-                                        {if model.connected.get() {format!("v{}", model.snapshot.get().protocol_version)} else {"—".into()}}
-                                }
-                            }
-                            col width:1fr gap:{px(3.0)}px label:"Connection quality" {
-                                row #relay.eyebrow height:min-content {
-                                    text text-transform:uppercase letter-spacing:{px(0.6)}px
-                                        "Quality · RTT"
-                                }
-                                row height:min-content font-size:{px(11.0)}px
+                                row height:min-content font-size:{px(12.0)}px
                                     font-color:{color(connection_quality_color.get())} {
                                     text {connection_quality.get()}
                                 }
                             }
+                            row #relay.value width:max-content height:min-content
+                                font-size:{px(18.0)}px {
+                                text font-family:monospace
+                                    {model.round_trip_ms.get().map(|ms| format!("{ms}")).unwrap_or_else(|| "—".into())}
+                            }
+                            row #relay.caption width:max-content height:min-content {
+                                text "ms"
+                            }
                         }
-                        col gap:{px(3.0)}px label:"Connection status" {
+                        col height:min-content gap:{px(7.0)}px pad:{px(12.0)}px
+                            stroke:(width:{px(1.0)} color:rule.hair edges:top) {
+                            row height:min-content align:center gap:{px(8.0)}px
+                                label:"Connection transport" {
+                                row #relay.eyebrow width:1fr height:min-content {
+                                    text "Transport"
+                                }
+                                row #relay.value width:max-content height:min-content
+                                    font-size:{px(11.0)}px {
+                                    text "HTTP + WebSocket"
+                                }
+                            }
+                            row height:min-content align:center gap:{px(8.0)}px
+                                label:"Server protocol" {
+                                row #relay.eyebrow width:1fr height:min-content {
+                                    text "Protocol"
+                                }
+                                row #relay.value width:max-content height:min-content
+                                    font-size:{px(11.0)}px {
+                                    text font-family:monospace
+                                        {if model.connected.get() {format!("v{}", model.snapshot.get().protocol_version)} else {"—".into()}}
+                                }
+                            }
+                        }
+                        col height:min-content gap:{px(4.0)}px pad:{px(12.0)}px
+                            stroke:(width:{px(1.0)} color:rule.hair edges:top)
+                            label:"Connection status" {
                             row #relay.eyebrow height:min-content {
-                                text text-transform:uppercase letter-spacing:{px(0.6)}px "Status"
+                                text "Status"
                             }
                             row #relay.caption height:min-content {
                                 text {model.status.get()}
                             }
                         }
-                        col gap:{px(3.0)}px label:"Revision meaning" {
+                        col height:min-content gap:{px(4.0)}px pad:{px(12.0)}px
+                            stroke:(width:{px(1.0)} color:rule.hair edges:top)
+                            label:"Revision meaning" {
                             row #relay.eyebrow height:min-content {
-                                text text-transform:uppercase letter-spacing:{px(0.6)}px
-                                    "Workspace revision"
+                                text "Workspace revision"
                             }
                             row #relay.caption height:min-content {
-                                text
-                                    "Shared state version used to detect edits based on older data."
+                                text "Shared state version. Prevents edits using older data."
                             }
                         }
                     }
@@ -313,8 +352,8 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
     });
     let open = Derived::new(move || model.expanded_projects.get().contains(&id.get()));
     view! {
-        col height:min-content gap:{px(3.0)}px {
-            row #relay.tree-row height:{px(30.0)}px gap:{px(2.0)}px align:center role:list-item
+        col height:min-content gap:0px {
+            row #relay.tree-row height:{px(30.0)}px gap:0px align:center role:list-item
                 label:{format!("Project row {}",name.get())} pad:(left:{px(4.0)}px) {
                 button #relay.tree-control @click:{toggle(model.expanded_projects, id.get_untracked());}
                     width:1fr shrink:1 gap:{px(8.0)}px pad:(horizontal:{px(4.0)}px vertical:0px)
@@ -333,7 +372,7 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
                     as navigation
                 {bind_tree_key(model, navigation, TreeItem::Project(id.get_untracked()), focus.clone());}
                 button #relay.tree-control @click:{model.select_project(id.get_untracked());}
-                    width:{px(24.0)}px height:{px(24.0)}px align:center label:{format!("Open board for {}", name.get())}
+                    width:{px(30.0)}px height:fill align:center label:{format!("Open board for {}", name.get())}
                     fill:{if model.project.get() == id.get() && model.page.get() == Page::Board {color(ink.inverse)} else {Color::TRANSPARENT}}
                     hover { fill:{if model.project.get() == id.get() && model.page.get() == Page::Board {color(ink.inverse_hover)} else {color(surface.raised)}} }
                     pressed { fill:{if model.project.get() == id.get() && model.page.get() == Page::Board {color(ink.inverse_pressed)} else {color(surface.raised)}} }
@@ -344,7 +383,7 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
                 }
                 button #relay.tree-control
                     @click:{model.select_project(id.get_untracked());model.page.set(Page::Connections);}
-                    width:{px(24.0)}px height:{px(24.0)}px align:center justify:center
+                    width:{px(30.0)}px height:fill align:center justify:center
                     label:{format!("Project Connections for {}",name.get())} {
                     icon size:{px(14.0)}px connections-icon
                     tooltip #relay.tooltip summary:"Project connections" {text "Project connections"}
@@ -353,7 +392,7 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
             if open.get() {
                 row height:min-content {
                     el width:{px(14.0)}px shrink:0 {}
-                    col height:min-content gap:{px(2.0)}px
+                    col height:min-content gap:0px
                         stroke:(width:{px(1.0)} color:rule.hair edges:left) {
                         let focus = focus.clone();
                         for (_, director) in {model.snapshot.get().directors.into_iter().filter(|d| d.project_id == id.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>()} {
@@ -362,8 +401,7 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
                                     focus:(focus.clone())
                             }
                         }
-                        row height:{px(32.0)}px align:center gap:{px(2.0)}px
-                            pad:(left:{px(4.0)}px right:{px(4.0)}px) {
+                        row height:{px(30.0)}px align:center gap:0px pad:(left:{px(4.0)}px) {
                             button #relay.tree-control
                                 @click:{model.select_project(id.get_untracked()); model.open_profile(EditTarget::New);}
                                 width:1fr shrink:1 gap:{px(6.0)}px
@@ -377,7 +415,7 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
                             }
                             button #relay.tree-control
                                 @click:{model.select_project(id.get_untracked()); model.open_profile(EditTarget::Defaults);}
-                                width:{px(24.0)}px height:{px(24.0)}px align:center
+                                width:{px(32.0)}px height:fill align:center
                                 label:{format!("Project defaults for {}", name.get())}
                                 {
                                 icon size:{px(14.0)}px sliders-icon
@@ -431,10 +469,9 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
                 }))
     });
     view! {
-        col height:min-content gap:{px(2.0)}px {
-            row #relay.tree-row height:{px(30.0)}px gap:{px(2.0)}px align:center role:list-item
-                label:{format!("Director row {}",name.get())}
-                pad:(left:{px(4.0)}px right:{px(4.0)}px)
+        col height:min-content gap:0px {
+            row #relay.tree-row height:{px(30.0)}px gap:0px align:center role:list-item
+                label:{format!("Director row {}",name.get())} pad:(left:{px(4.0)}px)
                 fill:{if selected.get() {color(ink.inverse)} else {Color::TRANSPARENT}}
                 font-color:{color(if selected.get() {ink.on_inverse} else {ink.fg})}
                 hover { fill:{color(if selected.get() {ink.inverse_hover} else {surface.raised})} }
@@ -442,7 +479,7 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
                     fill:{color(if selected.get() {ink.inverse_pressed} else {surface.raised})}
                 } {
                 button #relay.tree-control @click:{toggle(model.expanded_directors, id.get_untracked());}
-                    width:{px(24.0)}px height:{px(24.0)}px align:center label:{format!("Toggle director {}", name.get())}
+                    width:{px(24.0)}px height:fill align:center label:{format!("Toggle director {}", name.get())}
                     font-color:{color(if selected.get() {ink.on_inverse} else {ink.muted})}
                     description:{if open.get() {"Expanded"} else {"Collapsed"}}
                     {
@@ -475,7 +512,7 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
                     as navigation
                 {bind_tree_key(model, navigation, TreeItem::Director(id.get_untracked()), focus.clone());}
                 button #relay.tree-control @click:{model.open_director_profile(id.get_untracked());}
-                    width:{px(24.0)}px height:{px(24.0)}px align:center label:{format!("Profile for {}", name.get())}
+                    width:{px(32.0)}px height:fill align:center label:{format!("Profile for {}", name.get())}
                     font-color:{color(if selected.get() {ink.on_inverse} else {ink.muted})}
                     {
                     icon size:{px(14.0)}px sliders-icon
@@ -485,7 +522,7 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
             if open.get() {
                 row height:min-content {
                     el width:{px(16.0)}px shrink:0 {}
-                    col height:min-content gap:{px(2.0)}px pad:(left:{px(20.0)}px)
+                    col height:min-content gap:0px pad:(left:{px(20.0)}px)
                         stroke:(width:{px(1.0)} color:rule.hair edges:left) {
                         let focus = focus.clone();
                         for (_, worker) in {workers.get().into_iter().map(|s| (s.id.clone(), s))} {
