@@ -1183,3 +1183,56 @@ fn authoritative_merge_returns_board_connection_to_ready() {
     assert_eq!(connection.state, ConnectionState::Ready);
     assert_eq!(connection.error, None);
 }
+
+#[tokio::test]
+async fn gitlab_explicit_edit_accepts_authoritative_null_description_as_empty_body() {
+    let fake = Fake::new(vec![
+        (
+            "projects/group%2Frepo --method GET",
+            json!({"permissions":{"project_access":{"access_level":40}}}),
+            0,
+        ),
+        (
+            "projects/group%2Frepo --method GET",
+            json!({"issues_enabled":true}),
+            0,
+        ),
+        ("description=", json!({}), 0),
+        (
+            "issues/1 --method GET",
+            json!({"title":"Accepted","description":null}),
+            0,
+        ),
+    ]);
+    let (_temp, workspace) = workspace(fake.config()).await;
+    let mut task = pending_task();
+    task.reference = Some(reference_for(&gl_source(false), "group/repo", 1));
+    install_task(
+        &workspace,
+        sample_operation(OperationKind::EditTask {
+            issue_id: "task".into(),
+            title: "Accepted".into(),
+            body: String::new(),
+        }),
+        task,
+        board_record(gl_source(false)),
+    );
+    execute(&workspace, "operation").unwrap();
+    let snapshot = workspace.snapshots.borrow();
+    let task = snapshot.issues.iter().find(|i| i.id == "task").unwrap();
+    assert_eq!(task.title, "Accepted");
+    assert_eq!(task.body, "");
+}
+#[test]
+fn gitlab_hosts_cannot_be_cli_options_or_embedded_credentials() {
+    for host in ["--hostname", "-H", "user@host", "host:443", "https://host"] {
+        let mut source = gl_source(false);
+        if let BoardSource::Gitlab {
+            host: source_host, ..
+        } = &mut source
+        {
+            *source_host = host.into();
+        }
+        assert!(validate_source(&source).is_err());
+    }
+}

@@ -68,6 +68,18 @@ fn safe_segment(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
 }
+fn safe_host(host: &str) -> bool {
+    host.as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphanumeric)
+        && host
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
+}
 fn validate_source(source: &BoardSource) -> Result<(), Error> {
     let valid = match source {
         BoardSource::Local => false,
@@ -77,7 +89,7 @@ fn validate_source(source: &BoardSource) -> Result<(), Error> {
         BoardSource::Gitlab {
             host, path, url, ..
         } => {
-            safe_segment(host)
+            safe_host(host)
                 && path.split('/').all(safe_segment)
                 && (url.is_empty() || url.starts_with(&format!("https://{host}/")))
         }
@@ -330,14 +342,13 @@ fn execute_inner(workspace: &Workspace, id: &str) -> Result<(), Error> {
                     .find(|i| i.id == *issue_id)
                     .ok_or_else(|| Error::invalid("Task not found"))?;
                 issue.title = text(&accepted, "title")?;
-                issue.body = text(
-                    &accepted,
-                    if reference.provider == Provider::Github {
-                        "body"
-                    } else {
-                        "description"
-                    },
-                )?;
+                issue.body = if reference.provider == Provider::Github {
+                    text(&accepted, "body")?
+                } else if accepted["description"].is_null() {
+                    String::new()
+                } else {
+                    text(&accepted, "description")?
+                };
                 Ok(())
             })?;
         }
@@ -403,7 +414,7 @@ fn reference_host(reference: &IssueRef) -> Result<String, Error> {
         .strip_prefix("https://")
         .and_then(|s| s.split_once('/'))
         .map(|(host, _)| host.to_string())
-        .filter(|s| safe_segment(s))
+        .filter(|s| safe_host(s))
         .ok_or_else(|| Error::invalid("Remote issue requires a valid HTTPS URL"))
 }
 fn validate_reference(reference: &IssueRef) -> Result<(), Error> {

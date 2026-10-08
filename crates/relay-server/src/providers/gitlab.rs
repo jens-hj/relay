@@ -17,7 +17,7 @@ pub(super) fn rest(
     method: &str,
     fields: Value,
 ) -> Result<Value, Error> {
-    if !safe_segment(host) {
+    if !safe_host(host) {
         return Err(Error::invalid("Invalid GitLab host"));
     }
     let mut command = Command::new(&config.glab);
