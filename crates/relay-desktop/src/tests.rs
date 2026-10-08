@@ -4899,6 +4899,80 @@ fn conversation_tracks_constrain_recorded_text_and_draft_to_the_reading_width() 
 }
 
 #[test]
+fn clicking_below_the_draft_focuses_its_end_across_the_buffer_width() {
+    for width in [820.0, 1600.0] {
+        let mounted = mount(false, width);
+        buffer_worker(&mounted);
+        mounted.settle();
+        let draft = mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .find(|n| {
+                n.label
+                    .as_deref()
+                    .is_some_and(|l| l.starts_with("Draft text"))
+            })
+            .unwrap();
+        let label = draft.label.unwrap();
+        // The empty draft is reachable without hitting its text-height field.
+        for x in [draft.rect.origin.x - 5.0, width - 50.0] {
+            mounted.focus("Session actions");
+            let rect = mounted.rect(&label);
+            let position = Vector2::new(x, rect.origin.y + rect.size.height + 60.0);
+            for kind in [
+                PointerEventKind::Down(PointerButton::Primary),
+                PointerEventKind::Up(PointerButton::Primary),
+            ] {
+                mounted.ui.dispatch_pointer(PointerEvent {
+                    kind,
+                    position,
+                    pointer_type: PointerType::Mouse,
+                    modifiers: Modifiers::default(),
+                    timestamp: Duration::ZERO,
+                });
+            }
+            mounted.settle();
+            assert_eq!(mounted.ui.focused().unwrap().id(), draft.id);
+        }
+        mounted
+            .ui
+            .dispatch_ime(ImeEvent::Commit("First line\nLast line".into()));
+        mounted.settle();
+        mounted.focus(&label);
+        mounted.key(Key::Home, true);
+        mounted.focus("Session actions");
+        let rect = mounted.rect(&label);
+        let position = Vector2::new(width - 50.0, rect.origin.y + rect.size.height + 60.0);
+        for kind in [
+            PointerEventKind::Down(PointerButton::Primary),
+            PointerEventKind::Up(PointerButton::Primary),
+        ] {
+            mounted.ui.dispatch_pointer(PointerEvent {
+                kind,
+                position,
+                pointer_type: PointerType::Mouse,
+                modifiers: Modifiers::default(),
+                timestamp: Duration::ZERO,
+            });
+        }
+        mounted.settle();
+        mounted
+            .ui
+            .dispatch_ime(ImeEvent::Commit(" appended".into()));
+        mounted.settle();
+        assert_eq!(
+            plain_text(&crate::buffer::parts(
+                mounted.model,
+                &mounted.model.session.get_untracked()
+            )),
+            "First line\nLast line appended"
+        );
+    }
+}
+
+#[test]
 fn display_settings_write_sparse_overrides_and_reset_independently() {
     use crate::settings::{Preferences, Setting, ThemeMode};
     let directory = settings_directory();

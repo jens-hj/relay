@@ -1130,6 +1130,42 @@ pub fn Conversation(model: Model) -> Element {
     });
     let drag_controller = controller.get_untracked();
     root.on_pointer(move |event, _| match event.kind {
+        PointerEventKind::Down(PointerButton::Primary) => {
+            let state = drag_controller.borrow();
+            if !state
+                .viewport
+                .as_ref()
+                .is_some_and(|viewport| viewport.root().layout_rect().contains(event.position))
+            {
+                return;
+            }
+            let target = state
+                .surfaces
+                .iter()
+                .filter(|(key, _)| key.starts_with("draft-"))
+                .max_by(|(_, (a, _)), (_, (b, _))| {
+                    a.layout_rect()
+                        .origin
+                        .y
+                        .total_cmp(&b.layout_rect().origin.y)
+                })
+                .map(|(_, (field, editor))| (field.clone(), editor.clone()));
+            drop(state);
+            if let Some((field, editor)) = target
+                && event.position.y
+                    >= field.layout_rect().origin.y + field.layout_rect().size.height
+            {
+                drag_controller.borrow_mut().selection = None;
+                let fonts = model.ui.get_untracked().fonts();
+                let end = editor.borrow().text().len();
+                editor
+                    .borrow_mut()
+                    .set_selection_bytes(&mut fonts.borrow_mut(), end, end);
+                field.focus();
+                field.reveal();
+                field.paint_dirty();
+            }
+        }
         PointerEventKind::Move => {
             let Some((anchor, offset, mirror)) = drag_controller.borrow().pointer_anchor.clone()
             else {
