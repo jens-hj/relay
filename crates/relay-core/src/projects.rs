@@ -11,6 +11,18 @@ pub struct BoardDiscovery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconciliationInput {
+    pub operation_id: String,
+    pub url: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconciliationResult {
+    pub key: String,
+    pub result: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BoardSource {
     Local,
