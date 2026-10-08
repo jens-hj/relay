@@ -168,11 +168,8 @@ pub(crate) fn authorize_session(
     role: &SessionRole,
     config: &RuntimeConfig,
 ) -> Result<(), Error> {
-    let issue = snapshot
-        .issues
-        .iter()
-        .find(|i| i.id == issue_id)
-        .ok_or_else(|| Error::invalid("Task not found"))?;
+    let issue_id = snapshot.canonical_issue_id(issue_id);
+    let issue = snapshot.issue(issue_id).map_err(Error::invalid)?;
     let project = snapshot
         .project(&issue.project_id)
         .map_err(Error::invalid)?;
@@ -255,7 +252,9 @@ pub(crate) fn authorize_session(
         .map_err(Error::invalid)?;
     profile.validate().map_err(Error::invalid)?;
     if let DirectorScope::Issues { issue_ids } = &profile.scope
-        && !issue_ids.iter().any(|i| i == issue_id)
+        && !issue_ids
+            .iter()
+            .any(|i| snapshot.canonical_issue_id(i) == issue_id)
     {
         return Err(Error::invalid(
             "Issue is outside the current director scope",
@@ -415,7 +414,7 @@ fn prepare_workspaces(
     let issue = session
         .issue_id
         .as_ref()
-        .and_then(|id| snapshot.issues.iter().find(|i| &i.id == id));
+        .and_then(|id| snapshot.issue(id).ok());
     let primary = issue.and_then(|i| i.reference.as_ref()).and_then(|reference| snapshot.connections.iter().find(|c| session.connection_ids.contains(&c.id) && matches!(&c.kind,ConnectionKind::Repository{remote,..} if crate::projects::repository(remote).is_ok_and(|(_,path,_)|path==reference.repository))).map(|c|c.id.clone()));
     if issue.is_some_and(|i| i.reference.is_some()) && primary.is_none() {
         return Err(Error::invalid(
@@ -947,12 +946,8 @@ async fn execute(
         .find(|s| s.id == session_id)
         .unwrap();
     let issue = snapshot
-        .issues
-        .iter()
-        .find(|i| Some(i.id.as_str()) == session.issue_id.as_deref())
-        .ok_or_else(|| {
-            Error::invalid("Live worker issue is no longer on the board; sync and review scope")
-        })?;
+        .issue(session.issue_id.as_deref().unwrap_or_default())
+        .map_err(Error::invalid)?;
     let director = snapshot
         .directors
         .iter()

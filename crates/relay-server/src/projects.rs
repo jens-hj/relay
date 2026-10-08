@@ -554,6 +554,7 @@ pub(super) fn apply(
             title,
             body,
         } => {
+            let issue_id = snapshot.canonical_issue_id(&issue_id).to_owned();
             let title = text(&title, 1024, "task title")?;
             if body.len() > 64 * 1024 || body.contains('\0') {
                 return Err(Error::invalid("Task body is too large"));
@@ -591,6 +592,7 @@ pub(super) fn apply(
             issue_id,
             column_id,
         } => {
+            let issue_id = snapshot.canonical_issue_id(&issue_id).to_owned();
             editable_board(snapshot, &board_id)?;
             let board = snapshot.board(&board_id).map_err(Error::invalid)?.clone();
             if !board.columns.iter().any(|c| c.id == column_id)
@@ -947,7 +949,7 @@ fn start(
         return Err(Error::invalid("Fixture agents cannot be started"));
     }
     let issue_id = if let Some(id) = issue_id {
-        id
+        snapshot.canonical_issue_id(&id).to_owned()
     } else if role == SessionRole::Director {
         let board_id = local_board(snapshot, &project.id);
         let id = format!("task-{request}");
@@ -1246,6 +1248,90 @@ mod tests {
         )
         .unwrap();
         format!("project-{request}")
+    }
+
+    #[test]
+    fn aliased_history_keeps_scope_and_edits_the_preserved_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Snapshot::default();
+        let project = create(&mut s, &dir.path().join("root"), "Aliases");
+        let board = s
+            .boards
+            .iter()
+            .find(|b| b.project_id == project)
+            .unwrap()
+            .id
+            .clone();
+        apply(
+            &mut s,
+            Command::CreateTask {
+                board_id: board,
+                title: "Task".into(),
+                body: String::new(),
+                repository_connection_id: None,
+            },
+            "canonical",
+            DirectorProfile::default(),
+            &RuntimeConfig::default(),
+        )
+        .unwrap();
+        let mut historical = s.issue("task-canonical").unwrap().clone();
+        historical.id = "historical-task".into();
+        s.issues.push(historical);
+        s.issue_aliases
+            .insert("historical-task".into(), "task-canonical".into());
+        let director = s
+            .directors
+            .iter_mut()
+            .find(|d| d.project_id == project)
+            .unwrap();
+        director.overrides.scope = Some(DirectorScope::Issues {
+            issue_ids: vec!["historical-task".into()],
+        });
+        let director_id = director.id.clone();
+        for id in ["historical-task", "task-canonical"] {
+            runtime::authorize_session(
+                &s,
+                id,
+                &director_id,
+                false,
+                &SessionRole::Worker,
+                &RuntimeConfig::default(),
+            )
+            .unwrap();
+        }
+        apply(
+            &mut s,
+            Command::UpdateTask {
+                issue_id: "historical-task".into(),
+                title: "Updated".into(),
+                body: "Body".into(),
+            },
+            "edit",
+            DirectorProfile::default(),
+            &RuntimeConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(s.issue("historical-task").unwrap().title, "Updated");
+        assert_eq!(
+            s.issues
+                .iter()
+                .find(|i| i.id == "historical-task")
+                .unwrap()
+                .title,
+            "Task"
+        );
+        assert_eq!(
+            s.directors
+                .iter()
+                .find(|d| d.id == director_id)
+                .unwrap()
+                .overrides
+                .scope,
+            Some(DirectorScope::Issues {
+                issue_ids: vec!["historical-task".into()]
+            })
+        );
     }
 
     #[test]

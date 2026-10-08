@@ -255,6 +255,13 @@ impl Snapshot {
     pub fn canonical_issue_id<'a>(&'a self, id: &'a str) -> &'a str {
         resolve_alias(&self.issue_aliases, id)
     }
+    pub fn issue(&self, id: &str) -> Result<&Issue, String> {
+        let id = self.canonical_issue_id(id);
+        self.issues
+            .iter()
+            .find(|i| i.id == id)
+            .ok_or_else(|| "Task not found".into())
+    }
     pub fn board(&self, id: &str) -> Result<&Board, String> {
         let id = self.canonical_board_id(id);
         self.boards
