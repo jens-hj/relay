@@ -28,6 +28,7 @@ Desktop coverage added or kept by this work:
   - Profile override counts are the overridden whole fields out of seven.
   - The run strip shows only recorded values; its approval cell is labelled "Next-turn approval", because the mode can change during a run.
   - Usage appears only when measured.
+  - Approval requests name the action in plain words (for example "Run command" or "Change files") and show the recorded request details in full, pretty-printed when they are JSON, in a bounded scroll with positive height.
 - **Drafts and focus:**
   - The new task draft survives closing and reopening the form.
   - Switching a 1380 px window from 100% to 200% scale moves the session into its narrow layout without rebuilding the draft surface: the focused editing node and draft text are kept.
@@ -50,7 +51,7 @@ Linux, `nix develop .#ui-test`: Xvfb with Mesa lavapipe (software Vulkan).
 - **Demo data:** the read-only demo fixture project is shown as Fixture.
 - **No real harness:** no real agent turns or remote provider writes were made.
 
-Final round, frames in `/tmp/relay-labelism-capture/final2/` (earlier rounds are kept separately). Session frames and `compare-03-session.png` come from the build of `217d4cc`, after transcript content was capped at its 760 px reading column; the other frames come from `345fc01`, whose views are unchanged since. Names are `<palette>-<window>-s<sidebar>[-200pct]-<view>.png`.
+Final round, frames in `/tmp/relay-labelism-capture/final2/` (earlier rounds are kept separately). Session frames and `compare-03-session.png` come from the build of `15a749f`: transcript content is capped at its 760 px reading column, and the approval card shows a readable action name with the recorded request details. The other frames come from `345fc01`, whose views are unchanged since. Names are `<palette>-<window>-s<sidebar>[-200pct]-<view>.png`.
 
 | Frames | Shows |
 |---|---|
@@ -94,7 +95,7 @@ Final round, frames in `/tmp/relay-labelism-capture/final2/` (earlier rounds are
 
 ## Final check
 
-`CARGO_TARGET_DIR=<shared> nix develop --command just check` exited 0 at `217d4cc`:
+`CARGO_TARGET_DIR=<shared> nix develop --command just check` exited 0 at `15a749f`:
 - 98 desktop, 109 server, 6 core and 10 HTTP tests;
 - strict Clippy on all workspace targets;
 - Rust, Mosaic, just and Nix formatting;
