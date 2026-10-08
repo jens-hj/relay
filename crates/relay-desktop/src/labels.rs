@@ -57,6 +57,31 @@ pub fn SlidingSegments(
     }
 }
 
+/// A director's identifier: a diamond, filled while the director has active
+/// workers. The same mark heads the director profile.
+#[component]
+pub fn DirectorMark(
+    size: f32,
+    active: Derived<bool>,
+    #[prop(default = Derived::new(|| false))] inverse: Derived<bool>,
+) -> Element {
+    let tone = move || {
+        color(if inverse.get() {
+            ink.on_inverse
+        } else {
+            ink.fg
+        })
+    };
+    view! {
+        stack nohit width:{px(size * 1.42)}px height:{px(size * 1.42)}px shrink:0 align:center
+            justify:center {
+            el width:{px(size)}px height:{px(size)}px rotate:{std::f32::consts::FRAC_PI_4}
+                fill:{if active.get() {tone()} else {Color::TRANSPARENT}}
+                stroke:(width:{px(if size > 12.0 {2.0} else {1.0})} color:{tone()} offset:{px(-0.5)}) {}
+        }
+    }
+}
+
 /// What a session or issue is doing, as shown by a status glyph and word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunState {
@@ -150,8 +175,15 @@ pub fn issue_status(snapshot: &relay_core::Snapshot, sessions: &[relay_core::Ses
 /// A small square whose fill encodes a run state. Always paired with the
 /// state's word, either visibly or in the owning control's description.
 #[component]
-pub fn StatusGlyph(state: Derived<RunState>) -> Element {
+pub fn StatusGlyph(
+    state: Derived<RunState>,
+    /// Draw for an inverse (selected) row: every mark uses the inverse text
+    /// color, so the shape alone carries the state there.
+    #[prop(default = Derived::new(|| false))]
+    inverse: Derived<bool>,
+) -> Element {
     let size = 11.0;
+    let tone = move |token: ColorToken| color(if inverse.get() { ink.on_inverse } else { token });
     let frame = move || match state.get() {
         RunState::Running => run.text,
         RunState::Waiting => attention.text,
@@ -161,31 +193,31 @@ pub fn StatusGlyph(state: Derived<RunState>) -> Element {
     };
     view! {
         stack nohit width:{px(size)}px height:{px(size)}px shrink:0 align:center justify:center
-            fill:{if state.get() == RunState::Completed {color(ink.fg)} else {Color::TRANSPARENT}}
-            stroke:(width:{px(1.0)} color:{color(frame())} offset:{px(-0.5)}) {
+            fill:{if state.get() == RunState::Completed {tone(ink.fg)} else {Color::TRANSPARENT}}
+            stroke:(width:{px(1.0)} color:{tone(frame())} offset:{px(-0.5)}) {
             if state.get() == RunState::Running {
                 col {
                     el width:fill height:1fr {}
-                    el width:fill height:1fr fill:run.text {}
+                    el width:fill height:1fr fill:{tone(run.text)} {}
                 }
             }
             if state.get() == RunState::Waiting {
-                el width:{px(5.0)}px height:{px(5.0)}px fill:attention.text {}
+                el width:{px(5.0)}px height:{px(5.0)}px fill:{tone(attention.text)} {}
             }
             if state.get() == RunState::Fixture {
-                el width:{px(3.0)}px height:{px(3.0)}px fill:ink.muted {}
+                el width:{px(3.0)}px height:{px(3.0)}px fill:{tone(ink.muted)} {}
             }
             if state.get() == RunState::Stopped {
-                el width:{px(7.0)}px height:{px(2.0)}px fill:ink.fg {}
+                el width:{px(7.0)}px height:{px(2.0)}px fill:{tone(ink.fg)} {}
             }
             if state.get() == RunState::Interrupted {
-                el width:{px(1.5)}px height:{px(12.0)}px fill:ink.fg
+                el width:{px(1.5)}px height:{px(12.0)}px fill:{tone(ink.fg)}
                     rotate:{std::f32::consts::FRAC_PI_4} {}
             }
             if state.get() == RunState::Failed {
-                el width:{px(1.5)}px height:{px(9.0)}px fill:status.danger
+                el width:{px(1.5)}px height:{px(9.0)}px fill:{tone(status.danger)}
                     rotate:{std::f32::consts::FRAC_PI_4} {}
-                el width:{px(1.5)}px height:{px(9.0)}px fill:status.danger
+                el width:{px(1.5)}px height:{px(9.0)}px fill:{tone(status.danger)}
                     rotate:{-std::f32::consts::FRAC_PI_4} {}
             }
         }

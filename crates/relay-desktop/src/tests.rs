@@ -2409,6 +2409,7 @@ fn nonempty_columns_cannot_be_deleted_without_explicit_task_moves() {
     let mounted = mount(false, 1380.0);
     mounted.model.snapshot.set(local_project_snapshot());
     mounted.settle();
+    mounted.click("Board actions");
     mounted.click("Manage columns");
     mounted.focus("Column title");
     mounted.click("Delete empty column");
@@ -3825,49 +3826,60 @@ fn provenance_names_connections_and_omits_unrecorded_values() {
 }
 
 #[test]
-fn card_preview_strips_markers_and_bounds_length() {
+fn card_preview_strips_markers_and_collapses_whitespace() {
     let marker = "<!-- relay-operation:publish-1:task:issue-2 -->";
     assert_eq!(
         crate::ui::body_preview(&format!("Short   body\n\nwith lines\n\n{marker}")),
         "Short body with lines"
     );
-    let long = "word ".repeat(80);
-    let preview = crate::ui::body_preview(&long);
-    assert!(preview.ends_with('…'));
-    assert!(preview.chars().count() <= 151);
     assert_eq!(crate::ui::body_preview(marker), "");
 }
 
 #[test]
-fn controls_resolve_to_square_corners() {
-    let mounted = mount(false, 1380.0);
-    mounted.key(Key::Character(",".into()), true);
-    for label in [
-        "Reset interface scale",
-        "Theme: Light",
-        "Settings",
-        "Open command palette",
-    ] {
-        let node = mounted
-            .ui
-            .inspection_snapshot()
-            .nodes
-            .iter()
-            .find(|n| n.label.as_deref() == Some(label))
-            .unwrap_or_else(|| panic!("missing {label}"))
-            .id;
-        let details = mounted.ui.inspection_details(node).unwrap();
-        let radius = details
-            .attributes
-            .iter()
-            .find(|a| a.name == "radius")
-            .map(|a| a.value.clone())
-            .unwrap_or_default();
-        assert!(
-            radius.is_empty() || radius.trim_start_matches(['(', '[']).starts_with('0'),
-            "{label}: radius {radius}"
-        );
+fn board_chrome_aligns_with_the_sidebar_and_frames_cards() {
+    let mounted = mount(false, 1600.0);
+    let near = |a: f32, b: f32| (a - b).abs() <= 1.0;
+    let bottom = |r: Rect| r.origin.y + r.size.height;
+    let header = mounted.rect("Page header");
+    let brand = mounted.rect("Sidebar header");
+    assert!(near(header.size.height, 56.0), "{header:?}");
+    assert!(near(bottom(header), bottom(brand)), "{header:?} {brand:?}");
+    // Column heads start on the header rule, with no bar in between.
+    let columns: Vec<Rect> = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .iter()
+        .filter(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Column ")))
+        .map(|n| n.rect)
+        .collect();
+    assert!(!columns.is_empty());
+    for column in &columns {
+        assert!(near(column.origin.y, bottom(header)), "{column:?}");
+        assert!(near(column.size.height, 40.0), "{column:?}");
     }
+    // The board summary and the sidebar connection footer share a rule.
+    let summary = mounted.rect("Board summary");
+    let connection = mounted.rect("Connection");
+    assert!(
+        near(summary.origin.y, connection.origin.y),
+        "{summary:?} {connection:?}"
+    );
+    assert!(near(summary.size.height, 52.0));
+    // Card previews are clipped to three laid-out lines.
+    for node in mounted.ui.inspection_snapshot().nodes {
+        if node.label.as_deref() == Some("Task preview") {
+            assert!(node.rect.size.height <= 51.5, "{:?}", node.rect);
+        }
+    }
+    // The inspector opens on its identifier header, which holds Close.
+    mounted.model.issue.set(Some("issue-2".into()));
+    mounted.settle();
+    let issue = mounted.rect("Issue header");
+    let close = mounted.rect("Close issue details");
+    assert!(issue.origin.y < 1.0, "{issue:?}");
+    assert!(issue.size.height >= 91.5, "{issue:?}");
+    assert!(close.origin.y >= issue.origin.y && bottom(close) <= bottom(issue));
 }
 
 #[test]
@@ -3888,4 +3900,161 @@ fn wide_profiles_show_the_action_matrix_beside_the_controls() {
     let harness = narrow.rect("Agent harness");
     assert!(harness.origin.y > matrix.origin.y + matrix.size.height - 1.0);
     assert!((harness.origin.x - matrix.origin.x).abs() < 1.0);
+}
+
+#[test]
+fn inverse_controls_keep_their_fill_while_hovered_and_pressed() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_director_profile("director-main".into());
+    mounted.settle();
+    let fill = |label: &str| {
+        let id = mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some(label))
+            .unwrap()
+            .id;
+        mounted
+            .ui
+            .inspection_details(id)
+            .unwrap()
+            .attributes
+            .into_iter()
+            .find(|a| a.name == "fill")
+            .map(|a| a.value)
+    };
+    let pointer = |kind: PointerEventKind, position: Vector2| {
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind,
+            position,
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+        mounted.settle();
+    };
+    // Hover, then press without releasing, keeping on-inverse text readable.
+    let hold = |target: &str, filled: &str| {
+        let rest = fill(filled);
+        let center = mounted.rect(target).center();
+        pointer(PointerEventKind::Move, center);
+        assert_eq!(fill(filled), rest, "{filled} while hovered");
+        pointer(PointerEventKind::Down(PointerButton::Primary), center);
+        assert_eq!(fill(filled), rest, "{filled} while pressed");
+        let away = Vector2::new(700.0, 880.0);
+        pointer(PointerEventKind::Move, away);
+        pointer(PointerEventKind::Up(PointerButton::Primary), away);
+        rest
+    };
+    let unselected = fill("Director row Review director");
+    let selected = hold(
+        "Open director Project director",
+        "Director row Project director",
+    );
+    assert_ne!(selected, unselected);
+    hold("Save profile", "Save profile");
+    pointer(
+        PointerEventKind::Move,
+        mounted.rect("Open director Review director").center(),
+    );
+    let hovered = fill("Director row Review director");
+    assert_ne!(hovered, unselected, "unselected rows still show hover");
+    assert_ne!(hovered, selected);
+}
+
+#[test]
+fn fixture_projects_read_as_fixtures_and_local_projects_keep_their_status() {
+    let mounted = mount(false, 1380.0);
+    let card_states = |mounted: &Mounted| {
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .filter(|n| {
+                n.label.as_deref().is_some_and(|l| {
+                    l.starts_with("Open issue #") || l.starts_with("Open local task")
+                })
+            })
+            .map(|n| n.description.clone().unwrap_or_default())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(crate::ui::source_label(mounted.model), "Fixture");
+    let fixture_cards = card_states(&mounted);
+    assert!(!fixture_cards.is_empty());
+    assert!(
+        fixture_cards.iter().all(|d| d.starts_with("Fixture ·")),
+        "{fixture_cards:?}"
+    );
+    // A fixture project cannot run, so its summary shows only the task count.
+    assert!(has_label(&mounted, "Tasks"));
+    assert!(!has_label(&mounted, "Running"));
+
+    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    snapshot.projects[0].fixture = false;
+    snapshot.sessions.clear();
+    snapshot.migrate_projects();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert_eq!(crate::ui::source_label(mounted.model), "Local board");
+    let local_cards = card_states(&mounted);
+    assert!(!local_cards.is_empty());
+    assert!(
+        local_cards
+            .iter()
+            .all(|d| d.starts_with("Ready to scope ·")),
+        "{local_cards:?}"
+    );
+    for cell in ["Tasks", "Running", "Waiting", "Project workers"] {
+        assert!(has_label(&mounted, cell), "{cell}");
+    }
+}
+
+#[test]
+fn board_actions_menu_closes_on_escape_and_outside_clicks_and_reopens_at_once() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    snapshot.projects[0].fixture = false;
+    snapshot.migrate_projects();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    // Closing waits out the tooltip's hide delay.
+    let closed = |mounted: &Mounted| {
+        mounted.ui.tick(Duration::from_millis(250));
+        mounted.settle();
+        !has_label(mounted, "Manage columns")
+    };
+    mounted.settle();
+    mounted.click("Board actions");
+    assert!(has_label(&mounted, "Manage columns"));
+    // Escape from inside the menu closes it and returns focus to the trigger.
+    mounted.focus("Manage columns");
+    mounted.key(Key::Escape, false);
+    assert!(!has_label(&mounted, "Manage columns"));
+    let focused = mounted.ui.inspection_snapshot();
+    let trigger = focused
+        .nodes
+        .iter()
+        .find(|n| n.label.as_deref() == Some("Board actions"))
+        .unwrap();
+    assert_eq!(mounted.ui.focused().map(|e| e.id()), Some(trigger.id));
+    // One click reopens it.
+    mounted.click("Board actions");
+    assert!(has_label(&mounted, "Manage columns"));
+    // A click elsewhere closes it; a click on the trigger toggles it.
+    mounted.click("Page header");
+    assert!(closed(&mounted), "outside click");
+    mounted.click("Board actions");
+    assert!(has_label(&mounted, "Manage columns"));
+    mounted.click("Board actions");
+    assert!(closed(&mounted), "trigger toggle");
 }

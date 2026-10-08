@@ -2,6 +2,7 @@
 //! in focused submodules.
 
 mod board;
+mod chrome;
 mod preferences;
 mod profile;
 
@@ -19,6 +20,7 @@ use crate::{
     theme::*,
 };
 pub(crate) use board::*;
+pub(crate) use chrome::*;
 use mosaic::core::theme::color;
 use mosaic::prelude::*;
 use preferences::*;
@@ -32,31 +34,11 @@ pub fn shell(model: Model) -> Element {
             row @layout:{ move |rect: Rect| width.set(rect.size.width) } {
                 Sidebar model:(model) viewport:(width)
                 col width:1fr {
-                    if model.page.get() != Page::Sessions {
-                        row height:min-content min-height:{px(84.0)}px
-                            pad:(horizontal:{px(28.0)}px vertical:{px(18.0)}px) align:center
-                            justify:between shrink:0
-                            stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
-                            col height:min-content gap:{px(4.0)}px {
-                                text font-size:{px(22.0)}px font-weight:{650}
-                                    font-family:{FontFamily::SansSerif}
-                                    {
-                                match model.page.get() { Page::Board => "Project board", Page::Sessions => "Sessions", Page::Directors => "Directors", Page::Settings => "Settings", Page::NewProject => "New Project", Page::Connections => "Project Connections", Page::Publish => "Publish board", Page::DirectorStart => "Director conversation" }
-                            }
-                                text font-size:{px(12.0)}px font-color:{color(ink.muted)}
-                                    font-family:{FontFamily::SansSerif}
-                                    { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| p.name.clone()).unwrap_or_default() }
-                            }
-                            if width.get() < px(900.0) {
-                                button #relay.action @click:{ model.palette.set(true); }
-                                    width:{px(36.0)}px label:"Open command palette" {
-                                    icon size:{px(16.0)}px command-icon
-                                }
-                            } else {
-                                button #relay.action @click:{ model.palette.set(true); }
-                                    label:"Open command palette" "Commands"
-                            }
-                        }
+                    if !matches!(model.page.get(), Page::Sessions | Page::Board) {
+                        PageHeader model:(model)
+                            eyebrow:(page_label(model.page.get_untracked()).to_string())
+                            title:(Derived::new(move || model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| p.name.clone()).unwrap_or_default()))
+                            compact:(Derived::new(move || width.get() < px(900.0)))
                     }
                     if !model.notice.get().is_empty() {
                         row height:min-content fill:attention.fill pad:{px(12.0)}px gap:{px(12.0)}px
@@ -305,4 +287,17 @@ fn palette_action(model: Model, index: usize) {
     }
     model.palette.set(false);
     model.palette_query.set(String::new());
+}
+
+fn page_label(page: Page) -> &'static str {
+    match page {
+        Page::Board => "Project board",
+        Page::Sessions => "Sessions",
+        Page::Directors => "Directors",
+        Page::Settings => "Settings",
+        Page::NewProject => "New Project",
+        Page::Connections => "Project Connections",
+        Page::Publish => "Publish board",
+        Page::DirectorStart => "Director conversation",
+    }
 }

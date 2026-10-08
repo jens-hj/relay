@@ -27,7 +27,13 @@ pub(crate) fn Profiles(model: Model) -> Element {
                     button #relay.tree-control @click:{ model.open_profile(EditTarget::Defaults); }
                         pad:(horizontal:{px(12.0)}px vertical:0px)
                         fill:{color(if model.editor.get() == EditTarget::Defaults {ink.inverse} else {surface.panel})}
-                        label:"Project defaults" {
+                        label:"Project defaults"
+                        hover {
+                            fill:{color(if model.editor.get() == EditTarget::Defaults {ink.inverse} else {surface.raised})}
+                        }
+                        pressed {
+                            fill:{color(if model.editor.get() == EditTarget::Defaults {ink.inverse} else {surface.raised})}
+                        } {
                         text
                             font-weight:{if model.editor.get() == EditTarget::Defaults {700} else {400}}
                             font-color:{color(if model.editor.get() == EditTarget::Defaults {ink.on_inverse} else {ink.fg})}
@@ -40,7 +46,13 @@ pub(crate) fn Profiles(model: Model) -> Element {
                             pad:(horizontal:{px(12.0)}px vertical:0px)
                             stroke:(width:{px(1.0)} color:rule.hair edges:left)
                             fill:{color(if model.editor.get() == EditTarget::Director(id.get()) {ink.inverse} else {surface.panel})}
-                            label:{model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| d.name.clone()).unwrap_or_default()} {
+                            label:{model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| d.name.clone()).unwrap_or_default()}
+                            hover {
+                                fill:{color(if model.editor.get() == EditTarget::Director(id.get()) {ink.inverse} else {surface.raised})}
+                            }
+                            pressed {
+                                fill:{color(if model.editor.get() == EditTarget::Director(id.get()) {ink.inverse} else {surface.raised})}
+                            } {
                             text
                                 font-weight:{if model.editor.get() == EditTarget::Director(id.get()) {700} else {400}}
                                 font-color:{color(if model.editor.get() == EditTarget::Director(id.get()) {ink.on_inverse} else {ink.fg})}
@@ -51,7 +63,13 @@ pub(crate) fn Profiles(model: Model) -> Element {
                         pad:(horizontal:{px(12.0)}px vertical:0px)
                         stroke:(width:{px(1.0)} color:rule.hair edges:left)
                         fill:{color(if model.editor.get() == EditTarget::New {ink.inverse} else {surface.panel})}
-                        label:"Create director" {
+                        label:"Create director"
+                        hover {
+                            fill:{color(if model.editor.get() == EditTarget::New {ink.inverse} else {surface.raised})}
+                        }
+                        pressed {
+                            fill:{color(if model.editor.get() == EditTarget::New {ink.inverse} else {surface.raised})}
+                        } {
                         text font-weight:{if model.editor.get() == EditTarget::New {700} else {400}}
                             font-color:{color(if model.editor.get() == EditTarget::New {ink.on_inverse} else {ink.fg})}
                             "+ Director"
@@ -247,6 +265,12 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
                     fill:{color(if model.editor_profile.get().scope == DirectorScope::Project {ink.inverse} else {surface.panel})}
                     font-color:{color(if model.editor_profile.get().scope == DirectorScope::Project {ink.on_inverse} else {ink.fg})}
                     font-weight:{if model.editor_profile.get().scope == DirectorScope::Project {700} else {400}}
+                    hover {
+                        fill:{color(if model.editor_profile.get().scope == DirectorScope::Project {ink.inverse} else {surface.raised})}
+                    }
+                    pressed {
+                        fill:{color(if model.editor_profile.get().scope == DirectorScope::Project {ink.inverse} else {surface.raised})}
+                    }
                     "Whole project"
                 for (_, issue) in { model.snapshot.get().issues.into_iter().filter(|i| i.project_id == model.project.get() && model.snapshot.get().canonical_issue_id(&i.id) == i.id).map(|i| (i.id.clone(), i)).collect::<Vec<_>>() } {
                     let id = issue.id.clone();
@@ -263,6 +287,12 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
                         fill:{color(if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {ink.inverse} else {surface.panel})}
                         font-color:{color(if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {ink.on_inverse} else {ink.fg})}
                         font-weight:{if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {700} else {400}}
+                        hover {
+                            fill:{color(if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {ink.inverse} else {surface.raised})}
+                        }
+                        pressed {
+                            fill:{color(if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {ink.inverse} else {surface.raised})}
+                        }
                         { format!("{} {}", if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) { "✓" } else { "+" }, number) }
                 }
             }

@@ -5,12 +5,16 @@
 use crate::theme::*;
 use mosaic::prelude::*;
 
+/// Line height of clipped previews, in logical pixels.
+const PREVIEW_LINE: f32 = 17.0;
+
 mosaic::style! {
     // Controls.
     pub(crate) #relay.tree-leaf hover { fill:surface.raised }
     pub(crate) #relay.tree-row hover { fill:surface.raised }
     pub(crate) #relay.tree-control height:{px(30.0)}px min-width:0px shrink:0 justify:center radius:0px
         pad:0px fill:(Color::TRANSPARENT) font-color:ink.muted font-size:{px(12.0)}px
+        hover { fill:(Color::TRANSPARENT) } pressed { fill:(Color::TRANSPARENT) }
         focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
     pub(crate) #relay.tree-label width:1fr height:{px(30.0)}px align:center clip
     pub(crate) #relay.tooltip fill:surface.panel radius:0px font-color:ink.fg font-size:{px(12.0)}px
@@ -18,11 +22,13 @@ mosaic::style! {
     pub(crate) #relay.action width:max-content height:min-content shrink:0 radius:0px
         pad:(horizontal:{px(12.0)}px vertical:{px(7.0)}px) fill:surface.panel font-color:ink.fg
         font-size:{px(13.0)}px stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)})
-        hover { fill:surface.raised } focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(2.0)}) }
+        hover { fill:surface.raised } pressed { fill:surface.selected }
+        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(2.0)}) }
         disabled { opacity:0.5 }
     pub(crate) #relay.primary width:max-content height:min-content shrink:0 radius:0px
         pad:(horizontal:{px(12.0)}px vertical:{px(7.0)}px) fill:ink.inverse font-color:ink.on-inverse
         font-size:{px(13.0)}px font-weight:700
+        hover { fill:ink.inverse } pressed { fill:ink.inverse }
         focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(2.0)}) }
         disabled { opacity:0.5 }
     pub(crate) #relay.field fill:surface.panel radius:0px font-color:ink.fg font-size:{px(14.0)}px
@@ -51,6 +57,17 @@ mosaic::style! {
     // The 30px key header of a module.
     pub(crate) #relay.module-head height:{px(30.0)}px shrink:0 align:center justify:between
         pad:(horizontal:{px(12.0)}px vertical:0px) stroke:(width:{px(1.0)} color:rule.line edges:bottom)
+
+    // A single-line label that keeps its full text and fades out at the
+    // right edge when space runs out (as in the text editor example).
+    pub(crate) #relay.fade-label width:1fr min-width:0px height:fill
+    pub(crate) #relay.fade-line height:fill align:center clip
+        mask:linear(to:right stops:(0%:#FFFFFF 82%:#FFFFFF 100%:#FFFFFF00))
+    // A multi-line preview clipped to three laid-out lines, fading at the
+    // bottom. The line height is set here so the clip follows it exactly.
+    pub(crate) #relay.preview height:min-content clip font-size:{px(12.0)}px
+        line-height:{px(PREVIEW_LINE)}px max-height:{px(PREVIEW_LINE * 3.0)}px
+        mask:linear(to:bottom stops:(0%:#FFFFFF 62%:#FFFFFF 100%:#FFFFFF00))
 
     // Typography: apply to the container around a text leaf.
     pub(crate) #relay.eyebrow font-size:{px(11.0)}px font-color:ink.muted text-transform:uppercase

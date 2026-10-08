@@ -1,7 +1,10 @@
 use crate::styles::*;
 use crate::{
     controls::button,
-    labels::{RunState, SlotMeter, SlotMeterProps, StatusGlyph, StatusGlyphProps},
+    labels::{
+        DirectorMark, DirectorMarkProps, RunState, SlotMeter, SlotMeterProps, StatusGlyph,
+        StatusGlyphProps,
+    },
     model::{EditTarget, Model, Page},
     theme::*,
 };
@@ -45,25 +48,31 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     view! {
         col width:{px(model.preferences.get().sidebar_width)}px min-width:{px(160.0)}
             max-width:{(viewport.get()*0.4).max(px(160.0)).min(px(360.0))} fill:surface.sidebar
-            pad:(horizontal:{px(10.0)}px vertical:{px(14.0)}px) gap:{px(18.0)}px shrink:0 clip
-            resizable:($edges) label:"Sidebar"
+            gap:0px shrink:0 clip resizable:($edges) label:"Sidebar"
             @resize:{ move |event: &ResizeEvent, _| if event.phase == ResizePhase::End {
                 model.preferences.update(|p| p.sidebar_width = (event.size.width / p.scale).clamp(160.0, 360.0));
             } } {
-            col height:min-content pad:(horizontal:{px(6.0)}px vertical:0px) gap:{px(20.0)}px
-                shrink:0 {
-                text font-size:{px(26.0)}px font-weight:750 font-family:sans-serif font-color:ink.fg
-                    "Relay"
-                row height:min-content justify:between align:center pad:(bottom:{px(6.0)}px)
-                    stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
-                    text font-size:{px(11.0)}px font-color:ink.muted text-transform:uppercase
-                        letter-spacing:{px(0.6)}px "Projects"
-                    text font-size:{px(11.0)}px font-color:{color(ink.muted)}
-                        {format!("{:02}", model.snapshot.get().projects.len())}
+            row #relay.strip height:{px(56.0)}px shrink:0 align:center
+                pad:(horizontal:{px(16.0)}px vertical:0px) label:"Sidebar header" {
+                row #relay.title height:min-content width:max-content font-size:{px(20.0)}px
+                    font-weight:700 {
+                    text "Relay"
+                }
+            }
+            row height:{px(30.0)}px shrink:0 align:center justify:between
+                pad:(horizontal:{px(16.0)}px vertical:0px)
+                stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                row #relay.eyebrow height:min-content width:max-content {
+                    text text-transform:uppercase letter-spacing:{px(0.6)}px "Projects"
+                }
+                row #relay.caption height:min-content width:max-content {
+                    text {format!("{:02}", model.snapshot.get().projects.len())}
                 }
             }
             scroll {
-                col height:min-content gap:{px(6.0)}px role:list label:"Project agents" {
+                col height:min-content gap:{px(4.0)}px
+                    pad:(horizontal:{px(8.0)}px vertical:{px(10.0)}px) role:list
+                    label:"Project agents" {
                     for (_, project) in {model.snapshot.get().projects.into_iter().map(|p| (p.id.clone(), p))} {
                         col height:min-content {
                             ProjectTree model:(model) project-id:(project.id.clone())
@@ -80,22 +89,44 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                     }
                 }
             }
-            row height:{px(40.0)}px gap:{px(10.0)}px align:center shrink:0
-                stroke:(width:{px(1.0)} color:rule.hair edges:top) pad:(top:{px(6.0)}px) {
+            row height:{px(52.0)}px shrink:0 stroke:(width:{px(1.0)} color:rule.line edges:top)
+                label:"Connection" {
                 button #relay.tree-control @click:{model.page.set(Page::Settings);}
-                    width:{px(32.0)}px label:"Settings"
+                    width:{px(48.0)}px height:fill label:"Settings"
+                    stroke:(width:{px(1.0)} color:rule.line edges:right)
                     fill:{if model.page.get() == Page::Settings {color(ink.inverse)} else {Color::TRANSPARENT}}
+                    hover { fill:{if model.page.get() == Page::Settings {color(ink.inverse)} else {color(surface.raised)}} }
+                    pressed { fill:{if model.page.get() == Page::Settings {color(ink.inverse)} else {color(surface.raised)}} }
                     font-color:{color(if model.page.get() == Page::Settings {ink.on_inverse} else {ink.muted})} {
                     icon size:{px(18.0)}px gear-icon
                     tooltip #relay.tooltip summary:"Settings" {text "Settings · Ctrl/Cmd+,"}
                 }
-                row width:1fr height:min-content align:center gap:{px(6.0)}px {
-                    el width:{px(7.0)}px height:{px(7.0)}px shrink:0
-                        fill:if model.connected.get() {status.success} else {status.danger} {}
-                    text font-size:{px(11.0)}px font-color:{color(ink.muted)} text-wrap:none
-                        {if model.connected.get() {"Connected"} else if model.status.get().starts_with("Connecting") {"Connecting…"} else {"Offline"}}
+                col width:1fr min-width:0px justify:center gap:{px(3.0)}px
+                    pad:(horizontal:{px(12.0)}px vertical:0px)
+                    stroke:(width:{px(1.0)} color:rule.hair edges:right) {
+                    row #relay.eyebrow height:min-content {
+                        text text-transform:uppercase letter-spacing:{px(0.6)}px "Server"
+                    }
+                    row height:min-content align:center gap:{px(6.0)}px {
+                        el width:{px(7.0)}px height:{px(7.0)}px shrink:0
+                            fill:if model.connected.get() {status.success} else {status.danger} {}
+                        row #relay.value height:min-content width:max-content
+                            font-size:{px(12.0)}px {
+                            text text-wrap:none
+                                {String::from(if model.connected.get() {"Connected"} else if model.status.get().starts_with("Connecting") {"Connecting…"} else {"Offline"})}
+                        }
+                    }
                     tooltip #relay.tooltip summary:"Server connection" side:top {
                         text font-size:{px(12.0)}px {model.status.get()}
+                    }
+                }
+                col width:max-content justify:center gap:{px(3.0)}px
+                    pad:(horizontal:{px(12.0)}px vertical:0px) label:"Workspace revision" {
+                    row #relay.eyebrow height:min-content {
+                        text text-transform:uppercase letter-spacing:{px(0.6)}px "Revision"
+                    }
+                    row #relay.value height:min-content font-size:{px(12.0)}px {
+                        text text-wrap:none {format!("r{:04}", model.snapshot.get().revision)}
                     }
                 }
             }
@@ -120,7 +151,7 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
     let open = Derived::new(move || model.expanded_projects.get().contains(&id.get()));
     view! {
         col height:min-content gap:{px(3.0)}px {
-            row #relay.tree-row height:{px(34.0)}px gap:{px(2.0)}px align:center role:list-item
+            row #relay.tree-row height:{px(30.0)}px gap:{px(2.0)}px align:center role:list-item
                 label:{format!("Project row {}",name.get())} pad:(left:{px(4.0)}px) {
                 button #relay.tree-control @click:{toggle(model.expanded_projects, id.get_untracked());}
                     width:1fr shrink:1 gap:{px(8.0)}px pad:(horizontal:{px(4.0)}px vertical:0px)
@@ -129,8 +160,10 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
                     font-color:ink.fg
                     {
                     icon size:{px(13.0)}px shrink:0 {if open.get() {tree_chevron_down} else {tree_chevron_right}}
-                    row #relay.tree-label {
-                        text text-wrap:none font-family:{FontFamily::SansSerif} font-weight:{650} font-size:{px(14.0)}px {name.get()}
+                    stack #relay.fade-label #relay.title font-size:{px(14.0)}px {
+                        row #relay.fade-line {
+                            text width:max-content shrink:0 text-wrap:none {name.get()}
+                        }
                     }
                     tooltip #relay.tooltip summary:"Expand or collapse project" {text {name.get()}}
                 }
@@ -139,6 +172,8 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
                 button #relay.tree-control @click:{model.select_project(id.get_untracked());}
                     width:{px(28.0)}px label:{format!("Open board for {}", name.get())}
                     fill:{if model.project.get() == id.get() && model.page.get() == Page::Board {color(ink.inverse)} else {Color::TRANSPARENT}}
+                    hover { fill:{if model.project.get() == id.get() && model.page.get() == Page::Board {color(ink.inverse)} else {color(surface.raised)}} }
+                    pressed { fill:{if model.project.get() == id.get() && model.page.get() == Page::Board {color(ink.inverse)} else {color(surface.raised)}} }
                     font-color:{color(if model.project.get() == id.get() && model.page.get() == Page::Board {ink.on_inverse} else {ink.muted})}
                     {
                     icon size:{px(16.0)}px board-icon
@@ -213,17 +248,6 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
     let open = Derived::new(move || model.expanded_directors.get().contains(&id.get()));
     let capacity =
         Derived::new(move || crate::labels::director_capacity(&model.snapshot.get(), &id.get()));
-    let row_width = State::new(0.0f32);
-    // Zed Mono has a fixed advance, so the label width is predictable: only
-    // draw the capacity meter when it fits beside the full name.
-    let meter_fits = Derived::new(move || {
-        let (_, _, limit) = capacity.get();
-        let meter_width = limit.min(16) as f32 * px(8.0) + if limit > 16 { px(28.0) } else { 0.0 };
-        let name_width = name.get().chars().count() as f32 * px(12.0) * 0.6;
-        limit > 0
-            && row_width.get()
-                >= px(4.0 + 24.0 + 15.0 + 6.0 + 24.0 + 12.0) + name_width + meter_width
-    });
     let workers = Derived::new(move || {
         let snapshot = model.snapshot.get();
         snapshot
@@ -250,15 +274,16 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
     });
     view! {
         col height:min-content gap:{px(2.0)}px {
-            row #relay.tree-row height:{px(34.0)}px gap:{px(2.0)}px align:center role:list-item
+            row #relay.tree-row height:{px(30.0)}px gap:{px(2.0)}px align:center role:list-item
                 label:{format!("Director row {}",name.get())}
-                @layout:{move |rect: Rect| row_width.set(rect.size.width)}
-                pad:(left:{px(4.0)}px right:{px(2.0)}px)
-                fill:{if selected.get() {color(surface.selected)} else {Color::TRANSPARENT}}
-                stroke:(width:{px(if selected.get() {2.0} else {0.0})} color:ink.fg edges:left)
-                hover { fill:surface.raised } {
+                pad:(left:{px(4.0)}px right:{px(4.0)}px)
+                fill:{if selected.get() {color(ink.inverse)} else {Color::TRANSPARENT}}
+                font-color:{color(if selected.get() {ink.on_inverse} else {ink.fg})}
+                hover { fill:{color(if selected.get() {ink.inverse} else {surface.raised})} }
+                pressed { fill:{color(if selected.get() {ink.inverse} else {surface.raised})} } {
                 button #relay.tree-control @click:{toggle(model.expanded_directors, id.get_untracked());}
                     width:{px(24.0)}px label:{format!("Toggle director {}", name.get())}
+                    font-color:{color(if selected.get() {ink.on_inverse} else {ink.muted})}
                     description:{if open.get() {"Expanded"} else {"Collapsed"}}
                     {
                     icon size:{px(13.0)}px {if open.get() {tree_chevron_down} else {tree_chevron_right}}
@@ -267,11 +292,14 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
                 button #relay.tree-control @click:{model.open_director(id.get_untracked());} width:1fr
                     shrink:1 gap:{px(6.0)}px label:{format!("Open director {}", name.get())}
                     description:{format!("{} · {}", if model.snapshot.get().sessions.iter().any(|s| s.director_id == id.get() && s.role == SessionRole::Director) {"Open director conversation"} else {"Send first director prompt"}, capacity_label(capacity.get()))}
-                    font-color:ink.fg
+                    font-color:{color(if selected.get() {ink.on_inverse} else {ink.fg})}
                     {
-                    icon size:{px(15.0)}px shrink:0 director-icon
-                    row #relay.tree-label {
-                        text width:max-content text-wrap:none font-size:{px(12.0)}px font-color:{color(ink.fg)} {name.get()}
+                    DirectorMark size:(9.0) active:(Derived::new(move || capacity.get().1 > 0)) inverse:(selected)
+                    stack #relay.fade-label {
+                        row #relay.fade-line {
+                            text width:max-content shrink:0 text-wrap:none font-size:{px(12.0)}px
+                                font-weight:{if selected.get() {700} else {400}} font-color:{color(if selected.get() {ink.on_inverse} else {ink.fg})} {name.get()}
+                        }
                     }
                     tooltip #relay.tooltip summary:"Director" {
                         col height:min-content gap:{px(4.0)}px {
@@ -283,13 +311,19 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
                 }
                     as navigation
                 {bind_tree_key(model, navigation, TreeItem::Director(id.get_untracked()), focus.clone());}
-                if meter_fits.get() {
+                if capacity.get().2 > 0 && capacity.get().2 <= 8 {
                     SlotMeter running:(Derived::new(move || capacity.get().0))
                         active:(Derived::new(move || capacity.get().1))
                         limit:(Derived::new(move || capacity.get().2))
                 }
+                if capacity.get().2 > 8 {
+                    row width:max-content font-size:{px(11.0)}px label:"Worker capacity" {
+                        text text-wrap:none {format!("{}/{}", capacity.get().1, capacity.get().2)}
+                    }
+                }
                 button #relay.tree-control @click:{model.open_director_profile(id.get_untracked());}
                     width:{px(24.0)}px label:{format!("Profile for {}", name.get())}
+                    font-color:{color(if selected.get() {ink.on_inverse} else {ink.muted})}
                     {
                     icon size:{px(14.0)}px sliders-icon
                     tooltip #relay.tooltip summary:"Director profile" {text "Director profile"}
@@ -332,6 +366,22 @@ fn WorkerTree(model: Model, session_id: String, focus: TreeFocus) -> Element {
             .find(|s| s.id == id.get())
     });
     let title = Derived::new(move || session.get().map(|s| s.title).unwrap_or_default());
+    // The linked issue's number, when the task has a remote reference.
+    let numbered = Derived::new(move || {
+        let snapshot = model.snapshot.get();
+        let number = session
+            .get()
+            .and_then(|s| {
+                snapshot
+                    .issues
+                    .into_iter()
+                    .find(|i| Some(&i.id) == s.issue_id.as_ref())
+            })
+            .and_then(|i| i.reference)
+            .map(|r| format!("#{} ", r.number))
+            .unwrap_or_default();
+        format!("{number}{}", title.get())
+    });
     let detail = Derived::new(move || {
         let snapshot = model.snapshot.get();
         session
@@ -362,15 +412,17 @@ fn WorkerTree(model: Model, session_id: String, focus: TreeFocus) -> Element {
         button #relay.tree-control #relay.tree-leaf @click:{model.open_session(id.get_untracked());} width:fill shrink:1
             pad:(horizontal:{px(6.0)}px vertical:0px) gap:{px(6.0)}px
             label:{format!("Open worker {}", title.get())} description:{detail.get()}
-            fill:{if selected.get() {color(surface.selected)} else {Color::TRANSPARENT}}
-            stroke:(width:{px(if selected.get() {2.0} else {0.0})} color:ink.fg edges:left)
-            font-color:{color(if selected.get() {ink.fg} else {ink.muted})}
-            hover { fill:surface.raised } {
-            icon size:{px(14.0)}px shrink:0 worker-icon
-            row #relay.tree-label {
-                text width:max-content text-wrap:none font-size:{px(12.0)}px font-color:{color(if selected.get() {ink.fg} else {ink.muted})} {title.get()}
+            height:{px(30.0)}px
+            fill:{if selected.get() {color(ink.inverse)} else {Color::TRANSPARENT}}
+            font-color:{color(if selected.get() {ink.on_inverse} else {ink.muted})}
+            hover { fill:{color(if selected.get() {ink.inverse} else {surface.raised})} } pressed { fill:{color(if selected.get() {ink.inverse} else {surface.raised})} } {
+            StatusGlyph state:(state) inverse:(selected)
+            stack #relay.fade-label {
+                row #relay.fade-line {
+                    text width:max-content shrink:0 text-wrap:none font-size:{px(12.0)}px
+                        font-weight:{if selected.get() {700} else {400}} font-color:{color(if selected.get() {ink.on_inverse} else {ink.muted})} {numbered.get()}
+                }
             }
-            StatusGlyph state:(state)
             tooltip #relay.tooltip summary:"Worker" {
                 col height:min-content gap:{px(4.0)}px {
                     text {title.get()}
