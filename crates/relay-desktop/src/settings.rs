@@ -48,6 +48,134 @@ impl Default for Preferences {
     }
 }
 
+/// Local wire format: absence means follow the application default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LightPalette {
+    Paper,
+    Warm,
+    HighContrast,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DarkPalette {
+    Slate,
+    Neutral,
+    HighContrast,
+}
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Overrides {
+    version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<ThemeMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    light_palette: Option<LightPalette>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dark_palette: Option<DarkPalette>,
+    // Remember alternate families behind a high-contrast selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    light_warm: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dark_neutral: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scale: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sidebar_width: Option<f32>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    selected_boards: std::collections::BTreeMap<String, String>,
+}
+impl Overrides {
+    fn from_preferences(p: &Preferences) -> Self {
+        let d = Preferences::default();
+        Self {
+            version: 2,
+            mode: (p.mode != d.mode).then_some(p.mode),
+            light_palette: if p.light_high_contrast {
+                Some(LightPalette::HighContrast)
+            } else if p.light_warm {
+                Some(LightPalette::Warm)
+            } else {
+                None
+            },
+            dark_palette: if p.dark_high_contrast {
+                Some(DarkPalette::HighContrast)
+            } else if p.dark_neutral {
+                Some(DarkPalette::Neutral)
+            } else {
+                None
+            },
+            light_warm: (p.light_high_contrast && p.light_warm).then_some(true),
+            dark_neutral: (p.dark_high_contrast && p.dark_neutral).then_some(true),
+            scale: (p.scale != d.scale).then_some(p.scale),
+            sidebar_width: (p.sidebar_width != d.sidebar_width).then_some(p.sidebar_width),
+            selected_boards: p.selected_boards.clone(),
+        }
+    }
+    fn resolve(self) -> Result<Preferences, String> {
+        if self.version != 2 {
+            return Err(format!(
+                "Unsupported display settings version {}",
+                self.version
+            ));
+        }
+        let mut p = Preferences::default();
+        p.mode = self.mode.unwrap_or(p.mode);
+        p.light_high_contrast = self.light_palette == Some(LightPalette::HighContrast);
+        p.dark_high_contrast = self.dark_palette == Some(DarkPalette::HighContrast);
+        p.light_warm = self.light_palette == Some(LightPalette::Warm)
+            || (p.light_high_contrast && self.light_warm.unwrap_or(false));
+        p.dark_neutral = self.dark_palette == Some(DarkPalette::Neutral)
+            || (p.dark_high_contrast && self.dark_neutral.unwrap_or(false));
+        p.scale = self.scale.unwrap_or(p.scale);
+        p.sidebar_width = self.sidebar_width.unwrap_or(p.sidebar_width);
+        p.selected_boards = self.selected_boards;
+        p.validate()?;
+        Ok(p)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum Setting {
+    Mode,
+    LightPalette,
+    DarkPalette,
+    Scale,
+}
+impl Preferences {
+    pub fn overridden(&self, setting: Setting) -> bool {
+        let d = Self::default();
+        match setting {
+            Setting::Mode => self.mode != d.mode,
+            Setting::LightPalette => self.light_warm || self.light_high_contrast,
+            Setting::DarkPalette => self.dark_neutral || self.dark_high_contrast,
+            Setting::Scale => self.scale != d.scale,
+        }
+    }
+    pub fn reset(&mut self, setting: Setting) {
+        let d = Self::default();
+        match setting {
+            Setting::Mode => self.mode = d.mode,
+            Setting::LightPalette => {
+                self.light_warm = d.light_warm;
+                self.light_high_contrast = d.light_high_contrast;
+            }
+            Setting::DarkPalette => {
+                self.dark_neutral = d.dark_neutral;
+                self.dark_high_contrast = d.dark_high_contrast;
+            }
+            Setting::Scale => self.scale = d.scale,
+        }
+    }
+}
+
+pub fn reset_sidebar(model: Model) {
+    model
+        .preferences
+        .update(|p| p.sidebar_width = Preferences::default().sidebar_width);
+    model.sidebar_reset.update(|serial| *serial += 1);
+}
+
 impl Preferences {
     pub fn validate(&self) -> Result<(), String> {
         if !self.scale.is_finite() || !(0.8..=2.0).contains(&self.scale) {
@@ -67,8 +195,15 @@ impl Preferences {
             }
             Err(error) => return Err(format!("Cannot read display settings: {error}")),
         };
-        let preferences: Self = toml::from_str(&source)
+        let value: toml::Value = toml::from_str(&source)
             .map_err(|error| format!("Invalid display settings: {error}"))?;
+        let preferences: Self = if value.get("version").is_some() {
+            toml::from_str::<Overrides>(&source)
+                .map_err(|error| format!("Invalid display settings: {error}"))?
+                .resolve()?
+        } else {
+            toml::from_str(&source).map_err(|error| format!("Invalid display settings: {error}"))?
+        };
         preferences.validate()?;
         Ok(preferences)
     }
@@ -82,7 +217,8 @@ impl Preferences {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Cannot create settings directory: {e}"))?;
         let temporary = parent.join(format!(".relay-settings-{}.tmp", uuid::Uuid::new_v4()));
-        let source = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
+        let source = toml::to_string_pretty(&Overrides::from_preferences(self))
+            .map_err(|e| e.to_string())?;
         let result =
             std::fs::write(&temporary, source).and_then(|()| std::fs::rename(&temporary, path));
         if result.is_err() {

@@ -5,6 +5,7 @@ use crate::styles::*;
 use crate::theme::*;
 use mosaic::core::theme::color;
 use mosaic::prelude::*;
+use mosaic::widgets::Tick;
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 pub type Select = Rc<dyn Fn(usize)>;
@@ -42,23 +43,51 @@ pub fn SlidingSegments(
                     let choose=select.clone();
                     button #relay.tree-control @click:{choose(slot);} width:1fr height:fill
                         role:radio disabled:{disabled.get()}
-                        label:{format!("{}: {}",group.get(),option_name.get())}
                         stroke:(width:{px(if slot==0 {0.0} else {1.0})} color:rule.hair edges:left)
                         font-color:{color(if index.get()!=slot {ink.fg} else if is_attention() {attention.on} else {ink.on_inverse})} {
                         text text-wrap:none font-weight:{if index.get()==slot {700} else {400}}
                             font-color:{color(if index.get()!=slot {ink.fg} else if is_attention() {attention.on} else {ink.on_inverse})}
                             {option_name.get()}
                     } as option
-                    {let semantic_option=option.clone();Effect::new(move || {semantic_option.toggled(index.get()==slot);});}
-                    {let keys=focus.clone();let choose=select.clone();keys.borrow_mut().insert(slot,option.clone());let cleanup=keys.clone();on_cleanup(move ||{cleanup.borrow_mut().remove(&slot);});option.on_key(move |event,ctx| {if matches!(event.kind,KeyEventKind::Down{..}) {let next=match event.key {Key::ArrowRight|Key::ArrowDown=>(index.get_untracked()+1)%count,Key::ArrowLeft|Key::ArrowUp=>(index.get_untracked()+count-1)%count,Key::Home=>0,Key::End=>count-1,_=>return};choose(next);let target=keys.borrow().get(&next).cloned();if let Some(target)=target{target.focus();}ctx.stop_propagation();}});}
+                    // Keep both radio semantics in the element-owned binding.
+                    {let semantic_option=option.clone();option.semantic_label_dyn(move || {semantic_option.toggled(index.get()==slot);format!("{}: {}",group.get(),option_name.get())});}
+                    {let keys=focus.clone();let choose=select.clone();keys.borrow_mut().insert(slot,option.clone());let cleanup=keys.clone();option.__hot_on_remove(move ||{cleanup.borrow_mut().remove(&slot);});option.on_key(move |event,ctx| {if matches!(event.kind,KeyEventKind::Down{..}) {let next=match event.key {Key::ArrowRight|Key::ArrowDown=>(index.get_untracked()+1)%count,Key::ArrowLeft|Key::ArrowUp=>(index.get_untracked()+count-1)%count,Key::Home=>0,Key::End=>count-1,_=>return};choose(next);let target=keys.borrow().get(&next).cloned();if let Some(target)=target{target.focus();}ctx.stop_propagation();}});}
                 }
             }
         }
     }
 }
 
-/// A director's identifier: a diamond, filled while the director has active
-/// workers. The same mark heads the director profile; project defaults are a
+/// Only mounted, running marks drive frames. Changes invalidate old drivers.
+fn activity_rotation(element: &Element, active: Derived<bool>, angle: State<f32>) {
+    let generation = Rc::new(std::cell::Cell::new(0u64));
+    let owner = element.clone();
+    let element = element.clone();
+    let effect = Effect::new(move || {
+        let running = active.get();
+        let serial = generation.get().wrapping_add(1);
+        generation.set(serial);
+        angle.set(0.0);
+        if running {
+            let generation = generation.clone();
+            let mut elapsed = 0.0f32;
+            element.animate(move |dt| {
+                if generation.get() != serial || !active.get_untracked() {
+                    return Tick::Done;
+                }
+                elapsed = (elapsed + dt.as_secs_f32()) % 2.4;
+                angle.set(elapsed / 2.4 * std::f32::consts::TAU);
+                Tick::Continue
+            });
+        }
+    });
+    // The pinned component macro can mount this under a rebuilt branch.
+    // Tie this custom driver controller to the actual mark, as Mosaic does
+    // for its built-in bindings; the animation itself is element-owned.
+    owner.__hot_on_remove(move || effect.dispose());
+}
+
+/// A director's identifier: a coloured diamond, animated during its own run. The same mark heads the director profile; project defaults are a
 /// filled square.
 #[component]
 pub fn DirectorMark(
@@ -71,18 +100,21 @@ pub fn DirectorMark(
         color(if inverse.get() {
             ink.on_inverse
         } else {
-            ink.fg
+            accent.focus
         })
     };
-    view! {
+    let angle = State::new(0.0);
+    let view = view! {
         stack nohit width:{px(size * 1.42)}px height:{px(size * 1.42)}px shrink:0 align:center
             justify:center {
             el width:{px(size)}px height:{px(size)}px
-                rotate:{if defaults.get() {0.0} else {std::f32::consts::FRAC_PI_4}}
+                rotate:{if defaults.get() {0.0} else {std::f32::consts::FRAC_PI_4+angle.get()}}
                 fill:{if active.get() || defaults.get() {tone()} else {Color::TRANSPARENT}}
                 stroke:(width:{px(if size > 12.0 {2.0} else {1.0})} color:{tone()} offset:{px(-0.5)}) {}
         }
-    }
+    };
+    activity_rotation(&view, active, angle);
+    view
 }
 
 /// What a session or issue is doing, as shown by a status glyph and word.
@@ -192,10 +224,12 @@ pub fn StatusGlyph(
         RunState::Waiting => attention.text,
         RunState::Failed => status.danger,
         RunState::Completed => ink.fg,
-        _ => rule.line,
+        _ => run.text,
     };
-    view! {
-        stack nohit width:{px(size)}px height:{px(size)}px shrink:0 align:center justify:center
+    let angle = State::new(0.0);
+    let view = view! {
+        stack nohit rotate:{angle.get()} width:{px(size)}px height:{px(size)}px shrink:0
+            align:center justify:center
             fill:{if state.get() == RunState::Completed {tone(ink.fg)} else {Color::TRANSPARENT}}
             stroke:(width:{px(1.0)} color:{tone(frame())} offset:{px(-0.5)}) {
             if state.get() == RunState::Running {
@@ -224,7 +258,13 @@ pub fn StatusGlyph(
                     rotate:{-std::f32::consts::FRAC_PI_4} {}
             }
         }
-    }
+    };
+    activity_rotation(
+        &view,
+        Derived::new(move || state.get() == RunState::Running),
+        angle,
+    );
+    view
 }
 
 /// The tint for an issue label: stable for a given label text.
@@ -439,4 +479,55 @@ pub fn director_capacity(
         .map(|p| p.max_workers as usize)
         .unwrap_or(0);
     (running, active, limit)
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+    use mosaic::core::reactive::flush;
+    #[test]
+    fn running_animation_stops_resets_and_restarts_without_duplicate_drivers() {
+        let scope = Scope::new(|| {});
+        let (ui, running, angle, root) = scope.run(|| {
+            let ui = Ui::new();
+            let _ambient = ui.enter();
+            let running = State::new(false);
+            let angle = State::new(0.0);
+            let root = view! {
+                el {}
+            };
+            activity_rotation(&root, Derived::new(move || running.get()), angle);
+            ui.mount(&root);
+            (ui, running, angle, root)
+        });
+        flush();
+        ui.tick(std::time::Duration::from_millis(100));
+        assert_eq!(angle.get_untracked(), 0.0);
+        running.set(true);
+        flush();
+        ui.tick(std::time::Duration::from_millis(600));
+        flush();
+        let first = angle.get_untracked();
+        assert!(first > 0.0);
+        running.set(false);
+        flush();
+        assert_eq!(angle.get_untracked(), 0.0);
+        ui.tick(std::time::Duration::from_millis(600));
+        flush();
+        assert_eq!(angle.get_untracked(), 0.0);
+        running.set(true);
+        flush();
+        ui.tick(std::time::Duration::from_millis(600));
+        flush();
+        assert!((angle.get_untracked() - first).abs() < 0.01);
+        root.remove();
+        running.set(false);
+        flush();
+        running.set(true);
+        flush();
+        ui.tick(std::time::Duration::from_millis(600));
+        flush();
+        assert!((angle.get_untracked() - first).abs() < 0.01);
+        scope.dispose();
+    }
 }

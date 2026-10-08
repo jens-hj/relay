@@ -26,20 +26,17 @@ pub(crate) fn PageHeader(
                 }
             }
             children
-            col width:max-content justify:center pad:(horizontal:{px(12.0)}px vertical:0px) {
+            button #relay.header-action @click:{ model.palette.set(true); }
+                width:{if compact.get() {Dimension::Px(px(56.0))} else {Dimension::MaxContent}}
+                gap:{px(10.0)}px label:"Open command palette" {
                 if compact.get() {
-                    button #relay.action @click:{ model.palette.set(true); } width:{px(34.0)}px
-                        pad:0px justify:center label:"Open command palette" {
-                        icon size:{px(15.0)}px command-icon
-                    }
-                } else {
-                    button #relay.action @click:{ model.palette.set(true); }
-                        label:"Open command palette" gap:{px(10.0)}px {
-                        text "Commands"
-                        row #relay.caption height:min-content width:max-content {
-                            text
-                                {String::from(if cfg!(target_os = "macos") { "⌘K" } else { "Ctrl K" })}
-                        }
+                    icon size:{px(16.0)}px command-icon
+                }
+                if !compact.get() {
+                    text "Commands"
+                    row #relay.caption height:min-content width:max-content {
+                        text
+                            {String::from(if cfg!(target_os = "macos") { "⌘K" } else { "Ctrl K" })}
                     }
                 }
             }

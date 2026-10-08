@@ -93,13 +93,13 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
         },
     ];
     let messages = [
-        ("m1", "session-plan", "Jens", "message", "Let directors inherit project defaults, while keeping their explicit overrides intact when those defaults change."),
+        ("m1", "session-plan", "You", "prompt", "Let directors inherit project defaults, while keeping their explicit overrides intact when those defaults change."),
         ("m2", "session-plan", "Project director", "plan", "I will separate project defaults from director overrides.\n\n1. Define a typed profile for scope, responsibilities, completion, and permissions.\n2. Delegate validation to a worker.\n3. Return the effective profile and identify which values are inherited."),
         ("m3", "session-plan", "Project director", "handoff", "Profile validation is delegated to the linked worker session. Both conversations remain attached to issue #2. No agent is running in this fixture."),
         ("m4", "session-worker", "Worker", "message", "Validation checks worker limits, required permissions, and issue scope. Unknown TOML fields are rejected to catch misspelled configuration."),
         ("m5", "session-worker", "Worker", "result", "Fixture verification: inherited fields follow project defaults; explicit director fields remain unchanged. A zero worker limit represents paused delegation."),
         ("m6", "session-review", "Review director", "review", "Feedback should reference the original message, with an optional selected quote. The transcript remains immutable while comments accumulate alongside it."),
-        ("m7", "session-review", "Jens", "message", "Keep review keyboard-friendly. I should be able to jump between messages and comment without losing my place."),
+        ("m7", "session-review", "You", "prompt", "Keep review keyboard-friendly. I should be able to jump between messages and comment without losing my place."),
     ].into_iter().map(|(id, session, author, kind, body)| Message { id: id.into(), session_id: session.into(), author: author.into(), kind: kind.into(), body: body.into(), parts: vec![] }).collect();
     Snapshot {
         board_aliases: Default::default(),

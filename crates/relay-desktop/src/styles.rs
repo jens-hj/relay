@@ -12,7 +12,7 @@ mosaic::style! {
     // Controls.
     pub(crate) #relay.tree-leaf hover { fill:surface.raised }
     pub(crate) #relay.tree-row hover { fill:surface.raised }
-    pub(crate) #relay.tree-control height:{px(30.0)}px min-width:0px shrink:0 justify:center radius:0px
+    pub(crate) #relay.tree-control height:{px(30.0)}px min-width:0px shrink:0 align:center justify:center radius:0px
         pad:0px fill:(Color::TRANSPARENT) font-color:ink.muted font-size:{px(12.0)}px
         hover { fill:(Color::TRANSPARENT) } pressed { fill:(Color::TRANSPARENT) }
         focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
@@ -37,13 +37,27 @@ mosaic::style! {
     pub(crate) #relay.area fill:surface.panel radius:0px font-color:ink.fg font-size:{px(14.0)}px
         stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)}) pad:{px(10.0)}px
         focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-1.0)}) }
-    pub(crate) #relay.scale-stepper width:{px(160.0)}px height:{px(34.0)}px fill:surface.panel radius:0px
+    pub(crate) #relay.scale-stepper width:{px(120.0)}px height:{px(34.0)}px fill:surface.panel radius:0px
         stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)})
         focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(2.0)}) } {
-        decrement fill:surface.raised font-color:ink.fg radius:0px hover { fill:surface.selected }
-        field font-size:{px(14.0)}px font-color:ink.fg
-        increment fill:surface.raised font-color:ink.fg radius:0px hover { fill:surface.selected }
+        decrement width:{px(34.0)}px height:fill pad:0px align:center justify:center fill:surface.raised font-color:ink.fg radius:0px stroke:(width:{px(1.0)} color:rule.line edges:right) hover { fill:surface.selected }
+        field width:{px(52.0)}px height:fill align:center justify:center font-size:{px(14.0)}px font-color:ink.fg
+        increment width:{px(34.0)}px height:fill pad:0px align:center justify:center fill:surface.raised font-color:ink.fg radius:0px stroke:(width:{px(1.0)} color:rule.line edges:left) hover { fill:surface.selected }
     }
+
+    pub(crate) #relay.icon-action width:{px(34.0)}px height:{px(34.0)}px shrink:0
+        pad:0px radius:0px align:center justify:center fill:surface.panel font-color:ink.fg
+        stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)})
+        hover { fill:surface.raised } pressed { fill:surface.selected }
+        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+        disabled { opacity:0.4 }
+    pub(crate) #relay.header-action height:fill width:max-content shrink:0 radius:0px
+        align:center justify:center pad:(horizontal:{px(16.0)}px vertical:0px)
+        fill:(Color::TRANSPARENT) font-color:ink.fg font-size:{px(13.0)}px
+        stroke:(width:{px(1.0)} color:rule.line edges:right)
+        hover { fill:surface.raised } pressed { fill:surface.selected }
+        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+        disabled { opacity:0.5 }
 
     // Chrome and modules.
     // A full-width strip closed by a strong rule (bars, column heads).

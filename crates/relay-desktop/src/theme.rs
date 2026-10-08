@@ -25,7 +25,7 @@ mosaic::scheme! {
         harness-codex:Svg, harness-claude:Svg, harness-ready:Svg, harness-warning:Svg,
         harness-failed:Svg, harness-neutral:Svg,
         director-icon:Svg, worker-icon:Svg, gear-icon:Svg, plus-icon:Svg, sliders-icon:Svg,
-        command-icon:Svg,
+        command-icon:Svg, more-icon:Svg, connections-icon:Svg, reset-icon:Svg,
     }
 }
 
@@ -38,7 +38,7 @@ pub fn icons() -> RelayIcons {
         harness-ready:"assets/icons/harness-ready.svg", harness-warning:"assets/icons/harness-warning.svg",
         harness-failed:"assets/icons/harness-failed.svg", harness-neutral:"assets/icons/harness-neutral.svg",
         plus-icon:"assets/icons/plus.svg", sliders-icon:"assets/icons/sliders.svg",
-        command-icon:"assets/icons/command.svg",
+        command-icon:"assets/icons/command.svg", more-icon:"assets/icons/more.svg", connections-icon:"assets/icons/connections.svg", reset-icon:"assets/icons/reset.svg",
     } }
 }
 /// The six palettes a user can select: two soft families per mode plus the
@@ -160,7 +160,7 @@ fn soft_light(n: Neutrals) -> Colors {
         attention: hex(0xF2B8A0),
         attention_text: hex(0x8E3F22),
         on_attention: hex(0x3A2A24),
-        tints: [hex(0xD9D3EE), hex(0xCADDED), hex(0xD2E6D8), hex(0xEFE3B8)],
+        tints: [hex(0xCFC0EC), hex(0xB8D5EE), hex(0xBDE0C9), hex(0xEDD797)],
         meter: [hex(0x8FA9CF), hex(0xB3A7DE), hex(0xF2B8A0)],
         scrim: Color::from_srgb8(0x1C, 0x1E, 0x22, 0x66),
         success: hex(0x2F6347),
@@ -191,7 +191,7 @@ fn soft_dark(n: Neutrals) -> Colors {
         attention: hex(0xE8A78C),
         attention_text: hex(0xEFB39A),
         on_attention: hex(0x2A1D18),
-        tints: [hex(0x45475B), hex(0x3F4A5A), hex(0x3F4D4F), hex(0x4F4F47)],
+        tints: [hex(0x51466D), hex(0x344F72), hex(0x315C4C), hex(0x635332)],
         meter: [hex(0x8DA3BD), hex(0xB4ABD6), hex(0xE8A78C)],
         scrim: Color::from_srgb8(0x08, 0x09, 0x0B, 0x8C),
         success: hex(0xA7D3B9),

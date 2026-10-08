@@ -180,15 +180,23 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                         BoardChoices model:(model)
                     }
                 }
-                row #relay.cell width:max-content align:center gap:{px(6.0)}px {
+                row width:max-content gap:0px {
                     if model.selected_board().is_some() {
-                        button #relay.primary @click:{creating.set(!creating.get_untracked());}
-                            label:"New task" "New task"
+                        row width:max-content {
+                            button #relay.header-action
+                                @click:{creating.set(!creating.get_untracked());}
+                                fill:{color(ink.inverse)} font-color:{color(ink.on_inverse)}
+                                font-weight:700 label:"New task" hover { fill:{color(ink.inverse)} }
+                                pressed { fill:{color(ink.inverse)} } {
+                                text font-weight:{700} font-color:{color(ink.on_inverse)} "New task"
+                            }
+                        }
                     }
-                    row width:max-content height:min-content {
-                        button #relay.action @click:{menu.set(!menu.get_untracked());}
-                            label:"Board actions" pad:(horizontal:{px(10.0)}px vertical:{px(7.0)}px)
-                            "⋯" as menu_trigger
+                    row width:max-content {
+                        button #relay.header-action @click:{menu.set(!menu.get_untracked());}
+                            width:{px(56.0)}px pad:0px label:"Board actions" {
+                            icon size:{px(16.0)}px more-icon
+                        } as menu_trigger
                         { *trigger_slot.borrow_mut() = Some(menu_trigger.clone()); }
                         tooltip #relay.tooltip summary:"Board actions" trigger:manual open:menu
                             side:bottom align:end {
@@ -476,7 +484,7 @@ pub(crate) fn IssueCard(model: Model, issue: Issue) -> Element {
             }
             hover { fill:surface.raised }
             focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(2.0)}) } {
-            col height:min-content gap:0px {
+            col height:min-content gap:0px pad:{px(2.0)}px clip {
                 row height:{px(22.0)}px stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
                     row #relay.id-label width:max-content height:fill align:center
                         pad:(horizontal:{px(8.0)}px vertical:0px) fill:ink.inverse
@@ -508,8 +516,9 @@ pub(crate) fn IssueCard(model: Model, issue: Issue) -> Element {
                         }
                     }
                     if session_count.get() > 0 {
-                        row #relay.caption height:min-content width:max-content align:center
-                            font-size:{px(11.0)}px pad:(horizontal:{px(8.0)}px vertical:0px)
+                        row #relay.caption height:fill width:max-content align:center
+                            label:"Task session count" font-size:{px(11.0)}px
+                            pad:(horizontal:{px(8.0)}px vertical:0px)
                             stroke:(width:{px(1.0)} color:rule.hair edges:left) {
                             text text-wrap:none
                                 { format!("{} {}", session_count.get(), if session_count.get() == 1 { "session" } else { "sessions" }) }

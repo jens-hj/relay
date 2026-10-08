@@ -8,7 +8,9 @@ mod profile;
 
 use crate::styles::*;
 use crate::{
-    controls::{AppearanceSegments, AppearanceSegmentsProps, ButtonStyle, button},
+    controls::{
+        AppearanceSegments, AppearanceSegmentsProps, ButtonStyle, button, stepper_with_options,
+    },
     conversation::{Conversation, ConversationProps},
     labels::{
         DirectorMark, DirectorMarkProps, LabelStrip, LabelStripProps, Readout, ReadoutProps,
@@ -218,7 +220,7 @@ fn Palette(model: Model) -> Element {
                 input #relay.field placeholder:"Find an action…" label:"Command search" query
                     as command_search
                 { command_search.focus(); }
-                for (label, index) in [("Open board", 0), ("Open sessions", 1), ("Edit project defaults", 2), ("Create director", 3), ("Search transcript", 4), ("Sync project", 5), ("Stop worker", 6), ("Open settings", 7), ("Project Connections", 8), ("New Project", 9), ("Publish board", 10)] {
+                for (label, index) in [("Open board", 0), ("Open sessions", 1), ("Edit project defaults", 2), ("Create director", 3), ("Search transcript", 4), ("Sync project", 5), ("Stop worker", 6), ("Open settings", 7), ("Project Connections", 8), ("New Project", 9), ("Publish board", 10), ("Reset sidebar width", 11)] {
                     if label.to_lowercase().contains(&query.get().to_lowercase()) {
                         button #relay.action
                             @click:{
@@ -251,6 +253,7 @@ fn Palette(model: Model) -> Element {
                     "Project Connections",
                     "New Project",
                     "Publish board",
+                    "Reset sidebar width",
                 ]
                 .iter()
                 .position(|label| {
@@ -300,6 +303,7 @@ fn palette_action(model: Model, index: usize) {
         8 => model.page.set(Page::Connections),
         9 => model.page.set(Page::NewProject),
         10 => model.page.set(Page::Publish),
+        11 => crate::settings::reset_sidebar(model),
         _ => {
             model.page.set(Page::Sessions);
             model.searching.set(true);

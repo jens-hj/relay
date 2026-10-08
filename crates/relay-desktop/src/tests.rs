@@ -430,6 +430,7 @@ fn sidebar_drag_clamps_width_and_settings_remain_keyboard_reachable_in_short_win
     mounted.focus("Settings");
     mounted.key(Key::Enter, false);
     assert_eq!(mounted.model.page.get_untracked(), Page::Settings);
+    mounted.key(Key::Character("k".into()), true);
     mounted.focus("Reset sidebar width");
     mounted.key(Key::Enter, false);
     assert_eq!(
@@ -450,11 +451,26 @@ fn large_scale_settings_keep_controls_visible_in_a_narrow_window() {
     });
     mounted.size = Size::new(820.0, 600.0);
     mounted.key(Key::Character(",".into()), true);
+    let nodes = mounted.ui.inspection_snapshot();
+    let number = nodes
+        .nodes
+        .iter()
+        .find(|n| n.label.as_deref() == Some("200"))
+        .unwrap();
+    let details = mounted.ui.inspection_details(number.id).unwrap();
+    assert_eq!(
+        details
+            .attributes
+            .iter()
+            .find(|a| a.name == "font-size")
+            .unwrap()
+            .value,
+        "28.0"
+    );
     for label in [
         "Theme: System",
         "Decrease interface scale",
         "Reset interface scale",
-        "Reset sidebar width",
     ] {
         mounted.focus(label);
         let rect = mounted.rect(label);
@@ -465,10 +481,7 @@ fn large_scale_settings_keep_controls_visible_in_a_narrow_window() {
         );
     }
     mounted.key(Key::Enter, false);
-    assert_eq!(
-        mounted.model.preferences.get_untracked().sidebar_width,
-        220.0
-    );
+    assert_eq!(mounted.model.preferences.get_untracked().scale, 1.0);
 }
 
 impl Mounted {
@@ -4849,5 +4862,226 @@ fn conversation_tracks_constrain_recorded_text_and_draft_to_the_reading_width() 
     assert!(
         (draft.rect.origin.x - text.origin.x).abs() < 1.0,
         "draft and recorded text share a reading column"
+    );
+}
+
+#[test]
+fn display_settings_write_sparse_overrides_and_reset_independently() {
+    use crate::settings::{Preferences, Setting, ThemeMode};
+    let directory = settings_directory();
+    let path = directory.join("settings.toml");
+    let mut p = Preferences::default();
+    p.save(&path).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap().trim(),
+        "version = 2"
+    );
+    p.mode = ThemeMode::Light;
+    p.light_warm = true;
+    p.dark_high_contrast = true;
+    p.scale = 1.6;
+    p.sidebar_width = 310.0;
+    p.selected_boards.insert("project".into(), "board".into());
+    p.save(&path).unwrap();
+    assert_eq!(Preferences::load(&path).unwrap(), p);
+    for setting in [
+        Setting::Mode,
+        Setting::LightPalette,
+        Setting::DarkPalette,
+        Setting::Scale,
+    ] {
+        assert!(p.overridden(setting));
+        p.reset(setting);
+        assert!(!p.overridden(setting));
+    }
+    p.save(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    for key in ["mode", "light_palette", "dark_palette", "scale"] {
+        assert!(!text.contains(&format!("{key} =")), "{text}");
+    }
+    let loaded = Preferences::load(&path).unwrap();
+    assert_eq!(loaded.sidebar_width, 310.0);
+    assert_eq!(loaded.selected_boards["project"], "board");
+    std::fs::write(&path, "version = 99\nscale = 1.2\n").unwrap();
+    assert!(Preferences::load(&path).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "version = 99\nscale = 1.2\n"
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn sidebar_edge_double_click_clears_retained_resize_and_preserves_other_settings() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.preferences.update(|p| {
+        p.sidebar_width = 310.0;
+        p.dark_neutral = true;
+    });
+    mounted.settle();
+    let edge = mounted.rect("Sidebar");
+    let position = Vector2::new(edge.origin.x + edge.size.width - 1.0, 120.0);
+    for _ in 0..2 {
+        for kind in [
+            PointerEventKind::Down(PointerButton::Primary),
+            PointerEventKind::Up(PointerButton::Primary),
+        ] {
+            mounted.ui.dispatch_pointer(PointerEvent {
+                kind,
+                position,
+                pointer_type: PointerType::Mouse,
+                modifiers: Modifiers::default(),
+                timestamp: Duration::ZERO,
+            });
+            mounted.settle();
+        }
+    }
+    assert_eq!(
+        mounted.model.preferences.get_untracked().sidebar_width,
+        220.0
+    );
+    assert!(mounted.model.preferences.get_untracked().dark_neutral);
+    assert!((mounted.rect("Sidebar").size.width - 220.0).abs() < 1.0);
+}
+
+#[test]
+fn direct_project_connections_and_header_actions_use_full_cells() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(local_project_snapshot());
+    mounted.settle();
+    mounted.click("Project Connections for Relay · demo");
+    assert_eq!(mounted.model.page.get_untracked(), Page::Connections);
+    mounted.model.page.set(Page::Board);
+    mounted.settle();
+    let new = mounted.rect("New task");
+    let more = mounted.rect("Board actions");
+    assert_eq!(new.origin.y, more.origin.y);
+    assert_eq!(new.size.height, more.size.height);
+    assert!(more.size.height > 34.0);
+    let tree = mounted.rect("Project Connections for Relay · demo");
+    assert_eq!(tree.size.width, tree.size.height);
+    let nodes = mounted.ui.inspection_snapshot();
+    let button = nodes
+        .nodes
+        .iter()
+        .find(|n| n.label.as_deref() == Some("Project Connections for Relay · demo"))
+        .unwrap();
+    let icon = nodes
+        .nodes
+        .iter()
+        .find(|n| n.parent == Some(button.id))
+        .unwrap();
+    assert!((icon.rect.center().x - tree.center().x).abs() < 0.1);
+    assert!((icon.rect.center().y - tree.center().y).abs() < 0.1);
+    let count = nodes
+        .nodes
+        .iter()
+        .find(|n| n.label.as_deref() == Some("Task session count"))
+        .unwrap();
+    let footer = nodes.node(count.parent.unwrap()).unwrap();
+    assert_eq!(count.rect.size.height, footer.rect.size.height);
+    mounted
+        .model
+        .snapshot
+        .set(demo_snapshot(DirectorProfile::default()));
+    mounted.settle();
+    mounted.size = Size::new(820.0, 900.0);
+    mounted.settle();
+    mounted.size = Size::new(1600.0, 900.0);
+    mounted.settle();
+    assert_eq!(
+        mounted.rect("Source").origin.x + mounted.rect("Source").size.width,
+        mounted.rect("Board actions").origin.x
+    );
+    mounted.model.snapshot.set(local_project_snapshot());
+    mounted.settle();
+    let nodes = mounted.ui.inspection_snapshot();
+    let new = nodes
+        .nodes
+        .iter()
+        .find(|n| n.label.as_deref() == Some("New task"))
+        .unwrap();
+    let details = mounted.ui.inspection_details(new.id).unwrap();
+    let expected =
+        mosaic::render::PaintSpec::solid(mosaic::core::theme::color(crate::theme::ink.inverse));
+    assert_eq!(
+        details
+            .attributes
+            .iter()
+            .find(|a| a.name == "fill")
+            .unwrap()
+            .value,
+        format!("{expected:?}")
+    );
+}
+
+#[test]
+fn transcript_sender_and_content_share_the_first_glyph_baseline() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot.messages.retain(|m| m.session_id == "session-plan");
+    snapshot.messages.truncate(1);
+    snapshot.messages[0].kind = "message".into();
+    snapshot.messages[0].author = "Agent".into();
+    snapshot.messages[0].body = "Agent output".into();
+    snapshot.messages[0].parts.clear();
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let body = mounted.rect("Message m1");
+    let glyphs: Vec<_> = mounted
+        .ui
+        .scene()
+        .cmds
+        .iter()
+        .filter_map(|cmd| match cmd {
+            mosaic::render::PaintCmd::Glyphs(run) => run.glyphs.first().map(|g| (g.dest, g.key)),
+            _ => None,
+        })
+        .filter(|(r, _)| {
+            r.origin.y >= body.origin.y - 10.0
+                && r.origin.y < body.origin.y + body.size.height
+                && r.origin.x > 220.0
+        })
+        .collect();
+    assert_eq!(glyphs.len(), 2, "{glyphs:?}");
+    assert_eq!(glyphs[0].1, glyphs[1].1);
+    assert!(
+        (glyphs[0].0.origin.y - glyphs[1].0.origin.y).abs() < 1.0,
+        "{glyphs:?}"
+    );
+    mounted.model.snapshot.update(|s| {
+        s.messages[0].author = "Personal name".into();
+        s.messages[0].kind = "prompt".into();
+        s.messages[0].body = "You asked for this".into();
+    });
+    mounted.settle();
+    assert!(has_label(&mounted, "You"));
+    assert!(!has_label(&mounted, "Personal name"));
+    assert_eq!(
+        mounted.model.snapshot.get_untracked().messages[0].author,
+        "Personal name"
+    );
+}
+
+#[test]
+fn removed_settings_selectors_do_not_react_to_later_preferences() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.page.set(Page::Settings);
+    mounted.settle();
+    mounted.click("Theme: Light");
+    mounted.model.page.set(Page::Board);
+    mounted.settle();
+    mounted.model.preferences.update(|p| {
+        p.mode = crate::settings::ThemeMode::Dark;
+        p.scale = 1.3;
+    });
+    mounted.settle();
+    mounted.model.page.set(Page::Settings);
+    mounted.settle();
+    mounted.click("Theme: System");
+    assert_eq!(
+        mounted.model.preferences.get_untracked().mode,
+        crate::settings::ThemeMode::System
     );
 }

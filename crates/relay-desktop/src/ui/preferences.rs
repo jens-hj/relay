@@ -1,21 +1,22 @@
 use super::*;
+use crate::controls::{ResetSetting, ResetSettingProps};
 
 #[component]
 pub(crate) fn Settings(model: Model) -> Element {
     let scale = State::new(model.preferences.get_untracked().scale * 100.0);
-    Effect::new(move || {
+    let update_scale = Effect::new(move || {
         let value = (scale.get() / 100.0).clamp(0.8, 2.0);
         if model.preferences.get_untracked().scale != value {
             model.preferences.update(|p| p.scale = value);
         }
     });
-    Effect::new(move || {
+    let sync_scale = Effect::new(move || {
         let value = model.preferences.get().scale * 100.0;
         if (scale.get_untracked() - value).abs() > 0.01 {
             scale.set(value);
         }
     });
-    view! {
+    let root = view! {
         scroll {
             col height:min-content pad:{px(28.0)}px gap:{px(24.0)}px {
                 // Notices carry their own spacing, so none leaves an empty gap.
@@ -83,15 +84,24 @@ pub(crate) fn Settings(model: Model) -> Element {
                         row #relay.eyebrow height:min-content {
                             text text-transform:uppercase letter-spacing:{px(0.6)}px "Theme"
                         }
-                        AppearanceSegments model:(model) field:(0usize)
+                        row height:min-content align:center gap:{px(8.0)}px {
+                            el width:1fr min-width:0px height:{px(34.0)}px { scroll width:max-content { AppearanceSegments model:(model) field:(0usize) } }
+                            ResetSetting model:(model) setting:(crate::settings::Setting::Mode) name:("theme")
+                        }
                         row #relay.eyebrow height:min-content pad:(top:{px(4.0)}px) {
                             text text-transform:uppercase letter-spacing:{px(0.6)}px "Light palette"
                         }
-                        AppearanceSegments model:(model) field:(1usize)
+                        row height:min-content align:center gap:{px(8.0)}px {
+                            el width:1fr min-width:0px height:{px(34.0)}px { scroll width:max-content { AppearanceSegments model:(model) field:(1usize) } }
+                            ResetSetting model:(model) setting:(crate::settings::Setting::LightPalette) name:("light palette")
+                        }
                         row #relay.eyebrow height:min-content pad:(top:{px(4.0)}px) {
                             text text-transform:uppercase letter-spacing:{px(0.6)}px "Dark palette"
                         }
-                        AppearanceSegments model:(model) field:(2usize)
+                        row height:min-content align:center gap:{px(8.0)}px {
+                            el width:1fr min-width:0px height:{px(34.0)}px { scroll width:max-content { AppearanceSegments model:(model) field:(2usize) } }
+                            ResetSetting model:(model) setting:(crate::settings::Setting::DarkPalette) name:("dark palette")
+                        }
                     }
                 }
                 col #relay.module max-width:{px(760.0)}px label:"Interface scale" {
@@ -101,29 +111,9 @@ pub(crate) fn Settings(model: Model) -> Element {
                         row height:min-content gap:{px(8.0)}px align:center {
                             stepper #relay.scale-stepper min:80 max:200 step:10 label:"Interface scale percent" scale as scale_control
                             {scale_control.decrement().label("Decrease interface scale");scale_control.increment().label("Increase interface scale");}
-                            row #relay.caption height:min-content width:max-content {
-                                text "%"
-                            }
+                            row #relay.caption height:min-content width:max-content {text "%"}
+                            ResetSetting model:(model) setting:(crate::settings::Setting::Scale) name:("interface scale")
                         }
-                        button #relay.action @click:{model.preferences.update(|p|p.scale=1.0);}
-                            label:"Reset interface scale" "Reset"
-                    }
-                }
-                col #relay.module max-width:{px(760.0)}px label:"Sidebar" {
-                    SettingsHead title:"Sidebar" note:"Drag its right edge to resize"
-                    grid
-                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(100.0).into(), GridTrack::fr(1.0)))}
-                        max-width:{px(480.0)}px height:min-content gap:{px(8.0)}px
-                        pad:{px(12.0)}px {
-                        button #relay.action
-                            @click:{model.preferences.update(|p| p.sidebar_width = (p.sidebar_width - 20.0).max(160.0));}
-                            width:fill label:"Narrower sidebar" "Narrower"
-                        button #relay.action
-                            @click:{model.preferences.update(|p| p.sidebar_width = (p.sidebar_width + 20.0).min(360.0));}
-                            width:fill label:"Wider sidebar" "Wider"
-                        button #relay.action
-                            @click:{model.preferences.update(|p| p.sidebar_width = 220.0);}
-                            width:fill label:"Reset sidebar width" "Reset"
                     }
                 }
                 col #relay.module max-width:{px(760.0)}px label:"Fonts" {
@@ -138,7 +128,12 @@ pub(crate) fn Settings(model: Model) -> Element {
                 }
             }
         }
-    }
+    };
+    root.__hot_on_remove(move || {
+        update_scale.dispose();
+        sync_scale.dispose();
+    });
+    root
 }
 
 /// A settings module head: its caps name and a short note on the right.

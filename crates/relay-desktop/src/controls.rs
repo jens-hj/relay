@@ -15,6 +15,26 @@ impl ButtonStyle {
     }
 }
 
+// The DSL calls this constructor; retain Mosaic's behaviour and parts,
+// while allowing every internal text leaf to inherit Relay's type scale.
+pub fn stepper_with_options(
+    parent: &Element,
+    value: State<f32>,
+    options: StepperOptions,
+) -> mosaic::widgets::Stepper {
+    mosaic::widgets::stepper_styled_with_options(
+        parent,
+        value,
+        mosaic::prelude::StepperStyle {
+            text: TextStyle::inherited(),
+            button: ButtonStyle::default(),
+            radius: 0.0,
+            ..Default::default()
+        },
+        options,
+    )
+}
+
 pub fn button(
     parent: &Element,
     label: impl Into<String>,
@@ -79,5 +99,24 @@ pub fn AppearanceSegments(model: Model, field: usize) -> Element {
             options:(options.iter().map(|o| o.to_string()).collect::<Vec<_>>()) index:(index)
             select:(select) attention-slot:(None) cell-width:(112.0)
             disabled:(Derived::new(|| false))
+    }
+}
+
+#[component]
+pub fn ResetSetting(model: Model, setting: crate::settings::Setting, name: String) -> Element {
+    use crate::styles::*;
+    use crate::theme::*;
+    let name = State::new(name);
+    view! {
+        row width:{px(34.0)}px height:{px(34.0)}px shrink:0 {
+            button #relay.icon-action @click:{model.preferences.update(|p|p.reset(setting));}
+                disabled:{!model.preferences.get().overridden(setting)}
+                label:{format!("Reset {}",name.get())} {
+                icon size:{px(16.0)}px reset-icon
+                tooltip #relay.tooltip summary:"Reset to default" {
+                    text {format!("Reset {} to default",name.get())}
+                }
+            }
+        }
     }
 }

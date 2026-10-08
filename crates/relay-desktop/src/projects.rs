@@ -1,4 +1,5 @@
 use crate::labels::{Readout, ReadoutProps};
+use crate::labels::{SlidingSegments, SlidingSegmentsProps};
 use crate::panels::{BoundedPanel, BoundedPanelProps};
 use crate::styles::*;
 use crate::{
@@ -214,17 +215,15 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
             model.project_draft.update(|d| d.connection_form = form);
         });
     }
+    let select: crate::labels::Select = std::rc::Rc::new(move |slot| kind.set(slot));
     view! {
         col height:min-content gap:{px(8.0)}px max-width:{px(640.0)}px {
-            col height:min-content gap:{px(6.0)}px {
-                for (index, label) in [(0,"Repository"),(1,"Directory"),(2,"GitHub board"),(3,"GitLab board")] {
-                    button #relay.action @click:{kind.set(index);}
-                        fill:if kind.get() == index {ink.inverse} else {surface.panel}
-                        font-color:{color(if kind.get() == index {ink.on_inverse} else {ink.fg})}
-                        font-weight:{if kind.get() == index {700} else {400}}
-                        hover { fill:if kind.get() == index {ink.inverse} else {surface.raised} }
-                        pressed { fill:if kind.get() == index {ink.inverse} else {surface.raised} }
-                        (label)
+            row height:{px(34.0)}px {
+                scroll width:max-content {
+                    SlidingSegments name:("Connection type".to_string())
+                        options:(vec!["Repository".into(),"Directory".into(),"GitHub board".into(),"GitLab board".into()])
+                        index:(Derived::new(move || kind.get())) select:(select)
+                        attention-slot:(None) cell-width:(112.0) disabled:(Derived::new(||false))
                 }
             }
             input #relay.field label:"Connection address"

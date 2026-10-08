@@ -741,9 +741,10 @@ pub fn Conversation(model: Model) -> Element {
                 }
                 col #relay.cell width:max-content
                     stroke:(width:{px(1.0)} color:rule.line edges:left) {
-                    button #relay.action @click:{menu.set(!menu.get_untracked());}
-                        label:"Session actions" pad:(horizontal:{px(10.0)}px vertical:{px(7.0)}px)
-                        "⋯"
+                    button #relay.icon-action @click:{menu.set(!menu.get_untracked());}
+                        label:"Session actions" {
+                        icon size:{px(16.0)}px more-icon
+                    }
                 }
             }
             if session.get().is_some_and(|s| s.worker.is_some()) {
@@ -1059,9 +1060,6 @@ pub fn Conversation(model: Model) -> Element {
                         stroke:(width:{px(1.0)} color:rule.hair edges:top) label:"Next message" {
                         col width:{px(92.0)}px shrink:0 height:min-content gap:{px(8.0)}px
                             pad:(top:{px(2.0)}px) {
-                            row #relay.eyebrow height:min-content {
-                                text text-transform:uppercase letter-spacing:{px(0.6)}px "Draft"
-                            }
                             button #relay.action @click:{buffer::send(model);}
                                 pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
                                 label:"Send message" disabled:{model.busy.get()} "Send"
@@ -1212,17 +1210,21 @@ fn TranscriptMessage(
     let prompt = Derived::new(move || message.get().is_some_and(|m| m.kind == "prompt"));
     view! {
         grid height:min-content cols:{entry_cols(compact.get(), content_width.get())} {
-            Gutter author:(Derived::new(move || message.get().map(|m|m.author).unwrap_or_default()))
+            Gutter
+                author:(Derived::new(move || message.get().map(|m|if m.kind=="prompt" {"You".to_string()} else {m.author}).unwrap_or_default()))
                 tone:(Derived::new(move || if prompt.get() {ink.fg} else {ink.muted}))
-            col width:1fr min-width:0px max-width:{px(760.0)}px height:min-content gap:{px(8.0)}px
-                pad:(left:{px(if prompt.get() {14.0} else {0.0})}px)
-                stroke:(width:{px(2.0)} color:{if prompt.get() {color(ink.fg)} else {Color::TRANSPARENT}} edges:left) {
+            col width:1fr min-width:0px max-width:{px(760.0)}px height:min-content gap:0px
+                pad:(left:{px(if prompt.get() {12.0} else {0.0})}px right:{px(if prompt.get() {12.0} else {0.0})}px)
+                fill:{if prompt.get() {color(accent.soft)} else {Color::TRANSPARENT}}
+                stroke:(width:{px(2.0)} color:{if prompt.get() {color(accent.focus)} else {Color::TRANSPARENT}} edges:left) {
                 if detail {
-                    row height:min-content {
-                        button #relay.action @click:{expanded.set(!expanded.get_untracked());}
-                            pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
-                            label:"Toggle tool activity"
-                            {message.get().map(|m|match m.kind.as_str(){"issue-context"=>"Source context","file_change"=>"File changes","reasoning"=>"Reasoning",_=>"Tool activity"}.to_owned()).unwrap_or_default()}
+                    col height:min-content {
+                        row height:min-content pad:(bottom:{px(8.0)}px) {
+                            button #relay.action @click:{expanded.set(!expanded.get_untracked());}
+                                pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
+                                label:"Toggle tool activity"
+                                {message.get().map(|m|match m.kind.as_str(){"issue-context"=>"Source context","file_change"=>"File changes","reasoning"=>"Reasoning",_=>"Tool activity"}.to_owned()).unwrap_or_default()}
+                        }
                     }
                 }
                 if !detail || expanded.get() {
@@ -1247,14 +1249,14 @@ fn TranscriptMessage(
                     }
                 }
                 for (_, reply) in {buffer::parts(model,&model.session.get()).into_iter().filter(|p|matches!(&p.kind,PartKind::Reply {anchor,..} if anchor.message_id==message_id.get())).map(|p|(p.id.clone(),p)).collect::<Vec<_>>()} {
-                    col height:min-content {
+                    col height:min-content pad:(top:{px(8.0)}px) {
                         DraftPart model:(model) controller:(controller) part:(reply.clone())
                             mirror:true
                     }
                 }
                 for (_, comment) in {model.snapshot.get().comments.into_iter().filter(|c|c.message_id==message_id.get()).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
-                    col height:min-content pad:(left:{px(14.0)}px) gap:{px(5.0)}px selectable
-                        stroke:(width:{px(1.0)} color:rule.hair edges:left) {
+                    col height:min-content pad:(left:{px(14.0)}px top:{px(8.0)}px) gap:{px(5.0)}px
+                        selectable stroke:(width:{px(1.0)} color:rule.hair edges:left) {
                         row #relay.caption height:min-content {
                             text (comment.author.clone())
                         }
@@ -1282,10 +1284,10 @@ fn entry_cols(compact: bool, content_width: f32) -> GridTracks {
 #[component]
 fn Gutter(author: Derived<String>, tone: Derived<ColorToken>) -> Element {
     view! {
-        col width:{px(92.0)}px shrink:0 height:min-content pad:(top:{px(2.0)}px right:{px(8.0)}px) {
-            row #relay.eyebrow height:min-content clip font-color:{color(tone.get())} {
-                text text-wrap:none text-transform:{TextTransform::Uppercase}
-                    letter-spacing:{px(0.6)}px {author.get()}
+        col width:{px(92.0)}px shrink:0 height:min-content pad:(right:{px(8.0)}px) {
+            row height:min-content font-size:{px(15.0)}px font-color:{color(tone.get())} {
+                text text-transform:{TextTransform::Uppercase} letter-spacing:{px(0.6)}px
+                    {author.get()}
             }
         }
     }
