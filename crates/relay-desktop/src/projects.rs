@@ -113,7 +113,7 @@ fn ProjectSetup(model: Model) -> Element {
             text font-color:muted font-size:{px(12.0)}px
                 "The root is on the connected server. A local board is created automatically."
             button #action @click:{connections_open.set(!connections_open.get_untracked());}
-                width:min-content
+                width:{px(200.0)}px max-width:100%
                 label:{if connections_open.get(){"Hide connection form"}else{"Add connection"}}
                 {if connections_open.get(){"Hide connection form"}else{"Add connection"}}
             if connections_open.get() {
