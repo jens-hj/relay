@@ -3911,7 +3911,8 @@ fn wide_profiles_show_the_action_matrix_beside_the_controls() {
     let matrix = narrow.rect("Action matrix");
     let harness = narrow.rect("Agent harness");
     assert!(harness.origin.y > matrix.origin.y + matrix.size.height - 1.0);
-    assert!((harness.origin.x - matrix.origin.x).abs() < 1.0);
+    // Same column: the selector sits inside its module's 12px padding.
+    assert!(harness.origin.x >= matrix.origin.x && harness.origin.x <= matrix.origin.x + 13.0);
 }
 
 #[test]
@@ -4069,4 +4070,32 @@ fn board_actions_menu_closes_on_escape_and_outside_clicks_and_reopens_at_once() 
     assert!(has_label(&mounted, "Manage columns"));
     mounted.click("Board actions");
     assert!(closed(&mounted), "trigger toggle");
+}
+
+#[test]
+fn profile_header_counts_real_overrides_and_keeps_its_geometry() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_director_profile("director-main".into());
+    mounted.settle();
+    let near = |a: f32, b: f32| (a - b).abs() <= 1.0;
+    assert!(near(mounted.rect("Profile header").size.height, 74.0));
+    assert!(near(mounted.rect("Inheritance").size.height, 54.0));
+    assert!(near(mounted.rect("Save bar").size.height, 50.0));
+    assert!(has_label(&mounted, "Overrides"));
+    let before = crate::ui::overridden_fields(&mounted.model.editor_overrides.get_untracked());
+    mounted
+        .model
+        .modify_profile("harness", |p| p.harness = Harness::ClaudeCode);
+    mounted.settle();
+    let after = crate::ui::overridden_fields(&mounted.model.editor_overrides.get_untracked());
+    assert_eq!(
+        after.len(),
+        before.len() + usize::from(!before.contains(&"Harness"))
+    );
+    assert!(after.contains(&"Harness"));
+    // Project defaults have no overrides to count.
+    mounted.model.open_profile(EditTarget::Defaults);
+    mounted.settle();
+    assert!(!has_label(&mounted, "Overrides"));
+    assert!(has_label(&mounted, "Directors"));
 }

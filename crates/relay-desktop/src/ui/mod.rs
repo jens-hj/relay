@@ -11,8 +11,9 @@ use crate::{
     controls::{AppearanceSegments, AppearanceSegmentsProps, ButtonStyle, button},
     conversation::{Conversation, ConversationProps},
     labels::{
-        Readout, ReadoutProps, RunState, SlidingSegments, SlidingSegmentsProps, SlotMeter,
-        SlotMeterProps, StatusGlyph, StatusGlyphProps, Tag, TagProps,
+        DirectorMark, DirectorMarkProps, Readout, ReadoutProps, RunState, SlidingSegments,
+        SlidingSegmentsProps, SlotMeter, SlotMeterProps, StatusGlyph, StatusGlyphProps, Tag,
+        TagProps,
     },
     model::{EditTarget, Model, Page},
     projects::*,
@@ -24,6 +25,8 @@ pub(crate) use chrome::*;
 use mosaic::core::theme::color;
 use mosaic::prelude::*;
 use preferences::*;
+#[cfg(test)]
+pub(crate) use profile::overridden_fields;
 use profile::*;
 use relay_core::*;
 

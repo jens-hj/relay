@@ -58,12 +58,14 @@ pub fn SlidingSegments(
 }
 
 /// A director's identifier: a diamond, filled while the director has active
-/// workers. The same mark heads the director profile.
+/// workers. The same mark heads the director profile; project defaults are a
+/// filled square.
 #[component]
 pub fn DirectorMark(
     size: f32,
     active: Derived<bool>,
     #[prop(default = Derived::new(|| false))] inverse: Derived<bool>,
+    #[prop(default = Derived::new(|| false))] defaults: Derived<bool>,
 ) -> Element {
     let tone = move || {
         color(if inverse.get() {
@@ -75,8 +77,9 @@ pub fn DirectorMark(
     view! {
         stack nohit width:{px(size * 1.42)}px height:{px(size * 1.42)}px shrink:0 align:center
             justify:center {
-            el width:{px(size)}px height:{px(size)}px rotate:{std::f32::consts::FRAC_PI_4}
-                fill:{if active.get() {tone()} else {Color::TRANSPARENT}}
+            el width:{px(size)}px height:{px(size)}px
+                rotate:{if defaults.get() {0.0} else {std::f32::consts::FRAC_PI_4}}
+                fill:{if active.get() || defaults.get() {tone()} else {Color::TRANSPARENT}}
                 stroke:(width:{px(if size > 12.0 {2.0} else {1.0})} color:{tone()} offset:{px(-0.5)}) {}
         }
     }
