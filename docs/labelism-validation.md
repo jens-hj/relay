@@ -45,7 +45,9 @@ Desktop coverage added or kept by this work:
 
 Linux, `nix develop .#ui-test`: Xvfb with Mesa lavapipe (software Vulkan).
 
-- **Isolation:** each run used its own server process, temporary database, settings file and throwaway project directory under `/tmp/relay-labelism-capture`. Only processes recorded in that directory's PID files were started or stopped.
+Representative parent-reviewed native screenshots are saved in the repository: [Warm board](assets/labelism/board-warm.png), [Warm director profile](assets/labelism/profile-warm.png), [Neutral agent buffer](assets/labelism/agent-buffer-neutral.png), and [Warm settings](assets/labelism/settings-warm.png). These show the accepted views; the buffer includes the final approval-card and reading-column fixes.
+
+- **Isolation:** capture servers and clients used task-owned PID files, temporary databases/settings and throwaway project roots under `/tmp/relay-labelism-capture` and `/tmp/relay-labelism-parent`. Dedicated Xvfb displays were used.
 - **Seeded state:** a capture-only script sends real commands to the isolated server: it creates a project with a directory connection, creates a task, and starts a worker.
 - **Fake harness:** the worker is a capture-only fake Codex app-server script kept outside the repository. It replays one agent message labelled "[Capture fixture output]", a token-usage report and a command approval request. A failed run was produced by stopping that fake process (a child of the capture server, by PID).
 - **Demo data:** the read-only demo fixture project is shown as Fixture.
