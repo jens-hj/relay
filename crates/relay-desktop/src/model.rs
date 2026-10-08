@@ -750,12 +750,30 @@ impl Model {
         snapshot
             .boards
             .iter()
-            .find(|b| b.project_id == project && selected.as_ref() == Some(&b.id))
-            .or_else(|| snapshot.boards.iter().find(|b| b.project_id == project))
+            .find(|b| {
+                b.project_id == project
+                    && snapshot.board_active(&b.id)
+                    && selected.as_ref() == Some(&b.id)
+            })
+            .or_else(|| {
+                snapshot
+                    .boards
+                    .iter()
+                    .find(|b| b.project_id == project && snapshot.board_active(&b.id))
+            })
             .cloned()
     }
     pub fn board_columns(&self) -> Vec<BoardColumn> {
         self.selected_board().map(|b| b.columns).unwrap_or_else(|| {
+            if self
+                .snapshot
+                .get()
+                .boards
+                .iter()
+                .any(|b| b.project_id == self.project.get())
+            {
+                return Vec::new();
+            }
             self.snapshot
                 .get()
                 .projects
@@ -776,10 +794,38 @@ impl Model {
                     && m.column_ids.iter().any(|c| c == column)
             })
         } else {
-            issue.column_id == column
+            !self
+                .snapshot
+                .get()
+                .boards
+                .iter()
+                .any(|b| b.project_id == issue.project_id)
+                && issue.column_id == column
         }
     }
     pub fn action(&self, command: Command) {
+        if let Command::UpdateTask { issue_id, .. } = &command
+            && !self.snapshot.get_untracked().visible_task(issue_id)
+        {
+            self.notice
+                .set("Restore the task's board connection before editing.".into());
+            return;
+        }
+        let board_id = match &command {
+            Command::CreateTask { board_id, .. }
+            | Command::MoveTask { board_id, .. }
+            | Command::UpdateBoardColumns { board_id, .. }
+            | Command::SyncBoard { board_id }
+            | Command::PublishBoard { board_id, .. } => Some(board_id),
+            _ => None,
+        };
+        if board_id.is_some_and(|id| !self.snapshot.get_untracked().board_active(id)) {
+            self.notice.set(
+                "This board connection is disabled. Restore it before starting new board work."
+                    .into(),
+            );
+            return;
+        }
         self.submit(
             command,
             self.snapshot.get_untracked().revision,
@@ -789,6 +835,17 @@ impl Model {
     pub fn sync_project(&self) {
         if let Some(board) = self.selected_board() {
             self.action(Command::SyncBoard { board_id: board.id });
+            return;
+        }
+        if self
+            .snapshot
+            .get_untracked()
+            .boards
+            .iter()
+            .any(|b| b.project_id == self.project.get_untracked())
+        {
+            self.notice
+                .set("Restore a board connection before syncing.".into());
             return;
         }
         if !self

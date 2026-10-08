@@ -2807,3 +2807,62 @@ fn board_reconciliation_accepts_a_url_and_builds_the_typed_result_for_the_pendin
         matches!(serde_json::from_str::<BoardSource>(&result).unwrap(),BoardSource::Github{owner,number:9,url} if owner=="team" && url=="https://github.com/orgs/team/projects/9")
     );
 }
+
+#[test]
+fn disabled_board_connections_hide_selectors_and_block_new_work_without_losing_history() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    snapshot.boards[0].name = "Disabled historical board".into();
+    let board = snapshot.boards[0].clone();
+    snapshot.connections.retain(
+        |c| !matches!(&c.kind, ConnectionKind::Board { board_id } if board_id == &board.id),
+    );
+    snapshot.connections.push(ProjectConnection {
+        id: "disabled-board".into(),
+        project_id: "demo".into(),
+        name: "Disabled board".into(),
+        enabled: false,
+        state: ConnectionState::Ready,
+        error: None,
+        kind: ConnectionKind::Board {
+            board_id: board.id.clone(),
+        },
+    });
+    mounted.model.preferences.update(|p| {
+        p.selected_boards.insert("demo".into(), board.id.clone());
+    });
+    mounted.model.snapshot.set(snapshot.clone());
+    mounted.settle();
+    assert!(mounted.model.selected_board().is_none());
+    assert!(mounted.model.board_columns().is_empty());
+    assert!(
+        !mounted
+            .model
+            .task_in_column(&snapshot.issues[0], &snapshot.issues[0].column_id)
+    );
+    assert!(!snapshot.visible_task(&snapshot.issues[0].id));
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some(&board.name))
+    );
+    mounted.model.action(Command::CreateTask {
+        board_id: board.id.clone(),
+        title: "Blocked".into(),
+        body: String::new(),
+        repository_connection_id: None,
+    });
+    mounted.model.sync_project();
+    assert!(mounted.commands.try_recv().is_err());
+    assert_eq!(
+        mounted.model.snapshot.get_untracked().memberships,
+        snapshot.memberships
+    );
+    snapshot.connections.clear();
+    mounted.model.snapshot.set(snapshot);
+    mounted.settle();
+    assert_eq!(mounted.model.selected_board().unwrap().id, board.id);
+}

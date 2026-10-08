@@ -255,7 +255,7 @@ pub fn BoardActions(model: Model) -> Element {
     let managing = State::new(false);
     view! {
         col height:min-content gap:{px(8.0)}px {
-            for (_, board) in {model.snapshot.get().boards.into_iter().filter(|b|b.project_id==model.project.get()).map(|b|(b.id.clone(),b)).collect::<Vec<_>>()} {
+            for (_, board) in {model.snapshot.get().boards.into_iter().filter(|b|b.project_id==model.project.get() && model.snapshot.get().board_active(&b.id)).map(|b|(b.id.clone(),b)).collect::<Vec<_>>()} {
                 let id = State::new(board.id.clone());
                 let board_name = State::new(board.name.clone());
                 button #action
