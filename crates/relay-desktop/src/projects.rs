@@ -110,49 +110,56 @@ fn ProjectSetup(model: Model) -> Element {
         })
     });
     view! {
-        col height:min-content max-width:{px(760.0)}px gap:{px(24.0)}px {
-            Module title:("Project".to_string()) {
+        col #relay.module max-width:{px(760.0)}px gap:0px {
+            row #relay.module-head {
                 row #relay.eyebrow height:min-content {
-                    text text-transform:uppercase letter-spacing:{px(0.6)}px "Name"
-                }
-                input #relay.field label:"Project name" placeholder:"Project name" name
-                row #relay.eyebrow height:min-content {
-                    text text-transform:uppercase letter-spacing:{px(0.6)}px
-                        "Absolute root on server"
-                }
-                input #relay.field label:"Absolute project root on server"
-                    placeholder:"/home/you/projects/project" root
-                row #relay.caption height:min-content {
-                    text
-                        "The root is on the connected server. A local board is created automatically."
+                    text "Project"
                 }
             }
-            Module title:("Connections".to_string()) {
-                for (index, _connection) in {model.project_draft.get().connections.into_iter().enumerate()} {
-                    let index = *index;
-                    let connection = Derived::new(move || model.project_draft.get().connections.get(index).cloned());
-                    row height:min-content align:center gap:{px(8.0)}px pad:(bottom:{px(8.0)}px)
-                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
-                        row #relay.value width:1fr min-width:0px height:min-content {
-                            text
-                                {connection.get().as_ref().map(connection_label).unwrap_or_default()}
-                        }
-                        button #relay.action
-                            @click:{model.project_draft.update(|d| {d.connections.remove(index);});}
-                            "Remove initial connection"
+            row #relay.eyebrow height:min-content pad:{px(12.0)}px {
+                text text-transform:uppercase letter-spacing:{px(0.6)}px "Name"
+            }
+            input #relay.field width:fill label:"Project name" placeholder:"Project name"
+                stroke:(width:{px(1.0)} color:rule.line edges:bottom) name
+            row #relay.eyebrow height:min-content pad:{px(12.0)}px {
+                text text-transform:uppercase letter-spacing:{px(0.6)}px "Absolute root on server"
+            }
+            input #relay.field width:fill label:"Absolute project root on server"
+                stroke:(width:{px(1.0)} color:rule.line edges:bottom)
+                placeholder:"/home/you/projects/project" root
+            row #relay.caption height:min-content pad:{px(12.0)}px
+                stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
+                text "The root is on the connected server. A local board is created automatically."
+            }
+            row #relay.module-head {
+                row #relay.eyebrow height:min-content {
+                    text "Connections"
+                }
+            }
+            for (index, _connection) in {model.project_draft.get().connections.into_iter().enumerate()} {
+                let index = *index;
+                let connection = Derived::new(move || model.project_draft.get().connections.get(index).cloned());
+                row height:min-content align:center gap:0px
+                    stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                    row #relay.value width:1fr min-width:0px height:min-content pad:{px(12.0)}px {
+                        text {connection.get().as_ref().map(connection_label).unwrap_or_default()}
                     }
-                }
-                button #relay.action
-                    @click:{connections_open.set(!connections_open.get_untracked());}
-                    label:{if connections_open.get(){"Hide connection form"}else{"Add connection"}}
-                    {if connections_open.get(){"Hide connection form"}else{"Add connection"}}
-                if connections_open.get() {
-                    ConnectionForm model:(model) initial:true
+                    button #relay.header-action
+                        @click:{model.project_draft.update(|d| {d.connections.remove(index);});}
+                        stroke:(width:{px(1.0)} color:rule.hair edges:left)
+                        label:"Remove initial connection" "Remove"
                 }
             }
-            row height:min-content justify:end {
-                button #relay.primary
-                    @click:{
+            button #relay.action @click:{connections_open.set(!connections_open.get_untracked());}
+                width:fill justify:start stroke:(width:{px(1.0)} color:rule.line edges:bottom)
+                label:{if connections_open.get(){"Hide connection form"}else{"Add connection"}}
+                focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+                {if connections_open.get(){"Hide connection form"}else{"Add connection"}}
+            if connections_open.get() {
+                ConnectionForm model:(model) initial:true
+            }
+            button #relay.primary
+                @click:{
                         let draft = model.project_draft.get_untracked();
                         if draft.name.trim().is_empty() || !std::path::Path::new(draft.root.trim()).is_absolute() {
                             model.notice.set("Enter a name and an absolute root on the server.".into());
@@ -160,9 +167,10 @@ fn ProjectSetup(model: Model) -> Element {
                             model.submit(Command::CreateProject {name:draft.name.trim().into(),root:draft.root.trim().into(),connections:draft.connections.clone()},model.snapshot.get_untracked().revision,Saved::CreatedProject(draft));
                         }
                     }
-                    label:"Create project" disabled:{model.busy.get() || !model.connected.get()}
-                    "Create project"
-            }
+                width:fill label:"Create project"
+                disabled:{model.busy.get() || !model.connected.get()}
+                focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+                "Create project"
         }
     }
 }
@@ -337,14 +345,22 @@ pub fn TaskEditor(model: Model) -> Element {
     let body = State::new(issue.map(|i| task_body(&i.body)).unwrap_or_default());
     let editing = State::new(false);
     view! {
-        col height:min-content gap:{px(8.0)}px {
-            button #relay.action @click:{editing.set(!editing.get_untracked());} "Edit task"
+        col height:min-content gap:0px {
+            button #relay.action @click:{editing.set(!editing.get_untracked());} width:fill
+                justify:start stroke:(width:{px(1.0)} color:rule.line edges:bottom)
+                focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+                "Edit task"
             if editing.get() {
-                input #relay.field label:"Task title" title
-                input #relay.area multiline label:"Task body" height:{px(120.0)}px body
+                input #relay.field width:fill label:"Task title"
+                    stroke:(width:{px(1.0)} color:rule.line edges:bottom) title
+                input #relay.area multiline width:fill label:"Task body" height:{px(120.0)}px
+                    stroke:(width:{px(1.0)} color:rule.line edges:bottom) body
                 button #relay.action
                     @click:{if let Some(issue_id)=model.issue.get_untracked(){model.action(Command::UpdateTask{issue_id,title:title.get_untracked(),body:body.get_untracked()});}}
+                    width:fill
                     disabled:{model.busy.get() || !model.connected.get() || title.get().trim().is_empty()}
+                    stroke:(width:{px(1.0)} color:rule.line edges:bottom)
+                    focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
                     "Save task"
             }
             if editing.get() {
@@ -353,8 +369,10 @@ pub fn TaskEditor(model: Model) -> Element {
                     let column_title = State::new(column.title.clone());
                     button #relay.action
                         @click:{if let (Some(board),Some(issue_id))=(model.selected_board(),model.issue.get_untracked()){model.action(Command::MoveTask{board_id:board.id,issue_id,column_id:id.get_untracked()});}}
-                        label:{format!("Move task to {}",column_title.get())}
+                        width:fill label:{format!("Move task to {}",column_title.get())}
                         disabled:{model.busy.get() || !model.connected.get()}
+                        stroke:(width:{px(1.0)} color:rule.line edges:bottom)
+                        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
                         {format!("Move to {}",column_title.get())}
                 }
             }

@@ -263,24 +263,33 @@ fn FieldHead(
     view! {
         grid #relay.module-head @layout:{move |rect:Rect| width.set(rect.size.width)}
             content-align:(x:start y:center) items-align:(x:start y:center)
-            height:{if wide.get() {px(30.0).into()} else {Dimension::MinContent}}
-            pad:(horizontal:{px(12.0)}px vertical:{px(if wide.get() {0.0} else {8.0})}px)
-            gap:{px(8.0)}px
+            height:{if wide.get() {px(30.0).into()} else {Dimension::MinContent}} pad:0px gap:0px
+            rows:{GridTracks::new([GridTrack::fr(1.0)])}
             cols:{if wide.get() {GridTracks::new([GridTrack::fr(1.0), GridTrack::MaxContent, GridTrack::MaxContent])} else {GridTracks::new([GridTrack::fr(1.0)])}} {
-            row #relay.eyebrow height:min-content min-width:0px {
+            row #relay.eyebrow height:{if wide.get() {Dimension::Fill} else {Dimension::MinContent}}
+                min-height:{px(30.0)}px min-width:0px align:center
+                pad:(horizontal:{px(12.0)}px vertical:0px)
+                stroke:(width:{px(if wide.get() {0.0} else {1.0})} color:rule.hair edges:bottom) {
                 text text-transform:uppercase letter-spacing:{px(0.6)}px (title)
             }
-            row height:min-content width:max-content align:center {
+            row height:{if wide.get() {Dimension::Fill} else {Dimension::MinContent}}
+                width:{if wide.get() {Dimension::MaxContent} else {Dimension::Fill}} align:center
+                stroke:(width:{px(1.0)} color:rule.hair edges:if wide.get() {StrokeEdges::LEFT} else {StrokeEdges::BOTTOM}) {
                 children
             }
-            row height:min-content width:max-content align:center gap:{px(8.0)}px {
-                row #relay.caption height:min-content width:max-content {
+            row height:{if wide.get() {Dimension::Fill} else {Dimension::MinContent}}
+                min-height:{px(30.0)}px
+                width:{if wide.get() {Dimension::MaxContent} else {Dimension::Fill}} align:center
+                gap:0px
+                stroke:(width:{px(if wide.get() {1.0} else {0.0})} color:rule.hair edges:left) {
+                row #relay.caption height:min-content width:1fr min-width:0px
+                    pad:(horizontal:{px(12.0)}px vertical:0px) {
                     text
                         { if wide.get() {model.origin(field)} else if model.origin(field) == "Director override" {"Override"} else {"Default"} }
                 }
                 if model.origin(field) == "Director override" {
-                    button #relay.action @click:{ model.inherit(field); }
-                        pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
+                    button #relay.header-action @click:{ model.inherit(field); }
+                        min-height:{px(30.0)}px stroke:(width:{px(1.0)} color:rule.hair edges:left)
                         label:{ format!("Inherit {field}") } "Inherit"
                 }
                 tooltip #relay.tooltip summary:"Field origin" {
@@ -496,6 +505,7 @@ fn ProfileToml(model: Model) -> Element {
 #[component]
 pub(crate) fn ProfileControls(model: Model) -> Element {
     let harness_width = State::new(0.0f32);
+    let approval_width = State::new(0.0f32);
     let harness_keys: std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<usize, Element>>> =
         Default::default();
     let approval_index = Derived::new(move || {
@@ -531,12 +541,19 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
 
             col #relay.module {
                 FieldHead model:(model) title:"Execution approval" field:"execution"
-                col height:min-content gap:{px(10.0)}px pad:{px(12.0)}px {
-                    SlidingSegments name:("Execution approval".to_string())
-                        options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
-                        index:(approval_index) select:(choose_approval) attention-slot:(None)
-                        cell-width:(130.0) disabled:(Derived::new(|| false))
-                    row #relay.caption height:min-content {
+                col height:min-content gap:0px {
+                    row height:{px(34.0)}px
+                        @layout:{move |rect:Rect| approval_width.set(rect.size.width)} {
+                        scroll width:fill {
+                            SlidingSegments name:("Execution approval".to_string())
+                                options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
+                                index:(approval_index) select:(choose_approval)
+                                attention-slot:(None) cell-width:(130.0)
+                                disabled:(Derived::new(|| false)) fill-width:true
+                        } as approval_scroll
+                        { approval_scroll.content().style_dyn(move || Style::column().width(approval_width.get().max(px(390.0))).height(px(34.0)).shrink(0.0)); }
+                    }
+                    row #relay.caption height:min-content pad:{px(12.0)}px {
                         text
                             "Execution mode configures the harness. Action permissions are separate workflow settings."
                     }
@@ -544,10 +561,9 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
             }
             col #relay.module {
                 FieldHead model:(model) title:"Scope" field:"scope" {
-                    button #relay.action
+                    button #relay.header-action
                         @click:{ model.modify_profile("scope", |p| p.scope = DirectorScope::Project); }
-                        label:"Scope: Whole project"
-                        pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px) role:checkbox
+                        min-height:{px(30.0)}px label:"Scope: Whole project" role:checkbox
                         fill:{color(if whole_project.get() {ink.inverse} else {surface.panel})}
                         hover {
                             fill:{color(if whole_project.get() {ink.inverse} else {surface.raised})}
@@ -571,18 +587,17 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
             }
             col #relay.module {
                 FieldHead model:(model) title:"Concurrent workers" field:"max_workers" {
-                    row height:min-content width:max-content align:center {
-                        button #relay.action
+                    row min-height:{px(30.0)}px width:max-content align:center {
+                        button #relay.header-action
                             @click:{ model.modify_profile("max_workers", |p| p.max_workers = p.max_workers.saturating_sub(1)); }
-                            pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
-                            label:"Decrease worker limit" "−"
-                        row #relay.value height:min-content width:{px(40.0)}px justify:center {
+                            width:{px(30.0)}px pad:0px label:"Decrease worker limit" "−"
+                        row #relay.value height:fill width:{px(40.0)}px align:center justify:center
+                            stroke:(width:{px(1.0)} color:rule.hair edges:right) {
                             text { format!("{:02}", model.editor_profile.get().max_workers) }
                         }
-                        button #relay.action
+                        button #relay.header-action
                             @click:{ model.modify_profile("max_workers", |p| p.max_workers = (p.max_workers + 1).min(64)); }
-                            pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
-                            label:"Increase worker limit" "+"
+                            width:{px(30.0)}px pad:0px label:"Increase worker limit" "+"
                     }
                 }
                 row height:min-content gap:{px(10.0)}px align:center pad:{px(12.0)}px {

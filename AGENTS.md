@@ -21,6 +21,8 @@ Mosaic is private and uses the user's SSH configuration. Keep Cargo and Nix pinn
 
 Keep product UI copy plain, functional, and concise. Do not add marketing slogans, taglines, promotional filler, or decorative copy such as "your team, in motion". Use clear names for actions, settings, and state.
 
+Minimize visual nesting. Let sections and controls share their parent's borders, with only the dividers needed to distinguish them. Avoid inset framed cards or controls inside already framed panels. Put padding inside headings, text, and controls rather than around groups of framed elements. Header actions should fill their cells and align with adjacent sections; keep focus and selection states clear.
+
 `relay-core` owns the shared protocol and profile types. `relay-server` owns storage, GitHub synchronization, permissions, processes, and event publication. `relay-desktop` owns native presentation and networking. Keep shared-contract changes coordinated across both sides; preserve existing database data and bump the schema version when older servers could lose new state.
 
 For behavioral Rust changes, run the relevant tests and Clippy, then the required formatting checks. Verify the actual process/network/UI boundary when changing execution or reconnect behavior. Documentation changes need review of the text and referenced paths; do not claim Rust tests ran if they did not.

@@ -199,9 +199,11 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                         } as menu_trigger
                         { *trigger_slot.borrow_mut() = Some(menu_trigger.clone()); }
                         tooltip #relay.tooltip summary:"Board actions" trigger:manual open:menu
-                            side:bottom align:end {
-                            col height:min-content width:{px(260.0)}px gap:{px(6.0)}px {
+                            side:bottom align:end pad:0px {
+                            col height:min-content width:{px(260.0)}px gap:0px {
                                 if !full.get() {
+                                    col height:min-content gap:{px(6.0)}px pad:{px(12.0)}px
+                                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
                                     row #relay.eyebrow height:min-content { text text-transform:uppercase letter-spacing:{px(0.6)}px "Source" }
                                     row #relay.value height:min-content { text {source.get()} }
                                     if can_sync(model) {
@@ -215,17 +217,24 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                                         row #relay.eyebrow height:min-content { text text-transform:uppercase letter-spacing:{px(0.6)}px "Board" }
                                         BoardChoices model:(model)
                                     }
+                                    }
                                 }
                                 if local.get() {
                                     button #relay.action width:fill justify:start
                                         @click:{managing.set(!managing.get_untracked()); menu.set(false);}
+                                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
+                                        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
                                         label:"Manage columns" "Manage columns"
                                     button #relay.action width:fill justify:start
                                         @click:{model.page.set(Page::Publish); menu.set(false);}
+                                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
+                                        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
                                         label:"Publish board" "Publish board"
                                 }
                                 button #relay.action width:fill justify:start
                                     @click:{history.set(!history.get_untracked()); menu.set(false);}
+                                    stroke:(width:0px color:rule.hair)
+                                    focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
                                     label:"Operation history" "Operation history"
                             }
                         }
@@ -569,12 +578,13 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
             fill:surface.panel stroke:(width:{px(1.0)} color:rule.line edges:left)
             @layout:{move |rect: Rect| height.set(rect.size.height)} label:"Issue details" {
             if issue.get().is_none() {
-                row #relay.strip height:{px(56.0)}px shrink:0 align:center justify:between
-                    pad:(horizontal:{px(14.0)}px vertical:0px) {
-                    row #relay.caption height:min-content width:max-content {
+                row #relay.strip height:{px(56.0)}px shrink:0 align:center {
+                    row #relay.caption height:min-content width:1fr
+                        pad:(horizontal:{px(14.0)}px vertical:0px) {
                         text "Issue unavailable"
                     }
-                    button #relay.action @click:{ model.issue.set(None); }
+                    button #relay.header-action @click:{ model.issue.set(None); }
+                        stroke:(width:{px(1.0)} color:rule.line edges:left)
                         label:"Close issue details" "Close"
                 }
             }
@@ -591,15 +601,12 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                             text text-wrap:none { issue_number(&current.get()) }
                         }
                         col width:1fr min-width:0px height:min-content gap:{px(6.0)}px
-                            pad:(left:{px(14.0)}px right:{px(8.0)}px top:{px(8.0)}px bottom:{px(10.0)}px) {
-                            row height:min-content align:center gap:{px(8.0)}px {
+                            pad:(left:{px(14.0)}px right:{px(14.0)}px top:{px(8.0)}px bottom:{px(10.0)}px) {
+                            row height:min-content align:center {
                                 row #relay.eyebrow height:min-content width:1fr {
                                     text text-transform:uppercase letter-spacing:{px(0.6)}px
                                         "Issue details"
                                 }
-                                button #relay.action @click:{ model.issue.set(None); }
-                                    label:"Close issue details"
-                                    pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px) "Close"
                             }
                             row #relay.title font-size:{px(17.0)}px height:min-content selectable {
                                 text label:{ current.get().title } { current.get().title }
@@ -610,6 +617,9 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                                 }
                             }
                         }
+                        button #relay.header-action @click:{ model.issue.set(None); }
+                            stroke:(width:{px(1.0)} color:rule.line edges:left)
+                            label:"Close issue details" "Close"
                     }
                     scroll {
                         col height:min-content gap:0px selectable {
@@ -675,12 +685,10 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                                     }
                                 }
                             }
-                            col height:min-content
-                                pad:(horizontal:{px(14.0)}px vertical:{px(12.0)}px)
-                                gap:{px(12.0)}px {
+                            col height:min-content gap:0px {
                                 TaskEditor model:(model)
                                 if current.get().result.is_some() {
-                                    col height:min-content gap:{px(6.0)}px pad:(top:{px(8.0)}px)
+                                    col height:min-content gap:{px(6.0)}px pad:{px(12.0)}px
                                         stroke:(width:{px(1.0)} color:rule.line edges:top) {
                                         row #relay.eyebrow height:min-content {
                                             text text-transform:uppercase letter-spacing:{px(0.6)}px
