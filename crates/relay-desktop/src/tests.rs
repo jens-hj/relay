@@ -3761,6 +3761,39 @@ fn permission_rows_set_exact_values_for_every_action_by_click_and_keyboard() {
     );
 }
 
+// Regression for https://github.com/jens-hj/relay/issues/1: accessibility
+// bindings must die with the profile controls they update.
+#[test]
+fn director_options_survive_reopening_after_profile_controls_are_removed() {
+    let mounted = mount(false, 1380.0);
+    for _ in 0..3 {
+        mounted.click("Profile for Project director");
+        mounted
+            .model
+            .modify_profile("harness", |p| p.harness = Harness::ClaudeCode);
+        mounted
+            .model
+            .modify_profile("responsibilities", |p| p.responsibilities.clear());
+        mounted
+            .model
+            .modify_profile("completion", |p| p.completion.clear());
+        mounted.model.modify_profile("scope", |p| {
+            p.scope = DirectorScope::Issues {
+                issue_ids: vec!["issue-1".into()],
+            }
+        });
+        mounted.settle();
+        mounted.click("Open director Project director");
+        // Reloading defaults changes every toggle after the old page is gone.
+        mounted.click("Profile for Review director");
+        assert_eq!(
+            mounted.model.editor.get_untracked(),
+            EditTarget::Director("director-review".into())
+        );
+        mounted.click("Open director Project director");
+    }
+}
+
 fn has_label(mounted: &Mounted, label: &str) -> bool {
     mounted
         .ui

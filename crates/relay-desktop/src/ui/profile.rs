@@ -383,7 +383,12 @@ pub(crate) fn StepToggle(model: Model, task: Task, completion: bool) -> Element 
                     fill:{color(if on.get() {ink.fg} else {surface.panel})}
                     stroke:(width:{px(1.0)} color:{color(if on.get() {ink.fg} else {rule.line})} offset:{px(-0.5)}) {}
             } as toggle
-            {let semantic = toggle.clone(); Effect::new(move || { semantic.toggled(on.get()); });}
+            {
+                let semantic = toggle.clone();
+                let effect = Effect::new(move || { semantic.toggled(on.get()); });
+                // Component effects otherwise outlive this removed subtree.
+                toggle.__hot_on_remove(move || effect.dispose());
+            }
         }
     }
 }
@@ -691,9 +696,10 @@ fn HarnessChoice(
         }
     };
     let semantic = button.clone();
-    Effect::new(move || {
+    let effect = Effect::new(move || {
         semantic.toggled(selected.get());
     });
+    button.__hot_on_remove(move || effect.dispose());
     let slot = usize::from(harness == Harness::ClaudeCode);
     keys.borrow_mut().insert(slot, button.clone());
     let cleanup = keys.clone();
@@ -780,7 +786,11 @@ fn ScopeChip(model: Model, issue: Issue) -> Element {
                     }
                 }
             } as chip
-            {let semantic = chip.clone(); Effect::new(move || { semantic.toggled(on.get()); });}
+            {
+                let semantic = chip.clone();
+                let effect = Effect::new(move || { semantic.toggled(on.get()); });
+                chip.__hot_on_remove(move || effect.dispose());
+            }
         }
     }
 }
