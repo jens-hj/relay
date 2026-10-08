@@ -27,6 +27,28 @@ fn Settings(model: Model) -> Element {
     view! {
         scroll {
             col height:min-content pad:{px(28.0)}px gap:{px(24.0)}px {
+                if matches!(model.settings_store.get().persistence, crate::settings::Persistence::Suspended { .. }) {
+                    col height:min-content gap:{px(10.0)}px pad:{px(14.0)}px fill:attention-fill
+                        stroke:(width:{px(4.0)} color:attention-text edges:left)
+                        label:"Display settings not saved" {
+                        text font-family:sans-serif font-size:{px(15.0)}px font-weight:650
+                            font-color:on-attention "Display settings are not being saved"
+                        text font-size:{px(12.0)}px font-color:on-attention
+                            {match model.settings_store.get().persistence {crate::settings::Persistence::Suspended { reason } => crate::settings::suspended_notice(&reason), _ => String::new()}}
+                        text font-size:{px(12.0)}px font-color:on-attention
+                            {model.settings_store.get().path.map(|p| format!("File: {}", p.display())).unwrap_or_default()}
+                        row height:min-content gap:{px(8.0)}px {
+                            button #action @click:{crate::settings::recover_by_backup(model);}
+                                label:"Back up file and save current settings" "Back up and save"
+                            button #action @click:{crate::settings::retry_reading(model);}
+                                label:"Retry reading settings file" "Retry reading"
+                        }
+                    }
+                }
+                if model.settings_store.get().backup.is_some() {
+                    text font-size:{px(12.0)}px font-color:muted
+                        {model.settings_store.get().backup.map(|b| format!("Previous settings file kept at {}", b.display())).unwrap_or_default()}
+                }
                 col height:min-content gap:{px(10.0)}px {
                     text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Harnesses"
                     text font-size:{px(12.0)}px font-color:muted

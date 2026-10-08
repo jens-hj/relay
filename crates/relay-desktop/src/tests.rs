@@ -59,7 +59,7 @@ fn sidebar_tree_disclosure_keyboard_and_secondary_actions_are_independent() {
     let mounted = mount(false, 1380.0);
     mounted
         ._scope
-        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
     let focused_label = || {
         let focused = mounted.ui.focused().unwrap().id();
         mounted
@@ -264,7 +264,7 @@ fn sidebar_footer_stays_fixed_while_large_trees_scroll_and_scale() {
     let mut mounted = mount(false, 820.0);
     mounted
         ._scope
-        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
     mounted.size = Size::new(820.0, 360.0);
     let mut snapshot = mounted.model.snapshot.get_untracked();
     for i in 0..30 {
@@ -311,7 +311,7 @@ fn approval_control_scales_with_its_label_and_keeps_the_existing_approval() {
     mounted.settle();
     mounted
         ._scope
-        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
     mounted.click("Open issue #2");
     let before = mounted.rect("Approve implementation for this turn");
     mounted.model.worker_approval.set(true);
@@ -356,7 +356,7 @@ fn settings_work_disconnected_and_scale_layout_and_hit_targets_without_losing_dr
     let mounted = mount(false, 1380.0);
     mounted
         ._scope
-        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
     mounted.model.receive(NetworkState::default());
     mounted.model.worker_prompt.set("Keep this draft".into());
     mounted.key(Key::Character(",".into()), true);
@@ -442,7 +442,7 @@ fn large_scale_settings_keep_controls_visible_in_a_narrow_window() {
     let mut mounted = mount(false, 820.0);
     mounted
         ._scope
-        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
     mounted.model.preferences.update(|p| {
         p.scale = 2.0;
         p.sidebar_width = 160.0;
@@ -2257,7 +2257,7 @@ fn appearance_radios_arrow_keys_and_scale_stepper_keep_accessible_semantics() {
     let mounted = mount(false, 1380.0);
     mounted
         ._scope
-        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
     mounted.click("Settings");
     mounted.focus("Theme: Dark");
     assert_eq!(
@@ -2420,7 +2420,7 @@ fn new_project_form_remains_keyboard_reachable_at_two_hundred_percent() {
     let mut mounted = mount(false, 820.0);
     mounted
         ._scope
-        .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
     mounted.model.preferences.update(|p| {
         p.scale = 2.0;
         p.sidebar_width = 160.0;
@@ -3086,7 +3086,7 @@ fn harness_cards_keep_summary_and_actions_compact_and_responsive() {
             mounted.model.preferences.update(|p| p.scale = 2.0);
             mounted
                 ._scope
-                .run(|| crate::settings::bind(mounted.model, AppContext::detached(), None));
+                .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
         }
         mounted.settle();
         let refresh = mounted.rect("Refresh Claude Code status");
@@ -3161,5 +3161,248 @@ fn published_aliases_preserve_selected_board_scope_and_linked_sessions() {
             .issue_id
             .as_deref(),
         Some("imported-history")
+    );
+}
+
+#[test]
+fn every_palette_keeps_text_and_controls_readable() {
+    use crate::theme::{Palette, colors, contrast};
+    for palette in Palette::ALL {
+        let c = colors(palette);
+        let text = [
+            ("ink", c.ink),
+            ("muted", c.muted),
+            ("run text", c.run_text),
+            ("attention text", c.attention_text),
+            ("danger", c.danger),
+            ("success", c.success),
+            ("warning", c.warning),
+        ];
+        for (name, foreground) in text {
+            for background in c.neutrals() {
+                let ratio = contrast(foreground, background);
+                assert!(ratio >= 4.5, "{palette:?} {name}: {ratio:.2}");
+            }
+        }
+        for (name, foreground, background) in [
+            ("on inverse", c.on_inverse, c.inverse),
+            ("on run", c.on_run, c.run),
+            ("on attention", c.on_attention, c.attention),
+            ("ink on accent soft", c.ink, c.accent_soft),
+        ]
+        .into_iter()
+        .chain(c.tints.map(|tint| ("ink on tint", c.ink, tint)))
+        {
+            let ratio = contrast(foreground, background);
+            assert!(ratio >= 4.5, "{palette:?} {name}: {ratio:.2}");
+        }
+        for background in c.neutrals() {
+            for (name, mark) in [
+                ("focus ring", c.accent),
+                ("rule", c.line),
+                ("run glyph", c.run_text),
+                ("attention glyph", c.attention_text),
+            ] {
+                let ratio = contrast(mark, background);
+                assert!(ratio >= 3.0, "{palette:?} {name}: {ratio:.2}");
+            }
+        }
+        let indicator = contrast(c.inverse, c.surface);
+        assert!(indicator >= 3.0, "{palette:?} selector: {indicator:.2}");
+        if matches!(
+            palette,
+            Palette::Paper | Palette::Warm | Palette::Slate | Palette::Neutral
+        ) {
+            for value in [c.base, c.surface, c.ink, c.inverse, c.on_inverse] {
+                let [r, g, b, _] = value.to_srgb8();
+                assert!(
+                    [r, g, b] != [0, 0, 0] && [r, g, b] != [255, 255, 255],
+                    "{palette:?} uses pure black or white"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn contrast_check_rejects_the_concept_text_colors() {
+    let hex = mosaic::prelude::Color::from_rgb_hex;
+    let warm = hex(0xE8E5DF);
+    for (concept, expected) in [(0xC46A4A, 3.03), (0x4F8A6A, 3.23), (0x8E9095, 2.54)] {
+        let ratio = crate::theme::contrast(hex(concept), warm);
+        assert!((ratio - expected).abs() < 0.02, "{concept:06X}: {ratio:.2}");
+        assert!(ratio < 4.5);
+    }
+    assert!(crate::theme::contrast(hex(0x62666D), hex(0xDAD5CC)) < 4.5);
+}
+
+fn settings_directory() -> std::path::PathBuf {
+    let directory = std::env::temp_dir().join(format!("relay-settings-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    directory
+}
+
+#[test]
+fn high_contrast_settings_are_additive_and_omitted_while_off() {
+    use crate::settings::{Preferences, ThemeMode};
+    let directory = settings_directory();
+    let path = directory.join("settings.toml");
+    std::fs::write(
+        &path,
+        "mode = \"light\"\nlight_warm = true\ndark_neutral = true\nscale = 1.25\nsidebar_width = 300.0\n\n[selected_boards]\ndemo = \"board-1\"\n",
+    )
+    .unwrap();
+    let mut preferences = Preferences::load(&path).unwrap();
+    assert_eq!(preferences.mode, ThemeMode::Light);
+    assert!(preferences.light_warm && preferences.dark_neutral);
+    assert!(!preferences.light_high_contrast && !preferences.dark_high_contrast);
+    assert_eq!(preferences.scale, 1.25);
+    assert_eq!(preferences.sidebar_width, 300.0);
+    assert_eq!(preferences.selected_boards["demo"], "board-1");
+    preferences.save(&path).unwrap();
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(!written.contains("high_contrast"), "{written}");
+    preferences.dark_high_contrast = true;
+    preferences.save(&path).unwrap();
+    let reloaded = Preferences::load(&path).unwrap();
+    assert!(reloaded.dark_high_contrast && reloaded.dark_neutral);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn backups_never_replace_existing_files() {
+    let directory = settings_directory();
+    let path = directory.join("settings.toml");
+    std::fs::write(&path, b"newer = true\n").unwrap();
+    let taken = directory.join("settings.toml.unreadable-20000229T000000Z");
+    std::fs::write(&taken, b"older backup").unwrap();
+    let backup =
+        crate::settings::write_backup(&path, b"newer = true\n", "20000229T000000Z").unwrap();
+    assert_ne!(backup, taken);
+    assert_eq!(std::fs::read(&taken).unwrap(), b"older backup");
+    assert_eq!(std::fs::read(&backup).unwrap(), b"newer = true\n");
+    assert_eq!(crate::settings::utc_stamp(0), "19700101T000000Z");
+    assert_eq!(crate::settings::utc_stamp(951_782_400), "20000229T000000Z");
+    assert_eq!(crate::settings::utc_stamp(951_868_799), "20000229T235959Z");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn unreadable_settings_are_never_overwritten_until_explicitly_recovered() {
+    use crate::settings::{Persistence, Store};
+    use std::os::unix::fs::PermissionsExt;
+    let directory = settings_directory();
+    let path = directory.join("settings.toml");
+    let original = b"mode = \"dark\"\nfuture_setting = 3\n".to_vec();
+    std::fs::write(&path, &original).unwrap();
+    let (preferences, persistence) = crate::settings::open(&path);
+    assert!(matches!(persistence, Persistence::Suspended { .. }));
+
+    let mounted = mount(false, 1380.0);
+    mounted.model.preferences.set(preferences);
+    mounted.model.settings_store.set(Store {
+        path: Some(path.clone()),
+        persistence,
+        backup: None,
+    });
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
+    mounted.model.preferences.update(|p| p.scale = 1.5);
+    mounted
+        .model
+        .preferences
+        .update(|p| p.sidebar_width = 300.0);
+    mounted.settle();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    mounted.key(Key::Character(",".into()), true);
+    mounted.rect("Display settings not saved");
+
+    // A failed backup keeps the original and stays suspended.
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555)).unwrap();
+    mounted.click("Back up file and save current settings");
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(matches!(
+        mounted.model.settings_store.get_untracked().persistence,
+        Persistence::Suspended { .. }
+    ));
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+
+    // Retrying a still-invalid file changes nothing.
+    mounted.click("Retry reading settings file");
+    assert!(matches!(
+        mounted.model.settings_store.get_untracked().persistence,
+        Persistence::Suspended { .. }
+    ));
+    assert_eq!(mounted.model.preferences.get_untracked().scale, 1.5);
+
+    mounted.click("Back up file and save current settings");
+    let store = mounted.model.settings_store.get_untracked();
+    assert_eq!(store.persistence, Persistence::Enabled);
+    let backup = store.backup.unwrap();
+    assert_eq!(std::fs::read(&backup).unwrap(), original);
+    let saved = crate::settings::Preferences::load(&path).unwrap();
+    assert_eq!(saved.scale, 1.5);
+    assert_eq!(saved.sidebar_width, 300.0);
+
+    // Persistence resumes once recovered.
+    mounted.model.preferences.update(|p| p.scale = 1.25);
+    mounted.settle();
+    assert_eq!(
+        crate::settings::Preferences::load(&path).unwrap().scale,
+        1.25
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn retry_reading_adopts_a_repaired_settings_file() {
+    use crate::settings::{Persistence, Store};
+    let directory = settings_directory();
+    let path = directory.join("settings.toml");
+    std::fs::write(&path, "broken syntax").unwrap();
+    let (preferences, persistence) = crate::settings::open(&path);
+    let mounted = mount(false, 1380.0);
+    mounted.model.preferences.set(preferences);
+    mounted.model.settings_store.set(Store {
+        path: Some(path.clone()),
+        persistence,
+        backup: None,
+    });
+    std::fs::write(&path, "scale = 1.5\n").unwrap();
+    crate::settings::retry_reading(mounted.model);
+    assert_eq!(
+        mounted.model.settings_store.get_untracked().persistence,
+        Persistence::Enabled
+    );
+    assert_eq!(mounted.model.preferences.get_untracked().scale, 1.5);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn palette_selectors_slide_between_families_and_high_contrast() {
+    let mounted = mount(false, 1380.0);
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
+    mounted.key(Key::Character(",".into()), true);
+    mounted.click("Light palette: Warm");
+    mounted.click("Light palette: High contrast");
+    let preferences = mounted.model.preferences.get_untracked();
+    assert!(preferences.light_high_contrast && preferences.light_warm);
+    mounted.click("Light palette: Warm");
+    let preferences = mounted.model.preferences.get_untracked();
+    assert!(!preferences.light_high_contrast && preferences.light_warm);
+
+    mounted.focus("Dark palette: Slate");
+    mounted.key(Key::End, false);
+    assert!(mounted.model.preferences.get_untracked().dark_high_contrast);
+    mounted.key(Key::ArrowRight, false);
+    let preferences = mounted.model.preferences.get_untracked();
+    assert!(!preferences.dark_high_contrast && !preferences.dark_neutral);
+    assert_eq!(
+        mosaic::core::theme::color(crate::theme::base),
+        crate::theme::colors(crate::theme::Palette::Slate).base
     );
 }

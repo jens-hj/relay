@@ -1,6 +1,7 @@
 use crate::{model::Model, theme};
 use mosaic::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,12 +13,21 @@ pub enum ThemeMode {
     System,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Preferences {
     pub mode: ThemeMode,
     pub light_warm: bool,
     pub dark_neutral: bool,
+    /// Omitted while false so files stay readable by clients that predate it.
+    #[serde(skip_serializing_if = "is_false")]
+    pub light_high_contrast: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub dark_high_contrast: bool,
     pub scale: f32,
     pub sidebar_width: f32,
     pub selected_boards: std::collections::BTreeMap<String, String>,
@@ -29,6 +39,8 @@ impl Default for Preferences {
             mode: ThemeMode::Dark,
             light_warm: false,
             dark_neutral: false,
+            light_high_contrast: false,
+            dark_high_contrast: false,
             scale: 1.0,
             sidebar_width: 220.0,
             selected_boards: Default::default(),
@@ -80,6 +92,186 @@ impl Preferences {
     }
 }
 
+/// Whether display preferences may be written to disk.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Persistence {
+    Enabled,
+    /// The file on disk could not be used. Preferences apply to this session
+    /// only and nothing is written until the user explicitly resolves it.
+    Suspended {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Store {
+    pub path: Option<PathBuf>,
+    pub persistence: Persistence,
+    /// The backup created by the most recent explicit recovery.
+    pub backup: Option<PathBuf>,
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        Self {
+            path: None,
+            persistence: Persistence::Enabled,
+            backup: None,
+        }
+    }
+}
+
+/// Load preferences without ever discarding an unusable file: a missing
+/// file is a fresh start, anything else suspends persistence.
+pub fn open(path: &Path) -> (Preferences, Persistence) {
+    match Preferences::load(path) {
+        Ok(preferences) => (preferences, Persistence::Enabled),
+        Err(reason) => (Preferences::default(), Persistence::Suspended { reason }),
+    }
+}
+
+pub fn suspended_notice(reason: &str) -> String {
+    format!("{reason}. Display changes apply to this session only until settings are recovered.")
+}
+
+/// Keep a byte-for-byte copy of the existing settings file, then save the
+/// current preferences. A backup never replaces an existing file, and any
+/// failure leaves the original in place.
+pub fn backup_and_save(path: &Path, preferences: &Preferences) -> Result<Option<PathBuf>, String> {
+    preferences.validate()?;
+    let original = match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(format!(
+                "Cannot read the existing settings file to back it up: {error}"
+            ));
+        }
+    };
+    let backup = match &original {
+        Some(bytes) => Some(write_backup(
+            path,
+            bytes,
+            &utc_stamp(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            ),
+        )?),
+        None => None,
+    };
+    preferences.save(path).map_err(|error| match &backup {
+        Some(backup) => format!(
+            "{error}. The original file is unchanged; a copy is at {}",
+            backup.display()
+        ),
+        None => error,
+    })?;
+    Ok(backup)
+}
+
+pub fn write_backup(path: &Path, bytes: &[u8], stamp: &str) -> Result<PathBuf, String> {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "settings.toml".into());
+    for attempt in 0..1000 {
+        let candidate = path.with_file_name(if attempt == 0 {
+            format!("{name}.unreadable-{stamp}")
+        } else {
+            format!("{name}.unreadable-{stamp}-{attempt}")
+        });
+        // `create_new` fails instead of replacing an existing file.
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Cannot create settings backup: {error}")),
+        };
+        if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            drop(file);
+            // Only the file created above is removed; the original is untouched.
+            let _ = std::fs::remove_file(&candidate);
+            return Err(format!("Cannot write settings backup: {error}"));
+        }
+        return match std::fs::read(&candidate) {
+            Ok(copy) if copy == bytes => Ok(candidate),
+            _ => Err(format!(
+                "Settings backup at {} could not be verified; the original file is unchanged",
+                candidate.display()
+            )),
+        };
+    }
+    Err("Cannot find an unused settings backup name".into())
+}
+
+/// `YYYYMMDDTHHMMSSZ` for a Unix timestamp (proleptic Gregorian, UTC).
+pub fn utc_stamp(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let rest = seconds % 86_400;
+    // Civil-from-days (Howard Hinnant).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
+/// Explicitly resolve a suspended settings file by backing it up and saving
+/// the current preferences. Persistence is only enabled once both succeed.
+pub fn recover_by_backup(model: Model) {
+    let store = model.settings_store.get_untracked();
+    let Some(path) = store.path.clone() else {
+        return;
+    };
+    match backup_and_save(&path, &model.preferences.get_untracked()) {
+        Ok(backup) => model.settings_store.set(Store {
+            path: Some(path),
+            persistence: Persistence::Enabled,
+            backup,
+        }),
+        Err(reason) => model.settings_store.set(Store {
+            persistence: Persistence::Suspended { reason },
+            ..store
+        }),
+    }
+}
+
+/// Read the file again; adopt it only if it is now valid.
+pub fn retry_reading(model: Model) {
+    let store = model.settings_store.get_untracked();
+    let Some(path) = store.path.clone() else {
+        return;
+    };
+    match open(&path) {
+        (preferences, Persistence::Enabled) => {
+            model.settings_store.set(Store {
+                persistence: Persistence::Enabled,
+                ..store
+            });
+            model.preferences.set(preferences);
+        }
+        (_, suspended) => model.settings_store.set(Store {
+            persistence: suspended,
+            ..store
+        }),
+    }
+}
+
 pub fn path() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("RELAY_SETTINGS_PATH") {
         return Ok(path.into());
@@ -97,12 +289,30 @@ pub fn path() -> Result<PathBuf, String> {
         .ok_or_else(|| "Set RELAY_SETTINGS_PATH to store local display settings.".into())
 }
 
-pub fn bind(model: Model, context: AppContext, path: Option<PathBuf>) {
+pub fn themes(preferences: &Preferences) -> (theme::RelayTheme, theme::RelayTheme) {
+    (
+        theme::configured_palette(
+            true,
+            preferences.light_warm,
+            preferences.light_high_contrast,
+            preferences.scale,
+        ),
+        theme::configured_palette(
+            false,
+            preferences.dark_neutral,
+            preferences.dark_high_contrast,
+            preferences.scale,
+        ),
+    )
+}
+
+/// Apply preferences to the window and save them while persistence is
+/// enabled. A suspended store is never written implicitly.
+pub fn bind(model: Model, context: AppContext) {
     let mut previous = model.preferences.get_untracked();
     Effect::new(move || {
         let preferences = model.preferences.get();
-        let light = theme::configured_palette(true, preferences.light_warm, preferences.scale);
-        let dark = theme::configured_palette(false, preferences.dark_neutral, preferences.scale);
+        let (light, dark) = themes(&preferences);
         context.set_themes(light.clone(), dark.clone());
         match preferences.mode {
             ThemeMode::Dark => context.set_theme(dark),
@@ -110,7 +320,8 @@ pub fn bind(model: Model, context: AppContext, path: Option<PathBuf>) {
             ThemeMode::System => context.follow_system(),
         }
         if preferences != previous {
-            if let Some(path) = &path
+            let store = model.settings_store.get_untracked();
+            if let (Some(path), Persistence::Enabled) = (&store.path, &store.persistence)
                 && let Err(error) = preferences.save(path)
             {
                 model.notice.set(error);

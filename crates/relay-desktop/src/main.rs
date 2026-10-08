@@ -3,6 +3,7 @@ mod buffer_network;
 mod controls;
 mod conversation;
 mod fonts;
+mod labels;
 mod model;
 mod network;
 mod project_network;
@@ -19,9 +20,10 @@ use mosaic::prelude::*;
 fn main() -> Result<(), String> {
     let config = network::Config::from_env()?;
     let path = settings::path()?;
-    let (mut preferences, warning) = match settings::Preferences::load(&path) {
-        Ok(preferences) => (preferences, String::new()),
-        Err(error) => (settings::Preferences::default(), error),
+    let (mut preferences, persistence) = settings::open(&path);
+    let warning = match &persistence {
+        settings::Persistence::Enabled => String::new(),
+        settings::Persistence::Suspended { reason } => settings::suspended_notice(reason),
     };
     match std::env::var("RELAY_THEME").as_deref() {
         Ok("light") => preferences.mode = settings::ThemeMode::Light,
@@ -32,11 +34,7 @@ fn main() -> Result<(), String> {
     }
     App::new("Relay")
         .window(WindowConfig::new(1380.0, 900.0))
-        .theme(theme::configured_palette(
-            false,
-            preferences.dark_neutral,
-            preferences.scale,
-        ))
+        .theme(settings::themes(&preferences).1)
         .clear(theme::base)
         .run(move |ui, context| {
             fonts::configure(&mut ui.fonts().borrow_mut());
@@ -67,8 +65,13 @@ fn main() -> Result<(), String> {
             buffer::load_journal(model, &path, &config);
             Effect::new(move || buffer::receive(model, buffer_updates.get()));
             model.preferences.set(preferences.clone());
+            model.settings_store.set(settings::Store {
+                path: Some(path.clone()),
+                persistence: persistence.clone(),
+                backup: None,
+            });
             model.notice.set(warning.clone());
-            settings::bind(model, context.clone(), Some(path.clone()));
+            settings::bind(model, context.clone());
             let setup_offered = State::new(false);
             Effect::new(move || {
                 model.receive(updates.get());
