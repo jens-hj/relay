@@ -2946,7 +2946,8 @@ fn imported_task_recovery_marker_is_hidden_and_preserved_when_editing() {
             .as_ref()
             .is_some_and(|l| l.contains("relay-operation:"))
     }));
-    mounted.click("Edit task");
+    mounted.focus("Edit task");
+    mounted.key(Key::Enter, false);
     type_in(&mounted, "Task body", "Updated task description");
     mounted.focus("Save task");
     mounted.click("Save task");
@@ -3404,5 +3405,230 @@ fn palette_selectors_slide_between_families_and_high_contrast() {
     assert_eq!(
         mosaic::core::theme::color(crate::theme::base),
         crate::theme::colors(crate::theme::Palette::Slate).base
+    );
+}
+
+#[test]
+fn usage_split_separates_cached_input_and_survives_bad_reports() {
+    use crate::labels::UsageSplit;
+    let usage = |input, cached, output| TokenUsage {
+        input_tokens: input,
+        cached_input_tokens: cached,
+        output_tokens: output,
+    };
+    let split = UsageSplit::new(&usage(48_213, 31_004, 2_910));
+    assert_eq!(
+        (split.uncached, split.cached, split.output),
+        (17_209, 31_004, 2_910)
+    );
+    assert!(!split.clamped);
+    let [uncached, cached, output] = split.fractions().unwrap();
+    assert!((uncached + cached + output - 1.0).abs() < 1e-5);
+    assert!(cached > uncached && uncached > output);
+
+    assert_eq!(UsageSplit::new(&usage(0, 0, 0)).fractions(), None);
+
+    let inconsistent = UsageSplit::new(&usage(100, 250, 10));
+    assert!(inconsistent.clamped);
+    assert_eq!((inconsistent.uncached, inconsistent.cached), (0, 100));
+
+    let huge = UsageSplit::new(&usage(u64::MAX, u64::MAX / 2, u64::MAX));
+    for fraction in huge.fractions().unwrap() {
+        assert!((0.0..=1.0).contains(&fraction));
+    }
+    assert_eq!(crate::labels::grouped(1_234_567), "1,234,567");
+    assert_eq!(crate::labels::grouped(999), "999");
+}
+
+#[test]
+fn issue_status_prefers_waiting_and_active_work_then_the_latest_outcome() {
+    use crate::labels::{RunState, issue_status};
+    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let template = snapshot.sessions[1].clone();
+    let session = |id: &str, status: WorkerStatus| {
+        let mut session = template.clone();
+        session.id = id.into();
+        session.fixture = false;
+        session.worker = Some(worker_run(status));
+        session
+    };
+    assert_eq!(issue_status(&snapshot, &[]), RunState::Ready);
+    let older_failure = session("a", WorkerStatus::Failed);
+    let newer_success = session("b", WorkerStatus::Completed);
+    assert_eq!(
+        issue_status(&snapshot, &[older_failure.clone(), newer_success.clone()]),
+        RunState::Completed
+    );
+    assert_eq!(
+        issue_status(&snapshot, &[newer_success.clone(), older_failure.clone()]),
+        RunState::Failed
+    );
+    let queued = session("c", WorkerStatus::Queued);
+    let running = session("d", WorkerStatus::Running);
+    assert_eq!(
+        issue_status(
+            &snapshot,
+            &[running.clone(), queued.clone(), newer_success.clone()]
+        ),
+        RunState::Running
+    );
+    assert_eq!(
+        issue_status(&snapshot, &[queued.clone(), newer_success.clone()]),
+        RunState::Queued
+    );
+    snapshot.tool_permissions.push(ToolPermission {
+        id: "p".into(),
+        session_id: "c".into(),
+        run_id: "r".into(),
+        tool: "Write".into(),
+        description: "notes.txt".into(),
+        decision: None,
+        expired: false,
+    });
+    assert_eq!(
+        issue_status(&snapshot, &[running, queued, newer_success]),
+        RunState::Waiting
+    );
+}
+
+#[test]
+fn sidebar_rows_describe_worker_state_and_director_capacity() {
+    let mounted = mount(false, 1380.0);
+    mounted.click("Toggle director Project director");
+    let description = |label: &str| {
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some(label))
+            .and_then(|n| n.description.clone())
+            .unwrap_or_default()
+    };
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    let index = snapshot
+        .sessions
+        .iter()
+        .position(|s| s.id == "session-worker")
+        .unwrap();
+    let title = snapshot.sessions[index].title.clone();
+    snapshot.sessions[index].fixture = false;
+    for (status, word) in [
+        (WorkerStatus::Queued, "Queued"),
+        (WorkerStatus::Running, "Running"),
+        (WorkerStatus::Interrupted, "Interrupted"),
+    ] {
+        snapshot.sessions[index].worker = Some(worker_run(status));
+        mounted.model.receive(NetworkState {
+            snapshot: snapshot.clone(),
+            connected: true,
+            ..Default::default()
+        });
+        mounted.settle();
+        let worker = description(&format!("Open worker {title}"));
+        assert!(worker.ends_with(word), "{worker}");
+    }
+    snapshot.sessions[index].worker = Some(worker_run(WorkerStatus::Running));
+    snapshot.tool_permissions.push(ToolPermission {
+        id: "permission-sidebar".into(),
+        session_id: snapshot.sessions[index].id.clone(),
+        run_id: "run".into(),
+        tool: "Write".into(),
+        description: "notes.txt".into(),
+        decision: None,
+        expired: false,
+    });
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(description(&format!("Open worker {title}")).ends_with("Waiting for approval"));
+    let director = description("Open director Project director");
+    assert!(
+        director.contains("of 4 workers active, 1 running"),
+        "{director}"
+    );
+}
+
+fn worker_run(status: WorkerStatus) -> WorkerRun {
+    WorkerRun {
+        harness: Harness::Codex,
+        execution: None,
+        status,
+        thread_id: Some("thread".into()),
+        worktree: Some("/repo/worktrees/issue".into()),
+        branch: Some("worker/issue".into()),
+        base_commit: Some("abc123".into()),
+        error: None,
+        usage: None,
+        changes: None,
+    }
+}
+
+#[test]
+fn session_header_usage_and_execution_mode_use_measured_state() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = live_snapshot();
+    let session = &mut snapshot.sessions[0];
+    session.fixture = false;
+    session.issue_id = Some("issue-2".into());
+    session.director_id = snapshot.directors[0].id.clone();
+    let mut run = worker_run(WorkerStatus::Running);
+    run.usage = Some(TokenUsage {
+        input_tokens: 48_213,
+        cached_input_tokens: 31_004,
+        output_tokens: 2_910,
+    });
+    session.worker = Some(run);
+    let session_id = session.id.clone();
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(session_id.clone());
+    mounted.settle();
+    let status = || {
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some("Session status"))
+            .and_then(|n| n.description.clone())
+            .unwrap()
+    };
+    assert_eq!(status(), "Running");
+    mounted.click("Session actions");
+    mounted.click("Session usage and provenance");
+    mounted.rect("Latest turn usage");
+    mounted.rect("Usage meter");
+
+    mounted.focus("Worker approval: Ask");
+    mounted.key(Key::Enter, false);
+    let command = mounted.commands.try_recv().unwrap().command;
+    assert!(matches!(
+        command,
+        Command::SetWorkerExecution { session_id: ref id, execution: Some(ExecutionSettings { approval: ApprovalMode::Ask }) } if *id == session_id
+    ));
+
+    snapshot.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Queued;
+    snapshot.sessions[0].worker.as_mut().unwrap().usage = None;
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert_eq!(status(), "Queued");
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Latest turn usage"))
     );
 }

@@ -1,11 +1,13 @@
 use crate::{
     controls::{AppearanceSegments, AppearanceSegmentsProps, ButtonStyle, button},
     conversation::{Conversation, ConversationProps},
+    labels::{Readout, ReadoutProps, RunState, StatusGlyph, StatusGlyphProps, Tag, TagProps},
     model::{EditTarget, Model, Page},
     projects::*,
     sidebar::{Sidebar, SidebarProps},
     theme::*,
 };
+use mosaic::core::theme::color;
 use mosaic::prelude::*;
 use relay_core::*;
 
@@ -173,7 +175,8 @@ pub fn shell(model: Model) -> Element {
                     if model.page.get() != Page::Sessions {
                         row height:min-content min-height:{px(84.0)}px
                             pad:(horizontal:{px(28.0)}px vertical:{px(18.0)}px) align:center
-                            justify:between shrink:0 {
+                            justify:between shrink:0
+                            stroke:(width:{px(1.0)} color:rule edges:bottom) {
                             col height:min-content gap:{px(4.0)}px {
                                 text font-size:{px(22.0)}px font-weight:650 font-family:sans-serif
                                     {
@@ -194,12 +197,15 @@ pub fn shell(model: Model) -> Element {
                         }
                     }
                     if !model.notice.get().is_empty() {
-                        row height:min-content fill:accent-soft pad:{px(12.0)}px gap:{px(12.0)}px
-                            align:center shrink:0 {
+                        row height:min-content fill:attention-fill pad:{px(12.0)}px gap:{px(12.0)}px
+                            align:center shrink:0
+                            stroke:(width:{px(4.0)} color:attention-text edges:left) {
                             col width:1fr height:min-content gap:{px(4.0)}px {
-                                text font-size:{px(12.0)}px { model.notice.get() }
+                                text font-size:{px(12.0)}px font-color:on-attention
+                                    { model.notice.get() }
                                 if model.can_retry() {
-                                    text font-size:{px(11.0)}px { model.retry_summary() }
+                                    text font-size:{px(11.0)}px font-color:on-attention
+                                        { model.retry_summary() }
                                 }
                             }
                             if model.can_rebase() {
@@ -373,17 +379,27 @@ fn BoardColumnView(model: Model, column: BoardColumn) -> Element {
     view! {
         col height:min-content width:1fr gap:{px(12.0)}px {
             row height:min-content justify:between align:center
-                pad:(horizontal:{px(4.0)}px vertical:{px(10.0)}px) {
+                pad:(horizontal:{px(2.0)}px vertical:{px(10.0)}px)
+                stroke:(width:{px(1.0)} color:rule edges:bottom) {
                 text font-size:{px(13.0)}px font-weight:650 font-family:sans-serif
                     label:{ format!("Column {}", column_id.get()) }
                     { model.board_columns().iter().find(|c| c.id == column_id.get()).map(|c| c.title.clone()).unwrap_or_default() }
-                text font-size:{px(12.0)}px font-color:muted { issues.get().len().to_string() }
+                text font-size:{px(12.0)}px font-color:muted
+                    { format!("{:02}", issues.get().len()) }
             }
             for (_, issue) in { issues.get().into_iter().map(|i| (i.id.clone(), i)) } {
                 IssueCard model:(model) issue:(issue.clone())
             }
         }
     }
+}
+
+fn issue_number(issue: &Issue) -> String {
+    issue
+        .reference
+        .as_ref()
+        .map(|r| format!("#{}", r.number))
+        .unwrap_or_else(|| "Task".into())
 }
 
 #[component]
@@ -401,24 +417,51 @@ fn IssueCard(model: Model, issue: Issue) -> Element {
     });
     let count_id = id.clone();
     let session_count = Derived::new(move || model.sessions_for_task(&count_id).len());
+    let status_id = id.clone();
+    let state = Derived::new(move || {
+        crate::labels::issue_status(&model.snapshot.get(), &model.sessions_for_task(&status_id))
+    });
+    let selected_id = id.clone();
+    let selected = Derived::new(move || model.issue.get().as_deref() == Some(selected_id.as_str()));
     view! {
         button @click:{ model.issue.set(Some(id.clone())); model.worker_approval.set(false); }
-            width:fill height:min-content fill:surface radius:{px(10.0)}px pad:{px(16.0)}px
+            width:fill height:min-content fill:surface pad:0px radius:0px
             label:{ current.get().reference.map(|r|format!("Open issue #{}",r.number)).unwrap_or_else(||format!("Open local task {}",current.get().title)) }
+            description:{ format!("{} · {} linked sessions", state.get().label(), session_count.get()) }
+            stroke:(width:{px(if selected.get() {2.0} else {1.0})} color:{color(if selected.get() {ink} else {rule})} offset:{px(-1.0)})
             hover { fill:raised }
             focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) } {
-            col height:min-content gap:{px(14.0)}px align:start {
-                text font-size:{px(11.0)}px font-color:muted { current.get().label() }
-                text font-size:{px(15.0)}px font-weight:600 font-family:sans-serif font-color:ink
-                    label:{ current.get().title } { current.get().title }
-                for (_, label) in { current.get().labels.into_iter().map(|label| (label.clone(), label)) } {
-                    text font-size:{px(11.0)}px font-color:accent (label.clone())
+            col height:min-content gap:0px {
+                row height:{px(24.0)}px align:center
+                    stroke:(width:{px(1.0)} color:edge edges:bottom) {
+                    row width:max-content align:center pad:(horizontal:{px(8.0)}px vertical:0px)
+                        fill:inverse {
+                        text text-wrap:none font-size:{px(12.0)}px font-weight:700
+                            font-color:on-inverse { issue_number(&current.get()) }
+                    }
+                    row width:1fr align:center gap:{px(4.0)}px
+                        pad:(horizontal:{px(6.0)}px vertical:0px) clip {
+                        for (_, label) in { current.get().labels.into_iter().map(|label| (label.clone(), label)) } {
+                            Tag text:(label.clone())
+                        }
+                    }
                 }
-                if session_count.get() > 0 {
-                    text font-size:{px(11.0)}px font-color:muted
-                        { format!("{} linked sessions", session_count.get()) }
-                } else {
-                    text font-size:{px(11.0)}px font-color:muted "Ready to scope"
+                col height:min-content pad:(horizontal:{px(12.0)}px vertical:{px(12.0)}px) {
+                    text font-size:{px(15.0)}px font-weight:600 font-family:sans-serif
+                        font-color:ink label:{ current.get().title } { current.get().title }
+                }
+                row height:{px(28.0)}px align:center gap:{px(6.0)}px
+                    pad:(horizontal:{px(10.0)}px vertical:0px)
+                    stroke:(width:{px(1.0)} color:edge edges:top) {
+                    if state.get() != RunState::Ready {
+                        StatusGlyph state:(state)
+                    }
+                    text width:1fr text-wrap:none font-size:{px(11.0)}px
+                        font-color:{color(state.get().text_color())} { state.get().label() }
+                    if session_count.get() > 0 {
+                        text text-wrap:none font-size:{px(11.0)}px font-color:muted
+                            { format!("{} linked sessions", session_count.get()) }
+                    }
                 }
             }
         }
@@ -436,9 +479,12 @@ fn IssueDetail(model: Model) -> Element {
             .find(|i| Some(&i.id) == model.issue.get().as_ref())
     });
     view! {
-        col width:{px(320.0)} shrink:1 fill:surface pad:{px(22.0)}px gap:{px(14.0)}px {
-            row height:min-content align:center justify:between {
-                text font-size:{px(12.0)}px font-color:muted "ISSUE DETAILS"
+        col width:{px(340.0)} shrink:1 fill:surface stroke:(width:{px(1.0)} color:rule edges:left) {
+            row height:min-content align:center justify:between
+                pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px)
+                stroke:(width:{px(1.0)} color:rule edges:bottom) {
+                text font-size:{px(11.0)}px font-color:muted text-transform:uppercase
+                    letter-spacing:{px(0.6)}px "Issue details"
                 button #action @click:{ model.issue.set(None); } label:"Close issue details" "Close"
             }
             scroll {
@@ -446,33 +492,78 @@ fn IssueDetail(model: Model) -> Element {
                     let detail_id = State::new(detail.id.clone());
                     let fallback = detail.clone();
                     let current = Derived::new(move || model.snapshot.get().issue(&detail_id.get()).cloned().unwrap_or_else(|_| fallback.clone()));
-                    col height:min-content gap:{px(18.0)}px selectable {
-                        text font-size:{px(12.0)}px font-color:accent (current.get().label())
-                        text font-size:{px(21.0)}px font-weight:650 font-family:sans-serif
-                            label:{ current.get().title } { current.get().title }
+                    col height:min-content gap:{px(18.0)}px
+                        pad:(horizontal:{px(18.0)}px vertical:{px(16.0)}px) selectable {
+                        row height:min-content gap:{px(12.0)}px align:start {
+                            col width:max-content height:min-content min-height:{px(56.0)}px
+                                min-width:{px(56.0)}px align:center justify:center
+                                pad:(horizontal:{px(8.0)}px vertical:0px) fill:inverse {
+                                text text-wrap:none font-size:{px(20.0)}px font-weight:700
+                                    font-color:on-inverse { issue_number(&current.get()) }
+                            }
+                            col width:1fr height:min-content gap:{px(8.0)}px {
+                                text font-size:{px(19.0)}px font-weight:650 font-family:sans-serif
+                                    label:{ current.get().title } { current.get().title }
+                                row height:min-content gap:{px(4.0)}px clip {
+                                    for (_, label) in { current.get().labels.into_iter().map(|label| (label.clone(), label)) } {
+                                        Tag text:(label.clone())
+                                    }
+                                }
+                            }
+                        }
                         text font-size:{px(14.0)}px
                             label:{ crate::projects::task_body(&current.get().body) }
                             { crate::projects::task_body(&current.get().body) }
-                        text font-size:{px(11.0)}px font-color:muted
-                            { if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "Fixture issue · execution unavailable".to_string() } else { current.get().reference.map(|r| r.url).unwrap_or_default() } }
+                        col height:min-content gap:{px(3.0)}px pad:(top:{px(8.0)}px)
+                            stroke:(width:{px(1.0)} color:edge edges:top) {
+                            text font-size:{px(11.0)}px font-color:muted text-transform:uppercase
+                                letter-spacing:{px(0.6)}px
+                                { if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "Source" } else { "Issue" } }
+                            text font-size:{px(12.0)}px font-color:ink
+                                { if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "Fixture issue · execution unavailable".to_string() } else { current.get().reference.map(|r| r.url).unwrap_or_else(|| "Local task".into()) } }
+                        }
                         if !model.snapshot.get().visible_task(&current.get().id) {
-                            text font-size:{px(12.0)}px font-color:muted
-                                label:"Issue removed from board"
-                                "No longer on this board · history retained. Restore and sync before starting or continuing a worker. Active turns may finish or be stopped."
+                            col height:min-content pad:{px(10.0)}px fill:attention-fill
+                                stroke:(width:{px(4.0)} color:attention-text edges:left) {
+                                text font-size:{px(12.0)}px font-color:on-attention
+                                    label:"Issue removed from board"
+                                    "No longer on this board · history retained. Restore and sync before starting or continuing a worker. Active turns may finish or be stopped."
+                            }
                         }
                         WorkerForm model:(model) continuation:false
-                        text font-size:{px(12.0)}px font-weight:650 font-family:sans-serif
-                            "LINKED SESSIONS"
+                        row height:min-content justify:between pad:(top:{px(8.0)}px)
+                            stroke:(width:{px(1.0)} color:rule edges:top) {
+                            text font-size:{px(11.0)}px font-color:muted text-transform:uppercase
+                                letter-spacing:{px(0.6)}px "Linked sessions"
+                            text font-size:{px(11.0)}px font-color:muted
+                                { format!("{:02}", model.sessions_for_task(&detail_id.get()).len()) }
+                        }
                         for (_, session) in { model.sessions_for_task(&detail_id.get()).into_iter().map(|s| (s.id.clone(), s)).collect::<Vec<_>>() } {
                             let id = State::new(session.id.clone());
-                            button #action @click:{ model.open_session(id.get_untracked()); }
-                                { model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default() }
+                            let linked_state = Derived::new(move || model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| crate::labels::session_state(&model.snapshot.get(), s)).unwrap_or(RunState::Unavailable));
+                            button #tree-control @click:{ model.open_session(id.get_untracked()); }
+                                width:fill justify:start gap:{px(8.0)}px
+                                pad:(horizontal:{px(8.0)}px vertical:0px)
+                                stroke:(width:{px(1.0)} color:edge edges:bottom)
+                                label:{ model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default() }
+                                description:{ linked_state.get().label() } hover { fill:raised } {
+                                StatusGlyph state:(linked_state)
+                                text width:1fr text-wrap:none font-size:{px(12.0)}px font-color:ink
+                                    { model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default() }
+                                text text-wrap:none font-size:{px(11.0)}px
+                                    font-color:{color(linked_state.get().text_color())}
+                                    { linked_state.get().label() }
+                            }
                         }
                         TaskEditor model:(model)
                         if current.get().result.is_some() {
-                            text font-size:{px(12.0)}px font-weight:650 font-family:sans-serif
-                                "RESULT"
-                            text font-size:{px(14.0)}px { current.get().result.unwrap_or_default() }
+                            col height:min-content gap:{px(6.0)}px pad:(top:{px(8.0)}px)
+                                stroke:(width:{px(1.0)} color:rule edges:top) {
+                                text font-size:{px(11.0)}px font-color:muted
+                                    text-transform:uppercase letter-spacing:{px(0.6)}px "Result"
+                                text font-size:{px(14.0)}px
+                                    { current.get().result.unwrap_or_default() }
+                            }
                         }
                     }
                 }
@@ -480,7 +571,6 @@ fn IssueDetail(model: Model) -> Element {
         }
     }
 }
-
 #[component]
 fn Sessions(model: Model) -> Element {
     view! {
@@ -677,9 +767,10 @@ fn Palette(model: Model) -> Element {
         }
     });
     let view = view! {
-        col fill:#00000055 align:center pad:(horizontal:{px(30.0)}px vertical:{px(90.0)}px) {
-            col height:min-content width:{px(560.0)} max-width:100% fill:surface radius:{px(14.0)}px
-                pad:{px(18.0)}px gap:{px(12.0)}px {
+        col fill:scrim align:center pad:(horizontal:{px(30.0)}px vertical:{px(90.0)}px) {
+            col height:min-content width:{px(560.0)} max-width:100% fill:surface
+                stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) pad:{px(18.0)}px
+                gap:{px(12.0)}px {
                 row height:min-content justify:between align:center {
                     text font-size:{px(15.0)}px font-weight:650 font-family:sans-serif
                         "Command palette"
@@ -807,7 +898,7 @@ fn WorkerApproval(model: Model) -> Element {
                     mark,
                     focus: accent_color,
                     size: 18.0 * scale,
-                    radius: 5.0 * scale,
+                    radius: 0.0,
                     label: TextStyle::inherited(),
                     gap: 8.0 * scale,
                 },
@@ -829,16 +920,26 @@ fn WorkerForm(model: Model, continuation: bool) -> Element {
                     let id = State::new(director.id.clone());
                     button #action
                         @click:{ model.worker_director.set(id.get_untracked()); model.worker_approval.set(false); }
-                        fill:if model.worker_director.get() == id.get() { accent-soft } else { raised }
+                        width:fill justify:start role:radio
+                        fill:if model.worker_director.get() == id.get() { selected-fill } else { surface }
+                        stroke:(width:{px(if model.worker_director.get() == id.get() {3.0} else {1.0})} color:{color(if model.worker_director.get() == id.get() {ink} else {rule})} edges:left)
                         { model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| format!("Director: {}", d.name)).unwrap_or_default() }
                 }
             }
-            text font-size:{px(12.0)}px font-color:muted
-                {
-                match model.worker_profile(continuation) {
-                    Ok((p, active)) => format!("{} · Implementation: {} · {} · {} / {} workers active", match p.harness { Harness::Codex => "Codex", Harness::ClaudeCode => "Claude Code" }, p.permissions.get(&Task::Implement).copied().unwrap_or(Permission::Deny).label(), scope_label(&p.scope, &model.snapshot.get()), active, p.max_workers),
-                    Err(error) => error
+            if model.worker_profile(continuation).is_ok() {
+                grid
+                    cols:{GridTracks::auto_fit(GridTrack::minmax(px(120.0).into(), GridTrack::fr(1.0)))}
+                    height:min-content gap:{px(10.0)}px pad:{px(10.0)}px
+                    stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) label:"Worker policy" {
+                    for (_, key) in { worker_policy(model, continuation).into_iter().map(|(k, _)| (k, k)).collect::<Vec<_>>() } {
+                        let field: &'static str = key;
+                        Readout key:(field.to_string())
+                            value:(Derived::new(move || worker_policy(model, continuation).into_iter().find(|(k, _)| *k == field).map(|(_, v)| v).unwrap_or_default()))
+                    }
                 }
+            } else {
+                text font-size:{px(12.0)}px font-color:muted
+                    { model.worker_profile(continuation).err().unwrap_or_default() }
             }
             input #input-field label:"Worker prompt" placeholder:"Prompt for this turn…"
                 model.worker_prompt
@@ -847,7 +948,7 @@ fn WorkerForm(model: Model, continuation: bool) -> Element {
             }
             text font-size:{px(11.0)}px font-color:muted
                 { model.worker_gate(continuation).err().unwrap_or_else(|| "Ready · server rechecks policy and revision".into()) }
-            button #action @click:{ model.run_worker(continuation); }
+            button #primary @click:{ model.run_worker(continuation); }
                 label:if continuation { "Send worker prompt" } else { "Start worker" }
                 disabled:{ model.worker_gate(continuation).is_err() }
                 { if continuation { "Send / continue" } else { "Start worker" } }
@@ -991,4 +1092,34 @@ pub(crate) fn board_caption(board: &Board) -> String {
         ),
     };
     with_board_error(caption, board.error.as_deref())
+}
+
+fn worker_policy(model: Model, continuation: bool) -> Vec<(&'static str, String)> {
+    let Ok((profile, active)) = model.worker_profile(continuation) else {
+        return Vec::new();
+    };
+    vec![
+        (
+            "Harness",
+            match profile.harness {
+                Harness::Codex => "Codex".into(),
+                Harness::ClaudeCode => "Claude Code".into(),
+            },
+        ),
+        (
+            "Implement",
+            profile
+                .permissions
+                .get(&Task::Implement)
+                .copied()
+                .unwrap_or(Permission::Deny)
+                .label()
+                .to_string(),
+        ),
+        ("Scope", scope_label(&profile.scope, &model.snapshot.get())),
+        (
+            "Workers",
+            format!("{active} / {} active", profile.max_workers),
+        ),
+    ]
 }

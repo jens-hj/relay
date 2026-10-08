@@ -322,34 +322,34 @@ pub fn contrast(a: Color, b: Color) -> f32 {
 mosaic::style! {
     pub #tree-leaf hover { fill:raised }
     pub #tree-row hover { fill:raised }
-    pub #scale-stepper width:{px(160.0)}px height:{px(36.0)}px fill:surface
+    pub #scale-stepper width:{px(160.0)}px height:{px(36.0)}px fill:surface radius:0px
         stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
         focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) } {
         decrement fill:raised font-color:ink hover { fill:selected-fill }
         field font-size:{px(14.0)}px font-color:ink
         increment fill:raised font-color:ink hover { fill:selected-fill }
     }
-    pub #tree-control height:{px(34.0)}px min-width:0px shrink:0 justify:center
+    pub #tree-control height:{px(34.0)}px min-width:0px shrink:0 justify:center radius:0px
         pad:0px fill:(Color::TRANSPARENT) font-color:muted font-size:{px(12.0)}px
         focused { stroke:(width:{px(2.0)} color:accent offset:{px(-2.0)}) }
     pub #tree-label width:1fr height:{px(34.0)}px align:center clip
-    pub #tree-tooltip fill:surface font-color:ink font-size:{px(12.0)}px max-width:{px(320.0)}px
+    pub #tree-tooltip fill:surface radius:0px font-color:ink font-size:{px(12.0)}px max-width:{px(320.0)}px
         pad:{px(9.0)}px stroke:(width:{px(1.0)} color:rule)
-    pub #action width:max-content height:min-content shrink:0
+    pub #action width:max-content height:min-content shrink:0 radius:0px
         pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px) fill:surface font-color:ink font-size:{px(13.0)}px
         stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
         hover { fill:raised } focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) }
         disabled { opacity:0.5 }
-    pub #primary width:max-content height:min-content shrink:0
+    pub #primary width:max-content height:min-content shrink:0 radius:0px
         pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px) fill:inverse font-color:on-inverse font-size:{px(13.0)}px
         focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) }
         disabled { opacity:0.5 }
     pub #input-field
-        fill:surface font-color:ink font-size:{px(14.0)}px stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
+        fill:surface radius:0px font-color:ink font-size:{px(14.0)}px stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
         pad:{px(10.0)}px
         focused { stroke:(width:{px(2.0)} color:accent offset:{px(-1.0)}) }
     pub #area
-        fill:surface font-color:ink font-size:{px(14.0)}px stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
+        fill:surface radius:0px font-color:ink font-size:{px(14.0)}px stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
         pad:{px(10.0)}px
         focused { stroke:(width:{px(2.0)} color:accent offset:{px(-1.0)}) }
 }

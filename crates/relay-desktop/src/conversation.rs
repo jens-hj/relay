@@ -2,9 +2,14 @@
 use crate::{
     buffer,
     controls::{ButtonStyle, button},
+    labels::{
+        RunState, SlidingSegments, SlidingSegmentsProps, StatusGlyph, StatusGlyphProps,
+        UsageReadout, UsageReadoutProps,
+    },
     model::{EditTarget, Model},
     theme::*,
 };
+use mosaic::core::theme::color;
 use mosaic::{
     prelude::*,
     text::{CaretMotion, EditBuffer},
@@ -556,6 +561,28 @@ pub fn Conversation(model: Model) -> Element {
             .into_iter()
             .find(|s| s.id == model.session.get())
     });
+    let header_state = Derived::new(move || {
+        session
+            .get()
+            .map(|s| crate::labels::session_state(&model.snapshot.get(), &s))
+            .unwrap_or(RunState::Unavailable)
+    });
+    let header_id = Derived::new(move || {
+        let snapshot = model.snapshot.get();
+        session
+            .get()
+            .map(|s| {
+                s.issue_id
+                    .as_ref()
+                    .and_then(|id| snapshot.issue(id).ok())
+                    .and_then(|i| i.reference.as_ref().map(|r| format!("#{}", r.number)))
+                    .unwrap_or_else(|| match s.role {
+                        SessionRole::Director => "DIR".into(),
+                        _ => "WKR".into(),
+                    })
+            })
+            .unwrap_or_default()
+    });
     let removed = Derived::new(move || {
         let snapshot = model.snapshot.get();
         session
@@ -585,15 +612,29 @@ pub fn Conversation(model: Model) -> Element {
     });
     let root = view! {
         col width:1fr gap:{px(12.0)}px {
-            row height:{px(52.0)}px shrink:0 align:center gap:{px(10.0)}px
-                pad:(horizontal:{px(24.0)}px vertical:0px)
-                stroke:(width:{px(1.0)} color:edge edges:bottom) {
+            row height:{px(52.0)}px shrink:0 align:center gap:{px(12.0)}px
+                pad:(left:0px right:{px(16.0)}px) stroke:(width:{px(1.0)} color:rule edges:bottom) {
+                row width:max-content min-width:{px(52.0)}px align:center justify:center
+                    pad:(horizontal:{px(10.0)}px vertical:0px)
+                    fill:{color(match header_state.get() {RunState::Running => run_fill, RunState::Waiting => attention_fill, _ => inverse})} {
+                    text text-wrap:none font-size:{px(15.0)}px font-weight:700
+                        font-color:{color(match header_state.get() {RunState::Running => on_run, RunState::Waiting => on_attention, _ => on_inverse})}
+                        {header_id.get()}
+                }
                 row width:1fr height:min-content clip {
                     text font-family:sans-serif font-size:{px(16.0)}px font-weight:650
                         {session.get().map(|s|s.title).unwrap_or_else(|| "Agent".into())}
                 }
-                text font-size:{px(11.0)}px font-color:muted
-                    {session.get().map(|s| if s.fixture {"Fixture".into()} else {s.worker.map(|w| format!("{:?}",w.status)).unwrap_or_else(||"No active agent".into())}).unwrap_or_default()}
+                row width:max-content height:min-content align:center gap:{px(6.0)}px
+                    label:"Session status"
+                    description:{if header_state.get() == RunState::Unavailable {"No active agent"} else {header_state.get().label()}} {
+                    if header_state.get() != RunState::Unavailable {
+                        StatusGlyph state:(header_state)
+                    }
+                    text text-wrap:none font-size:{px(12.0)}px
+                        font-color:{color(header_state.get().text_color())}
+                        {if header_state.get() == RunState::Unavailable {"No active agent"} else {header_state.get().label()}}
+                }
                 button #tree-control @click:{menu.set(!menu.get_untracked());}
                     label:"Session actions" width:{px(30.0)}px "⋯"
             }
@@ -618,15 +659,24 @@ pub fn Conversation(model: Model) -> Element {
                         let worker = current.worker.unwrap();
                         text font-size:{px(12.0)}px font-color:muted
                             {format!("{} · {} · {}",match worker.harness{Harness::Codex=>"Codex",Harness::ClaudeCode=>"Claude Code"},worker.execution.as_ref().map(|e|e.approval).unwrap_or(inherited).label(),if worker.execution.is_some(){"Worker override"}else{"Inherited from director"})}
-                        row height:min-content gap:{px(8.0)}px {
-                            for mode in ApprovalMode::ALL {
-                                let id = session_id.clone();
-                                button #action
-                                    @click:{model.submit(Command::SetWorkerExecution{session_id:id.clone(),execution:Some(ExecutionSettings{approval:mode})},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
-                                    disabled:{!model.connected.get() || model.busy.get()}
-                                    label:{format!("Worker approval: {}",mode.label())}
-                                    {mode.label()}
-                            }
+                        row height:min-content gap:{px(8.0)}px align:center {
+                            let mode_session = session_id.clone();
+                            let mode_index = Derived::new(move || {
+                                let snapshot = model.snapshot.get();
+                                let session = snapshot.sessions.iter().find(|s| s.id == mode_session);
+                                let inherited = session.and_then(|s| snapshot.directors.iter().find(|d| d.id == s.director_id)).and_then(|d| snapshot.effective_profile(d).ok()).map(|p| p.execution.approval).unwrap_or_default();
+                                let mode = session.and_then(|s| s.worker.as_ref()).and_then(|w| w.execution.as_ref()).map(|e| e.approval).unwrap_or(inherited);
+                                ApprovalMode::ALL.iter().position(|m| *m == mode).unwrap_or(0)
+                            });
+                            let choose_session = session_id.clone();
+                            let choose: crate::labels::Select = Rc::new(move |slot: usize| {
+                                model.submit(Command::SetWorkerExecution{session_id:choose_session.clone(),execution:Some(ExecutionSettings{approval:ApprovalMode::ALL[slot]})},model.snapshot.get_untracked().revision,crate::model::Saved::Action);
+                            });
+                            SlidingSegments name:("Worker approval".to_string())
+                                options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
+                                index:(mode_index) select:(choose) attention:(None)
+                                cell-width:(120.0)
+                                disabled:(Derived::new(move || !model.connected.get() || model.busy.get()))
                             button #action
                                 @click:{model.submit(Command::SetWorkerExecution{session_id:session_id.clone(),execution:None},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
                                 disabled:{!model.connected.get() || model.busy.get()}
@@ -672,7 +722,14 @@ pub fn Conversation(model: Model) -> Element {
                             {session.get().map(|s|workspace_review(&s,details.get()=="changes")).unwrap_or_default()}
                         text font-size:{px(12.0)}px
                             {
-                            session.get().and_then(|s|s.worker).map(|w| if details.get()=="changes" { w.changes.map(|c|format!("{}\n{}{}",c.files.join("\n"),c.diff,if c.truncated {"\nReview truncated"}else{""})).unwrap_or_else(||"Changes unavailable".into()) } else {format!("Branch: {}\nBase: {}\nWorktree: {}\nThread: {}\n{}",w.branch.unwrap_or_default(),w.base_commit.unwrap_or_default(),w.worktree.unwrap_or_default(),w.thread_id.unwrap_or_default(),w.usage.map(|u|format!("Latest turn: {} input · {} cached · {} output tokens",u.input_tokens,u.cached_input_tokens,u.output_tokens)).unwrap_or_else(||"Usage unavailable · cache expiry unknown".into()))}).unwrap_or_else(||"No execution metadata".into())
+                            session.get().and_then(|s|s.worker).map(|w| if details.get()=="changes" { w.changes.map(|c|format!("{}\n{}{}",c.files.join("\n"),c.diff,if c.truncated {"\nReview truncated"}else{""})).unwrap_or_else(||"Changes unavailable".into()) } else {format!("Branch: {}\nBase: {}\nWorktree: {}\nThread: {}\n{}",w.branch.unwrap_or_default(),w.base_commit.unwrap_or_default(),w.worktree.unwrap_or_default(),w.thread_id.unwrap_or_default(),if w.usage.is_some() {""} else {"Usage unavailable for the latest turn"})}).unwrap_or_else(||"No execution metadata".into())
+                        }
+                        if details.get() == "usage" {
+                            for (_, usage) in {session.get().and_then(|s| s.worker).and_then(|w| w.usage).map(|u| (format!("{}-{}-{}", u.input_tokens, u.cached_input_tokens, u.output_tokens), u)).into_iter().collect::<Vec<_>>()} {
+                                col height:min-content pad:(top:{px(10.0)}px) {
+                                    UsageReadout usage:(usage.clone())
+                                }
+                            }
                         }
                     }
                 } as review
@@ -703,7 +760,13 @@ pub fn Conversation(model: Model) -> Element {
                     for (_, permission) in {model.snapshot.get().tool_permissions.into_iter().filter(|p|p.session_id == model.session.get() && p.decision.is_none() && !p.expired).map(|p|(p.id.clone(),p)).collect::<Vec<_>>()} {
                         let permission = State::new(permission.clone());
                         col height:min-content shrink:0 gap:{px(8.0)}px
-                            pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) {
+                            pad:(horizontal:{px(16.0)}px vertical:{px(12.0)}px) fill:surface
+                            stroke:(width:{px(1.0)} color:attention-text offset:{px(-1.0)})
+                            stroke:+(width:{px(4.0)} color:attention-text edges:left)
+                            label:"Approval request" {
+                            text font-size:{px(11.0)}px font-color:attention-text
+                                text-transform:uppercase letter-spacing:{px(0.6)}px
+                                "Waiting for approval"
                             text font-family:sans-serif font-size:{px(14.0)}px font-weight:650
                                 {format!("Approval requested · {}",permission.get().tool)}
                             scroll max-height:{px(140.0)}px {
@@ -713,6 +776,8 @@ pub fn Conversation(model: Model) -> Element {
                                 for (label, allow) in [("Allow once",true),("Deny",false)] {
                                     button #action
                                         @click:{let p=permission.get_untracked(); model.submit(Command::RespondPermission{permission_id:p.id,run_id:p.run_id,allow},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
+                                        fill:{color(if allow {attention_fill} else {surface})}
+                                        font-color:{color(if allow {on_attention} else {ink})}
                                         disabled:{!model.connected.get() || model.busy.get()}
                                         label:{format!("{} tool request",label)} (label)
                                 }
@@ -722,9 +787,15 @@ pub fn Conversation(model: Model) -> Element {
                     for (_, queued) in {model.snapshot.get().submissions.into_iter().filter(|s|s.session_id==model.session.get() && matches!(s.state,SubmissionState::Queued|SubmissionState::Paused)).map(|s|(s.id.clone(),s)).collect::<Vec<_>>()} {
                         let queued_id = State::new(queued.id.clone());
                         col height:min-content gap:{px(6.0)}px pad:{px(10.0)}px
-                            stroke:(width:{px(1.0)} color:edge edges:left) {
-                            text font-size:{px(11.0)}px font-color:muted
-                                {format!("{:?}",model.snapshot.get().submissions.iter().find(|s|s.id==queued_id.get()).map(|s|s.state.clone()).unwrap_or(SubmissionState::Cancelled))}
+                            stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) {
+                            row height:min-content gap:{px(8.0)}px align:center {
+                                text font-size:{px(11.0)}px font-color:on-inverse fill:inverse
+                                    pad:(horizontal:{px(6.0)}px vertical:{px(2.0)}px)
+                                    {model.snapshot.get().submissions.iter().filter(|s|s.session_id==model.session.get() && matches!(s.state,SubmissionState::Queued|SubmissionState::Paused)).position(|s|s.id==queued_id.get()).map(|i| format!("{:02}", i + 1)).unwrap_or_default()}
+                                text font-size:{px(11.0)}px font-color:muted
+                                    text-transform:uppercase letter-spacing:{px(0.6)}px
+                                    {match model.snapshot.get().submissions.iter().find(|s|s.id==queued_id.get()).map(|s|s.state.clone()) {Some(SubmissionState::Paused) => "Paused", _ => "Queued"}}
+                            }
                             text font-size:{px(14.0)}px
                                 {model.snapshot.get().submissions.iter().find(|s|s.id==queued_id.get()).map(|s|plain_text(&s.parts)).unwrap_or_default()}
                             if model.snapshot.get().submissions.iter().find(|s|s.id==queued_id.get()).is_some_and(|s|s.error.is_some()) {
@@ -800,7 +871,7 @@ pub fn Conversation(model: Model) -> Element {
             }
             row height:min-content min-height:{px(28.0)}px align:center
                 pad:(horizontal:{px(24.0)}px vertical:{px(6.0)}px) shrink:0 {
-                text width:1fr font-size:{px(10.0)}px font-color:muted
+                text width:1fr font-size:{px(11.0)}px font-color:muted
                     {
                     let state=model.buffer.get();
                     if !state.uploads.is_empty(){"Uploading inline files…"}else if let Some(doc)=state.documents.get(&model.session.get()) {if doc.finalize.is_some() || doc.submitting {"Sending…"}else if doc.saving.is_some(){"Saving draft…"}else if !state.connected {"Draft retained locally"}else{"Ctrl/Cmd+Enter sends · Enter adds a line"}}else{"Ctrl/Cmd+Enter sends · Enter adds a line"}
@@ -1034,7 +1105,7 @@ fn DraftPart(model: Model, controller: ControllerState, part: Part, mirror: bool
             });
             view! {
                 col height:min-content gap:{px(6.0)}px pad:(left:{px(14.0)}px)
-                    stroke:(width:{px(2.0)} color:accent-soft edges:left) {
+                    stroke:(width:{px(2.0)} color:rule edges:left) {
                     row height:min-content gap:{px(8.0)}px {
                         button #tree-control
                             @click:{go_to_source(model,&source_controller.get_untracked(),&anchor.get_untracked());}
@@ -1206,7 +1277,7 @@ fn BufferText(
                 .map(|(start, _)| {
                     mosaic::text::ColorSpan::new(
                         start..start + query.len(),
-                        mosaic::core::theme::color(accent),
+                        mosaic::core::theme::color(attention_text),
                     )
                 })
                 .collect()
