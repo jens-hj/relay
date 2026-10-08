@@ -22,6 +22,7 @@ pub fn SlidingSegments(
     cell_width: f32,
     disabled: Derived<bool>,
     #[prop(default = false)] fill_width: bool,
+    #[prop(default = true)] framed: bool,
 ) -> Element {
     let count = options.len().max(1);
     let focus: Rc<RefCell<BTreeMap<usize, Element>>> = Rc::default();
@@ -33,7 +34,8 @@ pub fn SlidingSegments(
             width:{if fill_width {Dimension::Fill} else {Dimension::Px(px(cell_width*count as f32))}}
             min-width:{px(if fill_width {cell_width*count as f32} else {0.0})}px max-width:100%
             height:{px(34.0)}px shrink:0 @layout:{move |rect:Rect|width.set(rect.size.width)}
-            fill:surface.panel stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)})
+            fill:surface.panel
+            stroke:(width:{px(if framed {1.0} else {0.0})} color:rule.line offset:{px(-1.0)})
             label:{group.get()} {
             el nohit width:{width.get()/count as f32}px height:fill
                 fill:{color(if is_attention() {attention.fill} else {ink.inverse})}

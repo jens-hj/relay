@@ -4182,6 +4182,64 @@ fn profile_header_counts_real_overrides_and_keeps_its_geometry() {
 }
 
 #[test]
+fn profile_field_headers_contain_their_text_and_controls() {
+    for (width, scale) in [(1380.0, 1.0), (1180.0, 1.0), (820.0, 1.0), (760.0, 2.0)] {
+        let mounted = mount(false, width);
+        mounted
+            ._scope
+            .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
+        mounted.model.preferences.update(|p| p.scale = scale);
+        mounted.model.open_director_profile("director-main".into());
+        for overrides in [false, true] {
+            if overrides {
+                mounted.model.modify_profile("harness", |_| {});
+                mounted.model.modify_profile("execution", |_| {});
+                mounted.model.modify_profile("scope", |_| {});
+                mounted.model.modify_profile("max_workers", |_| {});
+            }
+            mounted.settle();
+            let snapshot = mounted.ui.inspection_snapshot();
+            for title in [
+                "Agent harness",
+                "Execution approval",
+                "Scope",
+                "Concurrent workers",
+            ] {
+                let label = format!("{title} field header");
+                let head = snapshot
+                    .nodes
+                    .iter()
+                    .find(|n| n.label.as_deref() == Some(&label))
+                    .unwrap();
+                for node in &snapshot.nodes {
+                    let mut parent = node.parent;
+                    while let Some(id) = parent {
+                        if id == head.id {
+                            let rect = node.rect;
+                            if rect.size.width > 0.0 && rect.size.height > 0.0 {
+                                assert!(
+                                    rect.origin.x >= head.rect.origin.x - 1.0
+                                        && rect.origin.x + rect.size.width
+                                            <= head.rect.origin.x + head.rect.size.width + 1.0
+                                        && rect.origin.y >= head.rect.origin.y - 1.0
+                                        && rect.origin.y + rect.size.height
+                                            <= head.rect.origin.y + head.rect.size.height + 1.0,
+                                    "{label} at {width}px, scale {scale}, overrides {overrides}: {:?} {rect:?} outside {:?}",
+                                    node.label,
+                                    head.rect
+                                );
+                            }
+                            break;
+                        }
+                        parent = snapshot.nodes.iter().find(|n| n.id == id).unwrap().parent;
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn session_header_and_run_strip_show_only_recorded_values() {
     let mounted = mount(false, 1380.0);
     let mut snapshot = live_snapshot();

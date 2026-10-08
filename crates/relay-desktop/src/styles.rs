@@ -37,11 +37,11 @@ mosaic::style! {
     pub(crate) #relay.area fill:surface.panel radius:0px font-color:ink.fg font-size:{px(14.0)}px
         stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)}) pad:{px(10.0)}px
         focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-1.0)}) }
-    pub(crate) #relay.scale-stepper width:{px(120.0)}px height:{px(34.0)}px fill:surface.panel radius:0px
-        stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)})
-        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(2.0)}) } {
+    pub(crate) #relay.scale-stepper width:1fr min-width:0px height:{px(34.0)}px fill:surface.panel radius:0px
+        stroke:(width:0px color:rule.line)
+        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) } {
         decrement width:{px(34.0)}px height:fill pad:0px align:center justify:center fill:surface.raised font-color:ink.fg radius:0px stroke:(width:{px(1.0)} color:rule.line edges:right) hover { fill:surface.selected }
-        field width:{px(52.0)}px height:fill align:center justify:center font-size:{px(14.0)}px font-color:ink.fg
+        field width:1fr min-width:{px(52.0)}px height:fill align:center justify:center font-size:{px(14.0)}px font-color:ink.fg
         increment width:{px(34.0)}px height:fill pad:0px align:center justify:center fill:surface.raised font-color:ink.fg radius:0px stroke:(width:{px(1.0)} color:rule.line edges:left) hover { fill:surface.selected }
     }
 
@@ -65,9 +65,9 @@ mosaic::style! {
     // A header bar cell, separated from the next by a rule.
     pub(crate) #relay.cell height:fill pad:(horizontal:{px(14.0)}px vertical:0px) justify:center
         gap:{px(3.0)}px stroke:(width:{px(1.0)} color:rule.line edges:right)
-    // A framed module: panel fill inside a 1px rule.
+    // Keep the frame outside the panel so flush child fills cannot cover it.
     pub(crate) #relay.module height:min-content fill:surface.panel
-        stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)})
+        stroke:(width:{px(1.0)} color:rule.line offset:{px(0.5)})
     // The 30px key header of a module.
     pub(crate) #relay.module-head height:{px(30.0)}px shrink:0 align:center justify:between
         pad:(horizontal:{px(12.0)}px vertical:0px) stroke:(width:{px(1.0)} color:rule.line edges:bottom)

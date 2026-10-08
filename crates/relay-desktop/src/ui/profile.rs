@@ -66,13 +66,17 @@ pub(crate) fn Profiles(model: Model) -> Element {
             }
             row height:min-content shrink:0
                 pad:(left:{gutter.get()}px right:{gutter.get()}px bottom:{px(16.0)}px) {
-                row #relay.module height:{px(50.0)}px align:center gap:{px(12.0)}px
-                    pad:(left:{px(14.0)}px right:{px(8.0)}px) label:"Save bar" {
-                    row #relay.caption width:1fr min-width:0px height:min-content clip {
+                row #relay.module height:{px(50.0)}px align:center gap:0px pad:0px
+                    label:"Save bar" {
+                    row #relay.caption width:1fr min-width:0px height:min-content clip
+                        pad:(horizontal:{px(14.0)}px vertical:0px) {
                         text text-wrap:none "Explicit overrides survive project default changes"
                     }
-                    button #relay.primary @click:{ model.save_profile(); }
+                    button #relay.primary @click:{ model.save_profile(); } height:fill
+                        pad:(horizontal:{px(16.0)}px vertical:0px)
+                        stroke:(width:{px(1.0)} color:rule.line edges:left)
                         disabled:{ model.busy.get() || !model.connected.get() } label:"Save profile"
+                        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
                         "Save profile"
                 }
             }
@@ -259,12 +263,13 @@ fn FieldHead(
     #[prop(optional)] children: Children,
 ) -> Element {
     let width = State::new(0.0f32);
-    let wide = Derived::new(move || width.get() >= px(400.0));
+    let wide = Derived::new(move || width.get() >= px(480.0));
     view! {
         grid #relay.module-head @layout:{move |rect:Rect| width.set(rect.size.width)}
-            content-align:(x:start y:center) items-align:(x:start y:center)
+            label:{format!("{title} field header")} content-align:(x:start y:center)
+            items-align:(x:start y:center)
             height:{if wide.get() {px(30.0).into()} else {Dimension::MinContent}} pad:0px gap:0px
-            rows:{GridTracks::new([GridTrack::fr(1.0)])}
+            rows:{if wide.get() {GridTracks::new([GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::MinContent, GridTrack::MinContent, GridTrack::MinContent])}}
             cols:{if wide.get() {GridTracks::new([GridTrack::fr(1.0), GridTrack::MaxContent, GridTrack::MaxContent])} else {GridTracks::new([GridTrack::fr(1.0)])}} {
             row #relay.eyebrow height:{if wide.get() {Dimension::Fill} else {Dimension::MinContent}}
                 min-height:{px(30.0)}px min-width:0px align:center
@@ -282,8 +287,9 @@ fn FieldHead(
                 width:{if wide.get() {Dimension::MaxContent} else {Dimension::Fill}} align:center
                 gap:0px
                 stroke:(width:{px(if wide.get() {1.0} else {0.0})} color:rule.hair edges:left) {
-                row #relay.caption height:min-content width:1fr min-width:0px
-                    pad:(horizontal:{px(12.0)}px vertical:0px) {
+                row #relay.caption height:min-content
+                    width:{if wide.get() {Dimension::MaxContent} else {Dimension::Fill}}
+                    min-width:0px pad:(horizontal:{px(12.0)}px vertical:0px) {
                     text
                         { if wide.get() {model.origin(field)} else if model.origin(field) == "Director override" {"Override"} else {"Default"} }
                 }
