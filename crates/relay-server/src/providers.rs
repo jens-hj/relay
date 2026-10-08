@@ -3,6 +3,7 @@
 //! Journal keys (values are JSON unless noted): `board` = resolved BoardSource;
 //! `issue/<task-id>` = IssueRef; `membership/<task-id>` = remote item ID (plain);
 //! `status/<task-id>` and `edit/<task-id>` = `confirmed` (plain).
+//! `column/<local-column-id>` = resolved remote column ID (plain).
 //! `pending` = key of an in-flight write (plain). It is persisted *before* a write;
 //! an interrupted/ambiguous write cannot replay until that key has a known result.
 //! Reconciliation must supply the exact result type above, never an arbitrary OK.
@@ -172,6 +173,12 @@ fn merge(
     board.columns = remote.board.columns.clone();
     board.last_synced_at = Some(crate::now());
     board.error = None;
+    for connection in &mut snapshot.connections {
+        if matches!(&connection.kind, ConnectionKind::Board { board_id } if board_id == id) {
+            connection.state = ConnectionState::Ready;
+            connection.error = None;
+        }
+    }
     Ok(())
 }
 fn operation(snapshot: &Snapshot, id: &str) -> Result<ProjectOperation, Error> {
@@ -564,6 +571,15 @@ fn check_issue_permissions(config: &RuntimeConfig, reference: &IssueRef) -> Resu
     check_repository(config, &source, &reference.repository)
 }
 fn writable(board: &RemoteBoard) -> Result<(), Error> {
+    if board
+        .label_lists
+        .iter()
+        .any(|(_, label)| label.contains(','))
+    {
+        return Err(Error::invalid(
+            "GitLab boards with comma-containing label names are read-only",
+        ));
+    }
     if board.writable {
         Ok(())
     } else {
@@ -764,6 +780,27 @@ fn attach_task(
     )?;
     if item.is_empty() {
         return Err(Error::invalid("Reconciled membership ID must not be empty"));
+    }
+    if let OperationKind::CreateTask { board_id, .. } = &op.kind {
+        // Board addition is confirmed; status is still unconfirmed. Publication
+        // intentionally retains the local membership until its final swap.
+        workspace.update_project(|s| {
+            if let Some(member) = s
+                .memberships
+                .iter_mut()
+                .find(|m| m.board_id == *board_id && m.issue_id == task.id)
+            {
+                member.remote_item_id = Some(item.clone());
+            } else {
+                s.memberships.push(BoardMembership {
+                    board_id: board_id.clone(),
+                    issue_id: task.id.clone(),
+                    column_ids: Vec::new(),
+                    remote_item_id: Some(item.clone()),
+                });
+            }
+            Ok(())
+        })?;
     }
     confirmed(step(
         workspace,

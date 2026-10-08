@@ -255,6 +255,9 @@ fn gitlab_group_board_imports_multiple_label_memberships_closed_and_open() {
     ));
     let fake = Fake::new(steps);
     let board = metadata(&fake.config(), &gl_source(true)).unwrap();
+    assert!(
+        matches!(&board.board.source, BoardSource::Gitlab { url, .. } if url == "https://gitlab.example/groups/group/-/boards/2")
+    );
     let tasks = tasks(&fake.config(), &board).unwrap();
     assert_eq!(tasks[0].columns, ["gitlab-list-3", "gitlab-list-4"]);
     assert_eq!(tasks[1].columns, ["gitlab-closed"]);
@@ -1093,4 +1096,90 @@ fn paginated_collection_budget_is_bounded_across_responses() {
     let mut budget = ReadBudget::new();
     budget.started = std::time::Instant::now() - Duration::from_secs(121);
     assert!(budget.check().is_err());
+}
+
+#[tokio::test]
+async fn create_task_keeps_accepted_reference_and_membership_when_status_outcome_is_unknown() {
+    let mut steps = gh_metadata();
+    steps.push(("repos/elsewhere/repo --method GET", writable_repo(), 0));
+    steps.push((
+        "--method POST",
+        json!({"number":1,"html_url":"https://github.com/elsewhere/repo/issues/1"}),
+        0,
+    ));
+    steps.push(("repos/elsewhere/repo --method GET", writable_repo(), 0));
+    steps.push(("issues/1", json!({"node_id":"NODE1"}), 0));
+    steps.push((
+        "addProjectV2ItemById",
+        json!({"data":{"addProjectV2ItemById":{"item":{"id":"ITEM1"}}}}),
+        0,
+    ));
+    steps.push(("updateProjectV2ItemFieldValue", json!({}), 1));
+    let fake = Fake::new(steps);
+    let (_temp, workspace) = workspace(fake.config()).await;
+    install_task(
+        &workspace,
+        sample_operation(OperationKind::CreateTask {
+            board_id: "board".into(),
+            issue_id: "task".into(),
+        }),
+        pending_task(),
+        board_record(gh_source()),
+    );
+    workspace
+        .update_project(|s| {
+            s.memberships.retain(|m| m.issue_id != "task");
+            Ok(())
+        })
+        .unwrap();
+    assert!(execute(&workspace, "operation").is_err());
+    let snapshot = workspace.snapshots.borrow();
+    assert!(
+        snapshot
+            .issues
+            .iter()
+            .find(|i| i.id == "task")
+            .unwrap()
+            .reference
+            .is_some()
+    );
+    let member = snapshot
+        .memberships
+        .iter()
+        .find(|m| m.issue_id == "task")
+        .unwrap();
+    assert_eq!(member.remote_item_id.as_deref(), Some("ITEM1"));
+    assert!(member.column_ids.is_empty());
+    assert_eq!(
+        operation(&snapshot, "operation").unwrap().state,
+        OperationState::NeedsReconciliation
+    );
+}
+#[test]
+fn authoritative_merge_returns_board_connection_to_ready() {
+    let fake = Fake::new(gh_metadata());
+    let mut remote = metadata(&fake.config(), &gh_source()).unwrap();
+    remote.board.id = "board".into();
+    remote.board.project_id = "project".into();
+    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    snapshot.boards.push(remote.board.clone());
+    snapshot.connections.push(ProjectConnection {
+        id: "board-connection".into(),
+        project_id: "project".into(),
+        name: "Board".into(),
+        kind: ConnectionKind::Board {
+            board_id: "board".into(),
+        },
+        enabled: true,
+        state: ConnectionState::Pending,
+        error: Some("Old failure".into()),
+    });
+    merge(&mut snapshot, "board", &remote, vec![]).unwrap();
+    let connection = snapshot
+        .connections
+        .iter()
+        .find(|c| c.id == "board-connection")
+        .unwrap();
+    assert_eq!(connection.state, ConnectionState::Ready);
+    assert_eq!(connection.error, None);
 }

@@ -4,6 +4,12 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 pub(super) fn escaped(s: &str) -> String {
     utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
 }
+fn board_url(host: &str, group: bool, path: &str, number: u64) -> String {
+    format!(
+        "https://{host}/{}{path}/-/boards/{number}",
+        if group { "groups/" } else { "" }
+    )
+}
 pub(super) fn rest(
     config: &RuntimeConfig,
     host: &str,
@@ -204,7 +210,7 @@ pub(super) fn metadata(config: &RuntimeConfig, source: &BoardSource) -> Result<R
                 group: *group,
                 path: path.clone(),
                 number: *number,
-                url: format!("https://{host}/{path}/-/boards/{number}"),
+                url: board_url(host, *group, path, *number),
             },
             columns,
             last_synced_at: None,
@@ -303,7 +309,7 @@ pub(super) fn create_board(
         group: *group,
         path: path.clone(),
         number,
-        url: format!("https://{host}/{path}/-/boards/{number}"),
+        url: board_url(host, *group, path, number),
     })
 }
 pub(super) fn move_task(
