@@ -59,6 +59,7 @@ pub struct Model {
     pub project: State<String>,
     pub discovery_requests: State<Option<UnboundedSender<BoardSource>>>,
     pub discovery: State<crate::project_network::DiscoveryUpdate>,
+    pub publish_drafts: State<std::collections::BTreeMap<String, crate::projects::PublishDraft>>,
     pub project_draft: State<crate::projects::ProjectDraft>,
     pub workspace_selection: State<Option<Vec<String>>>,
     pub expanded_projects: State<BTreeSet<String>>,
@@ -117,6 +118,7 @@ impl Model {
             project: State::new(String::new()),
             discovery_requests: State::new(None),
             discovery: State::new(Default::default()),
+            publish_drafts: State::new(Default::default()),
             project_draft: State::new(Default::default()),
             workspace_selection: State::new(None),
             expanded_projects: State::new(BTreeSet::new()),
@@ -717,6 +719,24 @@ impl Model {
                 Saved::Start(prompt)
             },
         );
+    }
+    pub fn discover_destination(&self, source: BoardSource) {
+        self.discovery.set(crate::project_network::DiscoveryUpdate {
+            source: Some(source.clone()),
+            result: None,
+        });
+        if self
+            .discovery_requests
+            .get_untracked()
+            .is_none_or(|sender| sender.send(source.clone()).is_err())
+        {
+            self.discovery.set(crate::project_network::DiscoveryUpdate {
+                source: Some(source),
+                result: Some(Err(
+                    "Cannot read destination statuses. Reconnect and try again.".into(),
+                )),
+            });
+        }
     }
     pub fn selected_board(&self) -> Option<Board> {
         let snapshot = self.snapshot.get();

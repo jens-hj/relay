@@ -33,6 +33,32 @@ impl Default for ConnectionDraft {
     }
 }
 
+#[derive(Clone)]
+pub struct PublishDraft {
+    pub github: bool,
+    pub group: bool,
+    pub host: String,
+    pub path: String,
+    pub number: String,
+    pub title: String,
+    pub mappings: std::collections::BTreeMap<String, String>,
+    pub repositories: std::collections::BTreeMap<String, String>,
+}
+impl Default for PublishDraft {
+    fn default() -> Self {
+        Self {
+            github: true,
+            group: false,
+            host: "gitlab.com".into(),
+            path: String::new(),
+            number: "0".into(),
+            title: String::new(),
+            mappings: Default::default(),
+            repositories: Default::default(),
+        }
+    }
+}
+
 #[component]
 pub fn ProjectPage(model: Model) -> Element {
     view! {
@@ -417,14 +443,14 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
             .find(|o| o.id == id.get())
             .unwrap_or_else(|| fallback.clone())
     });
-    let key = State::new(
+    let key = Derived::new(move || {
         operation
-            .get_untracked()
+            .get()
             .results
             .get("pending")
             .cloned()
-            .unwrap_or_default(),
-    );
+            .unwrap_or_default()
+    });
     let result = State::new(String::new());
     view! {
         col height:min-content gap:{px(6.0)}px {
@@ -439,30 +465,150 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
             if operation.get().state==OperationState::NeedsReconciliation {
                 text font-size:{px(12.0)}px
                     "Confirm the provider result before continuing. Inspect the remote board or issue; do not repeat an unknown write."
-                text
-                    {operation.get().results.iter().map(|(key,value)|format!("{key}: {value}")).collect::<Vec<_>>().join("\n")}
-                input #input-field label:"Provider operation key" key
-                input #input-field label:"Confirmed provider result" result
+                text font-size:{px(12.0)}px font-color:muted
+                    {reconciliation_instruction(&key.get())}
+                text font-size:{px(12.0)}px font-color:muted
+                    {key.get().split_once('/').and_then(|(_,id)|model.snapshot.get().issues.into_iter().find(|i|i.id==id)).map(|i|format!("{}\n{}",i.title,i.reference.map(|r|r.url).or_else(||operation.get().results.get(&format!("issue/{}",i.id)).and_then(|json|serde_json::from_str::<IssueRef>(json).ok()).map(|r|r.url)).unwrap_or_default())).unwrap_or_default()}
+                if !key.get().starts_with("status/") && !key.get().starts_with("edit/") {
+                    input #input-field label:"Confirmed provider result"
+                        placeholder:{if key.get()=="board" || key.get().starts_with("issue/"){ "Confirmed destination or issue URL" }else{"Confirmed board item ID"}}
+                        result
+                }
                 button #action
-                    @click:{model.action(Command::ReconcileOperation{operation_id:id.get_untracked(),key:key.get_untracked(),result:result.get_untracked()});}
-                    disabled:{model.busy.get() || !model.connected.get() || key.get().trim().is_empty() || result.get().trim().is_empty()}
+                    @click:{match reconciliation_result(&operation.get_untracked(),&key.get_untracked(),&result.get_untracked()){Ok(result)=>model.action(Command::ReconcileOperation{operation_id:id.get_untracked(),key:key.get_untracked(),result}),Err(error)=>model.notice.set(error)}}
+                    disabled:{model.busy.get() || !model.connected.get() || key.get().is_empty() || ((!key.get().starts_with("status/") && !key.get().starts_with("edit/")) && result.get().trim().is_empty())}
                     "Confirm provider result"
             }
         }
     }
 }
 
+fn reconciliation_instruction(key: &str) -> &'static str {
+    if key == "board" {
+        "Find the destination board created by this publish operation and enter its URL."
+    } else if key.starts_with("issue/") {
+        "Find the issue created for this task in its selected repository and enter its URL."
+    } else if key.starts_with("membership/") {
+        "Find the task's existing board item and enter its item ID. Confirm the item belongs to the selected task and destination."
+    } else if key.starts_with("status/") {
+        "Inspect the remote task's status. Confirm only if the requested move has already completed."
+    } else if key.starts_with("edit/") {
+        "Inspect the remote task's title and body. Confirm only if the requested edit has already completed."
+    } else {
+        "The server has not provided a recoverable step. Review the operation with the server administrator."
+    }
+}
+
+fn reconciliation_result(
+    operation: &ProjectOperation,
+    key: &str,
+    input: &str,
+) -> Result<String, String> {
+    if key.starts_with("status/") || key.starts_with("edit/") {
+        return Ok("confirmed".into());
+    }
+    if key.starts_with("membership/") {
+        return if input.trim().is_empty() {
+            Err("Enter the confirmed board item ID.".into())
+        } else {
+            Ok(input.trim().into())
+        };
+    }
+    let url = reqwest::Url::parse(input.trim())
+        .map_err(|_| "Enter the confirmed provider URL.".to_owned())?;
+    if !matches!(url.scheme(), "https" | "http") {
+        return Err("Enter an HTTP or HTTPS provider URL.".into());
+    }
+    if key == "board" {
+        let OperationKind::Publish { target, .. } = &operation.kind else {
+            return Err("This operation has no publication destination.".into());
+        };
+        let number = url
+            .path_segments()
+            .and_then(|segments| segments.filter(|s| !s.is_empty()).next_back())
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .ok_or("The destination URL must end in its board number.")?;
+        let mut source = target.source.clone();
+        match &mut source {
+            BoardSource::Github {
+                number: n, url: u, ..
+            }
+            | BoardSource::Gitlab {
+                number: n, url: u, ..
+            } => {
+                *n = number;
+                *u = url.to_string();
+            }
+            BoardSource::Local => return Err("Select a remote publication destination.".into()),
+        }
+        return serde_json::to_string(&source).map_err(|e| e.to_string());
+    }
+    if key.starts_with("issue/") {
+        let (repository, number, provider) =
+            if let Some((repo, number)) = url.path().rsplit_once("/-/issues/") {
+                (repo, number, Provider::Gitlab)
+            } else if url.host_str() == Some("github.com") {
+                let (repo, number) = url
+                    .path()
+                    .rsplit_once("/issues/")
+                    .ok_or("Enter the created GitHub issue URL.")?;
+                (repo, number, Provider::Github)
+            } else {
+                return Err("Enter the created GitHub or GitLab issue URL.".into());
+            };
+        let number = number
+            .trim_end_matches('/')
+            .parse::<u64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or("The issue URL must include its issue number.")?;
+        return serde_json::to_string(&IssueRef {
+            provider,
+            repository: repository.trim_start_matches('/').into(),
+            number,
+            url: url.to_string(),
+        })
+        .map_err(|e| e.to_string());
+    }
+    Err("The server has not provided a supported reconciliation step.".into())
+}
+
 #[component]
 fn Publish(model: Model) -> Element {
-    let github = State::new(true);
-    let group = State::new(false);
-    let host = State::new("gitlab.com".to_owned());
-    let path = State::new(String::new());
-    let number = State::new("0".to_owned());
-    let title = State::new(model.selected_board().map(|b| b.name).unwrap_or_default());
-    let mappings = State::new(std::collections::BTreeMap::<String, String>::new());
-    let repositories = State::new(std::collections::BTreeMap::<String, String>::new());
-    let manual = State::new(false);
+    let board_id = State::new(model.selected_board().map(|b| b.id).unwrap_or_default());
+    let draft = model
+        .publish_drafts
+        .get_untracked()
+        .get(&board_id.get_untracked())
+        .cloned()
+        .unwrap_or_else(|| PublishDraft {
+            title: model.selected_board().map(|b| b.name).unwrap_or_default(),
+            ..Default::default()
+        });
+    let github = State::new(draft.github);
+    let group = State::new(draft.group);
+    let host = State::new(draft.host);
+    let path = State::new(draft.path);
+    let number = State::new(draft.number);
+    let title = State::new(draft.title);
+    let mappings = State::new(draft.mappings);
+    let repositories = State::new(draft.repositories);
+    Effect::new(move || {
+        let draft = PublishDraft {
+            github: github.get(),
+            group: group.get(),
+            host: host.get(),
+            path: path.get(),
+            number: number.get(),
+            title: title.get(),
+            mappings: mappings.get(),
+            repositories: repositories.get(),
+        };
+        model.publish_drafts.update(|drafts| {
+            drafts.insert(board_id.get_untracked(), draft);
+        });
+    });
     let source = Derived::new(move || {
         number.get().trim().parse::<u64>().ok().map(|number| {
             if github.get() {
@@ -491,36 +637,11 @@ fn Publish(model: Model) -> Element {
         }
     });
     let choices = Derived::new(move || {
-        if number.get().trim() == "0" {
-            if github.get() {
-                [
-                    ("name:Todo", "Todo"),
-                    ("name:In Progress", "In Progress"),
-                    ("name:Done", "Done"),
-                    ("name:No status", "No status"),
-                ]
-                .into_iter()
-                .map(|(id, title)| BoardColumn {
-                    id: id.into(),
-                    title: title.into(),
-                })
-                .collect()
-            } else {
-                [("gitlab-open", "Open"), ("gitlab-closed", "Closed")]
-                    .into_iter()
-                    .map(|(id, title)| BoardColumn {
-                        id: id.into(),
-                        title: title.into(),
-                    })
-                    .collect()
-            }
-        } else {
-            discovered
-                .get()
-                .and_then(Result::ok)
-                .map(|d| d.columns)
-                .unwrap_or_default()
-        }
+        discovered
+            .get()
+            .and_then(Result::ok)
+            .map(|d| d.columns)
+            .unwrap_or_default()
     });
     let previous = State::new(source.get_untracked());
     Effect::new(move || {
@@ -549,9 +670,9 @@ fn Publish(model: Model) -> Element {
             input #input-field label:"Destination owner or path" path
             input #input-field label:"Destination number (0 creates new)" number
             input #input-field label:"Destination title" title
-            if number.get().trim()!="0" {
+            col height:min-content gap:{px(8.0)}px {
                 button #action
-                    @click:{if let (Some(sender),Some(source))=(model.discovery_requests.get_untracked(),source.get_untracked()){model.discovery.set(crate::project_network::DiscoveryUpdate{source:Some(source.clone()),result:None});let _=sender.send(source);}else{model.notice.set("Destination discovery is unavailable.".into());}}
+                    @click:{if let Some(source)=source.get_untracked(){model.discover_destination(source);}}
                     label:"Read destination statuses"
                     disabled:{!model.connected.get() || path.get().trim().is_empty() || source.get().is_none()}
                     "Read destination statuses"
@@ -565,24 +686,18 @@ fn Publish(model: Model) -> Element {
             }
             text font-size:{px(12.0)}px font-color:muted
                 "Map each local column to a destination status or list."
-            button #action @click:{manual.set(!manual.get_untracked());} "Enter status IDs"
             for (_, column) in {model.board_columns().into_iter().map(|c|(c.id.clone(),c))} {
                 let id = State::new(column.id.clone());
                 let column_title = State::new(column.title.clone());
-                let destination = State::new(String::new());
-                {Effect::new(move || mappings.update(|m|{m.insert(id.get(),destination.get());}));}
                 text font-family:sans-serif {column_title.get()}
                 for (_, choice) in {choices.get().into_iter().map(|c|(c.id.clone(),c))} {
                     let choice_id=State::new(choice.id.clone());
-                    let choice_title=State::new(choice.title.clone());
-                    button #action @click:{destination.set(choice_id.get_untracked());}
+                    let choice_title=Derived::new(move || choices.get().iter().find(|c|c.id==choice_id.get()).map(|c|c.title.clone()).unwrap_or_default());
+                    button #action
+                        @click:{mappings.update(|m|{m.insert(id.get_untracked(),choice_id.get_untracked());});}
                         label:{format!("Map {} to {}",column_title.get(),choice_title.get())}
                         fill:if mappings.get().get(&id.get())==Some(&choice_id.get()){accent-soft}else{raised}
                         {choice_title.get()}
-                }
-                if manual.get() {
-                    input #input-field
-                        label:{format!("Destination status for {}",column_title.get())} destination
                 }
             }
             for (_, issue) in {model.snapshot.get().issues.into_iter().filter(|i|model.board_columns().iter().any(|c|model.task_in_column(i,&c.id))).map(|i|(i.id.clone(),i)).collect::<Vec<_>>()} {
@@ -606,14 +721,15 @@ fn Publish(model: Model) -> Element {
                     if let (Some(board),Ok(number))=(model.selected_board(),number.get_untracked().parse::<u64>()) {
                         let columns:Vec<_>=board.columns.iter().map(|c|ColumnMapping{local_id:c.id.clone(),remote_id:mappings.get_untracked().get(&c.id).cloned().unwrap_or_default()}).collect();
                         let tasks:Vec<_>=model.snapshot.get_untracked().issues.iter().filter(|i|board.columns.iter().any(|c|model.task_in_column(i,&c.id))).map(|i|TaskPublication{issue_id:i.id.clone(),repository_connection_id:repositories.get_untracked().get(&i.id).cloned().unwrap_or_default()}).collect();
-                        if path.get_untracked().trim().is_empty() || title.get_untracked().trim().is_empty() || columns.iter().any(|c|c.remote_id.trim().is_empty()) || tasks.iter().any(|t|t.repository_connection_id.is_empty()) {model.notice.set("Choose a destination, column mappings and a repository for every task.".into());} else {
+                        if path.get_untracked().trim().is_empty() || title.get_untracked().trim().is_empty() || columns.iter().any(|c|!choices.get_untracked().iter().any(|choice|choice.id==c.remote_id)) || tasks.iter().any(|t|t.repository_connection_id.is_empty()) {model.notice.set("Choose a destination, column mappings and a repository for every task.".into());} else {
                             let source=if github.get_untracked(){BoardSource::Github{owner:path.get_untracked(),number,url:String::new()}}else{BoardSource::Gitlab{host:host.get_untracked(),group:group.get_untracked(),path:path.get_untracked(),number,url:String::new()}};
                             model.action(Command::PublishBoard{board_id:board.id,target:PublishTarget{source,name:title.get_untracked()},columns,tasks});
                         }
                     } else {model.notice.set("Enter a destination board number, or 0 for a new board.".into());}
                 }
                 label:"Confirm board publication"
-                disabled:{model.busy.get() || !model.connected.get()} "Publish board"
+                disabled:{model.busy.get() || !model.connected.get() || model.selected_board().is_none_or(|b|b.source!=BoardSource::Local) || model.snapshot.get().operations.iter().any(|o|matches!(&o.kind,OperationKind::Publish{board_id:id,..} if id==&board_id.get()) && matches!(o.state,OperationState::Pending|OperationState::Running|OperationState::NeedsReconciliation))}
+                "Publish board"
             Operations model:(model)
         }
     }

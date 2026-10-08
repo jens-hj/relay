@@ -2216,7 +2216,9 @@ fn reconciliation_has_no_retry_and_tracks_live_operation_state() {
         },
         state: OperationState::NeedsReconciliation,
         error: Some("Unknown provider write outcome".into()),
-        results: Default::default(),
+        results: [("pending".into(), "membership/issue-2".into())]
+            .into_iter()
+            .collect(),
     });
     mounted.model.snapshot.set(snapshot);
     mounted.model.page.set(Page::Connections);
@@ -2229,7 +2231,6 @@ fn reconciliation_has_no_retry_and_tracks_live_operation_state() {
             .iter()
             .any(|n| n.label.as_deref() == Some("Retry operation"))
     );
-    type_in(&mounted, "Provider operation key", "membership/issue-2");
     type_in(&mounted, "Confirmed provider result", "remote-item-42");
     mounted.focus("Confirm provider result");
     mounted.click("Confirm provider result");
@@ -2531,14 +2532,30 @@ fn publish_maps_columns_and_task_repositories_without_pretending_board_is_remote
     mounted.settle();
     type_in(&mounted, "Destination owner or path", "team");
     type_in(&mounted, "Destination title", "Published work");
-    mounted.focus("Enter status IDs");
-    mounted.click("Enter status IDs");
+    let source = BoardSource::Github {
+        owner: "team".into(),
+        number: 0,
+        url: String::new(),
+    };
+    mounted
+        .model
+        .discovery
+        .set(crate::project_network::DiscoveryUpdate {
+            source: Some(source.clone()),
+            result: Some(Ok(BoardDiscovery {
+                source,
+                name: "New board defaults".into(),
+                columns: vec![BoardColumn {
+                    id: "provider-default-done".into(),
+                    title: "Done".into(),
+                }],
+            })),
+        });
+    mounted.settle();
     for column in columns {
-        type_in(
-            &mounted,
-            &format!("Destination status for {}", column.title),
-            &format!("name:{}", column.title),
-        );
+        let label = format!("Map {} to Done", column.title);
+        mounted.focus(&label);
+        mounted.click(&label);
     }
     for task in tasks {
         let label = format!("Issue repository Repository for {}", task.title);
@@ -2648,5 +2665,145 @@ fn destination_discovery_uses_server_metadata_and_ignores_a_different_destinatio
     assert_eq!(
         mounted.model.selected_board().unwrap().source,
         BoardSource::Local
+    );
+}
+
+#[test]
+fn new_destination_defaults_come_from_server_and_publish_draft_survives_navigation_errors() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(local_project_snapshot());
+    mounted.model.page.set(Page::Publish);
+    mounted.settle();
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.discovery_requests.set(Some(sender));
+    type_in(&mounted, "Destination owner or path", "team");
+    type_in(&mounted, "Destination title", "New destination");
+    mounted.focus("Read destination statuses");
+    mounted.click("Read destination statuses");
+    let source = requests.try_recv().unwrap();
+    assert!(matches!(&source, BoardSource::Github { number: 0, .. }));
+    mounted
+        .model
+        .discovery
+        .set(crate::project_network::DiscoveryUpdate {
+            source: Some(source.clone()),
+            result: Some(Err("Destination access denied".into())),
+        });
+    mounted.settle();
+    mounted.rect("Destination access denied");
+    mounted.click("Settings");
+    mounted.model.page.set(Page::Publish);
+    mounted.settle();
+    let draft = mounted
+        .model
+        .publish_drafts
+        .get_untracked()
+        .get("board-demo")
+        .unwrap()
+        .clone();
+    assert_eq!(draft.path, "team");
+    assert_eq!(draft.title, "New destination");
+    mounted.rect("Destination access denied");
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Enter status IDs"))
+    );
+    mounted
+        .model
+        .discovery
+        .set(crate::project_network::DiscoveryUpdate {
+            source: Some(source.clone()),
+            result: Some(Ok(BoardDiscovery {
+                source,
+                name: "Default statuses".into(),
+                columns: vec![BoardColumn {
+                    id: "opaque-provider-id".into(),
+                    title: "Ready".into(),
+                }],
+            })),
+        });
+    mounted.settle();
+    mounted.focus("Map Backlog to Ready");
+    mounted.click("Map Backlog to Ready");
+    mounted.click("Settings");
+    mounted.model.page.set(Page::Publish);
+    mounted.settle();
+    assert_eq!(
+        mounted
+            .model
+            .publish_drafts
+            .get_untracked()
+            .get("board-demo")
+            .unwrap()
+            .mappings
+            .get("backlog")
+            .unwrap(),
+        "opaque-provider-id"
+    );
+    assert!(!mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+        n.label
+            .as_deref()
+            .is_some_and(|label| label.contains("opaque-provider-id"))
+    }));
+    drop(requests);
+    mounted.focus("Read destination statuses");
+    mounted.click("Read destination statuses");
+    mounted.rect("Cannot read destination statuses. Reconnect and try again.");
+}
+
+#[test]
+fn board_reconciliation_accepts_a_url_and_builds_the_typed_result_for_the_pending_step() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    snapshot.operations.push(ProjectOperation {
+        id: "publish-url".into(),
+        project_id: "demo".into(),
+        kind: OperationKind::Publish {
+            board_id: "board-demo".into(),
+            target: PublishTarget {
+                source: BoardSource::Github {
+                    owner: "team".into(),
+                    number: 0,
+                    url: String::new(),
+                },
+                name: "Work".into(),
+            },
+            columns: vec![],
+            tasks: vec![],
+        },
+        state: OperationState::NeedsReconciliation,
+        error: Some("Connection lost after board creation".into()),
+        results: [("pending".into(), "board".into())].into_iter().collect(),
+    });
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.page.set(Page::Connections);
+    mounted.settle();
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Provider operation key"))
+    );
+    type_in(
+        &mounted,
+        "Confirmed provider result",
+        "https://github.com/orgs/team/projects/9",
+    );
+    mounted.focus("Confirm provider result");
+    mounted.click("Confirm provider result");
+    let Command::ReconcileOperation { key, result, .. } =
+        mounted.commands.try_recv().unwrap().command
+    else {
+        panic!("Expected reconciliation");
+    };
+    assert_eq!(key, "board");
+    assert!(
+        matches!(serde_json::from_str::<BoardSource>(&result).unwrap(),BoardSource::Github{owner,number:9,url} if owner=="team" && url=="https://github.com/orgs/team/projects/9")
     );
 }
