@@ -3,6 +3,7 @@ use crate::{
     model::{Model, Page, Saved},
     theme::*,
 };
+use mosaic::core::theme::color;
 use mosaic::prelude::*;
 use relay_core::*;
 
@@ -211,7 +212,7 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
             if kind.get() >= 2 {
                 input #input-field label:"Board number" placeholder:"Existing board number" number
             }
-            text font-size:{px(12.0)}px font-color:muted
+            text font-size:{px(12.0)}px font-color:{color(muted)}
                 {if kind.get()==0 {"Repositories are cloned by the server."} else if kind.get()==1 {"Directory access follows the session execution mode."} else {"Connect an existing remote board."}}
             button #action
                 @click:{
@@ -239,12 +240,12 @@ fn Connections(model: Model) -> Element {
                 let fallback=connection.clone();
                 let connection = Derived::new(move || model.snapshot.get().connections.into_iter().find(|c|c.id==id.get()).unwrap_or_else(||fallback.clone()));
                 col height:min-content gap:{px(8.0)}px {
-                    text font-family:sans-serif {connection.get().name}
+                    text font-family:{FontFamily::SansSerif} {connection.get().name}
                     text
                         {format!("{:?}{}",connection.get().state,if connection.get().enabled {""}else{" · disabled"})}
-                    text font-size:{px(12.0)}px font-color:muted
+                    text font-size:{px(12.0)}px font-color:{color(muted)}
                         {match &connection.get().kind {ConnectionKind::Repository{remote,checkout,..}=>format!("{remote}\n{}",checkout.as_deref().unwrap_or("Clone pending")),ConnectionKind::Directory{path}=>path.clone(),ConnectionKind::Board{board_id}=>model.snapshot.get().boards.iter().find(|b| &b.id==board_id).map(|b|source_label(&b.source)).unwrap_or_else(||"Board unavailable".into())}}
-                    text font-color:danger {connection.get().error.unwrap_or_default()}
+                    text font-color:{color(danger)} {connection.get().error.unwrap_or_default()}
                     if !connection.get().enabled {
                         button #action
                             @click:{model.action(Command::RetryConnection{connection_id:id.get_untracked()});}
@@ -514,7 +515,7 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
         col height:min-content gap:{px(6.0)}px {
             text
                 {format!("{} · {:?}",match operation.get().kind{OperationKind::Clone{..}=>"Clone",OperationKind::Sync{..}=>"Sync",OperationKind::Publish{..}=>"Publish",_=>"Task update"},operation.get().state)}
-            text font-color:danger {operation.get().error.unwrap_or_default()}
+            text font-color:{color(danger)} {operation.get().error.unwrap_or_default()}
             if matches!(operation.get().state,OperationState::Failed|OperationState::Interrupted) {
                 button #action
                     @click:{model.action(Command::RetryOperation{operation_id:id.get_untracked()});}
@@ -523,9 +524,9 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
             if operation.get().state==OperationState::NeedsReconciliation {
                 text font-size:{px(12.0)}px
                     "Confirm the provider result before continuing. Inspect the remote board or issue; do not repeat an unknown write."
-                text font-size:{px(12.0)}px font-color:muted
+                text font-size:{px(12.0)}px font-color:{color(muted)}
                     {reconciliation_instruction(&key.get())}
-                text font-size:{px(12.0)}px font-color:muted
+                text font-size:{px(12.0)}px font-color:{color(muted)}
                     {key.get().split_once('/').and_then(|(_,id)|model.snapshot.get().issues.into_iter().find(|i|i.id==id)).map(|i|format!("{}\n{}",i.title,i.reference.map(|r|r.url).or_else(||operation.get().results.get(&format!("issue/{}",i.id)).and_then(|json|serde_json::from_str::<IssueRef>(json).ok()).map(|r|r.url)).unwrap_or_default())).unwrap_or_default()}
                 if key.get()=="board" || key.get().starts_with("issue/") {
                     input #input-field label:"Created board or issue URL" url
@@ -671,7 +672,7 @@ fn Publish(model: Model) -> Element {
                     disabled:{!model.connected.get() || path.get().trim().is_empty() || source.get().is_none()}
                     "Read destination statuses"
                 if discovered.get().is_some() {
-                    text font-size:{px(12.0)}px font-color:muted
+                    text font-size:{px(12.0)}px font-color:{color(muted)}
                         {match discovered.get().unwrap(){Ok(metadata)=>format!("Destination: {}",metadata.name),Err(error)=>error.clone()}}
                 }
                 if model.discovery.get().source==source.get() && model.discovery.get().result.is_none() {
@@ -683,7 +684,7 @@ fn Publish(model: Model) -> Element {
             for (_, column) in {model.board_columns().into_iter().map(|c|(c.id.clone(),c))} {
                 let id = State::new(column.id.clone());
                 let column_title = State::new(column.title.clone());
-                text font-family:sans-serif {column_title.get()}
+                text font-family:{FontFamily::SansSerif} {column_title.get()}
                 for (_, choice) in {choices.get().into_iter().map(|c|(c.id.clone(),c))} {
                     let choice_id=State::new(choice.id.clone());
                     let choice_title=Derived::new(move || choices.get().iter().find(|c|c.id==choice_id.get()).map(|c|c.title.clone()).unwrap_or_default());

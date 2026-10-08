@@ -57,7 +57,7 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                     stroke:(width:{px(1.0)} color:rule edges:bottom) {
                     text font-size:{px(11.0)}px font-color:muted text-transform:uppercase
                         letter-spacing:{px(0.6)}px "Projects"
-                    text font-size:{px(11.0)}px font-color:muted
+                    text font-size:{px(11.0)}px font-color:{color(muted)}
                         {format!("{:02}", model.snapshot.get().projects.len())}
                 }
             }
@@ -91,7 +91,7 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                 row width:1fr height:min-content align:center gap:{px(6.0)}px {
                     el width:{px(7.0)}px height:{px(7.0)}px shrink:0
                         fill:if model.connected.get() {success} else {danger} {}
-                    text font-size:{px(11.0)}px font-color:muted text-wrap:none
+                    text font-size:{px(11.0)}px font-color:{color(muted)} text-wrap:none
                         {if model.connected.get() {"Connected"} else if model.status.get().starts_with("Connecting") {"Connecting…"} else {"Offline"}}
                     tooltip #tree-tooltip summary:"Server connection" side:top {
                         text font-size:{px(12.0)}px {model.status.get()}
@@ -129,7 +129,7 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
                     {
                     icon size:{px(13.0)}px shrink:0 {if open.get() {tree_chevron_down} else {tree_chevron_right}}
                     row #tree-label {
-                        text text-wrap:none font-family:sans-serif font-weight:650 font-size:{px(14.0)}px {name.get()}
+                        text text-wrap:none font-family:{FontFamily::SansSerif} font-weight:{650} font-size:{px(14.0)}px {name.get()}
                     }
                     tooltip #tree-tooltip summary:"Expand or collapse project" {text {name.get()}}
                 }
@@ -269,12 +269,12 @@ fn DirectorTree(model: Model, director_id: String, focus: TreeFocus) -> Element 
                     {
                     icon size:{px(15.0)}px shrink:0 director-icon
                     row #tree-label {
-                        text width:max-content text-wrap:none font-size:{px(12.0)}px {name.get()}
+                        text width:max-content text-wrap:none font-size:{px(12.0)}px font-color:{color(ink)} {name.get()}
                     }
                     tooltip #tree-tooltip summary:"Director" {
                         col height:min-content gap:{px(4.0)}px {
                             text {name.get()}
-                            text font-color:muted font-size:{px(11.0)}px
+                            text font-color:{color(muted)} font-size:{px(11.0)}px
                                 {if model.snapshot.get().sessions.iter().any(|s| s.director_id == id.get() && s.role == SessionRole::Director) {"Open director conversation"} else {"Send first director prompt"}}
                         }
                     }
@@ -366,13 +366,13 @@ fn WorkerTree(model: Model, session_id: String, focus: TreeFocus) -> Element {
             hover { fill:raised } {
             icon size:{px(14.0)}px shrink:0 worker-icon
             row #tree-label {
-                text width:max-content text-wrap:none font-size:{px(12.0)}px {title.get()}
+                text width:max-content text-wrap:none font-size:{px(12.0)}px font-color:{color(if selected.get() {ink} else {muted})} {title.get()}
             }
             StatusGlyph state:(state)
             tooltip #tree-tooltip summary:"Worker" {
                 col height:min-content gap:{px(4.0)}px {
                     text {title.get()}
-                    text font-size:{px(11.0)}px font-color:muted {detail.get()}
+                    text font-size:{px(11.0)}px font-color:{color(muted)} {detail.get()}
                 }
             }
         }

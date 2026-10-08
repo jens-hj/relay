@@ -1,7 +1,10 @@
 use crate::{
     controls::{AppearanceSegments, AppearanceSegmentsProps, ButtonStyle, button},
     conversation::{Conversation, ConversationProps},
-    labels::{Readout, ReadoutProps, RunState, StatusGlyph, StatusGlyphProps, Tag, TagProps},
+    labels::{
+        Readout, ReadoutProps, RunState, SlidingSegments, SlidingSegmentsProps, SlotMeter,
+        SlotMeterProps, StatusGlyph, StatusGlyphProps, Tag, TagProps,
+    },
     model::{EditTarget, Model, Page},
     projects::*,
     sidebar::{Sidebar, SidebarProps},
@@ -35,9 +38,9 @@ fn Settings(model: Model) -> Element {
                         label:"Display settings not saved" {
                         text font-family:sans-serif font-size:{px(15.0)}px font-weight:650
                             font-color:on-attention "Display settings are not being saved"
-                        text font-size:{px(12.0)}px font-color:on-attention
+                        text font-size:{px(12.0)}px font-color:{color(on_attention)}
                             {match model.settings_store.get().persistence {crate::settings::Persistence::Suspended { reason } => crate::settings::suspended_notice(&reason), _ => String::new()}}
-                        text font-size:{px(12.0)}px font-color:on-attention
+                        text font-size:{px(12.0)}px font-color:{color(on_attention)}
                             {model.settings_store.get().path.map(|p| format!("File: {}", p.display())).unwrap_or_default()}
                         row height:min-content gap:{px(8.0)}px {
                             button #action @click:{crate::settings::recover_by_backup(model);}
@@ -48,7 +51,7 @@ fn Settings(model: Model) -> Element {
                     }
                 }
                 if model.settings_store.get().backup.is_some() {
-                    text font-size:{px(12.0)}px font-color:muted
+                    text font-size:{px(12.0)}px font-color:{color(muted)}
                         {model.settings_store.get().backup.map(|b| format!("Previous settings file kept at {}", b.display())).unwrap_or_default()}
                 }
                 col height:min-content gap:{px(10.0)}px {
@@ -60,7 +63,8 @@ fn Settings(model: Model) -> Element {
                             "Disconnected · last checked status retained"
                     }
                     if !model.harness_error.get().is_empty() {
-                        text font-size:{px(12.0)}px font-color:muted {model.harness_error.get()}
+                        text font-size:{px(12.0)}px font-color:{color(muted)}
+                            {model.harness_error.get()}
                     }
                     for (_, harness) in [("codex",Harness::Codex),("claude",Harness::ClaudeCode)] {
                         HarnessCard model:(model) harness:(harness)
@@ -178,11 +182,13 @@ pub fn shell(model: Model) -> Element {
                             justify:between shrink:0
                             stroke:(width:{px(1.0)} color:rule edges:bottom) {
                             col height:min-content gap:{px(4.0)}px {
-                                text font-size:{px(22.0)}px font-weight:650 font-family:sans-serif
+                                text font-size:{px(22.0)}px font-weight:{650}
+                                    font-family:{FontFamily::SansSerif}
                                     {
                                 match model.page.get() { Page::Board => "Project board", Page::Sessions => "Sessions", Page::Directors => "Directors", Page::Settings => "Settings", Page::NewProject => "New Project", Page::Connections => "Project Connections", Page::Publish => "Publish board", Page::DirectorStart => "Director conversation" }
                             }
-                                text font-size:{px(12.0)}px font-color:muted font-family:sans-serif
+                                text font-size:{px(12.0)}px font-color:{color(muted)}
+                                    font-family:{FontFamily::SansSerif}
                                     { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| p.name.clone()).unwrap_or_default() }
                             }
                             if width.get() < px(900.0) {
@@ -201,10 +207,10 @@ pub fn shell(model: Model) -> Element {
                             align:center shrink:0
                             stroke:(width:{px(4.0)} color:attention-text edges:left) {
                             col width:1fr height:min-content gap:{px(4.0)}px {
-                                text font-size:{px(12.0)}px font-color:on-attention
+                                text font-size:{px(12.0)}px font-color:{color(on_attention)}
                                     { model.notice.get() }
                                 if model.can_retry() {
-                                    text font-size:{px(11.0)}px font-color:on-attention
+                                    text font-size:{px(11.0)}px font-color:{color(on_attention)}
                                         { model.retry_summary() }
                                 }
                             }
@@ -236,7 +242,7 @@ pub fn shell(model: Model) -> Element {
                                 col height:min-content pad:{px(32.0)}px gap:{px(12.0)}px {
                                     text font-family:sans-serif font-size:{px(18.0)}px
                                         "Waiting for your workspace"
-                                    text font-color:muted { model.status.get() }
+                                    text font-color:{color(muted)} { model.status.get() }
                                     text font-color:muted
                                         "Start relay-server and connect with its workspace token."
                                 }
@@ -326,7 +332,7 @@ fn Board(model: Model, narrow: Derived<bool>) -> Element {
         col width:1fr pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) gap:{px(12.0)}px {
             scroll {
                 col height:min-content gap:{px(12.0)}px {
-                    text font-size:{px(12.0)}px font-color:muted
+                    text font-size:{px(12.0)}px font-color:{color(muted)}
                         {
                 if let Some(board)=model.selected_board() {board_caption(&board) } else {
                     model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| match &p.github {
@@ -381,10 +387,10 @@ fn BoardColumnView(model: Model, column: BoardColumn) -> Element {
             row height:min-content justify:between align:center
                 pad:(horizontal:{px(2.0)}px vertical:{px(10.0)}px)
                 stroke:(width:{px(1.0)} color:rule edges:bottom) {
-                text font-size:{px(13.0)}px font-weight:650 font-family:sans-serif
+                text font-size:{px(13.0)}px font-weight:{650} font-family:{FontFamily::SansSerif}
                     label:{ format!("Column {}", column_id.get()) }
                     { model.board_columns().iter().find(|c| c.id == column_id.get()).map(|c| c.title.clone()).unwrap_or_default() }
-                text font-size:{px(12.0)}px font-color:muted
+                text font-size:{px(12.0)}px font-color:{color(muted)}
                     { format!("{:02}", issues.get().len()) }
             }
             for (_, issue) in { issues.get().into_iter().map(|i| (i.id.clone(), i)) } {
@@ -436,8 +442,8 @@ fn IssueCard(model: Model, issue: Issue) -> Element {
                     stroke:(width:{px(1.0)} color:edge edges:bottom) {
                     row width:max-content align:center pad:(horizontal:{px(8.0)}px vertical:0px)
                         fill:inverse {
-                        text text-wrap:none font-size:{px(12.0)}px font-weight:700
-                            font-color:on-inverse { issue_number(&current.get()) }
+                        text text-wrap:none font-size:{px(12.0)}px font-weight:{700}
+                            font-color:{color(on_inverse)} { issue_number(&current.get()) }
                     }
                     row width:1fr align:center gap:{px(4.0)}px
                         pad:(horizontal:{px(6.0)}px vertical:0px) clip {
@@ -447,8 +453,9 @@ fn IssueCard(model: Model, issue: Issue) -> Element {
                     }
                 }
                 col height:min-content pad:(horizontal:{px(12.0)}px vertical:{px(12.0)}px) {
-                    text font-size:{px(15.0)}px font-weight:600 font-family:sans-serif
-                        font-color:ink label:{ current.get().title } { current.get().title }
+                    text font-size:{px(15.0)}px font-weight:{600}
+                        font-family:{FontFamily::SansSerif} font-color:{color(ink)}
+                        label:{ current.get().title } { current.get().title }
                 }
                 row height:{px(28.0)}px align:center gap:{px(6.0)}px
                     pad:(horizontal:{px(10.0)}px vertical:0px)
@@ -459,7 +466,7 @@ fn IssueCard(model: Model, issue: Issue) -> Element {
                     text width:1fr text-wrap:none font-size:{px(11.0)}px
                         font-color:{color(state.get().text_color())} { state.get().label() }
                     if session_count.get() > 0 {
-                        text text-wrap:none font-size:{px(11.0)}px font-color:muted
+                        text text-wrap:none font-size:{px(11.0)}px font-color:{color(muted)}
                             { format!("{} linked sessions", session_count.get()) }
                     }
                 }
@@ -498,11 +505,12 @@ fn IssueDetail(model: Model) -> Element {
                             col width:max-content height:min-content min-height:{px(56.0)}px
                                 min-width:{px(56.0)}px align:center justify:center
                                 pad:(horizontal:{px(8.0)}px vertical:0px) fill:inverse {
-                                text text-wrap:none font-size:{px(20.0)}px font-weight:700
-                                    font-color:on-inverse { issue_number(&current.get()) }
+                                text text-wrap:none font-size:{px(20.0)}px font-weight:{700}
+                                    font-color:{color(on_inverse)} { issue_number(&current.get()) }
                             }
                             col width:1fr height:min-content gap:{px(8.0)}px {
-                                text font-size:{px(19.0)}px font-weight:650 font-family:sans-serif
+                                text font-size:{px(19.0)}px font-weight:{650}
+                                    font-family:{FontFamily::SansSerif}
                                     label:{ current.get().title } { current.get().title }
                                 row height:min-content gap:{px(4.0)}px clip {
                                     for (_, label) in { current.get().labels.into_iter().map(|label| (label.clone(), label)) } {
@@ -516,10 +524,10 @@ fn IssueDetail(model: Model) -> Element {
                             { crate::projects::task_body(&current.get().body) }
                         col height:min-content gap:{px(3.0)}px pad:(top:{px(8.0)}px)
                             stroke:(width:{px(1.0)} color:edge edges:top) {
-                            text font-size:{px(11.0)}px font-color:muted text-transform:uppercase
-                                letter-spacing:{px(0.6)}px
+                            text font-size:{px(11.0)}px font-color:{color(muted)}
+                                text-transform:{TextTransform::Uppercase} letter-spacing:{px(0.6)}px
                                 { if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "Source" } else { "Issue" } }
-                            text font-size:{px(12.0)}px font-color:ink
+                            text font-size:{px(12.0)}px font-color:{color(ink)}
                                 { if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "Fixture issue · execution unavailable".to_string() } else { current.get().reference.map(|r| r.url).unwrap_or_else(|| "Local task".into()) } }
                         }
                         if !model.snapshot.get().visible_task(&current.get().id) {
@@ -535,7 +543,7 @@ fn IssueDetail(model: Model) -> Element {
                             stroke:(width:{px(1.0)} color:rule edges:top) {
                             text font-size:{px(11.0)}px font-color:muted text-transform:uppercase
                                 letter-spacing:{px(0.6)}px "Linked sessions"
-                            text font-size:{px(11.0)}px font-color:muted
+                            text font-size:{px(11.0)}px font-color:{color(muted)}
                                 { format!("{:02}", model.sessions_for_task(&detail_id.get()).len()) }
                         }
                         for (_, session) in { model.sessions_for_task(&detail_id.get()).into_iter().map(|s| (s.id.clone(), s)).collect::<Vec<_>>() } {
@@ -548,7 +556,8 @@ fn IssueDetail(model: Model) -> Element {
                                 label:{ model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default() }
                                 description:{ linked_state.get().label() } hover { fill:raised } {
                                 StatusGlyph state:(linked_state)
-                                text width:1fr text-wrap:none font-size:{px(12.0)}px font-color:ink
+                                text width:1fr text-wrap:none font-size:{px(12.0)}px
+                                    font-color:{color(ink)}
                                     { model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default() }
                                 text text-wrap:none font-size:{px(11.0)}px
                                     font-color:{color(linked_state.get().text_color())}
@@ -582,61 +591,125 @@ fn Sessions(model: Model) -> Element {
 
 #[component]
 fn Profiles(model: Model) -> Element {
+    let profile_kind = Derived::new(move || {
+        String::from(if model.editor.get() == EditTarget::Defaults {
+            "ALL"
+        } else {
+            "DIR"
+        })
+    });
+    let profile_title = Derived::new(move || {
+        String::from(if model.editor.get() == EditTarget::Defaults {
+            "Project defaults"
+        } else {
+            "Director profile"
+        })
+    });
+    let harness_index = Derived::new(move || {
+        usize::from(model.editor_profile.get().harness == Harness::ClaudeCode)
+    });
+    let choose_harness: crate::labels::Select = std::rc::Rc::new(move |slot: usize| {
+        model.modify_profile("harness", |p| {
+            p.harness = if slot == 1 {
+                Harness::ClaudeCode
+            } else {
+                Harness::Codex
+            }
+        });
+    });
+    let approval_index = Derived::new(move || {
+        let mode = model.editor_profile.get().execution.approval;
+        ApprovalMode::ALL
+            .iter()
+            .position(|m| *m == mode)
+            .unwrap_or(0)
+    });
+    let choose_approval: crate::labels::Select = std::rc::Rc::new(move |slot: usize| {
+        model.modify_profile("execution", |p| {
+            p.execution.approval = ApprovalMode::ALL[slot]
+        });
+    });
+    let capacity = Derived::new(move || match model.editor.get() {
+        EditTarget::Director(id) => crate::labels::director_capacity(&model.snapshot.get(), &id),
+        _ => (0, 0, 0),
+    });
     view! {
         col width:1fr pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) gap:{px(14.0)}px {
             scroll width:max-content {
-                row height:min-content width:max-content gap:{px(8.0)}px {
-                    button #action @click:{ model.open_profile(EditTarget::Defaults); }
-                        "Project defaults"
+                row height:min-content width:max-content gap:0px
+                    stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) {
+                    button #tree-control @click:{ model.open_profile(EditTarget::Defaults); }
+                        pad:(horizontal:{px(12.0)}px vertical:0px)
+                        fill:{color(if model.editor.get() == EditTarget::Defaults {inverse} else {surface})}
+                        label:"Project defaults" {
+                        text
+                            font-weight:{if model.editor.get() == EditTarget::Defaults {700} else {400}}
+                            font-color:{color(if model.editor.get() == EditTarget::Defaults {on_inverse} else {ink})}
+                            "Project defaults"
+                    }
                     for (_, director) in { model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
                         let id = State::new(director.id.clone());
-                        button #action
+                        button #tree-control
                             @click:{ model.open_profile(EditTarget::Director(id.get_untracked())); }
-                            {
-                        model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| d.name.clone()).unwrap_or_default()
+                            pad:(horizontal:{px(12.0)}px vertical:0px)
+                            stroke:(width:{px(1.0)} color:edge edges:left)
+                            fill:{color(if model.editor.get() == EditTarget::Director(id.get()) {inverse} else {surface})}
+                            label:{model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| d.name.clone()).unwrap_or_default()} {
+                            text
+                                font-weight:{if model.editor.get() == EditTarget::Director(id.get()) {700} else {400}}
+                                font-color:{color(if model.editor.get() == EditTarget::Director(id.get()) {on_inverse} else {ink})}
+                                {model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| d.name.clone()).unwrap_or_default()}
+                        }
                     }
+                    button #tree-control @click:{ model.open_profile(EditTarget::New); }
+                        pad:(horizontal:{px(12.0)}px vertical:0px)
+                        stroke:(width:{px(1.0)} color:edge edges:left)
+                        fill:{color(if model.editor.get() == EditTarget::New {inverse} else {surface})}
+                        label:"Create director" {
+                        text font-weight:{if model.editor.get() == EditTarget::New {700} else {400}}
+                            font-color:{color(if model.editor.get() == EditTarget::New {on_inverse} else {ink})}
+                            "+ Director"
                     }
-                    button #action @click:{ model.open_profile(EditTarget::New); }
-                        label:"Create director" "+ Director"
                 }
             } as tabs
             { tabs.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(px(42.0)).basis(px(42.0)).shrink(0.0)); }
             scroll {
                 col height:min-content gap:{px(20.0)}px {
-                    text font-size:{px(20.0)}px font-weight:650 font-family:sans-serif
-                        { if model.editor.get() == EditTarget::Defaults { "Project defaults" } else { "Director profile" } }
+                    row height:min-content gap:{px(12.0)}px align:center {
+                        col width:{px(48.0)}px height:{px(48.0)}px align:center justify:center
+                            shrink:0 fill:inverse {
+                            text text-wrap:none font-weight:{700} font-color:{color(on_inverse)}
+                                font-size:{px(12.0)}px { profile_kind.get() }
+                        }
+                        col width:1fr height:min-content gap:{px(4.0)}px {
+                            text font-size:{px(20.0)}px font-weight:{650}
+                                font-family:{FontFamily::SansSerif} { profile_title.get() }
+                            text font-size:{px(12.0)}px font-color:{color(muted)}
+                                { if model.editor.get() == EditTarget::Defaults { "Directors inherit these values unless they override a field. Applies to the next worker turn." } else { "Overrides apply to this director's next worker turn; omitted fields follow project defaults." } }
+                        }
+                    }
                     if model.editor.get() != EditTarget::Defaults {
                         input #input-field label:"Director name" model.editor_name
                     }
-                    text font-size:{px(12.0)}px font-color:muted
-                        "Effective profiles gate issue-linked worker execution."
                     ProfileField model:(model) title:"Agent harness" field:"harness"
-                    row height:min-content gap:{px(8.0)}px {
-                        button #action
-                            @click:{ model.modify_profile("harness", |p| p.harness = Harness::Codex); }
-                            fill:if model.editor_profile.get().harness == Harness::Codex { accent-soft } else { raised }
-                            "Codex"
-                        button #action
-                            @click:{ model.modify_profile("harness", |p| p.harness = Harness::ClaudeCode); }
-                            fill:if model.editor_profile.get().harness == Harness::ClaudeCode { accent-soft } else { raised }
-                            "Claude Code"
-                    }
+                    SlidingSegments name:("Agent harness".to_string())
+                        options:(vec!["Codex".to_string(), "Claude Code".to_string()])
+                        index:(harness_index) select:(choose_harness) attention:(None)
+                        cell-width:(130.0) disabled:(Derived::new(|| false))
                     ProfileField model:(model) title:"Execution approval" field:"execution"
-                    row height:min-content gap:{px(8.0)}px {
-                        for mode in ApprovalMode::ALL {
-                            button #action
-                                @click:{model.modify_profile("execution", |p| p.execution.approval = mode);}
-                                fill:if model.editor_profile.get().execution.approval == mode {accent-soft} else {raised}
-                                label:{format!("Execution approval: {}",mode.label())}
-                                {mode.label()}
-                        }
-                    }
+                    SlidingSegments name:("Execution approval".to_string())
+                        options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
+                        index:(approval_index) select:(choose_approval) attention:(None)
+                        cell-width:(150.0) disabled:(Derived::new(|| false))
                     text font-size:{px(12.0)}px font-color:muted
                         "Execution mode configures the harness. Action permissions are separate workflow settings."
                     ProfileField model:(model) title:"Scope" field:"scope"
-                    row height:min-content gap:{px(8.0)}px {
+                    row height:min-content gap:{px(6.0)}px {
                         button #action
                             @click:{ model.modify_profile("scope", |p| p.scope = DirectorScope::Project); }
+                            fill:{color(if model.editor_profile.get().scope == DirectorScope::Project {inverse} else {surface})}
+                            font-color:{color(if model.editor_profile.get().scope == DirectorScope::Project {on_inverse} else {ink})}
+                            font-weight:{if model.editor_profile.get().scope == DirectorScope::Project {700} else {400}}
                             "Whole project"
                         for (_, issue) in { model.snapshot.get().issues.into_iter().filter(|i| i.project_id == model.project.get() && model.snapshot.get().canonical_issue_id(&i.id) == i.id).map(|i| (i.id.clone(), i)).collect::<Vec<_>>() } {
                             let id = issue.id.clone();
@@ -650,10 +723,13 @@ fn Profiles(model: Model) -> Element {
                                     p.scope = if ids.is_empty() { DirectorScope::Project } else { DirectorScope::Issues { issue_ids: ids } };
                                 });
                             }
+                                fill:{color(if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {inverse} else {surface})}
+                                font-color:{color(if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {on_inverse} else {ink})}
+                                font-weight:{if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) {700} else {400}}
                                 { format!("{} {}", if matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())) { "✓" } else { "+" }, number) }
                         }
                     }
-                    text font-size:{px(12.0)}px font-color:muted
+                    text font-size:{px(12.0)}px font-color:{color(muted)}
                         {
                         match model.editor_profile.get().scope {
                             DirectorScope::Project => "All project issues".into(),
@@ -663,33 +739,51 @@ fn Profiles(model: Model) -> Element {
                                 .collect::<Vec<_>>().join(", "),
                         }
                     }
-                    ProfileField model:(model) title:"Responsibilities" field:"responsibilities"
-                    StepChoices model:(model) completion:false
-                    ProfileField model:(model) title:"Required for completion" field:"completion"
-                    StepChoices model:(model) completion:true
                     ProfileField model:(model) title:"Concurrent workers" field:"max_workers"
                     row height:min-content gap:{px(10.0)}px align:center {
                         button #action
                             @click:{ model.modify_profile("max_workers", |p| p.max_workers = p.max_workers.saturating_sub(1)); }
                             label:"Decrease worker limit" "−"
                         text font-size:{px(18.0)}px
-                            { model.editor_profile.get().max_workers.to_string() }
+                            { format!("{:02}", model.editor_profile.get().max_workers) }
                         button #action
                             @click:{ model.modify_profile("max_workers", |p| p.max_workers = (p.max_workers + 1).min(64)); }
                             label:"Increase worker limit" "+"
-                        text font-size:{px(12.0)}px font-color:muted "0 pauses delegation"
+                        SlotMeter running:(Derived::new(move || capacity.get().0))
+                            active:(Derived::new(move || capacity.get().1))
+                            limit:(Derived::new(move || model.editor_profile.get().max_workers as usize))
+                        text font-size:{px(12.0)}px font-color:{color(muted)}
+                            { if model.editor_profile.get().max_workers == 0 { "0 pauses delegation".to_string() } else if matches!(model.editor.get(), EditTarget::Director(_)) { format!("{} active now", capacity.get().1) } else { "0 pauses delegation".to_string() } }
                     }
-                    ProfileField model:(model) title:"Action permissions" field:"permissions"
-                    col height:min-content gap:{px(8.0)}px {
-                        for task in Task::ALL {
-                            row height:min-content align:center justify:between {
-                                text font-size:{px(13.0)}px (task.label())
-                                button #action
-                                    @click:{ model.modify_profile("permissions", |p| { let current = p.permissions[&task]; p.permissions.insert(task, current.next()); }); }
-                                    label:{ format!("{} permission", task.label()) }
-                                    { model.editor_profile.get().permissions[&task].label() }
-                            }
+                    col height:min-content gap:0px
+                        stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
+                        label:"Action matrix" {
+                        grid cols:(1fr 1fr 1fr) height:min-content gap:{px(12.0)}px pad:{px(12.0)}px
+                            stroke:(width:{px(1.0)} color:rule edges:bottom) {
+                            ProfileField model:(model) title:"Responsibilities"
+                                field:"responsibilities"
+                            ProfileField model:(model) title:"Required for completion"
+                                field:"completion"
+                            ProfileField model:(model) title:"Action permissions"
+                                field:"permissions"
                         }
+                        row height:{px(30.0)}px align:center
+                            pad:(horizontal:{px(12.0)}px vertical:0px)
+                            stroke:(width:{px(1.0)} color:edge edges:bottom) {
+                            text width:1fr font-size:{px(11.0)}px font-color:muted
+                                text-transform:uppercase letter-spacing:{px(0.6)}px "Action"
+                            text width:{px(110.0)}px font-size:{px(11.0)}px font-color:muted
+                                text-transform:uppercase letter-spacing:{px(0.6)}px "Responsible"
+                            text width:{px(110.0)}px font-size:{px(11.0)}px font-color:muted
+                                text-transform:uppercase letter-spacing:{px(0.6)}px "Required"
+                            text width:{px(234.0)}px font-size:{px(11.0)}px font-color:muted
+                                text-transform:uppercase letter-spacing:{px(0.6)}px "Permission"
+                        }
+                        for task in Task::ALL {
+                            ActionRow model:(model) task:(task)
+                        }
+                        text font-size:{px(12.0)}px font-color:muted pad:{px(12.0)}px
+                            "Implement: Deny blocks worker turns; Ask requires approval each turn. Other actions are workflow settings."
                     }
                     row height:min-content gap:{px(8.0)}px {
                         button #action @click:{ model.export_toml(); } "Export / edit TOML"
@@ -708,8 +802,9 @@ fn Profiles(model: Model) -> Element {
                     }
                 }
             }
-            row height:min-content gap:{px(12.0)}px align:center shrink:0 {
-                button #action @click:{ model.save_profile(); }
+            row height:min-content gap:{px(12.0)}px align:center shrink:0 pad:(top:{px(10.0)}px)
+                stroke:(width:{px(1.0)} color:rule edges:top) {
+                button #primary @click:{ model.save_profile(); }
                     disabled:{ model.busy.get() || !model.connected.get() } label:"Save profile"
                     "Save profile"
                 text font-size:{px(12.0)}px font-color:muted
@@ -719,13 +814,49 @@ fn Profiles(model: Model) -> Element {
     }
 }
 
+const PERMISSIONS: [Permission; 3] = [Permission::Deny, Permission::Ask, Permission::Allow];
+
+#[component]
+fn ActionRow(model: Model, task: Task) -> Element {
+    let index = Derived::new(move || {
+        let permission = model
+            .editor_profile
+            .get()
+            .permissions
+            .get(&task)
+            .copied()
+            .unwrap_or(Permission::Deny);
+        PERMISSIONS
+            .iter()
+            .position(|p| *p == permission)
+            .unwrap_or(0)
+    });
+    let choose: crate::labels::Select = std::rc::Rc::new(move |slot: usize| {
+        model.modify_profile("permissions", |p| {
+            p.permissions.insert(task, PERMISSIONS[slot]);
+        });
+    });
+    view! {
+        row height:{px(46.0)}px align:center pad:(horizontal:{px(12.0)}px vertical:0px)
+            stroke:(width:{px(1.0)} color:edge edges:bottom) {
+            text width:1fr text-wrap:none font-size:{px(13.0)}px (task.label())
+            StepToggle model:(model) task:(task) completion:false
+            StepToggle model:(model) task:(task) completion:true
+            SlidingSegments name:(format!("{} permission", task.label()))
+                options:(PERMISSIONS.iter().map(|p| p.label().to_string()).collect::<Vec<_>>())
+                index:(index) select:(choose) attention:(Some(1)) cell-width:(78.0)
+                disabled:(Derived::new(|| false))
+        }
+    }
+}
+
 #[component]
 fn ProfileField(model: Model, title: &'static str, field: &'static str) -> Element {
     view! {
-        row height:min-content justify:between align:center {
+        row height:min-content justify:between align:center gap:{px(8.0)}px {
             col height:min-content gap:{px(4.0)}px {
                 text font-size:{px(13.0)}px font-weight:650 font-family:sans-serif (title)
-                text font-size:{px(11.0)}px font-color:muted { model.origin(field) }
+                text font-size:{px(11.0)}px font-color:{color(muted)} { model.origin(field) }
             }
             if model.origin(field) == "Director override" {
                 button #action @click:{ model.inherit(field); } label:{ format!("Inherit {field}") }
@@ -736,22 +867,32 @@ fn ProfileField(model: Model, title: &'static str, field: &'static str) -> Eleme
 }
 
 #[component]
-fn StepChoices(model: Model, completion: bool) -> Element {
-    view! {
-        grid cols:(1fr 1fr 1fr 1fr) height:min-content gap:{px(6.0)}px {
-            for task in Task::ALL {
-                button #action
-                    @click:{ model.modify_profile(if completion { "completion" } else { "responsibilities" }, |p| {
-                    let steps = if completion { &mut p.completion } else { &mut p.responsibilities };
-                    if steps.contains(&task) { steps.retain(|t| t != &task); } else { steps.push(task); }
-                }); }
-                    width:fill {
-                    text font-size:{px(12.0)}px
-                        { format!("{} {}", if (if completion { model.editor_profile.get().completion } else { model.editor_profile.get().responsibilities }).contains(&task) { "✓" } else { "+" }, task.label()) }
-                }
-            }
+fn StepToggle(model: Model, task: Task, completion: bool) -> Element {
+    let on = Derived::new(move || {
+        let profile = model.editor_profile.get();
+        if completion {
+            profile.completion.contains(&task)
+        } else {
+            profile.responsibilities.contains(&task)
         }
-    }
+    });
+    let toggle = view! {
+        button #tree-control
+            @click:{ model.modify_profile(if completion { "completion" } else { "responsibilities" }, |p| {
+                let steps = if completion { &mut p.completion } else { &mut p.responsibilities };
+                if steps.contains(&task) { steps.retain(|t| t != &task); } else { steps.push(task); }
+            }); }
+            width:{px(110.0)}px justify:start role:checkbox
+            label:{ format!("{} {}", task.label(), if completion { "required for completion" } else { "responsibility" }) } {
+            el width:{px(14.0)}px height:{px(14.0)}px fill:{color(if on.get() {ink} else {surface})}
+                stroke:(width:{px(1.0)} color:rule offset:{px(-0.5)}) {}
+        }
+    };
+    let semantic = toggle.clone();
+    Effect::new(move || {
+        semantic.toggled(on.get());
+    });
+    toggle
 }
 
 #[component]
@@ -912,7 +1053,7 @@ fn WorkerApproval(model: Model) -> Element {
 fn WorkerForm(model: Model, continuation: bool) -> Element {
     view! {
         col height:min-content gap:{px(10.0)}px {
-            text font-size:{px(13.0)}px font-weight:650 font-family:sans-serif
+            text font-size:{px(13.0)}px font-weight:{650} font-family:{FontFamily::SansSerif}
                 { if continuation { "Continue this session" } else { "Start task worker" } }
             if !continuation {
                 WorkspaceChoices model:(model)
@@ -938,7 +1079,7 @@ fn WorkerForm(model: Model, continuation: bool) -> Element {
                     }
                 }
             } else {
-                text font-size:{px(12.0)}px font-color:muted
+                text font-size:{px(12.0)}px font-color:{color(muted)}
                     { model.worker_profile(continuation).err().unwrap_or_default() }
             }
             input #input-field label:"Worker prompt" placeholder:"Prompt for this turn…"
@@ -946,7 +1087,7 @@ fn WorkerForm(model: Model, continuation: bool) -> Element {
             if model.worker_profile(continuation).is_ok_and(|(p, _)| p.permissions.get(&Task::Implement) == Some(&Permission::Ask)) {
                 WorkerApproval model:(model)
             }
-            text font-size:{px(11.0)}px font-color:muted
+            text font-size:{px(11.0)}px font-color:{color(muted)}
                 { model.worker_gate(continuation).err().unwrap_or_else(|| "Ready · server rechecks policy and revision".into()) }
             button #primary @click:{ model.run_worker(continuation); }
                 label:if continuation { "Send worker prompt" } else { "Start worker" }
@@ -990,9 +1131,9 @@ fn HarnessCard(model: Model, harness: Harness) -> Element {
             }
             if advanced.get() {
                 col height:min-content gap:{px(8.0)}px {
-                    text font-size:{px(12.0)}px font-color:muted
+                    text font-size:{px(12.0)}px font-color:{color(muted)}
                         {status.get().map(|s|s.detail).unwrap_or_default()}
-                    text font-size:{px(12.0)}px font-color:muted
+                    text font-size:{px(12.0)}px font-color:{color(muted)}
                         {status.get().map(|s|format!("{} · {}",s.version.unwrap_or_else(||"Version unavailable".into()),sync_label(Some(s.checked_at)).replacen("Last synced", "Checked", 1))).unwrap_or_default()}
                     text font-size:{px(12.0)}px font-color:muted
                         "Automatic · Ask · Unrestricted Access. Mode availability also depends on the harness account and managed settings."
@@ -1027,7 +1168,7 @@ fn HarnessSummary(model: Model, harness: Harness) -> Element {
         row height:min-content width:1fr align:center gap:{px(8.0)}px {
             icon size:{px(20.0)}px shrink:0
                 {if harness==Harness::Codex{harness_codex}else{harness_claude}}
-            text font-family:sans-serif font-size:{px(14.0)}px font-weight:650
+            text font-family:{FontFamily::SansSerif} font-size:{px(14.0)}px font-weight:{650}
                 {if harness==Harness::Codex{"Codex"}else{"Claude Code"}}
             icon size:{px(14.0)}px shrink:0
                 font-color:{mosaic::core::theme::color(match state.get().as_str(){"ready"=>success,"signed_out"|"incompatible"=>warning,"unknown"|"error"|"failed"=>danger,_=>muted})}

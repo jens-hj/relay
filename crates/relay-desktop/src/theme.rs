@@ -341,7 +341,7 @@ mosaic::style! {
         hover { fill:raised } focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) }
         disabled { opacity:0.5 }
     pub #primary width:max-content height:min-content shrink:0 radius:0px
-        pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px) fill:inverse font-color:on-inverse font-size:{px(13.0)}px
+        pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px) fill:inverse font-color:on-inverse font-size:{px(13.0)}px font-weight:700
         focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) }
         disabled { opacity:0.5 }
     pub #input-field

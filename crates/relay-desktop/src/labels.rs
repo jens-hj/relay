@@ -44,7 +44,9 @@ pub fn SlidingSegments(
                         label:{format!("{}: {}",group.get(),option_name.get())}
                         stroke:(width:{px(if slot==0 {0.0} else {1.0})} color:edge edges:left)
                         font-color:{color(if index.get()!=slot {ink} else if is_attention() {on_attention} else {on_inverse})} {
-                        text text-wrap:none {option_name.get()}
+                        text text-wrap:none font-weight:{if index.get()==slot {700} else {400}}
+                            font-color:{color(if index.get()!=slot {ink} else if is_attention() {on_attention} else {on_inverse})}
+                            {option_name.get()}
                     } as option
                     {let semantic_option=option.clone();Effect::new(move || {semantic_option.toggled(index.get()==slot);});}
                     {let keys=focus.clone();let choose=select.clone();keys.borrow_mut().insert(slot,option.clone());let cleanup=keys.clone();on_cleanup(move ||{cleanup.borrow_mut().remove(&slot);});option.on_key(move |event,ctx| {if matches!(event.kind,KeyEventKind::Down{..}) {let next=match event.key {Key::ArrowRight|Key::ArrowDown=>(index.get_untracked()+1)%count,Key::ArrowLeft|Key::ArrowUp=>(index.get_untracked()+count-1)%count,Key::Home=>0,Key::End=>count-1,_=>return};choose(next);let target=keys.borrow().get(&next).cloned();if let Some(target)=target{target.focus();}ctx.stop_propagation();}});}
@@ -217,7 +219,7 @@ pub fn Readout(key: String, value: Derived<String>) -> Element {
         col height:min-content min-width:0px gap:{px(3.0)}px {
             text text-wrap:none font-size:{px(11.0)}px font-color:muted text-transform:uppercase
                 letter-spacing:{px(0.6)}px (key.clone())
-            text font-size:{px(13.0)}px font-color:ink {value.get()}
+            text font-size:{px(13.0)}px font-color:{color(ink)} {value.get()}
         }
     }
 }
@@ -240,7 +242,7 @@ pub fn SlotMeter(
                     stroke:(width:{px(1.0)} color:{color(if cell < running.get() {run_text} else {rule})} offset:{px(-0.5)}) {}
             }
             if limit.get() > 16 {
-                text text-wrap:none font-size:{px(11.0)}px font-color:muted
+                text text-wrap:none font-size:{px(11.0)}px font-color:{color(muted)}
                     {format!("+{}", limit.get() - 16)}
             }
         }

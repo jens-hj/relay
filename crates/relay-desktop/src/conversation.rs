@@ -617,12 +617,13 @@ pub fn Conversation(model: Model) -> Element {
                 row width:max-content min-width:{px(52.0)}px align:center justify:center
                     pad:(horizontal:{px(10.0)}px vertical:0px)
                     fill:{color(match header_state.get() {RunState::Running => run_fill, RunState::Waiting => attention_fill, _ => inverse})} {
-                    text text-wrap:none font-size:{px(15.0)}px font-weight:700
+                    text text-wrap:none font-size:{px(15.0)}px font-weight:{700}
                         font-color:{color(match header_state.get() {RunState::Running => on_run, RunState::Waiting => on_attention, _ => on_inverse})}
                         {header_id.get()}
                 }
                 row width:1fr height:min-content clip {
-                    text font-family:sans-serif font-size:{px(16.0)}px font-weight:650
+                    text font-family:{FontFamily::SansSerif} font-size:{px(16.0)}px
+                        font-weight:{650}
                         {session.get().map(|s|s.title).unwrap_or_else(|| "Agent".into())}
                 }
                 row width:max-content height:min-content align:center gap:{px(6.0)}px
@@ -657,7 +658,7 @@ pub fn Conversation(model: Model) -> Element {
                         let snapshot = model.snapshot.get();
                         let inherited = snapshot.directors.iter().find(|d| d.id == current.director_id).and_then(|d|snapshot.effective_profile(d).ok()).map(|p|p.execution.approval).unwrap_or_default();
                         let worker = current.worker.unwrap();
-                        text font-size:{px(12.0)}px font-color:muted
+                        text font-size:{px(12.0)}px font-color:{color(muted)}
                             {format!("{} · {} · {}",match worker.harness{Harness::Codex=>"Codex",Harness::ClaudeCode=>"Claude Code"},worker.execution.as_ref().map(|e|e.approval).unwrap_or(inherited).label(),if worker.execution.is_some(){"Worker override"}else{"Inherited from director"})}
                         row height:min-content gap:{px(8.0)}px align:center {
                             let mode_session = session_id.clone();
@@ -708,7 +709,7 @@ pub fn Conversation(model: Model) -> Element {
                 col height:min-content shrink:0 {
                     if session.get().and_then(|s|s.worker).is_some_and(|w|w.error.is_some()) {
                         row height:min-content pad:(horizontal:{px(24.0)}px vertical:0px) {
-                            text font-size:{px(12.0)}px font-color:danger
+                            text font-size:{px(12.0)}px font-color:{color(danger)}
                                 {session.get().and_then(|s|s.worker).and_then(|w|w.error).unwrap_or_default()}
                         }
                     }
@@ -767,7 +768,8 @@ pub fn Conversation(model: Model) -> Element {
                             text font-size:{px(11.0)}px font-color:attention-text
                                 text-transform:uppercase letter-spacing:{px(0.6)}px
                                 "Waiting for approval"
-                            text font-family:sans-serif font-size:{px(14.0)}px font-weight:650
+                            text font-family:{FontFamily::SansSerif} font-size:{px(14.0)}px
+                                font-weight:{650}
                                 {format!("Approval requested · {}",permission.get().tool)}
                             scroll max-height:{px(140.0)}px {
                                 text font-size:{px(12.0)}px {permission.get().description}
@@ -789,17 +791,19 @@ pub fn Conversation(model: Model) -> Element {
                         col height:min-content gap:{px(6.0)}px pad:{px(10.0)}px
                             stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) {
                             row height:min-content gap:{px(8.0)}px align:center {
-                                text font-size:{px(11.0)}px font-color:on-inverse fill:inverse
+                                text font-size:{px(11.0)}px font-weight:{700}
+                                    font-color:{color(on_inverse)} fill:inverse
                                     pad:(horizontal:{px(6.0)}px vertical:{px(2.0)}px)
                                     {model.snapshot.get().submissions.iter().filter(|s|s.session_id==model.session.get() && matches!(s.state,SubmissionState::Queued|SubmissionState::Paused)).position(|s|s.id==queued_id.get()).map(|i| format!("{:02}", i + 1)).unwrap_or_default()}
-                                text font-size:{px(11.0)}px font-color:muted
-                                    text-transform:uppercase letter-spacing:{px(0.6)}px
+                                text font-size:{px(11.0)}px font-color:{color(muted)}
+                                    text-transform:{TextTransform::Uppercase}
+                                    letter-spacing:{px(0.6)}px
                                     {match model.snapshot.get().submissions.iter().find(|s|s.id==queued_id.get()).map(|s|s.state.clone()) {Some(SubmissionState::Paused) => "Paused", _ => "Queued"}}
                             }
                             text font-size:{px(14.0)}px
                                 {model.snapshot.get().submissions.iter().find(|s|s.id==queued_id.get()).map(|s|plain_text(&s.parts)).unwrap_or_default()}
                             if model.snapshot.get().submissions.iter().find(|s|s.id==queued_id.get()).is_some_and(|s|s.error.is_some()) {
-                                text font-size:{px(11.0)}px font-color:muted
+                                text font-size:{px(11.0)}px font-color:{color(muted)}
                                     {model.snapshot.get().submissions.iter().find(|s|s.id==queued_id.get()).and_then(|s|s.error.clone()).unwrap_or_default()}
                             }
                             let cancel = State::new(queued.id.clone());
@@ -871,7 +875,7 @@ pub fn Conversation(model: Model) -> Element {
             }
             row height:min-content min-height:{px(28.0)}px align:center
                 pad:(horizontal:{px(24.0)}px vertical:{px(6.0)}px) shrink:0 {
-                text width:1fr font-size:{px(11.0)}px font-color:muted
+                text width:1fr font-size:{px(11.0)}px font-color:{color(muted)}
                     {
                     let state=model.buffer.get();
                     if !state.uploads.is_empty(){"Uploading inline files…"}else if let Some(doc)=state.documents.get(&model.session.get()) {if doc.finalize.is_some() || doc.submitting {"Sending…"}else if doc.saving.is_some(){"Saving draft…"}else if !state.connected {"Draft retained locally"}else{"Ctrl/Cmd+Enter sends · Enter adds a line"}}else{"Ctrl/Cmd+Enter sends · Enter adds a line"}
@@ -962,7 +966,7 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
     view! {
         col height:min-content gap:{px(8.0)}px {
             row height:min-content gap:{px(8.0)}px align:center {
-                text font-size:{px(11.0)}px font-color:muted
+                text font-size:{px(11.0)}px font-color:{color(muted)}
                     {message.get().map(|m|m.author).unwrap_or_default()}
                 if detail {
                     button #tree-control @click:{expanded.set(!expanded.get_untracked());}
@@ -1052,7 +1056,8 @@ fn RecordedPart(
             view! {
                 col height:min-content gap:{px(6.0)}px pad:(left:{px(14.0)}px)
                     stroke:(width:{px(2.0)} color:edge edges:left) {
-                    text font-size:{px(12.0)}px font-color:muted {format!("↩ {}",quote.get())}
+                    text font-size:{px(12.0)}px font-color:{color(muted)}
+                        {format!("↩ {}",quote.get())}
                     for (_, entry) in {located_parts(&parts.get(),offset+prefix)} {
                         col height:min-content {
                             RecordedPart model:(model) controller:(controller)
@@ -1181,7 +1186,7 @@ fn InlineAsset(
                             }
                         }
                     } else {
-                        text font-color:muted font-size:{px(12.0)}px
+                        text font-color:{color(muted)} font-size:{px(12.0)}px
                             {model.buffer.get().fetch_errors.get(&asset.get().id).cloned().unwrap_or_else(||"Loading file…".into())}
                     }
                 }

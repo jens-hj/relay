@@ -3632,3 +3632,50 @@ fn session_header_usage_and_execution_mode_use_measured_state() {
             .any(|n| n.label.as_deref() == Some("Latest turn usage"))
     );
 }
+
+#[test]
+fn permission_rows_set_exact_values_for_every_action_by_click_and_keyboard() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_profile(EditTarget::Defaults);
+    mounted.settle();
+    let permission = |task: Task| {
+        mounted
+            .model
+            .editor_profile
+            .get_untracked()
+            .permissions
+            .get(&task)
+            .copied()
+    };
+    mounted.focus("Merge permission: Allow");
+    mounted.key(Key::Enter, false);
+    assert_eq!(permission(Task::Merge), Some(Permission::Allow));
+    mounted.key(Key::ArrowLeft, false);
+    assert_eq!(permission(Task::Merge), Some(Permission::Ask));
+    mounted.key(Key::Home, false);
+    assert_eq!(permission(Task::Merge), Some(Permission::Deny));
+    mounted.focus("Deploy permission: Ask");
+    mounted.key(Key::Enter, false);
+    assert_eq!(permission(Task::Deploy), Some(Permission::Ask));
+    mounted.focus("Implement permission: Deny");
+    mounted.key(Key::Enter, false);
+    assert_eq!(permission(Task::Implement), Some(Permission::Deny));
+
+    let responsible = mounted
+        .model
+        .editor_profile
+        .get_untracked()
+        .responsibilities
+        .contains(&Task::Merge);
+    mounted.focus("Merge responsibility");
+    mounted.key(Key::Enter, false);
+    assert_ne!(
+        mounted
+            .model
+            .editor_profile
+            .get_untracked()
+            .responsibilities
+            .contains(&Task::Merge),
+        responsible
+    );
+}
