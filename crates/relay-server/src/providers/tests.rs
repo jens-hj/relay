@@ -1524,3 +1524,218 @@ fn recovery_membership_and_status_require_confirmed_authoritative_board_state() 
         assert!(!fake.calls().contains("mutation"));
     }
 }
+
+#[test]
+fn same_gitlab_repository_and_issue_number_on_distinct_hosts_remain_distinct_tasks() {
+    let fake = Fake::new(gl_metadata());
+    let mut first = metadata(&fake.config(), &gl_source(false)).unwrap();
+    first.board.id = "host-one".into();
+    first.board.project_id = "project".into();
+    let mut second = first.clone();
+    second.board.id = "host-two".into();
+    second.board.source = BoardSource::Gitlab {
+        host: "other.example".into(),
+        group: false,
+        path: "group/repo".into(),
+        number: 2,
+        url: "https://other.example/group/repo/-/boards/2".into(),
+    };
+    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    snapshot
+        .boards
+        .extend([first.board.clone(), second.board.clone()]);
+    let incoming = |source: &BoardSource| RemoteTask {
+        reference: reference_for(source, "group/repo", 1),
+        title: "Issue".into(),
+        body: String::new(),
+        labels: vec![],
+        columns: vec!["gitlab-open".into()],
+        item_id: "101".into(),
+    };
+    merge(
+        &mut snapshot,
+        "host-one",
+        &first,
+        vec![incoming(&first.board.source)],
+    )
+    .unwrap();
+    merge(
+        &mut snapshot,
+        "host-two",
+        &second,
+        vec![incoming(&second.board.source)],
+    )
+    .unwrap();
+    let one = snapshot
+        .memberships
+        .iter()
+        .find(|m| m.board_id == "host-one")
+        .unwrap()
+        .issue_id
+        .clone();
+    let two = snapshot
+        .memberships
+        .iter()
+        .find(|m| m.board_id == "host-two")
+        .unwrap()
+        .issue_id
+        .clone();
+    assert_ne!(one, two);
+    merge(
+        &mut snapshot,
+        "host-one",
+        &first,
+        vec![incoming(&first.board.source)],
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot
+            .memberships
+            .iter()
+            .find(|m| m.board_id == "host-one")
+            .unwrap()
+            .issue_id,
+        one
+    );
+}
+
+#[tokio::test]
+async fn github_project_status_move_does_not_require_write_permission_on_external_repository() {
+    let mut steps = gh_metadata();
+    steps.push((
+        "repos/elsewhere/repo --method GET",
+        json!({"permissions":{"push":false,"pull":true}}),
+        0,
+    ));
+    steps.push((
+        "updateProjectV2ItemFieldValue",
+        json!({"data":{"updateProjectV2ItemFieldValue":{"projectV2Item":{"id":"ITEM1"}}}}),
+        0,
+    ));
+    steps.push((
+        "items(first",
+        json!({"data":{"node":{"items":page(json!([gh_item(1,Some("done"))]),None)}}}),
+        0,
+    ));
+    steps.push((
+        "labels(first",
+        json!({"data":{"node":{"labels":page(json!([]),None)}}}),
+        0,
+    ));
+    let fake = Fake::new(steps);
+    let (_temp, workspace) = workspace(fake.config()).await;
+    let mut task = pending_task();
+    task.reference = Some(reference_for(&gh_source(), "elsewhere/repo", 1));
+    install_task(
+        &workspace,
+        sample_operation(OperationKind::MoveTask {
+            board_id: "board".into(),
+            issue_id: "task".into(),
+            column_id: "done".into(),
+        }),
+        task,
+        board_record(gh_source()),
+    );
+    workspace
+        .update_project(|s| {
+            s.memberships
+                .iter_mut()
+                .find(|m| m.issue_id == "task")
+                .unwrap()
+                .remote_item_id = Some("ITEM1".into());
+            Ok(())
+        })
+        .unwrap();
+    execute(&workspace, "operation").unwrap();
+    assert_eq!(
+        workspace
+            .snapshots
+            .borrow()
+            .memberships
+            .iter()
+            .find(|m| m.issue_id == "task")
+            .unwrap()
+            .column_ids,
+        ["done"]
+    );
+}
+
+#[tokio::test]
+async fn github_created_reference_uses_canonical_url_casing_and_retains_task_id_on_mirror() {
+    let mut steps = gh_metadata();
+    steps.push(("repos/elsewhere/repo --method GET", writable_repo(), 0));
+    steps.push((
+        "--method POST",
+        json!({"number":1,"html_url":"https://github.com/ElseWhere/Repo/issues/1"}),
+        0,
+    ));
+    steps.push(("repos/ElseWhere/Repo --method GET", writable_repo(), 0));
+    steps.push((
+        "repos/ElseWhere/Repo/issues/1",
+        json!({"node_id":"NODE1"}),
+        0,
+    ));
+    steps.push((
+        "addProjectV2ItemById",
+        json!({"data":{"addProjectV2ItemById":{"item":{"id":"ITEM1"}}}}),
+        0,
+    ));
+    steps.push((
+        "updateProjectV2ItemFieldValue",
+        json!({"data":{"updateProjectV2ItemFieldValue":{"projectV2Item":{"id":"ITEM1"}}}}),
+        0,
+    ));
+    let mut item = gh_item(1, Some("todo"));
+    item["content"]["repository"]["nameWithOwner"] = json!("ElseWhere/Repo");
+    item["content"]["url"] = json!("https://github.com/ElseWhere/Repo/issues/1");
+    steps.push((
+        "items(first",
+        json!({"data":{"node":{"items":page(json!([item]),None)}}}),
+        0,
+    ));
+    steps.push((
+        "labels(first",
+        json!({"data":{"node":{"labels":page(json!([]),None)}}}),
+        0,
+    ));
+    let fake = Fake::new(steps);
+    let (_temp, workspace) = workspace(fake.config()).await;
+    install_task(
+        &workspace,
+        sample_operation(OperationKind::CreateTask {
+            board_id: "board".into(),
+            issue_id: "task".into(),
+        }),
+        pending_task(),
+        board_record(gh_source()),
+    );
+    execute(&workspace, "operation").unwrap();
+    let snapshot = workspace.snapshots.borrow();
+    let task = snapshot.issues.iter().find(|i| i.id == "task").unwrap();
+    assert_eq!(
+        task.reference.as_ref().unwrap().repository,
+        "ElseWhere/Repo"
+    );
+    assert_eq!(
+        snapshot
+            .memberships
+            .iter()
+            .find(|m| m.issue_id == "task")
+            .unwrap()
+            .remote_item_id
+            .as_deref(),
+        Some("ITEM1")
+    );
+}
+#[test]
+fn github_known_board_urls_match_owner_case_insensitively() {
+    let source = BoardSource::Github {
+        owner: "OWNER".into(),
+        number: 0,
+        url: String::new(),
+    };
+    let found =
+        board_source_from_url(&source, "https://github.com/users/owner/projects/1").unwrap();
+    assert!(matches!(found,BoardSource::Github{owner,number:1,..} if owner == "OWNER"));
+    assert!(board_source_from_url(&source, "https://github.com/users/another/projects/1").is_err());
+}

@@ -543,13 +543,21 @@ fn reference_for(source: &BoardSource, repo: &str, number: u64) -> IssueRef {
     }
 }
 fn check_repository(config: &RuntimeConfig, source: &BoardSource, repo: &str) -> Result<(), Error> {
+    check_repository_access(config, source, repo, true)
+}
+fn check_repository_access(
+    config: &RuntimeConfig,
+    source: &BoardSource,
+    repo: &str,
+    issue_write: bool,
+) -> Result<(), Error> {
     match source {
         BoardSource::Github { .. } => {
             let v = github::rest(config, &format!("repos/{repo}"), "GET", json!({}))?;
-            if v["permissions"]["push"] != true {
+            if issue_write && v["permissions"]["push"] != true {
                 return Err(Error::invalid("Repository write permission is required"));
             }
-            if v["has_issues"] == false || v["archived"] == true {
+            if issue_write && (v["has_issues"] == false || v["archived"] == true) {
                 return Err(Error::invalid(
                     "Destination repository issues are disabled or archived",
                 ));
@@ -608,7 +616,16 @@ fn check_destination(
             "Task provider/host does not match destination",
         ));
     }
-    check_repository(config, source, &reference.repository)
+    // Projects v2 membership/status writes require project permission and issue
+    // read access, not write permission in every external issue repository.
+    check_repository_access(config, source, &reference.repository, false)
+}
+fn same_repository(provider: &Provider, left: &str, right: &str) -> bool {
+    if *provider == Provider::Github {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
 }
 fn check_issue_permissions(config: &RuntimeConfig, reference: &IssueRef) -> Result<(), Error> {
     let source = match reference.provider {
@@ -733,12 +750,15 @@ fn create_issue(
                 "POST",
                 json!({"title":task.title,"body":body}),
             )?;
-            IssueRef {
-                provider: Provider::Github,
-                repository: repo.into(),
-                number: number(&v, "number")?,
-                url: text(&v, "html_url")?,
+            let reference = issue_reference_from_url(source, &text(&v, "html_url")?)?;
+            if reference.number != number(&v, "number")?
+                || !same_repository(&reference.provider, &reference.repository, repo)
+            {
+                return Err(Error::invalid(
+                    "Provider returned a different issue repository or number",
+                ));
             }
+            reference
         }
         BoardSource::Gitlab { host, .. } => {
             let v = gitlab::rest(
@@ -814,7 +834,7 @@ fn attach_task(
         )?)?
     };
     check_destination(&workspace.config, &board.board.source, &reference)?;
-    if reference.repository != repo {
+    if !same_repository(&reference.provider, &reference.repository, repo) {
         return Err(Error::invalid(
             "Accepted issue repository does not match selected task repository",
         ));
@@ -899,7 +919,12 @@ fn create_task(
         .as_ref()
         .ok_or_else(|| Error::invalid("Select a repository connection for remote task creation"))?;
     let repo = repository(&snapshot, &op.project_id, connection, &board.board.source)?;
-    check_repository(&workspace.config, &board.board.source, &repo)?;
+    check_repository_access(
+        &workspace.config,
+        &board.board.source,
+        &repo,
+        task.reference.is_none() && !op.results.contains_key(&format!("issue/{}", task.id)),
+    )?;
     if let Some(reference) = &task.reference {
         check_destination(&workspace.config, &board.board.source, reference)?;
     }
@@ -1024,10 +1049,15 @@ fn publish(
             &publication.repository_connection_id,
             &target.source,
         )?;
-        check_repository(&workspace.config, &target.source, &repo)?;
+        check_repository_access(
+            &workspace.config,
+            &target.source,
+            &repo,
+            task.reference.is_none() && !op.results.contains_key(&format!("issue/{}", task.id)),
+        )?;
         if let Some(reference) = &task.reference {
             check_destination(&workspace.config, &target.source, reference)?;
-            if reference.repository != repo {
+            if !same_repository(&reference.provider, &reference.repository, &repo) {
                 return Err(Error::invalid(
                     "Existing issue repository does not match task repository selection",
                 ));
@@ -1296,7 +1326,7 @@ pub fn lookup_reconciliation(
         }
         .ok_or_else(|| Error::invalid("Operation has no task creation step"))?;
         let repo = repository(snapshot, &op.project_id, connection, &source)?;
-        if repo != reference.repository {
+        if !same_repository(&reference.provider, &repo, &reference.repository) {
             return Err(Error::invalid(
                 "Known issue does not match selected repository",
             ));
@@ -1417,13 +1447,18 @@ fn positive_number(text: &str) -> Result<u64, Error> {
 fn board_source_from_url(scope: &BoardSource, url: &str) -> Result<BoardSource, Error> {
     let source = match scope {
         BoardSource::Github { owner, .. } => {
-            let suffix = [
-                format!("https://github.com/users/{owner}/projects/"),
-                format!("https://github.com/orgs/{owner}/projects/"),
-            ]
-            .into_iter()
-            .find_map(|p| url.strip_prefix(&p))
-            .ok_or_else(|| Error::invalid("Known board URL is outside destination owner"))?;
+            let path = url
+                .strip_prefix("https://github.com/")
+                .and_then(|p| p.strip_prefix("users/").or_else(|| p.strip_prefix("orgs/")))
+                .ok_or_else(|| Error::invalid("Enter a GitHub project URL"))?;
+            let (actual_owner, suffix) = path
+                .split_once("/projects/")
+                .ok_or_else(|| Error::invalid("Enter a GitHub project URL"))?;
+            if !owner.eq_ignore_ascii_case(actual_owner) {
+                return Err(Error::invalid(
+                    "Known board URL is outside destination owner",
+                ));
+            }
             BoardSource::Github {
                 owner: owner.clone(),
                 number: positive_number(suffix)?,
