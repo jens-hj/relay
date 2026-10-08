@@ -1985,6 +1985,18 @@ fn inline_permission_answers_exact_run_and_disappears_when_expired() {
         ..Default::default()
     });
     mounted.settle();
+    let description = mounted.rect("notes.txt");
+    let request = mounted.rect("Approval request");
+    assert!(
+        description.size.height > 0.0,
+        "approval details must be readable"
+    );
+    assert!(
+        description.origin.y >= request.origin.y
+            && description.origin.y + description.size.height
+                <= request.origin.y + request.size.height,
+        "{description:?} inside {request:?}"
+    );
     mounted.click("Allow once tool request");
     let envelope = mounted.commands.try_recv().unwrap();
     assert!(

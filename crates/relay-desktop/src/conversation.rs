@@ -947,11 +947,21 @@ pub fn Conversation(model: Model) -> Element {
                                         }
                                         row #relay.title height:min-content font-size:{px(14.0)}px {
                                             text
-                                                {format!("Approval requested · {}",permission.get().tool)}
+                                                {format!("Approval requested · {}", match permission.get().tool.as_str() {
+                                                    "item/commandExecution/requestApproval" => "Run command",
+                                                    "item/fileChange/requestApproval" => "Change files",
+                                                    other => other,
+                                                })}
                                         }
-                                        scroll max-height:{px(140.0)}px {
+                                        BoundedPanel limit:(Derived::new(|| px(140.0))) {
                                             row height:min-content font-size:{px(12.0)}px {
-                                                text {permission.get().description}
+                                                text
+                                                    {
+                                                    let description = permission.get().description;
+                                                    serde_json::from_str::<serde_json::Value>(&description)
+                                                        .and_then(|value| serde_json::to_string_pretty(&value))
+                                                        .unwrap_or(description)
+                                                }
                                             }
                                         }
                                     }
