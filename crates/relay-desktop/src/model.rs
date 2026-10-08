@@ -472,6 +472,9 @@ impl Model {
         self.editor_name.set(name);
         self.editor_revision.set(snapshot.revision);
         self.editor.set(target);
+        // A TOML draft belongs to the profile loaded above. Hiding and showing
+        // its editor preserves the draft; loading a profile starts a new one.
+        self.toml.set(String::new());
         self.advanced.set(false);
         self.page.set(Page::Directors);
     }

@@ -44,91 +44,11 @@ pub(crate) fn Profiles(model: Model) -> Element {
     let gutter = Derived::new(move || px(if wide.get() { 40.0 } else { 20.0 }));
     view! {
         col width:1fr gap:0px @layout:{move |rect: Rect| width.set(rect.size.width)} {
-            row height:min-content shrink:0
-                pad:(left:{gutter.get()}px right:{gutter.get()}px top:{px(16.0)}px) {
-                scroll width:max-content {
-                    row height:min-content width:max-content gap:0px
-                        stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)}) {
-                        button #relay.tree-control
-                            @click:{ model.open_profile(EditTarget::Defaults); }
-                            pad:(horizontal:{px(12.0)}px vertical:0px)
-                            fill:{color(if model.editor.get() == EditTarget::Defaults {ink.inverse} else {surface.panel})}
-                            label:"Project defaults"
-                            hover {
-                                fill:{color(if model.editor.get() == EditTarget::Defaults {ink.inverse} else {surface.raised})}
-                            }
-                            pressed {
-                                fill:{color(if model.editor.get() == EditTarget::Defaults {ink.inverse} else {surface.raised})}
-                            } {
-                            text
-                                font-weight:{if model.editor.get() == EditTarget::Defaults {700} else {400}}
-                                font-color:{color(if model.editor.get() == EditTarget::Defaults {ink.on_inverse} else {ink.fg})}
-                                "Project defaults"
-                        }
-                        for (_, director) in { model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
-                            let id = State::new(director.id.clone());
-                            button #relay.tree-control
-                                @click:{ model.open_profile(EditTarget::Director(id.get_untracked())); }
-                                pad:(horizontal:{px(12.0)}px vertical:0px)
-                                stroke:(width:{px(1.0)} color:rule.hair edges:left)
-                                fill:{color(if model.editor.get() == EditTarget::Director(id.get()) {ink.inverse} else {surface.panel})}
-                                label:{model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| d.name.clone()).unwrap_or_default()}
-                                hover {
-                                    fill:{color(if model.editor.get() == EditTarget::Director(id.get()) {ink.inverse} else {surface.raised})}
-                                }
-                                pressed {
-                                    fill:{color(if model.editor.get() == EditTarget::Director(id.get()) {ink.inverse} else {surface.raised})}
-                                } {
-                                text
-                                    font-weight:{if model.editor.get() == EditTarget::Director(id.get()) {700} else {400}}
-                                    font-color:{color(if model.editor.get() == EditTarget::Director(id.get()) {ink.on_inverse} else {ink.fg})}
-                                    {model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| d.name.clone()).unwrap_or_default()}
-                            }
-                        }
-                        button #relay.tree-control @click:{ model.open_profile(EditTarget::New); }
-                            pad:(horizontal:{px(12.0)}px vertical:0px)
-                            stroke:(width:{px(1.0)} color:rule.hair edges:left)
-                            fill:{color(if model.editor.get() == EditTarget::New {ink.inverse} else {surface.panel})}
-                            label:"Create director"
-                            hover {
-                                fill:{color(if model.editor.get() == EditTarget::New {ink.inverse} else {surface.raised})}
-                            }
-                            pressed {
-                                fill:{color(if model.editor.get() == EditTarget::New {ink.inverse} else {surface.raised})}
-                            } {
-                            text
-                                font-weight:{if model.editor.get() == EditTarget::New {700} else {400}}
-                                font-color:{color(if model.editor.get() == EditTarget::New {ink.on_inverse} else {ink.fg})}
-                                "+ Director"
-                        }
-                    }
-                } as tabs
-                { tabs.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(px(42.0)).basis(px(42.0)).shrink(0.0)); }
-            }
             scroll {
                 col height:min-content gap:{px(24.0)}px
-                    pad:(left:{gutter.get()}px right:{gutter.get()}px top:{px(20.0)}px bottom:{px(24.0)}px) {
+                    pad:(left:{gutter.get()}px right:{gutter.get()}px top:{px(28.0)}px bottom:{px(24.0)}px) {
                     ProfileHeader model:(model)
-                    // The name module brings its own spacing, so the defaults
-                    // page has no empty gap where it would be.
-                    col height:min-content gap:0px {
-                        Inheritance model:(model)
-                        if model.editor.get() != EditTarget::Defaults {
-                            col height:min-content pad:(top:{px(24.0)}px) {
-                                col #relay.module {
-                                    row #relay.module-head {
-                                        row #relay.eyebrow height:min-content {
-                                            text text-transform:uppercase letter-spacing:{px(0.6)}px
-                                                "Name"
-                                        }
-                                    }
-                                    col height:min-content pad:{px(12.0)}px {
-                                        input #relay.field label:"Director name" model.editor_name
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    Inheritance model:(model)
                     // One grid for both layouts: the track template changes with the
                     // width, the controls themselves are never rebuilt.
                     grid height:min-content gap:{px(24.0)}px align:start
@@ -164,6 +84,8 @@ pub(crate) fn Profiles(model: Model) -> Element {
 /// readings for the profile being edited.
 #[component]
 fn ProfileHeader(model: Model) -> Element {
+    let width = State::new(0.0f32);
+    let readings = Derived::new(move || width.get() >= px(760.0));
     let defaults = Derived::new(move || model.editor.get() == EditTarget::Defaults);
     let director = Derived::new(move || match model.editor.get() {
         EditTarget::Director(id) => Some(id),
@@ -210,7 +132,8 @@ fn ProfileHeader(model: Model) -> Element {
         format!("{count:02}")
     });
     view! {
-        row #relay.module height:{px(74.0)}px shrink:0 label:"Profile header" {
+        row #relay.module height:{px(74.0)}px shrink:0 label:"Profile header"
+            @layout:{move |rect:Rect| width.set(rect.size.width)} {
             stack width:{px(74.0)}px shrink:0 align:center justify:center fill:ink.inverse {
                 DirectorMark size:(22.0) active:(Derived::new(move || capacity.get().1 > 0))
                     inverse:(Derived::new(|| true)) defaults:(defaults)
@@ -221,20 +144,44 @@ fn ProfileHeader(model: Model) -> Element {
                     text text-transform:{TextTransform::Uppercase} letter-spacing:{px(0.6)}px
                         {kind.get()}
                 }
-                stack #relay.fade-label #relay.title height:min-content font-size:{px(22.0)}px {
-                    row #relay.fade-line {
-                        text width:max-content shrink:0 text-wrap:none {title.get()}
+                if defaults.get() {
+                    stack #relay.fade-label #relay.title height:min-content font-size:{px(22.0)}px {
+                        row #relay.fade-line {
+                            text width:max-content shrink:0 text-wrap:none {title.get()}
+                        }
                     }
+                } else {
+                    input width:fill height:{px(32.0)}px pad:0px radius:0px
+                        fill:(Color::TRANSPARENT)
+                        stroke:(width:{px(1.0)} color:(Color::TRANSPARENT)) font-family:sans-serif
+                        font-size:{px(22.0)}px font-weight:600 label:"Director name"
+                        placeholder:"Director name"
+                        focused { stroke:(width:{px(1.0)} color:accent.focus edges:bottom) }
+                        model.editor_name
                 }
             }
-            if defaults.get() {
+            if defaults.get() && readings.get() {
                 HeaderCell key:("Directors".to_string()) value:(directors)
             }
-            if director.get().is_some() {
+            if director.get().is_some() && readings.get() {
                 HeaderCell key:("Overrides".to_string())
                     value:(Derived::new(move || format!("{:02} / {:02}", overridden_fields(&model.editor_overrides.get()).len(), OVERRIDE_FIELDS)))
                 HeaderCell key:("Workers".to_string())
                     value:(Derived::new(move || format!("{} / {} active", capacity.get().1, capacity.get().2)))
+            }
+            if readings.get() {
+                HeaderCell key:("Profile fields".to_string())
+                    value:(Derived::new(move || if model.editor_profile.get().validate().is_ok() {"Valid".to_string()} else {"Invalid".to_string()})) {
+                    tooltip #relay.tooltip summary:"Profile field validation" {
+                        text {model.editor_profile.get().validate().err().unwrap_or_else(|| "Local profile field validation passes. The server rechecks scope and policy when saving.".to_string())}
+                    }
+                }
+            }
+            col width:max-content justify:center pad:(horizontal:{px(12.0)}px vertical:0px) {
+                button #relay.action @click:{model.palette.set(true);} width:{px(32.0)}px
+                    height:{px(32.0)}px pad:0px justify:center label:"Open command palette" {
+                    icon size:{px(15.0)}px command-icon
+                }
             }
         }
     }
@@ -244,6 +191,8 @@ fn ProfileHeader(model: Model) -> Element {
 /// overrides, applied when the next worker turn starts.
 #[component]
 fn Inheritance(model: Model) -> Element {
+    let width = State::new(0.0f32);
+    let horizontal = Derived::new(move || width.get() >= px(780.0));
     let defaults = Derived::new(move || model.editor.get() == EditTarget::Defaults);
     let base = Derived::new(move || {
         let profile = if defaults.get() {
@@ -265,12 +214,12 @@ fn Inheritance(model: Model) -> Element {
         }
     });
     view! {
-        row height:{px(54.0)}px shrink:0 align:center label:"Inheritance" {
+        grid height:min-content gap:{px(12.0)}px shrink:0 label:"Inheritance"
+            @layout:{move |rect:Rect| width.set(rect.size.width)}
+            cols:{if horizontal.get() {GridTracks::new([GridTrack::fr(1.0),GridTrack::fr(1.0),GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0)])}} {
             ChainStep step:"01 · Project defaults" value:(base) current:(defaults)
-            el width:{px(40.0)}px height:{px(1.0)}px shrink:0 fill:rule.line {}
             ChainStep step:"02 · Director overrides" value:(director)
                 current:(Derived::new(move || !defaults.get()))
-            el width:{px(40.0)}px height:{px(1.0)}px shrink:0 fill:rule.line {}
             ChainStep step:"03 · Next worker turn"
                 value:(Derived::new(|| "Applies when the next worker turn starts".to_string()))
                 current:(Derived::new(|| false))
@@ -281,7 +230,7 @@ fn Inheritance(model: Model) -> Element {
 #[component]
 fn ChainStep(step: &'static str, value: Derived<String>, current: Derived<bool>) -> Element {
     view! {
-        col width:1fr min-width:0px justify:center gap:{px(3.0)}px
+        col width:1fr min-width:0px height:{px(54.0)}px shrink:0 justify:center gap:{px(3.0)}px
             pad:(horizontal:{px(14.0)}px vertical:0px)
             fill:{color(if current.get() {ink.inverse} else {surface.panel})}
             stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)}) {
@@ -311,19 +260,33 @@ fn FieldHead(
     field: &'static str,
     #[prop(optional)] children: Children,
 ) -> Element {
+    let width = State::new(0.0f32);
+    let wide = Derived::new(move || width.get() >= px(400.0));
     view! {
-        row #relay.module-head gap:{px(8.0)}px {
-            row #relay.eyebrow height:min-content width:1fr min-width:0px {
+        grid #relay.module-head @layout:{move |rect:Rect| width.set(rect.size.width)}
+            height:{if wide.get() {px(30.0).into()} else {Dimension::MinContent}}
+            pad:(horizontal:{px(12.0)}px vertical:{px(if wide.get() {0.0} else {8.0})}px)
+            gap:{px(8.0)}px
+            cols:{if wide.get() {GridTracks::new([GridTrack::fr(1.0), GridTrack::MaxContent, GridTrack::MaxContent])} else {GridTracks::new([GridTrack::fr(1.0)])}} {
+            row #relay.eyebrow height:min-content min-width:0px {
                 text text-transform:uppercase letter-spacing:{px(0.6)}px (title)
             }
-            children
-            row #relay.caption height:min-content width:max-content {
-                text { model.origin(field) }
+            row height:min-content width:max-content align:center {
+                children
             }
-            if model.origin(field) == "Director override" {
-                button #relay.action @click:{ model.inherit(field); }
-                    pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
-                    label:{ format!("Inherit {field}") } "Inherit"
+            row height:min-content width:max-content align:center gap:{px(8.0)}px {
+                row #relay.caption height:min-content width:max-content {
+                    text
+                        { if wide.get() {model.origin(field)} else if model.origin(field) == "Director override" {"Override"} else {"Default"} }
+                }
+                if model.origin(field) == "Director override" {
+                    button #relay.action @click:{ model.inherit(field); }
+                        pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
+                        label:{ format!("Inherit {field}") } "Inherit"
+                }
+                tooltip #relay.tooltip summary:"Field origin" {
+                    text {format!("{title}: {}. Overrides replace this whole field.", model.origin(field))}
+                }
             }
         }
     }
@@ -332,22 +295,31 @@ fn FieldHead(
 /// The origin of one whole matrix field, with Inherit when overridden.
 #[component]
 fn FieldOrigin(model: Model, title: &'static str, field: &'static str) -> Element {
+    let short = match field {
+        "responsibilities" => "Resp.",
+        "completion" => "Done",
+        _ => "Permission",
+    };
     view! {
-        row width:1fr min-width:0px align:center gap:{px(8.0)}px
-            pad:(horizontal:{px(12.0)}px vertical:{px(6.0)}px)
-            stroke:(width:{px(1.0)} color:rule.hair edges:right) {
+        row width:1fr min-width:0px align:center gap:{px(6.0)}px
+            pad:(horizontal:{px(10.0)}px vertical:{px(6.0)}px)
+            stroke:(width:{px(1.0)} color:rule.hair edges:right) label:{format!("{title} origin")} {
             col width:1fr min-width:0px height:min-content gap:{px(2.0)}px {
                 row #relay.eyebrow height:min-content {
-                    text text-transform:uppercase letter-spacing:{px(0.6)}px (title)
+                    text (short)
                 }
                 row #relay.caption height:min-content {
-                    text { model.origin(field) }
+                    text
+                        {if model.origin(field) == "Director override" {"Override"} else {"Default"}}
                 }
             }
             if model.origin(field) == "Director override" {
-                button #relay.action @click:{ model.inherit(field); }
-                    pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
-                    label:{ format!("Inherit {field}") } "Inherit"
+                button #relay.action @click:{model.inherit(field);} width:{px(20.0)}px
+                    height:{px(20.0)}px pad:0px justify:center label:{format!("Inherit {field}")}
+                    "×"
+            }
+            tooltip #relay.tooltip summary:"Field origin" {
+                text {format!("{title}: {}. Overrides replace this whole field.", model.origin(field))}
             }
         }
     }
@@ -374,7 +346,7 @@ pub(crate) fn ActionRow(model: Model, task: Task) -> Element {
         });
     });
     view! {
-        row height:{px(40.0)}px align:center pad:(left:{px(12.0)}px right:{px(3.0)}px)
+        row height:{px(34.0)}px align:center pad:(left:{px(12.0)}px right:{px(3.0)}px)
             stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
             row width:1fr min-width:0px height:min-content font-size:{px(13.0)}px clip {
                 text text-wrap:none (task.label())
@@ -383,7 +355,7 @@ pub(crate) fn ActionRow(model: Model, task: Task) -> Element {
             StepToggle model:(model) task:(task) completion:true
             SlidingSegments name:(format!("{} permission", task.label()))
                 options:(PERMISSIONS.iter().map(|p| p.label().to_string()).collect::<Vec<_>>())
-                index:(index) select:(choose) attention-slot:(Some(1)) cell-width:(72.0)
+                index:(index) select:(choose) attention-slot:(Some(1)) cell-width:(60.0)
                 disabled:(Derived::new(|| false))
         }
     }
@@ -406,7 +378,7 @@ pub(crate) fn StepToggle(model: Model, task: Task, completion: bool) -> Element 
                 let steps = if completion { &mut p.completion } else { &mut p.responsibilities };
                 if steps.contains(&task) { steps.retain(|t| t != &task); } else { steps.push(task); }
             }); }
-                width:{px(96.0)}px height:fill justify:center role:checkbox
+                width:{px(60.0)}px height:fill justify:center role:checkbox
                 label:{ format!("{} {}", task.label(), if completion { "required for completion" } else { "responsibility" }) } {
                 el width:{px(12.0)}px height:{px(12.0)}px
                     fill:{color(if on.get() {ink.fg} else {surface.panel})}
@@ -421,46 +393,61 @@ pub(crate) fn StepToggle(model: Model, task: Task, completion: bool) -> Element 
 /// action with its responsibility, completion step and permission.
 #[component]
 pub(crate) fn ActionMatrix(model: Model) -> Element {
-    view! {
-        col #relay.module label:"Action matrix" {
-            row #relay.module-head {
-                row #relay.eyebrow height:min-content width:max-content {
-                    text text-transform:uppercase letter-spacing:{px(0.6)}px "Actions"
+    let width = State::new(0.0f32);
+    let extent = State::new(px(400.0));
+    let root = view! {
+        col height:min-content min-width:0px {
+            scroll {
+                col #relay.module label:"Action matrix"
+                    @layout:{move |rect:Rect| extent.set(rect.size.height)} {
+                    row #relay.module-head {
+                        row #relay.eyebrow height:min-content width:max-content {
+                            text text-transform:uppercase letter-spacing:{px(0.6)}px "Actions"
+                        }
+                        row #relay.caption height:min-content width:max-content {
+                            text "Responsibility · completion · permission"
+                        }
+                    }
+                    row height:min-content stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
+                        FieldOrigin model:(model) title:"Responsibilities" field:"responsibilities"
+                        FieldOrigin model:(model) title:"Completion" field:"completion"
+                        FieldOrigin model:(model) title:"Permissions" field:"permissions"
+                    }
+                    row #relay.eyebrow height:{px(26.0)}px align:center
+                        pad:(left:{px(12.0)}px right:{px(3.0)}px)
+                        stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
+                        row width:1fr height:min-content {
+                            text text-transform:uppercase letter-spacing:{px(0.6)}px "Action"
+                        }
+                        row width:{px(60.0)}px height:min-content justify:center {
+                            text text-transform:uppercase letter-spacing:{px(0.6)}px "Resp."
+                        }
+                        row width:{px(60.0)}px height:min-content justify:center {
+                            text text-transform:uppercase letter-spacing:{px(0.6)}px "Done"
+                        }
+                        row width:{px(180.0)}px height:min-content justify:center {
+                            text text-transform:uppercase letter-spacing:{px(0.6)}px "Permission"
+                        }
+                    }
+                    for task in Task::ALL {
+                        ActionRow model:(model) task:(task)
+                    }
+                    row #relay.caption height:min-content pad:{px(12.0)}px {
+                        text
+                            "Implement: Deny blocks worker turns; Ask requires approval each turn. Other actions are workflow settings."
+                    }
                 }
-                row #relay.caption height:min-content width:max-content {
-                    text "Responsibility · completion · permission"
-                }
-            }
-            row height:min-content stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
-                FieldOrigin model:(model) title:"Responsibilities" field:"responsibilities"
-                FieldOrigin model:(model) title:"Completion" field:"completion"
-                FieldOrigin model:(model) title:"Permissions" field:"permissions"
-            }
-            row #relay.eyebrow height:{px(26.0)}px align:center
-                pad:(left:{px(12.0)}px right:{px(3.0)}px)
-                stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
-                row width:1fr height:min-content {
-                    text text-transform:uppercase letter-spacing:{px(0.6)}px "Action"
-                }
-                row width:{px(96.0)}px height:min-content justify:center {
-                    text text-transform:uppercase letter-spacing:{px(0.6)}px "Responsible"
-                }
-                row width:{px(96.0)}px height:min-content justify:center {
-                    text text-transform:uppercase letter-spacing:{px(0.6)}px "Required"
-                }
-                row width:{px(216.0)}px height:min-content justify:center {
-                    text text-transform:uppercase letter-spacing:{px(0.6)}px "Permission"
-                }
-            }
-            for task in Task::ALL {
-                ActionRow model:(model) task:(task)
-            }
-            row #relay.caption height:min-content pad:{px(12.0)}px {
-                text
-                    "Implement: Deny blocks worker turns; Ask requires approval each turn. Other actions are workflow settings."
+            } as horizontal
+            {
+                horizontal.root().on_layout(move |rect| width.set(rect.size.width));
+                horizontal.content().style_dyn(move || Style::column()
+                    .width(width.get().max(px(432.0))).height(Dimension::MinContent).shrink(0.0));
+                horizontal.root().style_dyn(move || Style::stack()
+                    .width(Dimension::Fill).height(extent.get()).basis(Dimension::Auto).grow(0.0).shrink(0.0));
             }
         }
-    }
+    };
+    root
 }
 
 /// The profile as TOML: export, the effective profile, and import.
@@ -470,13 +457,18 @@ fn ProfileToml(model: Model) -> Element {
         col #relay.module {
             row #relay.module-head gap:{px(6.0)}px {
                 row #relay.eyebrow height:min-content width:1fr {
-                    text text-transform:uppercase letter-spacing:{px(0.6)}px "Profile TOML"
+                    text text-transform:uppercase letter-spacing:{px(0.6)}px
+                        "Effective profile · TOML"
                 }
-                button #relay.action @click:{ model.export_toml(); }
-                    pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px) "Export / edit TOML"
                 button #relay.action
-                    @click:{ model.toml.set(model.editor_profile.get_untracked().to_toml()); model.advanced.set(true); }
-                    pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px) "Show effective profile"
+                    @click:{
+                        if !model.advanced.get_untracked() && model.toml.get_untracked().is_empty() {
+                            model.toml.set(model.editor_profile.get_untracked().to_toml());
+                        }
+                        model.advanced.update(|open| *open = !*open);
+                    }
+                    pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px) label:"Toggle profile TOML"
+                    {if model.advanced.get() {"Hide"} else {"Edit"}}
             }
             if model.advanced.get() {
                 col height:min-content gap:{px(10.0)}px pad:{px(12.0)}px {
@@ -484,6 +476,10 @@ fn ProfileToml(model: Model) -> Element {
                         text
                             "Project defaults use a complete profile. Directors use overrides; omitted fields inherit. Copy this text to export."
                     }
+                    button #relay.action @click:{ model.export_toml(); } "Export / edit TOML"
+                    button #relay.action
+                        @click:{ model.toml.set(model.editor_profile.get_untracked().to_toml()); }
+                        "Show effective profile"
                     input #relay.area multiline height:{px(240.0)}px label:"Profile TOML" model.toml
                     button #relay.action @click:{ model.import_toml(); } "Import TOML into draft"
                 }
@@ -494,18 +490,9 @@ fn ProfileToml(model: Model) -> Element {
 
 #[component]
 pub(crate) fn ProfileControls(model: Model) -> Element {
-    let harness_index = Derived::new(move || {
-        usize::from(model.editor_profile.get().harness == Harness::ClaudeCode)
-    });
-    let choose_harness: crate::labels::Select = std::rc::Rc::new(move |slot: usize| {
-        model.modify_profile("harness", |p| {
-            p.harness = if slot == 1 {
-                Harness::ClaudeCode
-            } else {
-                Harness::Codex
-            }
-        });
-    });
+    let harness_width = State::new(0.0f32);
+    let harness_keys: std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<usize, Element>>> =
+        Default::default();
     let approval_index = Derived::new(move || {
         let mode = model.editor_profile.get().execution.approval;
         ApprovalMode::ALL
@@ -528,13 +515,15 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
         col height:min-content gap:{px(24.0)}px {
             col #relay.module {
                 FieldHead model:(model) title:"Agent harness" field:"harness"
-                col height:min-content pad:{px(12.0)}px {
-                    SlidingSegments name:("Agent harness".to_string())
-                        options:(vec!["Codex".to_string(), "Claude Code".to_string()])
-                        index:(harness_index) select:(choose_harness) attention-slot:(None)
-                        cell-width:(130.0) disabled:(Derived::new(|| false))
+                grid height:min-content gap:0px label:"Harness choices"
+                    @layout:{move |rect:Rect| harness_width.set(rect.size.width)}
+                    cols:{if harness_width.get() >= px(360.0) {GridTracks::new([GridTrack::fr(1.0),GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0)])}} {
+                    HarnessChoice model:(model) harness:(Harness::Codex) keys:(harness_keys.clone())
+                    HarnessChoice model:(model) harness:(Harness::ClaudeCode)
+                        keys:(harness_keys.clone())
                 }
             }
+
             col #relay.module {
                 FieldHead model:(model) title:"Execution approval" field:"execution"
                 col height:min-content gap:{px(10.0)}px pad:{px(12.0)}px {
@@ -613,20 +602,150 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
     }
 }
 
+/// A harness choice reports the actual connected server's last check. An
+/// inverse selected cell retains the same glyph shape with readable ink.
+#[component]
+fn HarnessChoice(
+    model: Model,
+    harness: Harness,
+    keys: std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<usize, Element>>>,
+) -> Element {
+    let name = if harness == Harness::Codex {
+        "Codex"
+    } else {
+        "Claude Code"
+    };
+    let selected = Derived::new(move || model.editor_profile.get().harness == harness);
+    let state = Derived::new(move || {
+        if !model.connected.get() {
+            return "disconnected".to_string();
+        }
+        if !model.harness_error.get().is_empty() {
+            return "stale".to_string();
+        }
+        model
+            .harnesses
+            .get()
+            .into_iter()
+            .find(|s| s.harness == harness)
+            .map(|s| s.state)
+            .unwrap_or_default()
+    });
+    let caption = Derived::new(move || {
+        match state.get().as_str() {
+            "ready" => "Installed · signed in",
+            "signed_out" => "Installed · sign in",
+            "missing" => "Not installed",
+            "incompatible" => "Incompatible version",
+            "unknown" | "error" | "failed" => "Check failed",
+            "disconnected" => "Disconnected",
+            "stale" => "Refresh failed",
+            "" => "Checking",
+            _ => "Check unavailable",
+        }
+        .to_string()
+    });
+    let tone = move || {
+        color(if selected.get() {
+            ink.on_inverse
+        } else {
+            match state.get().as_str() {
+                "ready" => status.success,
+                "signed_out" | "incompatible" => status.warning,
+                "unknown" | "error" | "failed" => status.danger,
+                _ => ink.muted,
+            }
+        })
+    };
+    let button = view! {
+        button #relay.tree-control
+            @click:{model.modify_profile("harness", |p| p.harness = harness);} width:1fr
+            min-width:0px height:min-content pad:0px role:radio
+            label:{format!("Agent harness: {name}")} description:{caption.get()}
+            fill:{color(if selected.get() {ink.inverse} else {surface.panel})}
+            stroke:(width:{px(1.0)} color:rule.hair offset:{px(-1.0)})
+            hover { fill:{color(if selected.get() {ink.inverse} else {surface.raised})} }
+            pressed { fill:{color(if selected.get() {ink.inverse} else {surface.raised})} } {
+            col height:min-content min-height:{px(76.0)}px justify:center gap:{px(8.0)}px
+                pad:{px(12.0)}px {
+                row height:min-content gap:{px(8.0)}px align:center
+                    font-color:{color(if selected.get() {ink.on_inverse} else {ink.fg})} {
+                    icon size:{px(18.0)}px shrink:0
+                        {if harness == Harness::Codex {harness_codex} else {harness_claude}}
+                    row height:min-content font-family:sans-serif font-size:{px(14.0)}px
+                        font-weight:600 {
+                        text (name)
+                    }
+                }
+                row height:min-content gap:{px(6.0)}px align:center font-color:{tone()}
+                    font-size:{px(11.0)}px {
+                    icon size:{px(11.0)}px shrink:0
+                        {match state.get().as_str(){"ready" => harness_ready, "signed_out" | "incompatible" => harness_warning, "unknown" | "error" | "failed" => harness_failed, _ => harness_neutral}}
+                    text {caption.get()}
+                }
+                tooltip #relay.tooltip summary:"Harness availability" {
+                    text {model.harnesses.get().iter().find(|s| s.harness == harness).map(|s| s.detail.clone()).unwrap_or_else(|| caption.get())}
+                }
+            }
+        }
+    };
+    let semantic = button.clone();
+    Effect::new(move || {
+        semantic.toggled(selected.get());
+    });
+    let slot = usize::from(harness == Harness::ClaudeCode);
+    keys.borrow_mut().insert(slot, button.clone());
+    let cleanup = keys.clone();
+    on_cleanup(move || {
+        cleanup.borrow_mut().remove(&slot);
+    });
+    button.on_key(move |event, ctx| {
+        if !matches!(event.kind, KeyEventKind::Down { .. }) {
+            return;
+        }
+        let current =
+            usize::from(model.editor_profile.get_untracked().harness == Harness::ClaudeCode);
+        let next = match event.key {
+            Key::ArrowLeft | Key::ArrowRight | Key::ArrowUp | Key::ArrowDown => 1 - current,
+            Key::Home => 0,
+            Key::End => 1,
+            _ => return,
+        };
+        model.modify_profile("harness", |p| {
+            p.harness = if next == 0 {
+                Harness::Codex
+            } else {
+                Harness::ClaudeCode
+            }
+        });
+        let target = keys.borrow().get(&next).cloned();
+        if let Some(target) = target {
+            target.focus();
+        }
+        ctx.stop_propagation();
+    });
+    button
+}
+
 /// One issue in the director's scope: its number block, inverse while
 /// selected, and title.
 #[component]
 fn ScopeChip(model: Model, issue: Issue) -> Element {
     let id = issue.id.clone();
     let issue_id = State::new(id.clone());
-    let number = issue.reference.as_ref().map(|r| format!("#{}", r.number));
-    let has_number = number.is_some();
-    let chip_label = format!(
-        "Scope {}",
-        number.clone().unwrap_or_else(|| issue.title.clone())
-    );
-    let number = State::new(number.unwrap_or_default());
-    let title = State::new(issue.title.clone());
+    let fallback = issue.clone();
+    let current = Derived::new(move || {
+        model
+            .snapshot
+            .get()
+            .issue(&issue_id.get())
+            .cloned()
+            .unwrap_or_else(|_| fallback.clone())
+    });
+    let number = Derived::new(move || current.get().reference.map(|r| format!("#{}", r.number)));
+    let title = Derived::new(move || current.get().title);
+    let chip_label =
+        Derived::new(move || format!("Scope {}", number.get().unwrap_or_else(|| title.get())));
     let on = Derived::new(
         move || matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &issue_id.get())),
     );
@@ -641,15 +760,15 @@ fn ScopeChip(model: Model, issue: Issue) -> Element {
                 });
             }
                 width:fill height:{px(24.0)}px pad:0px gap:0px justify:start role:checkbox
-                label:(chip_label.clone())
+                label:{chip_label.get()}
                 stroke:(width:{px(1.0)} color:{color(if on.get() {rule.line} else {rule.hair})} offset:{px(-1.0)}) {
-                if has_number {
+                if number.get().is_some() {
                     row width:max-content align:center shrink:0
                         pad:(horizontal:{px(6.0)}px vertical:0px) font-size:{px(10.0)}px
                         font-weight:700 fill:{color(if on.get() {ink.inverse} else {surface.panel})}
                         font-color:{color(if on.get() {ink.on_inverse} else {ink.muted})}
                         stroke:(width:{px(1.0)} color:{color(if on.get() {rule.line} else {rule.hair})} edges:right) {
-                        text text-wrap:none {number.get()}
+                        text text-wrap:none {number.get().unwrap_or_default()}
                     }
                 }
                 stack #relay.fade-label pad:(horizontal:{px(8.0)}px vertical:0px)

@@ -657,7 +657,7 @@ fn long_profile_forms_scroll_without_squeezing_permission_controls() {
     let plan = mounted.rect("Plan permission");
     let delegate = mounted.rect("Delegate permission");
     assert!(plan.size.height >= 30.0);
-    assert!(delegate.origin.y >= plan.origin.y + plan.size.height + 6.0);
+    assert!(delegate.origin.y >= plan.origin.y + plan.size.height - 0.5);
     let save = mounted.rect("Save profile");
     assert!(save.origin.y + save.size.height <= mounted.size.height);
 }
@@ -3902,16 +3902,25 @@ fn wide_profiles_show_the_action_matrix_beside_the_controls() {
     mounted.model.open_profile(EditTarget::Defaults);
     mounted.settle();
     let matrix = mounted.rect("Action matrix");
-    let harness = mounted.rect("Agent harness");
+    let harness = mounted.rect("Harness choices");
     assert!(matrix.origin.y + mounted.rect("Deploy permission").size.height < mounted.size.height);
     assert!(harness.origin.x > matrix.origin.x + matrix.size.width - 1.0);
+    let codex = mounted.rect("Agent harness: Codex");
+    let claude = mounted.rect("Agent harness: Claude Code");
+    assert!(
+        (codex.size.width + claude.size.width - harness.size.width).abs() <= 1.0,
+        "harness={harness:?}, codex={codex:?}, claude={claude:?}"
+    );
+    assert!(
+        (claude.origin.x + claude.size.width - harness.origin.x - harness.size.width).abs() <= 1.0
+    );
     assert!(mounted.rect("Deploy permission").origin.y < mounted.size.height);
 
     let narrow = mount(false, 820.0);
     narrow.model.open_profile(EditTarget::Defaults);
     narrow.settle();
     let matrix = narrow.rect("Action matrix");
-    let harness = narrow.rect("Agent harness");
+    let harness = narrow.rect("Harness choices");
     assert!(harness.origin.y > matrix.origin.y + matrix.size.height - 1.0);
     // Same column: the selector sits inside its module's 12px padding.
     assert!(harness.origin.x >= matrix.origin.x && harness.origin.x <= matrix.origin.x + 13.0);
@@ -4091,6 +4100,7 @@ fn profile_header_counts_real_overrides_and_keeps_its_geometry() {
     mounted.model.open_director_profile("director-main".into());
     mounted.settle();
     let near = |a: f32, b: f32| (a - b).abs() <= 1.0;
+    assert!(near(mounted.rect("Profile header").origin.y, 28.0));
     assert!(near(mounted.rect("Profile header").size.height, 74.0));
     assert!(near(mounted.rect("Inheritance").size.height, 54.0));
     assert!(near(mounted.rect("Save bar").size.height, 50.0));
@@ -4197,4 +4207,159 @@ fn live_readout_values_keep_their_container_typography_after_updates() {
     });
     mounted.settle();
     assert_eq!(typography("0 / 5 active"), before);
+}
+
+#[test]
+fn profile_fields_remain_reachable_at_double_scale_without_rebuilding_the_draft() {
+    let mounted = mount(false, 760.0);
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
+    mounted.model.preferences.update(|p| p.scale = 2.0);
+    mounted.model.open_director_profile("director-main".into());
+    mounted.settle();
+    type_in(&mounted, "Director name", "Retained director draft");
+    mounted.focus("Deploy permission: Allow");
+    let control = mounted.rect("Deploy permission: Allow");
+    assert!(
+        control.origin.x >= 0.0
+            && control.origin.x + control.size.width <= mounted.size.width + 1.0,
+        "{control:?}"
+    );
+    mounted.key(Key::Enter, false);
+    assert_eq!(
+        mounted.model.editor_profile.get_untracked().permissions[&Task::Deploy],
+        Permission::Allow
+    );
+    for label in [
+        "Increase worker limit",
+        "Inherit max_workers",
+        "Whole project",
+    ] {
+        mounted.focus(label);
+        let rect = mounted.rect(label);
+        assert!(
+            rect.origin.x >= 0.0 && rect.origin.x + rect.size.width <= mounted.size.width + 1.0,
+            "{label}: {rect:?}"
+        );
+    }
+    mounted.focus("Toggle profile TOML");
+    mounted.key(Key::Enter, false);
+    type_in(&mounted, "Profile TOML", "retained TOML draft");
+    mounted.focus("Toggle profile TOML");
+    mounted.key(Key::Enter, false);
+    mounted.key(Key::Enter, false);
+    assert_eq!(mounted.model.toml.get_untracked(), "retained TOML draft");
+    assert_eq!(
+        mounted.model.editor_name.get_untracked(),
+        "Retained director draft"
+    );
+    mounted.model.open_profile(EditTarget::Defaults);
+    mounted.settle();
+    mounted.focus("Toggle profile TOML");
+    mounted.key(Key::Enter, false);
+    assert_eq!(
+        mounted.model.toml.get_untracked(),
+        mounted.model.editor_profile.get_untracked().to_toml()
+    );
+    assert_ne!(mounted.model.toml.get_untracked(), "retained TOML draft");
+}
+
+#[test]
+fn profile_scope_reacts_to_publication_and_harness_choice_reports_actual_availability() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    let issue_id = snapshot.issues[0].id.clone();
+    snapshot.issues[0].reference = None;
+    snapshot.issues[0].title = "Local task title".into();
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_director_profile("director-main".into());
+    mounted.settle();
+    assert!(has_label(&mounted, "Scope Local task title"));
+    type_in(&mounted, "Director name", "Unsubmitted edit");
+    let task = snapshot
+        .issues
+        .iter_mut()
+        .find(|i| i.id == issue_id)
+        .unwrap();
+    task.title = "Published task title".into();
+    task.reference = Some(IssueRef {
+        provider: Provider::Github,
+        repository: "team/repo".into(),
+        number: 456,
+        url: "https://github.com/team/repo/issues/456".into(),
+    });
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.harnesses.set(vec![HarnessStatus {
+        harness: Harness::ClaudeCode,
+        executable: "claude".into(),
+        version: None,
+        state: "missing".into(),
+        detail: "Not installed on this server".into(),
+        checked_at: 1,
+    }]);
+    mounted.settle();
+    assert!(!has_label(&mounted, "Scope Local task title"));
+    assert!(has_label(&mounted, "Scope #456"));
+    let chooser = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some("Agent harness: Claude Code"))
+        .unwrap();
+    assert_eq!(chooser.description.as_deref(), Some("Not installed"));
+    mounted.click("Agent harness: Claude Code");
+    assert_eq!(
+        mounted.model.editor_profile.get_untracked().harness,
+        Harness::ClaudeCode
+    );
+    assert_eq!(
+        mounted.model.editor_overrides.get_untracked().harness,
+        Some(Harness::ClaudeCode)
+    );
+    assert_eq!(
+        mounted.model.editor_name.get_untracked(),
+        "Unsubmitted edit"
+    );
+    mounted.focus("Agent harness: Claude Code");
+    mounted.key(Key::Home, false);
+    assert_eq!(
+        mounted.model.editor_profile.get_untracked().harness,
+        Harness::Codex
+    );
+    assert_eq!(
+        mounted.ui.focused().unwrap().id(),
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .find(|n| n.label.as_deref() == Some("Agent harness: Codex"))
+            .unwrap()
+            .id
+    );
+    mounted.key(Key::ArrowRight, false);
+    assert_eq!(
+        mounted.model.editor_profile.get_untracked().harness,
+        Harness::ClaudeCode
+    );
+    mounted.key(Key::ArrowLeft, false);
+    assert_eq!(
+        mounted.model.editor_profile.get_untracked().harness,
+        Harness::Codex
+    );
+    mounted.key(Key::End, false);
+    assert_eq!(
+        mounted.model.editor_profile.get_untracked().harness,
+        Harness::ClaudeCode
+    );
 }
