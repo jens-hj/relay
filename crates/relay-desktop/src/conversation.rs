@@ -1,4 +1,5 @@
 //! A Relay-owned document interaction controller over Mosaic's native text primitives.
+use crate::panels::{BoundedPanel, BoundedPanelProps};
 use crate::styles::*;
 use crate::{
     buffer,
@@ -645,9 +646,37 @@ pub fn Conversation(model: Model) -> Element {
     // column above each entry and wrap card actions. Only track templates
     // change, so transcript and draft surfaces are never rebuilt.
     let doc_width = State::new(1200.0f32);
+    let doc_height = State::new(900.0f32);
+    let recovery = Derived::new(move || {
+        model
+            .buffer
+            .get()
+            .documents
+            .get(&model.session.get())
+            .is_some_and(|d| !d.error.is_empty() || !d.recovery.is_empty())
+    });
+    let warning = Derived::new(move || {
+        removed.get()
+            || session.get().and_then(|s| s.worker).is_some_and(|w| {
+                w.error.is_some()
+                    || (!matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running)
+                        && (w.thread_id.is_none() || w.worktree.is_none()))
+            })
+    });
+    // Auxiliary disclosures share a height budget. Even several open panels
+    // leave space for the document; Tab reveals controls in their own scroll.
+    let auxiliary_limit = Derived::new(move || {
+        let count = usize::from(menu.get())
+            + usize::from(!details.get().is_empty())
+            + usize::from(model.buffer.get().approval_needed)
+            + usize::from(recovery.get())
+            + usize::from(warning.get());
+        ((doc_height.get() - px(160.0)).max(0.0) * 0.6 / count.max(1) as f32).min(px(280.0))
+    });
     let compact = Derived::new(move || doc_width.get() < px(720.0));
     let root = view! {
-        col width:1fr gap:0px @layout:{move |rect: Rect| doc_width.set(rect.size.width)} {
+        col width:1fr gap:0px
+            @layout:{move |rect: Rect| { doc_width.set(rect.size.width); doc_height.set(rect.size.height); }} {
             row height:{px(74.0)}px shrink:0 stroke:(width:{px(1.0)} color:rule.line edges:bottom)
                 label:"Session header" {
                 stack width:{px(if compact.get() {52.0} else {74.0})}px shrink:0 align:center
@@ -708,104 +737,117 @@ pub fn Conversation(model: Model) -> Element {
                 }
             }
             if session.get().is_some_and(|s| s.worker.is_some()) {
-                row height:{px(28.0)}px shrink:0
-                    stroke:(width:{px(1.0)} color:rule.line edges:bottom) label:"Session run" {
-                    for (_, cell) in {session.get().map(|s| run_cells(&model.snapshot.get(), &s)).unwrap_or_default().into_iter().map(|c| (c.0, c)).collect::<Vec<_>>()} {
-                        let key: &'static str = cell.0;
-                        RunCell key:(key)
-                            value:(Derived::new(move || session.get().map(|s| run_cells(&model.snapshot.get(), &s)).unwrap_or_default().into_iter().find(|c| c.0 == key).map(|c| c.1).unwrap_or_default()))
+                scroll {
+                    row width:max-content height:{px(28.0)}px shrink:0
+                        stroke:(width:{px(1.0)} color:rule.line edges:bottom) label:"Session run" {
+                        for (_, cell) in {session.get().map(|s| run_cells(&model.snapshot.get(), &s)).unwrap_or_default().into_iter().map(|c| (c.0, c)).collect::<Vec<_>>()} {
+                            let key: &'static str = cell.0;
+                            RunCell key:(key)
+                                value:(Derived::new(move || session.get().map(|s| run_cells(&model.snapshot.get(), &s)).unwrap_or_default().into_iter().find(|c| c.0 == key).map(|c| c.1).unwrap_or_default()))
+                        }
                     }
-                }
+                } as strip
+                { strip.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(px(28.0)).basis(Dimension::Auto).grow(0.0).shrink(0.0)); }
             }
             if menu.get() {
-                col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
-                    gap:{px(10.0)}px shrink:0
-                    stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
-                    if compact.get() && session.get().and_then(|s|s.worker).is_some_and(|w|matches!(w.status,WorkerStatus::Running|WorkerStatus::Queued)) {
-                        row height:min-content {
-                            button #relay.action @click:{model.stop_worker();} label:"Stop worker"
-                                disabled:{!model.connected.get() || model.busy.get()} "Stop worker"
+                BoundedPanel limit:(auxiliary_limit) {
+                    col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
+                        gap:{px(10.0)}px shrink:0
+                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                        if compact.get() && session.get().and_then(|s|s.worker).is_some_and(|w|matches!(w.status,WorkerStatus::Running|WorkerStatus::Queued)) {
+                            row height:min-content {
+                                button #relay.action @click:{model.stop_worker();}
+                                    label:"Stop worker"
+                                    disabled:{!model.connected.get() || model.busy.get()}
+                                    "Stop worker"
+                            }
                         }
-                    }
-                    grid height:min-content gap:{px(8.0)}px
-                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(90.0).into(), GridTrack::fr(1.0)))} {
-                        button #relay.action @click:{model.open_worker_issue();}
-                            label:"Linked issue" "Issue"
-                        button #relay.action
-                            @click:{if let Some(s)=session.get_untracked(){model.open_profile(EditTarget::Director(s.director_id));}}
-                            label:"Director profile" "Profile"
-                        button #relay.action
-                            @click:{details.set(if details.get_untracked()=="changes" {String::new()}else{"changes".into()});}
-                            label:"Toggle change review" "Changes"
-                        button #relay.action
-                            @click:{details.set(if details.get_untracked()=="usage" {String::new()}else{"usage".into()});}
-                            label:"Session usage and provenance" "Details"
-                        button #relay.action @click:{model.searching.set(true);menu.set(false);}
-                            label:"Search transcript" "Find"
-                    }
-                    if session.get().is_some_and(|s| !s.fixture && s.worker.is_some()) {
-                        let current = session.get_untracked().unwrap();
-                        let session_id = current.id.clone();
-                        let snapshot = model.snapshot.get();
-                        let inherited = snapshot.directors.iter().find(|d| d.id == current.director_id).and_then(|d|snapshot.effective_profile(d).ok()).map(|p|p.execution.approval).unwrap_or_default();
-                        let worker = current.worker.unwrap();
-                        text font-size:{px(12.0)}px font-color:{color(ink.muted)}
-                            {format!("{} · {} · {}",match worker.harness{Harness::Codex=>"Codex",Harness::ClaudeCode=>"Claude Code"},worker.execution.as_ref().map(|e|e.approval).unwrap_or(inherited).label(),if worker.execution.is_some(){"Worker override"}else{"Inherited from director"})}
-                        row height:min-content gap:{px(8.0)}px align:center {
-                            let mode_session = session_id.clone();
-                            let mode_index = Derived::new(move || {
-                                let snapshot = model.snapshot.get();
-                                let session = snapshot.sessions.iter().find(|s| s.id == mode_session);
-                                let inherited = session.and_then(|s| snapshot.directors.iter().find(|d| d.id == s.director_id)).and_then(|d| snapshot.effective_profile(d).ok()).map(|p| p.execution.approval).unwrap_or_default();
-                                let mode = session.and_then(|s| s.worker.as_ref()).and_then(|w| w.execution.as_ref()).map(|e| e.approval).unwrap_or(inherited);
-                                ApprovalMode::ALL.iter().position(|m| *m == mode).unwrap_or(0)
-                            });
-                            let choose_session = session_id.clone();
-                            let choose: crate::labels::Select = Rc::new(move |slot: usize| {
-                                model.submit(Command::SetWorkerExecution{session_id:choose_session.clone(),execution:Some(ExecutionSettings{approval:ApprovalMode::ALL[slot]})},model.snapshot.get_untracked().revision,crate::model::Saved::Action);
-                            });
-                            SlidingSegments name:("Worker approval".to_string())
-                                options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
-                                index:(mode_index) select:(choose) attention-slot:(None)
-                                cell-width:(156.0)
-                                disabled:(Derived::new(move || !model.connected.get() || model.busy.get()))
+                        grid height:min-content gap:{px(8.0)}px
+                            cols:{GridTracks::auto_fit(GridTrack::minmax(px(90.0).into(), GridTrack::fr(1.0)))} {
+                            button #relay.action @click:{model.open_worker_issue();}
+                                label:"Linked issue" "Issue"
                             button #relay.action
-                                @click:{model.submit(Command::SetWorkerExecution{session_id:session_id.clone(),execution:None},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
-                                disabled:{!model.connected.get() || model.busy.get()}
-                                label:"Inherit worker execution settings" "Inherit"
+                                @click:{if let Some(s)=session.get_untracked(){model.open_profile(EditTarget::Director(s.director_id));}}
+                                label:"Director profile" "Profile"
+                            button #relay.action
+                                @click:{details.set(if details.get_untracked()=="changes" {String::new()}else{"changes".into()});}
+                                label:"Toggle change review" "Changes"
+                            button #relay.action
+                                @click:{details.set(if details.get_untracked()=="usage" {String::new()}else{"usage".into()});}
+                                label:"Session usage and provenance" "Details"
+                            button #relay.action @click:{model.searching.set(true);menu.set(false);}
+                                label:"Search transcript" "Find"
                         }
-                        text font-size:{px(11.0)}px font-color:ink.muted
-                            "Execution changes apply to the next turn."
+                        if session.get().is_some_and(|s| !s.fixture && s.worker.is_some()) {
+                            let current = session.get_untracked().unwrap();
+                            let session_id = current.id.clone();
+                            let snapshot = model.snapshot.get();
+                            let inherited = snapshot.directors.iter().find(|d| d.id == current.director_id).and_then(|d|snapshot.effective_profile(d).ok()).map(|p|p.execution.approval).unwrap_or_default();
+                            let worker = current.worker.unwrap();
+                            text font-size:{px(12.0)}px font-color:{color(ink.muted)}
+                                {format!("{} · {} · {}",match worker.harness{Harness::Codex=>"Codex",Harness::ClaudeCode=>"Claude Code"},worker.execution.as_ref().map(|e|e.approval).unwrap_or(inherited).label(),if worker.execution.is_some(){"Worker override"}else{"Inherited from director"})}
+                            grid height:min-content gap:{px(8.0)}px align:center
+                                cols:{if compact.get() {GridTracks::new([GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0),GridTrack::MaxContent])}} {
+                                let mode_session = session_id.clone();
+                                let mode_index = Derived::new(move || {
+                                    let snapshot = model.snapshot.get();
+                                    let session = snapshot.sessions.iter().find(|s| s.id == mode_session);
+                                    let inherited = session.and_then(|s| snapshot.directors.iter().find(|d| d.id == s.director_id)).and_then(|d| snapshot.effective_profile(d).ok()).map(|p| p.execution.approval).unwrap_or_default();
+                                    let mode = session.and_then(|s| s.worker.as_ref()).and_then(|w| w.execution.as_ref()).map(|e| e.approval).unwrap_or(inherited);
+                                    ApprovalMode::ALL.iter().position(|m| *m == mode).unwrap_or(0)
+                                });
+                                let choose_session = session_id.clone();
+                                let choose: crate::labels::Select = Rc::new(move |slot: usize| {
+                                    model.submit(Command::SetWorkerExecution{session_id:choose_session.clone(),execution:Some(ExecutionSettings{approval:ApprovalMode::ALL[slot]})},model.snapshot.get_untracked().revision,crate::model::Saved::Action);
+                                });
+                                SlidingSegments name:("Worker approval".to_string())
+                                    options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
+                                    index:(mode_index) select:(choose) attention-slot:(None)
+                                    cell-width:(156.0)
+                                    disabled:(Derived::new(move || !model.connected.get() || model.busy.get()))
+                                button #relay.action
+                                    @click:{model.submit(Command::SetWorkerExecution{session_id:session_id.clone(),execution:None},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
+                                    disabled:{!model.connected.get() || model.busy.get()}
+                                    label:"Inherit worker execution settings" "Inherit"
+                            }
+                            text font-size:{px(11.0)}px font-color:ink.muted
+                                "Execution changes apply to the next turn."
+                        }
                     }
                 }
             }
-            if removed.get() {
-                row height:min-content pad:(horizontal:{px(24.0)}px vertical:0px) shrink:0 {
-                    text label:"Session issue removed from board" font-size:{px(12.0)}px
-                        font-color:ink.muted
-                        "Issue no longer on this board. New turns require restoration and sync."
-                }
-            }
-            if session.get().and_then(|s|s.worker).is_some_and(|w|!matches!(w.status,WorkerStatus::Queued|WorkerStatus::Running) && (w.thread_id.is_none() || w.worktree.is_none())) {
-                row height:min-content gap:{px(8.0)}px pad:(horizontal:{px(24.0)}px vertical:0px)
-                    shrink:0 {
-                    text width:1fr label:"Worker cannot continue" font-size:{px(12.0)}px
-                        {session.get().and_then(|s|s.worker).and_then(|w|w.error).unwrap_or_else(||"No resumable thread was recorded".into())}
-                    button #relay.action @click:{model.open_worker_issue();}
-                        label:"Start new worker from linked issue" "Open issue"
-                }
-            } else {
-                col height:min-content shrink:0 {
-                    if session.get().and_then(|s|s.worker).is_some_and(|w|w.error.is_some()) {
-                        row height:min-content pad:(horizontal:{px(24.0)}px vertical:0px) {
-                            text font-size:{px(12.0)}px font-color:{color(status.danger)}
-                                {session.get().and_then(|s|s.worker).and_then(|w|w.error).unwrap_or_default()}
+            if warning.get() {
+                BoundedPanel limit:(auxiliary_limit) {
+                    if removed.get() {
+                        row height:min-content pad:(horizontal:{px(24.0)}px vertical:0px) shrink:0 {
+                            text label:"Session issue removed from board" font-size:{px(12.0)}px
+                                font-color:ink.muted
+                                "Issue no longer on this board. New turns require restoration and sync."
+                        }
+                    }
+                    if session.get().and_then(|s|s.worker).is_some_and(|w|!matches!(w.status,WorkerStatus::Queued|WorkerStatus::Running) && (w.thread_id.is_none() || w.worktree.is_none())) {
+                        grid height:min-content gap:{px(8.0)}px
+                            cols:{if compact.get() {GridTracks::new([GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0), GridTrack::MaxContent])}}
+                            pad:(horizontal:{px(24.0)}px vertical:0px) shrink:0 {
+                            text width:1fr label:"Worker cannot continue" font-size:{px(12.0)}px
+                                {session.get().and_then(|s|s.worker).and_then(|w|w.error).unwrap_or_else(||"No resumable thread was recorded".into())}
+                            button #relay.action @click:{model.open_worker_issue();}
+                                label:"Start new worker from linked issue" "Open issue"
+                        }
+                    } else {
+                        col height:min-content shrink:0 {
+                            if session.get().and_then(|s|s.worker).is_some_and(|w|w.error.is_some()) {
+                                row height:min-content pad:(horizontal:{px(24.0)}px vertical:0px) {
+                                    text font-size:{px(12.0)}px font-color:{color(status.danger)}
+                                        {session.get().and_then(|s|s.worker).and_then(|w|w.error).unwrap_or_default()}
+                                }
+                            }
                         }
                     }
                 }
             }
             if !details.get().is_empty() {
-                scroll {
+                BoundedPanel limit:(auxiliary_limit) {
                     col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(10.0)}px)
                         gap:{px(12.0)}px selectable label:"Session details" {
                         if details.get() == "usage" {
@@ -845,8 +887,7 @@ pub fn Conversation(model: Model) -> Element {
                             text font-size:{px(12.0)}px font-color:ink.muted "No execution metadata"
                         }
                     }
-                } as review
-                { review.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(Dimension::Auto).max_height(px(280.0)).shrink(0.0)); }
+                }
             }
             if model.searching.get() {
                 row height:min-content pad:(horizontal:{px(24.0)}px vertical:0px) shrink:0 {
@@ -1019,26 +1060,37 @@ pub fn Conversation(model: Model) -> Element {
             } as document_scroll
             {controller.get_untracked().borrow_mut().viewport=Some(document_scroll.clone());}
             if model.buffer.get().approval_needed {
-                row height:min-content gap:{px(10.0)}px align:center
-                    pad:(horizontal:{px(24.0)}px vertical:0px) shrink:0 {
-                    text width:1fr font-size:{px(12.0)}px
-                        "This director requires approval to implement this turn."
-                    button #relay.action
-                        @click:{model.worker_approval.set(true);buffer::send(model);}
-                        label:"Approve this turn and send" "Approve and send"
+                BoundedPanel limit:(auxiliary_limit) {
+                    grid height:min-content gap:{px(10.0)}px align:center
+                        pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
+                        cols:{if compact.get() {GridTracks::new([GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0), GridTrack::MaxContent])}} {
+                        row #relay.caption height:min-content min-width:0px {
+                            text "This director requires approval to implement this turn."
+                        }
+                        button #relay.action
+                            @click:{model.worker_approval.set(true);buffer::send(model);}
+                            label:"Approve this turn and send" "Approve and send"
+                    }
                 }
             }
-            if model.buffer.get().documents.get(&model.session.get()).is_some_and(|d|!d.error.is_empty() || !d.recovery.is_empty()) {
-                row height:min-content gap:{px(8.0)}px pad:(horizontal:{px(24.0)}px vertical:0px)
-                    shrink:0 {
-                    text width:1fr font-size:{px(12.0)}px
-                        {model.buffer.get().documents.get(&model.session.get()).map(|d|if d.error.is_empty(){"Recovered draft available".into()}else{d.error.clone()}).unwrap_or_default()}
-                    button #relay.action @click:{buffer::resolve(model,false);}
-                        label:"Load shared draft" "Load shared"
-                    button #relay.action @click:{buffer::resolve(model,true);}
-                        label:"Restore local draft" "Restore local"
-                    button #relay.action @click:{buffer::retry_save(model);}
-                        label:"Retry draft save" "Retry"
+            if recovery.get() {
+                BoundedPanel limit:(auxiliary_limit) {
+                    col height:min-content gap:{px(8.0)}px
+                        pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) {
+                        row #relay.caption height:min-content {
+                            text
+                                {model.buffer.get().documents.get(&model.session.get()).map(|d| if d.error.is_empty() {"Recovered draft available".into()} else {d.error.clone()}).unwrap_or_default()}
+                        }
+                        grid height:min-content gap:{px(8.0)}px
+                            cols:{GridTracks::auto_fit(GridTrack::minmax(px(90.0).into(), GridTrack::fr(1.0)))} {
+                            button #relay.action @click:{buffer::resolve(model,false);}
+                                label:"Load shared draft" "Load shared"
+                            button #relay.action @click:{buffer::resolve(model,true);}
+                                label:"Restore local draft" "Restore local"
+                            button #relay.action @click:{buffer::retry_save(model);}
+                                label:"Retry draft save" "Retry"
+                        }
+                    }
                 }
             }
             row height:min-content min-height:{px(28.0)}px align:center
@@ -2224,7 +2276,7 @@ pub(crate) fn run_cells(snapshot: &Snapshot, session: &Session) -> Vec<(&'static
 #[component]
 fn RunCell(key: &'static str, value: Derived<String>) -> Element {
     view! {
-        row width:max-content max-width:{px(340.0)}px min-width:0px shrink:1 align:center
+        row width:max-content max-width:{px(340.0)}px min-width:0px shrink:0 align:center
             gap:{px(8.0)}px pad:(horizontal:{px(14.0)}px vertical:0px)
             stroke:(width:{px(1.0)} color:rule.hair edges:right) label:(key.to_string()) {
             row #relay.eyebrow height:min-content width:max-content shrink:0 {

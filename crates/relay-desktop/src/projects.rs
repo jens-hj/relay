@@ -1,8 +1,11 @@
+use crate::labels::{Readout, ReadoutProps};
+use crate::panels::{BoundedPanel, BoundedPanelProps};
 use crate::styles::*;
 use crate::{
     controls::{ButtonStyle, button},
     model::{Model, Page, Saved},
     theme::*,
+    ui::{Module, ModuleProps},
 };
 use mosaic::core::theme::color;
 use mosaic::prelude::*;
@@ -66,7 +69,7 @@ impl Default for PublishDraft {
 pub fn ProjectPage(model: Model) -> Element {
     view! {
         scroll {
-            col height:min-content pad:{px(24.0)}px gap:{px(16.0)}px {
+            col height:min-content pad:{px(28.0)}px gap:{px(24.0)}px {
                 if model.page.get() == Page::NewProject {
                     ProjectSetup model:(model)
                 } else if model.page.get() == Page::Connections {
@@ -106,42 +109,59 @@ fn ProjectSetup(model: Model) -> Element {
         })
     });
     view! {
-        col height:min-content max-width:{px(640.0)}px gap:{px(12.0)}px {
-            text font-family:sans-serif font-size:{px(13.0)}px "Name"
-            input #relay.field label:"Project name" placeholder:"Project name" name
-            text font-family:sans-serif font-size:{px(13.0)}px "Absolute root on server"
-            input #relay.field label:"Absolute project root on server"
-                placeholder:"/home/you/projects/project" root
-            text font-color:ink.muted font-size:{px(12.0)}px
-                "The root is on the connected server. A local board is created automatically."
-            button #relay.action @click:{connections_open.set(!connections_open.get_untracked());}
-                width:{px(200.0)}px max-width:100%
-                label:{if connections_open.get(){"Hide connection form"}else{"Add connection"}}
-                {if connections_open.get(){"Hide connection form"}else{"Add connection"}}
-            if connections_open.get() {
-                ConnectionForm model:(model) initial:true
-            }
-            for (index, _connection) in {model.project_draft.get().connections.into_iter().enumerate()} {
-                let index = *index;
-                let connection = Derived::new(move || model.project_draft.get().connections.get(index).cloned());
-                col height:min-content gap:{px(6.0)}px {
-                    text {connection.get().as_ref().map(connection_label).unwrap_or_default()}
-                    button #relay.action
-                        @click:{model.project_draft.update(|d| {d.connections.remove(index);});}
-                        "Remove initial connection"
+        col height:min-content max-width:{px(760.0)}px gap:{px(24.0)}px {
+            Module title:("Project".to_string()) {
+                row #relay.eyebrow height:min-content {
+                    text text-transform:uppercase letter-spacing:{px(0.6)}px "Name"
+                }
+                input #relay.field label:"Project name" placeholder:"Project name" name
+                row #relay.eyebrow height:min-content {
+                    text text-transform:uppercase letter-spacing:{px(0.6)}px
+                        "Absolute root on server"
+                }
+                input #relay.field label:"Absolute project root on server"
+                    placeholder:"/home/you/projects/project" root
+                row #relay.caption height:min-content {
+                    text
+                        "The root is on the connected server. A local board is created automatically."
                 }
             }
-            button #relay.action
-                @click:{
-                    let draft = model.project_draft.get_untracked();
-                    if draft.name.trim().is_empty() || !std::path::Path::new(draft.root.trim()).is_absolute() {
-                        model.notice.set("Enter a name and an absolute root on the server.".into());
-                    } else {
-                        model.submit(Command::CreateProject {name:draft.name.trim().into(),root:draft.root.trim().into(),connections:draft.connections.clone()},model.snapshot.get_untracked().revision,Saved::CreatedProject(draft));
+            Module title:("Connections".to_string()) {
+                for (index, _connection) in {model.project_draft.get().connections.into_iter().enumerate()} {
+                    let index = *index;
+                    let connection = Derived::new(move || model.project_draft.get().connections.get(index).cloned());
+                    row height:min-content align:center gap:{px(8.0)}px pad:(bottom:{px(8.0)}px)
+                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                        row #relay.value width:1fr min-width:0px height:min-content {
+                            text
+                                {connection.get().as_ref().map(connection_label).unwrap_or_default()}
+                        }
+                        button #relay.action
+                            @click:{model.project_draft.update(|d| {d.connections.remove(index);});}
+                            "Remove initial connection"
                     }
                 }
-                label:"Create project" disabled:{model.busy.get() || !model.connected.get()}
-                "Create project"
+                button #relay.action
+                    @click:{connections_open.set(!connections_open.get_untracked());}
+                    label:{if connections_open.get(){"Hide connection form"}else{"Add connection"}}
+                    {if connections_open.get(){"Hide connection form"}else{"Add connection"}}
+                if connections_open.get() {
+                    ConnectionForm model:(model) initial:true
+                }
+            }
+            row height:min-content justify:end {
+                button #relay.primary
+                    @click:{
+                        let draft = model.project_draft.get_untracked();
+                        if draft.name.trim().is_empty() || !std::path::Path::new(draft.root.trim()).is_absolute() {
+                            model.notice.set("Enter a name and an absolute root on the server.".into());
+                        } else {
+                            model.submit(Command::CreateProject {name:draft.name.trim().into(),root:draft.root.trim().into(),connections:draft.connections.clone()},model.snapshot.get_untracked().revision,Saved::CreatedProject(draft));
+                        }
+                    }
+                    label:"Create project" disabled:{model.busy.get() || !model.connected.get()}
+                    "Create project"
+            }
         }
     }
 }
@@ -240,40 +260,59 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
 #[component]
 fn Connections(model: Model) -> Element {
     view! {
-        col height:min-content gap:{px(16.0)}px {
-            for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && match &c.kind { ConnectionKind::Board{board_id} => model.snapshot.get().canonical_board_id(board_id) == board_id, _ => true }).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
-                let id = State::new(connection.id.clone());
-                let fallback=connection.clone();
-                let connection = Derived::new(move || model.snapshot.get().connections.into_iter().find(|c|c.id==id.get()).unwrap_or_else(||fallback.clone()));
-                col height:min-content gap:{px(8.0)}px {
-                    text font-family:{FontFamily::SansSerif} {connection.get().name}
-                    text
-                        {format!("{:?}{}",connection.get().state,if connection.get().enabled {""}else{" · disabled"})}
-                    text font-size:{px(12.0)}px font-color:{color(ink.muted)}
-                        {match &connection.get().kind {ConnectionKind::Repository{remote,checkout,..}=>format!("{remote}\n{}",checkout.as_deref().unwrap_or("Clone pending")),ConnectionKind::Directory{path}=>path.clone(),ConnectionKind::Board{board_id}=>model.snapshot.get().boards.iter().find(|b| &b.id==board_id).map(|b|source_label(&b.source)).unwrap_or_else(||"Board unavailable".into())}}
-                    text font-color:{color(status.danger)}
-                        {connection.get().error.unwrap_or_default()}
-                    if !connection.get().enabled {
-                        button #relay.action
-                            @click:{model.action(Command::RetryConnection{connection_id:id.get_untracked()});}
-                            label:{format!("Restore connection {}",connection.get().name)}
-                            disabled:{model.busy.get() || !model.connected.get()}
-                            "Restore connection"
-                    } else if matches!(connection.get().state,ConnectionState::Failed|ConnectionState::Interrupted) {
-                        button #relay.action
-                            @click:{model.action(Command::RetryConnection{connection_id:id.get_untracked()});}
-                            disabled:{model.busy.get() || !model.connected.get()} "Retry connection"
-                    }
-                    if connection.get().enabled {
-                        button #relay.action
-                            @click:{model.action(Command::RemoveConnection{connection_id:id.get_untracked()});}
-                            disabled:{model.busy.get() || !model.connected.get()}
-                            "Remove connection"
+        col height:min-content max-width:{px(760.0)}px gap:{px(24.0)}px {
+            Module title:("Connections".to_string()) {
+                for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && match &c.kind { ConnectionKind::Board{board_id} => model.snapshot.get().canonical_board_id(board_id) == board_id, _ => true }).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
+                    let id = State::new(connection.id.clone());
+                    let fallback=connection.clone();
+                    let connection = Derived::new(move || model.snapshot.get().connections.into_iter().find(|c|c.id==id.get()).unwrap_or_else(||fallback.clone()));
+                    col height:min-content gap:{px(6.0)}px pad:(bottom:{px(10.0)}px)
+                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                        row height:min-content align:center gap:{px(8.0)}px {
+                            row #relay.title width:1fr min-width:0px height:min-content
+                                font-size:{px(14.0)}px {
+                                text {connection.get().name}
+                            }
+                            row #relay.caption height:min-content width:max-content {
+                                text
+                                    {format!("{:?}{}",connection.get().state,if connection.get().enabled {""}else{" · disabled"})}
+                            }
+                        }
+                        row #relay.caption height:min-content {
+                            text
+                                {match &connection.get().kind {ConnectionKind::Repository{remote,checkout,..}=>format!("{remote}\n{}",checkout.as_deref().unwrap_or("Clone pending")),ConnectionKind::Directory{path}=>path.clone(),ConnectionKind::Board{board_id}=>model.snapshot.get().boards.iter().find(|b| &b.id==board_id).map(|b|source_label(&b.source)).unwrap_or_else(||"Board unavailable".into())}}
+                        }
+                        if connection.get().error.is_some() {
+                            row height:min-content font-size:{px(12.0)}px font-color:status.danger {
+                                text {connection.get().error.unwrap_or_default()}
+                            }
+                        }
+                        row height:min-content gap:{px(8.0)}px {
+                            if !connection.get().enabled {
+                                button #relay.action
+                                    @click:{model.action(Command::RetryConnection{connection_id:id.get_untracked()});}
+                                    label:{format!("Restore connection {}",connection.get().name)}
+                                    disabled:{model.busy.get() || !model.connected.get()}
+                                    "Restore connection"
+                            } else if matches!(connection.get().state,ConnectionState::Failed|ConnectionState::Interrupted) {
+                                button #relay.action
+                                    @click:{model.action(Command::RetryConnection{connection_id:id.get_untracked()});}
+                                    disabled:{model.busy.get() || !model.connected.get()}
+                                    "Retry connection"
+                            }
+                            if connection.get().enabled {
+                                button #relay.action
+                                    @click:{model.action(Command::RemoveConnection{connection_id:id.get_untracked()});}
+                                    disabled:{model.busy.get() || !model.connected.get()}
+                                    "Remove connection"
+                            }
+                        }
                     }
                 }
             }
-            text font-family:sans-serif "Add connection"
-            ConnectionForm model:(model) initial:false
+            Module title:("New connection".to_string()) {
+                ConnectionForm model:(model) initial:false
+            }
             Operations model:(model)
         }
     }
@@ -397,9 +436,11 @@ fn DirectorStart(model: Model, director_id: String) -> Element {
 #[component]
 pub fn Operations(model: Model) -> Element {
     view! {
-        col height:min-content gap:{px(8.0)}px {
-            for (_, operation) in {model.snapshot.get().operations.into_iter().filter(|o|o.project_id==model.project.get() && o.state!=OperationState::Completed).map(|o|(o.id.clone(),o)).collect::<Vec<_>>()} {
-                OperationCard model:(model) operation:(operation.clone())
+        BoundedPanel limit:(Derived::new(|| px(200.0))) {
+            col height:min-content gap:{px(8.0)}px {
+                for (_, operation) in {model.snapshot.get().operations.into_iter().filter(|o|o.project_id==model.project.get() && o.state!=OperationState::Completed).map(|o|(o.id.clone(),o)).collect::<Vec<_>>()} {
+                    OperationCard model:(model) operation:(operation.clone())
+                }
             }
         }
     }
@@ -416,19 +457,77 @@ pub fn OperationHistory(model: Model, open: State<bool>) -> Element {
                 button #relay.action @click:{open.set(false);} label:"Close operation history"
                     "Close"
             }
-            for (_, operation) in {model.snapshot.get().operations.into_iter().filter(|o|o.project_id==model.project.get() && o.state==OperationState::Completed).map(|o|(o.id.clone(),o)).collect::<Vec<_>>()} {
-                OperationCard model:(model) operation:(operation.clone())
-            }
-            if !model.snapshot.get().operations.iter().any(|o|o.project_id==model.project.get() && o.state==OperationState::Completed) {
-                row #relay.caption height:min-content {
-                    text "No completed operations"
+            BoundedPanel limit:(Derived::new(|| px(180.0))) {
+                col height:min-content gap:{px(8.0)}px {
+                    for (_, operation) in {model.snapshot.get().operations.into_iter().filter(|o|o.project_id==model.project.get() && o.state==OperationState::Completed).map(|o|(o.id.clone(),o)).collect::<Vec<_>>()} {
+                        OperationCard model:(model) operation:(operation.clone())
+                    }
+                    if !model.snapshot.get().operations.iter().any(|o|o.project_id==model.project.get() && o.state==OperationState::Completed) {
+                        row #relay.caption height:min-content {
+                            text "No completed operations"
+                        }
+                    }
                 }
             }
         }
     }
 }
+/// A recorded operation's actual destination, retaining IDs when that
+/// destination is no longer in the snapshot.
+fn operation_subject(snapshot: &Snapshot, operation: &ProjectOperation) -> String {
+    match &operation.kind {
+        OperationKind::Clone { connection_id } => snapshot
+            .connections
+            .iter()
+            .find(|c| &c.id == connection_id)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| connection_id.clone()),
+        OperationKind::Sync { board_id } | OperationKind::Publish { board_id, .. } => snapshot
+            .board(board_id)
+            .map(|b| b.name.clone())
+            .unwrap_or_else(|_| board_id.clone()),
+        OperationKind::CreateTask { issue_id, .. }
+        | OperationKind::EditTask { issue_id, .. }
+        | OperationKind::MoveTask { issue_id, .. } => snapshot
+            .issue(issue_id)
+            .map(|i| format!("{} · {}", i.label(), i.title))
+            .unwrap_or_else(|_| issue_id.clone()),
+    }
+}
+
+/// Human-readable known provider receipts. Unrecognised steps stay available
+/// as recorded values in this optional diagnostic disclosure.
+fn operation_results(operation: &ProjectOperation) -> Vec<(String, String, String)> {
+    operation
+        .results
+        .iter()
+        .map(|(key, value)| {
+            if key == "board"
+                && let Ok(source) = serde_json::from_str::<BoardSource>(value)
+            {
+                let url = match source {
+                    BoardSource::Github { url, .. } | BoardSource::Gitlab { url, .. } => url,
+                    BoardSource::Local => "Local board".into(),
+                };
+                return (key.clone(), "Board".into(), url);
+            }
+            if key.starts_with("issue/")
+                && let Ok(issue) = serde_json::from_str::<IssueRef>(value)
+            {
+                return (
+                    key.clone(),
+                    format!("{} #{}", issue.repository, issue.number),
+                    issue.url,
+                );
+            }
+            (key.clone(), key.clone(), value.clone())
+        })
+        .collect()
+}
+
 #[component]
 fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
+    let expanded = State::new(false);
     let id = State::new(operation.id.clone());
     let fallback = operation;
     let operation = Derived::new(move || {
@@ -484,10 +583,41 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
         })
     });
     view! {
-        col height:min-content gap:{px(6.0)}px {
-            text
-                {format!("{} · {:?}",match operation.get().kind{OperationKind::Clone{..}=>"Clone",OperationKind::Sync{..}=>"Sync",OperationKind::Publish{..}=>"Publish",_=>"Task update"},operation.get().state)}
-            text font-color:{color(status.danger)} {operation.get().error.unwrap_or_default()}
+        col height:min-content gap:{px(6.0)}px pad:{px(10.0)}px
+            stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
+            label:{format!("Operation {}", id.get())} {
+            grid height:min-content gap:{px(8.0)}px
+                cols:{GridTracks::new([GridTrack::fr(1.0), GridTrack::MaxContent])} {
+                col height:min-content min-width:0px gap:{px(3.0)}px {
+                    row #relay.value height:min-content {
+                        text
+                            {format!("{} · {:?}",match operation.get().kind{OperationKind::Clone{..}=>"Clone",OperationKind::Sync{..}=>"Sync",OperationKind::Publish{..}=>"Publish",OperationKind::CreateTask{..}=>"Create task",OperationKind::MoveTask{..}=>"Move task",OperationKind::EditTask{..}=>"Edit task"},operation.get().state)}
+                    }
+                    row #relay.caption height:min-content {
+                        text {operation_subject(&model.snapshot.get(), &operation.get())}
+                    }
+                }
+                button #relay.action @click:{expanded.set(!expanded.get_untracked());}
+                    pad:(horizontal:{px(8.0)}px vertical:{px(3.0)}px)
+                    label:{format!("Operation details {}", id.get())} "Details"
+            }
+            if expanded.get() {
+                col height:min-content gap:{px(6.0)}px selectable {
+                    row #relay.caption height:min-content {
+                        text {format!("Operation: {}", id.get())}
+                    }
+                    for (_, result) in {operation_results(&operation.get()).into_iter().map(|r| (r.0.clone(), r))} {
+                        let key = State::new(result.0.clone());
+                        Readout key:(result.1.clone())
+                            value:(Derived::new(move || operation_results(&operation.get()).into_iter().find(|r| r.0 == key.get()).map(|r| r.2).unwrap_or_default()))
+                    }
+                }
+            }
+            if operation.get().error.is_some_and(|e| !e.is_empty()) {
+                row height:min-content font-color:status.danger {
+                    text {operation.get().error.unwrap_or_default()}
+                }
+            }
             if matches!(operation.get().state,OperationState::Failed|OperationState::Interrupted) {
                 button #relay.action
                     @click:{model.action(Command::RetryOperation{operation_id:id.get_untracked()});}
@@ -619,7 +749,7 @@ fn Publish(model: Model) -> Element {
         }
     });
     view! {
-        col height:min-content max-width:{px(640.0)}px gap:{px(12.0)}px {
+        col #relay.module max-width:{px(760.0)}px gap:{px(12.0)}px pad:{px(12.0)}px {
             grid cols:{GridTracks::auto_fit(GridTrack::minmax(px(120.0).into(),GridTrack::fr(1.0)))}
                 height:min-content gap:{px(8.0)}px {
                 button #relay.action @click:{github.set(true);} width:fill

@@ -6,6 +6,7 @@ mod fonts;
 mod labels;
 mod model;
 mod network;
+mod panels;
 mod project_network;
 mod projects;
 mod settings;

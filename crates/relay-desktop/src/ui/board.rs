@@ -1,4 +1,5 @@
 use super::*;
+use crate::panels::{BoundedPanel, BoundedPanelProps};
 use std::{cell::RefCell, rc::Rc};
 
 /// Whether a project is the read-only demo fixture.
@@ -123,6 +124,8 @@ fn select_board(model: Model, id: &str) {
 pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
     let columns = Derived::new(move || model.board_columns());
     let width = State::new(1200.0f32);
+    let height = State::new(900.0f32);
+    let disclosure_limit = Derived::new(move || (height.get() - px(90.0)).max(0.0) * 0.5);
     // Full header cells need room; below this the source, sync and board
     // choice move into the Board actions menu.
     let full = Derived::new(move || width.get() >= px(960.0));
@@ -155,7 +158,8 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
             .is_some_and(|b| b.source == BoardSource::Local)
     });
     view! {
-        col width:1fr min-width:0px @layout:{move |rect: Rect| width.set(rect.size.width)} {
+        col width:1fr min-width:0px
+            @layout:{move |rect: Rect| {width.set(rect.size.width);height.set(rect.size.height);}} {
             PageHeader model:(model) eyebrow:("Project board".to_string()) title:(project_name)
                 compact:(Derived::new(move || !full.get())) {
                 if full.get() {
@@ -221,34 +225,36 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                     { bind_menu(model, menu, &menu_anchor, trigger_slot.clone()); }
                 }
             }
-            if board_error(model).is_some() {
-                row height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
-                    fill:attention.fill stroke:(width:{px(4.0)} color:attention.text edges:left)
-                    label:"Board error" {
-                    row font-size:{px(12.0)}px font-color:attention.on {
-                        text {board_error(model).unwrap_or_default()}
+            BoundedPanel limit:(disclosure_limit) {
+                if board_error(model).is_some() {
+                    row height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
+                        fill:attention.fill stroke:(width:{px(4.0)} color:attention.text edges:left)
+                        label:"Board error" {
+                        row font-size:{px(12.0)}px font-color:attention.on {
+                            text {board_error(model).unwrap_or_default()}
+                        }
                     }
                 }
-            }
-            if creating.get() && model.selected_board().is_some() {
-                NewTaskForm model:(model) open:(creating) draft:(draft)
-            }
-            if managing.get() {
-                col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
-                    stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
-                    Columns model:(model) open:(managing)
+                if creating.get() && model.selected_board().is_some() {
+                    NewTaskForm model:(model) open:(creating) draft:(draft)
                 }
-            }
-            if model.snapshot.get().operations.iter().any(|o| o.project_id == model.project.get() && o.state != OperationState::Completed) {
-                col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
-                    stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
-                    Operations model:(model)
+                if managing.get() {
+                    col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
+                        stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
+                        Columns model:(model) open:(managing)
+                    }
                 }
-            }
-            if history.get() {
-                col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
-                    stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
-                    OperationHistory model:(model) open:(history)
+                if model.snapshot.get().operations.iter().any(|o| o.project_id == model.project.get() && o.state != OperationState::Completed) {
+                    col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
+                        stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
+                        Operations model:(model)
+                    }
+                }
+                if history.get() {
+                    col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
+                        stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
+                        OperationHistory model:(model) open:(history)
+                    }
                 }
             }
             if stacked.get() {
@@ -536,7 +542,7 @@ fn DetailRow(key: String, value: Derived<String>) -> Element {
 /// The issue inspector: identifier block, key/value grid, body, linked
 /// sessions and the worker form.
 #[component]
-pub(crate) fn IssueDetail(model: Model) -> Element {
+pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element {
     // A tall inspector keeps the worker setup anchored at the bottom; a short
     // one (small window, large scale) scrolls it with the details.
     let height = State::new(0.0f32);
@@ -550,8 +556,8 @@ pub(crate) fn IssueDetail(model: Model) -> Element {
             .find(|i| Some(&i.id) == model.issue.get().as_ref())
     });
     view! {
-        col width:{px(392.0)} shrink:1 fill:surface.panel
-            stroke:(width:{px(1.0)} color:rule.line edges:left)
+        col width:{if full {Dimension::Fill} else {Dimension::Px(px(392.0))}} min-width:0px shrink:1
+            fill:surface.panel stroke:(width:{px(1.0)} color:rule.line edges:left)
             @layout:{move |rect: Rect| height.set(rect.size.height)} label:"Issue details" {
             if issue.get().is_none() {
                 row #relay.strip height:{px(56.0)}px shrink:0 align:center justify:between
@@ -568,7 +574,7 @@ pub(crate) fn IssueDetail(model: Model) -> Element {
                 let fallback = detail.clone();
                 let current = Derived::new(move || model.snapshot.get().issue(&detail_id.get()).cloned().unwrap_or_else(|_| fallback.clone()));
                 let fixture = Derived::new(move || model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture));
-                col gap:0px {
+                col min-width:0px gap:0px {
                     row height:min-content shrink:0
                         stroke:(width:{px(1.0)} color:rule.line edges:bottom) label:"Issue header" {
                         col #relay.id-label width:{px(74.0)}px min-height:{px(92.0)}px shrink:0
@@ -739,6 +745,8 @@ pub(crate) fn WorkerApproval(model: Model) -> Element {
 #[component]
 pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
     let choosing = State::new(false);
+    let width = State::new(600.0f32);
+    let compact = Derived::new(move || width.get() < px(320.0));
     // Which director and resources the next worker uses, in one line.
     let setup = Derived::new(move || {
         let snapshot = model.snapshot.get();
@@ -767,49 +775,57 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
             .unwrap_or_else(|| "Ready · server rechecks policy and revision".into())
     });
     view! {
-        col #relay.module label:"Worker setup" {
-            row #relay.module-head gap:{px(8.0)}px {
-                row #relay.eyebrow height:min-content width:max-content {
-                    text text-transform:uppercase letter-spacing:{px(0.6)}px
+        col #relay.module min-width:0px label:"Worker setup"
+            @layout:{move |rect:Rect| width.set(rect.size.width)} {
+            grid #relay.module-head gap:{px(8.0)}px
+                cols:{GridTracks::new([GridTrack::fr(1.0),GridTrack::MaxContent])} {
+                row #relay.eyebrow height:min-content min-width:0px clip width:1fr {
+                    text text-wrap:none text-transform:uppercase letter-spacing:{px(0.6)}px
                         (if continuation { "Continue this session" } else { "Start task worker" })
                 }
                 if !continuation {
-                    row #relay.caption height:min-content width:1fr min-width:0px clip {
-                        text text-wrap:none {setup.get()}
-                    }
                     button #relay.action @click:{ choosing.set(!choosing.get_untracked()); }
-                        pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
+                        shrink:0 pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
                         label:"Choose director and resources"
                         { if choosing.get() { "Done" } else { "Change" } }
                 }
             }
-            if choosing.get() && !continuation {
-                col height:min-content gap:{px(6.0)}px pad:{px(12.0)}px
-                    stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
-                    for (_, director) in { model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
-                        let id = State::new(director.id.clone());
-                        button #relay.action
-                            @click:{ model.worker_director.set(id.get_untracked()); model.worker_approval.set(false); }
-                            width:fill justify:start role:radio
-                            fill:if model.worker_director.get() == id.get() {surface.selected} else {surface.panel}
-                            stroke:(width:{px(if model.worker_director.get() == id.get() {3.0} else {1.0})} color:{color(if model.worker_director.get() == id.get() {ink.fg} else {rule.line})} edges:left)
-                            { model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| format!("Director: {}", d.name)).unwrap_or_default() }
-                    }
-                    WorkspaceChoices model:(model)
+            if !continuation {
+                row #relay.caption height:min-content min-width:0px clip
+                    pad:(horizontal:{px(12.0)}px vertical:{px(6.0)}px) description:{setup.get()} {
+                    text text-wrap:none {setup.get()}
                 }
             }
-            if model.worker_profile(continuation).is_ok() {
-                grid
-                    cols:{GridTracks::auto_fit(GridTrack::minmax(px(80.0).into(), GridTrack::fr(1.0)))}
-                    height:min-content gap:0px stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
-                    label:"Worker policy" {
-                    for (_, key) in { worker_policy(model, continuation).into_iter().map(|(k, _)| (k, k)).collect::<Vec<_>>() } {
-                        let field: &'static str = key;
-                        col height:min-content min-width:0px
-                            pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px)
-                            stroke:(width:{px(1.0)} color:rule.hair edges:right) {
-                            Readout key:(field.to_string())
-                                value:(Derived::new(move || worker_policy(model, continuation).into_iter().find(|(k, _)| *k == field).map(|(_, v)| v).unwrap_or_default()))
+            BoundedPanel limit:(Derived::new(|| px(180.0))) {
+                if choosing.get() && !continuation {
+                    col height:min-content gap:{px(6.0)}px pad:{px(12.0)}px
+                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                        for (_, director) in { model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
+                            let id = State::new(director.id.clone());
+                            button #relay.action
+                                @click:{ model.worker_director.set(id.get_untracked()); model.worker_approval.set(false); }
+                                width:fill justify:start role:radio
+                                fill:if model.worker_director.get() == id.get() {surface.selected} else {surface.panel}
+                                stroke:(width:{px(if model.worker_director.get() == id.get() {3.0} else {1.0})} color:{color(if model.worker_director.get() == id.get() {ink.fg} else {rule.line})} edges:left)
+                                { model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| format!("Director: {}", d.name)).unwrap_or_default() }
+                        }
+                        WorkspaceChoices model:(model)
+                    }
+                }
+                if model.worker_profile(continuation).is_ok() {
+                    grid
+                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(80.0).into(), GridTrack::fr(1.0)))}
+                        height:min-content gap:0px
+                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
+                        label:"Worker policy" {
+                        for (_, key) in { worker_policy(model, continuation).into_iter().map(|(k, _)| (k, k)).collect::<Vec<_>>() } {
+                            let field: &'static str = key;
+                            col height:min-content min-width:0px
+                                pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px)
+                                stroke:(width:{px(1.0)} color:rule.hair edges:right) {
+                                Readout key:(field.to_string())
+                                    value:(Derived::new(move || worker_policy(model, continuation).into_iter().find(|(k, _)| *k == field).map(|(_, v)| v).unwrap_or_default()))
+                            }
                         }
                     }
                 }
@@ -820,7 +836,8 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
                 if model.worker_profile(continuation).is_ok_and(|(p, _)| p.permissions.get(&Task::Implement) == Some(&Permission::Ask)) {
                     WorkerApproval model:(model)
                 }
-                row height:min-content align:center gap:{px(12.0)}px {
+                grid height:min-content align:center gap:{px(12.0)}px
+                    cols:{if compact.get() {GridTracks::new([GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0),GridTrack::MaxContent])}} {
                     row #relay.caption width:1fr min-width:0px height:min-content {
                         text {gate_status.get()}
                     }

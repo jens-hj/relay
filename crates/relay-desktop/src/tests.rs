@@ -4535,3 +4535,207 @@ fn live_text_typography_survives_content_and_theme_updates() {
     assert_eq!(updated_colors, initial_colors, "content update");
     assert_eq!(themed_colors, initial_colors, "theme switch");
 }
+
+/// A focused control must also survive its local scroll clip, not just have a
+/// rectangle inside the window. Hit testing uses Mosaic's real clip chain.
+fn assert_control_hit(mounted: &Mounted, label: &str) {
+    mounted.focus(label);
+    let snapshot = mounted.ui.inspection_snapshot();
+    let target = snapshot
+        .nodes
+        .iter()
+        .find(|n| n.label.as_deref() == Some(label))
+        .unwrap();
+    let rect = target.rect;
+    assert!(
+        rect.origin.x >= 0.0 && rect.origin.x + rect.size.width <= mounted.size.width + 1.0,
+        "{label}: {rect:?}"
+    );
+    let mut hit = mounted.ui.hit_test(rect.center()).map(|e| e.id());
+    while let Some(id) = hit {
+        if id == target.id {
+            return;
+        }
+        hit = snapshot
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(|n| n.parent);
+    }
+    panic!("Focused control clipped or obscured: {label}: {rect:?}");
+}
+
+#[test]
+fn bounded_session_disclosures_keep_controls_reachable_and_draft_mounted() {
+    let mounted = mount(false, 760.0);
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
+    mounted.model.preferences.update(|p| p.scale = 2.0);
+    let mut snapshot = live_snapshot();
+    let session = &mut snapshot.sessions[0];
+    session.fixture = false;
+    session.director_id = snapshot.directors[0].id.clone();
+    let mut worker = worker_run(WorkerStatus::Running);
+    worker.error = Some("A long recorded diagnostic. ".repeat(80));
+    session.worker = Some(worker);
+    let session_id = session.id.clone();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(session_id.clone());
+    mounted.settle();
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| {
+            n.label
+                .as_deref()
+                .is_some_and(|l| l.starts_with("Draft text"))
+        })
+        .unwrap();
+    mounted.focus(draft.label.as_deref().unwrap());
+    mounted.ui.dispatch_ime(ImeEvent::Commit(
+        "Draft retained through disclosures".into(),
+    ));
+    mounted.settle();
+    mounted.model.buffer.update(|b| {
+        b.approval_needed = true;
+        let doc = b.documents.get_mut(&session_id).unwrap();
+        doc.error = "Draft save failed with a long diagnostic. ".repeat(80);
+        doc.recovery.push(doc.parts.clone());
+    });
+    mounted.settle();
+    mounted.click("Session actions");
+    assert_control_hit(&mounted, "Session usage and provenance");
+    mounted.key(Key::Enter, false);
+    for label in [
+        "Stop worker",
+        "Inherit worker execution settings",
+        "Load shared draft",
+        "Restore local draft",
+        "Retry draft save",
+        "Approve this turn and send",
+        "Send message",
+    ] {
+        assert_control_hit(&mounted, label);
+    }
+    assert!(
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.id == draft.id),
+        "editor remains mounted"
+    );
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, &session_id)),
+        "Draft retained through disclosures"
+    );
+}
+
+#[test]
+fn bounded_worker_setup_scrolls_long_choices_without_losing_prompt() {
+    for (width, scale) in [(1600.0, 1.0), (760.0, 2.0)] {
+        let mounted = mount(false, width);
+        mounted
+            ._scope
+            .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
+        mounted.model.preferences.update(|p| p.scale = scale);
+        let mut snapshot = local_project_snapshot();
+        for i in 0..24 {
+            let mut director = snapshot.directors[0].clone();
+            director.id = format!("director-extra-{i}");
+            director.name = format!("Director {i}");
+            snapshot.directors.push(director);
+            snapshot.connections.push(ProjectConnection {
+                id: format!("directory-{i}"),
+                project_id: "demo".into(),
+                name: format!("Directory {i}"),
+                enabled: true,
+                state: ConnectionState::Ready,
+                error: None,
+                kind: ConnectionKind::Directory {
+                    path: format!("/server/{i}"),
+                },
+            });
+        }
+        mounted.model.snapshot.set(snapshot);
+        mounted.model.issue.set(Some("issue-2".into()));
+        mounted.settle();
+        mounted
+            .model
+            .worker_prompt
+            .set("Retained worker prompt".into());
+        assert_control_hit(&mounted, "Choose director and resources");
+        mounted.key(Key::Enter, false);
+        assert_control_hit(&mounted, "Choose session resources");
+        mounted.key(Key::Enter, false);
+        for label in [
+            "Workspace resource Directory 23",
+            "Worker prompt",
+            "Start worker",
+        ] {
+            assert_control_hit(&mounted, label);
+        }
+        assert_eq!(
+            mounted.model.worker_prompt.get_untracked(),
+            "Retained worker prompt"
+        );
+    }
+}
+
+#[test]
+fn bounded_operation_history_exposes_recorded_results_and_keeps_close_reachable() {
+    let mounted = mount(false, 760.0);
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
+    mounted.model.preferences.update(|p| p.scale = 2.0);
+    let mut snapshot = local_project_snapshot();
+    for i in 0..50 {
+        snapshot.operations.push(ProjectOperation {
+            id: format!("operation-{i}"),
+            project_id: "demo".into(),
+            kind: OperationKind::CreateTask {
+                board_id: "board-demo".into(),
+                issue_id: "issue-2".into(),
+            },
+            state: OperationState::Completed,
+            error: None,
+            results: [(
+                "issue/issue-2".into(),
+                serde_json::to_string(&IssueRef {
+                    provider: Provider::Github,
+                    repository: "team/repo".into(),
+                    number: 456,
+                    url: "https://github.com/team/repo/issues/456".into(),
+                })
+                .unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+        });
+    }
+    mounted.model.snapshot.set(snapshot);
+    mounted.settle();
+    mounted.click("Board actions");
+    assert_control_hit(&mounted, "Operation history");
+    mounted.key(Key::Enter, false);
+    assert_control_hit(&mounted, "Operation details operation-49");
+    mounted.key(Key::Enter, false);
+    assert!(has_label(
+        &mounted,
+        "https://github.com/team/repo/issues/456"
+    ));
+    assert!(has_label(&mounted, "Operation: operation-49"));
+    assert_control_hit(&mounted, "Close operation history");
+    mounted.key(Key::Enter, false);
+    assert!(!has_label(&mounted, "Operation details operation-49"));
+    assert_control_hit(&mounted, "New task");
+}
