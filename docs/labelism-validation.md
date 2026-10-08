@@ -29,7 +29,8 @@ Desktop coverage added or kept by this work:
   - Usage appears only when measured.
 - **Drafts and focus:**
   - The new task draft survives closing and reopening the form.
-  - At 760 px and 200% scale the session switches to its narrow layout without rebuilding the draft surface: focus and draft text are kept, and approval, queue and session actions fit the window.
+  - Switching a 1380 px window from 100% to 200% scale moves the session into its narrow layout without rebuilding the draft surface: the focused editing node and draft text are kept.
+  - At 760 px and 200% scale every session panel (actions, details, warnings, approval, recovery) stays reachable and the draft node is kept.
 - **Settings:** saved files without high-contrast keys keep their values; false keys are omitted; backups never replace an existing file; unreadable or newer files are never overwritten; a failed backup stays suspended; retry adopts a repaired file.
 - **Typography:** a live `Readout` value keeps its 13px Zed Mono container typography when its value changes. A second regression records the pinned text behavior described below.
 
@@ -66,7 +67,7 @@ CAPTURES
 - **Fake harness:** it exercises the desktop's handling of real protocol shapes, not real Codex or Claude Code behavior.
 - **Issue status ordering:** "most recent outcome" uses session creation order, because sessions carry no timestamps.
 - **Thin glyphs on light fills:** dark text on light inverse fills renders lighter under linear-space blending, so labels on inverse fills are bold. Their contrast pairs pass, but the dark-theme selected rows look lighter than the concept.
-- **Not shown, because no recorded data exists:** turn numbers, elapsed time, unsaved-change counts and profile validation.
+- **Not shown, because no recorded data exists:** turn numbers, elapsed time and unsaved-change counts. Profile validation is a local check of the edited profile; the server rechecks it on save.
 
 ## Final check
 
