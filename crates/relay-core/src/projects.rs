@@ -249,19 +249,30 @@ pub fn local_columns() -> Vec<BoardColumn> {
 }
 
 impl Snapshot {
+    pub fn canonical_board_id<'a>(&'a self, id: &'a str) -> &'a str {
+        resolve_alias(&self.board_aliases, id)
+    }
+    pub fn canonical_issue_id<'a>(&'a self, id: &'a str) -> &'a str {
+        resolve_alias(&self.issue_aliases, id)
+    }
     pub fn board(&self, id: &str) -> Result<&Board, String> {
+        let id = self.canonical_board_id(id);
         self.boards
             .iter()
             .find(|b| b.id == id)
             .ok_or_else(|| "Board not found".into())
     }
     pub fn board_active(&self, board_id: &str) -> bool {
+        if self.canonical_board_id(board_id) != board_id {
+            return false;
+        }
         self.connections
             .iter()
             .find(|c| matches!(&c.kind,ConnectionKind::Board{board_id:id} if id==board_id))
             .is_none_or(|c| c.enabled)
     }
     pub fn visible_task(&self, issue_id: &str) -> bool {
+        let issue_id = self.canonical_issue_id(issue_id);
         let Some(issue) = self.issues.iter().find(|i| i.id == issue_id) else {
             return false;
         };
@@ -354,5 +365,67 @@ impl Snapshot {
                 });
             }
         }
+    }
+}
+
+// Bound traversal even for malformed persisted data. Writers only create
+// redirects within a project and retain the original records for history.
+fn resolve_alias<'a>(
+    aliases: &'a std::collections::BTreeMap<String, String>,
+    id: &'a str,
+) -> &'a str {
+    let original = id;
+    let mut current = id;
+    for _ in 0..=aliases.len() {
+        let Some(next) = aliases.get(current) else {
+            return current;
+        };
+        current = next;
+    }
+    original
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    #[test]
+    fn publication_aliases_keep_history_and_resolve_active_membership() {
+        let mut snapshot = demo_snapshot(DirectorProfile::default());
+        snapshot.migrate_projects();
+        let mut historical = snapshot.issues[0].clone();
+        let canonical = historical.id.clone();
+        historical.id = "historical-task".into();
+        snapshot.issues.push(historical);
+        snapshot
+            .issue_aliases
+            .insert("historical-task".into(), canonical.clone());
+        assert!(snapshot.visible_task("historical-task"));
+        assert_eq!(snapshot.canonical_issue_id("historical-task"), canonical);
+        let mut board = snapshot.boards[0].clone();
+        let canonical_board = board.id.clone();
+        board.id = "historical-board".into();
+        snapshot.boards.push(board);
+        snapshot
+            .board_aliases
+            .insert("historical-board".into(), canonical_board.clone());
+        assert!(!snapshot.board_active("historical-board"));
+        assert_eq!(
+            snapshot.board("historical-board").unwrap().id,
+            canonical_board
+        );
+        assert_eq!(snapshot.issues.last().unwrap().id, "historical-task");
+        let restored: Snapshot =
+            serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        assert_eq!(restored.issue_aliases, snapshot.issue_aliases);
+    }
+
+    #[test]
+    fn malformed_alias_cycle_does_not_loop_or_select_an_arbitrary_task() {
+        let mut snapshot = demo_snapshot(DirectorProfile::default());
+        snapshot
+            .issue_aliases
+            .extend([("a".into(), "b".into()), ("b".into(), "a".into())]);
+        assert_eq!(snapshot.canonical_issue_id("a"), "a");
     }
 }

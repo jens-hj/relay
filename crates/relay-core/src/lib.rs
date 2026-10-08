@@ -170,6 +170,11 @@ pub struct Comment {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// Retained IDs redirect to the identities preserved by board publication.
+    #[serde(default)]
+    pub board_aliases: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub issue_aliases: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub protocol_version: u32,
     #[serde(default)]
