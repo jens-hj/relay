@@ -38,7 +38,7 @@ Mosaic tools are available separately through `nix run .#mosaic-fmt` and `nix ru
 nix develop --command just dev
 ```
 
-`just dev` builds the workspace, creates `.env` with a random token if neither configuration nor `RELAY_TOKEN` exists, starts a loopback server, waits for it to be ready, and opens the desktop with the same token. Closing the desktop or pressing Ctrl+C stops the processes it started. It leaves the database intact. Use `just dev 7440` to choose another local port. This recipe sets `RELAY_BIND` and `RELAY_ENDPOINT` for the local pair; use `just server` and `just client` for separate or remote processes.
+`just dev` builds the workspace, creates `.env` with a random token if neither configuration nor `RELAY_TOKEN` exists, starts a loopback server, waits for it to be ready, and opens the desktop with the same token. Closing the desktop or pressing Ctrl+C stops the processes it started. It leaves the database intact. Use `just dev 7440` to choose another local port, or `just dev --release` to build and run release binaries; both options can be combined as `just dev --release 7440`. This recipe sets `RELAY_BIND` and `RELAY_ENDPOINT` for the local pair; use `just server` and `just client` for separate or remote processes.
 
 For separate terminals, enter the development shell in each and supply the same token:
 

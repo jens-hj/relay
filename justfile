@@ -60,23 +60,56 @@ dogfood repo="jens-hj/relay" owner="jens-hj" board="5":
     exec cargo run --locked -p relay-server
 
 # Open the persistent local workspace with installed agent harnesses.
-dev port="7331":
+dev *args:
     #!/usr/bin/env bash
     set -euo pipefail
     umask 077
+
+    relay_port="7331"
+    relay_release=false
+    relay_port_set=false
+    while (($#)); do
+        case "$1" in
+            --release)
+                relay_release=true
+                ;;
+            --*)
+                printf 'Unknown option: %s\n' "$1" >&2
+                exit 2
+                ;;
+            *)
+                if [[ "$relay_port_set" == true ]]; then
+                    printf 'Usage: just dev [--release] [PORT]\n' >&2
+                    exit 2
+                fi
+                relay_port="$1"
+                relay_port_set=true
+                ;;
+        esac
+        shift
+    done
+
     if [[ -z "${RELAY_TOKEN:-}" ]]; then
         if [[ -f .env ]]; then printf 'Set RELAY_TOKEN in .env before starting Relay.\n' >&2; exit 1; fi
         just setup
-        exec just dev "$1"
+        if [[ "$relay_release" == true ]]; then
+            exec just dev --release "$relay_port"
+        fi
+        exec just dev "$relay_port"
     fi
     export RELAY_DATABASE="${RELAY_DATABASE:-data/local.sqlite3}"
-    relay_port="$1"
     if ! [[ "$relay_port" =~ ^[0-9]{1,5}$ ]] || ((10#$relay_port < 1 || 10#$relay_port > 65535)); then
         printf 'Port must be a number from 1 to 65535.\n' >&2
         exit 1
     fi
 
-    cargo build --locked --workspace
+    relay_profile=debug
+    relay_cargo_release=()
+    if [[ "$relay_release" == true ]]; then
+        relay_profile=release
+        relay_cargo_release=(--release)
+    fi
+    cargo build "${relay_cargo_release[@]}" --locked --workspace
     relay_target_dir="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.target_directory')"
     export RELAY_TOKEN="${RELAY_TOKEN:-$(openssl rand -hex 32)}"
     export RELAY_BIND="127.0.0.1:$relay_port"
@@ -101,7 +134,7 @@ dev port="7331":
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
-    "$relay_target_dir/debug/relay-server" &
+    "$relay_target_dir/$relay_profile/relay-server" &
     relay_server_pid=$!
     relay_ready=false
     for ((relay_attempt = 0; relay_attempt < 100; relay_attempt++)); do
@@ -123,7 +156,7 @@ dev port="7331":
         exit 1
     fi
 
-    "$relay_target_dir/debug/relay-desktop" &
+    "$relay_target_dir/$relay_profile/relay-desktop" &
     relay_client_pid=$!
     relay_status=0
     wait "$relay_client_pid" || relay_status=$?
