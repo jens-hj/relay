@@ -2,10 +2,34 @@
 //! stderr is discarded, and the Relay bearer is never inherited.
 use crate::Error;
 use std::{
+    cell::RefCell,
     io::Read,
     process::{Command, ExitStatus, Stdio},
     time::{Duration, Instant},
 };
+thread_local! {
+    static CANCELLATION: RefCell<Option<tokio::sync::watch::Receiver<bool>>> = const { RefCell::new(None) };
+}
+pub(crate) fn with_cancellation<T>(
+    stop: tokio::sync::watch::Receiver<bool>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Restore(Option<tokio::sync::watch::Receiver<bool>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CANCELLATION.with(|value| *value.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(CANCELLATION.with(|value| value.replace(Some(stop))));
+    run()
+}
+fn cancelled() -> Result<(), Error> {
+    if CANCELLATION.with(|value| value.borrow().as_ref().is_some_and(|stop| *stop.borrow())) {
+        Err(Error::invalid("Server stopped the resource operation"))
+    } else {
+        Ok(())
+    }
+}
 pub(crate) struct Capture {
     pub bytes: Vec<u8>,
     pub status: ExitStatus,
@@ -56,6 +80,7 @@ fn read_output(
     let mut bytes = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
+        cancelled()?;
         if Instant::now() >= deadline {
             return Err(timeout_error(label));
         }
@@ -104,6 +129,7 @@ pub(crate) fn capture(
     timeout: Duration,
     label: &str,
 ) -> Result<Capture, Error> {
+    cancelled()?;
     command
         .env_remove("RELAY_TOKEN")
         .stdin(Stdio::null())
@@ -113,6 +139,22 @@ pub(crate) fn capture(
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let parent = unsafe { libc::getpid() };
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != parent {
+                    libc::_exit(127);
+                }
+                Ok(())
+            });
+        }
     }
     let child = command.spawn().map_err(|_| {
         Error::invalid(format!(
@@ -135,6 +177,7 @@ pub(crate) fn capture(
             .map_err(|_| Error::invalid(format!("Cannot wait for {label}")))?
     } else {
         loop {
+            cancelled()?;
             if let Some(status) = owned
                 .child
                 .try_wait()

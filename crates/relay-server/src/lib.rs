@@ -17,6 +17,8 @@ mod conversation;
 mod github;
 mod harness;
 mod process;
+mod projects;
+mod providers;
 mod runtime;
 pub use runtime::{RemoteConfig, RuntimeConfig};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -97,7 +99,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 4 {
+        if version > 5 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -112,7 +114,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS drafts(session_id TEXT PRIMARY KEY, draft TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS draft_receipts(request_id TEXT PRIMARY KEY, request TEXT NOT NULL, response TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY, metadata TEXT NOT NULL, bytes BLOB NOT NULL);
-             PRAGMA user_version = 4;"
+             PRAGMA user_version = 5;"
         ).map_err(Error::internal)?;
         let seed =
             serde_json::to_string(&demo_snapshot(defaults.clone())).map_err(Error::internal)?;
@@ -139,6 +141,21 @@ impl Store {
                         .insert(Task::Implement, Permission::Allow);
                 }
             }
+            connection
+                .execute(
+                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                    [serde_json::to_string(&snapshot).map_err(Error::internal)?],
+                )
+                .map_err(Error::internal)?;
+        }
+        if version < 5 {
+            let json: String = connection
+                .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+                    r.get(0)
+                })
+                .map_err(Error::internal)?;
+            let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
+            snapshot.migrate_projects();
             connection
                 .execute(
                     "UPDATE workspace SET snapshot=?1 WHERE id=1",
@@ -229,8 +246,18 @@ impl Store {
         }
         let mut action = None;
         match envelope.command {
+            command if projects::handles(&command) => {
+                action = projects::apply(
+                    &mut snapshot,
+                    command,
+                    &envelope.request_id,
+                    self.defaults.clone(),
+                    config,
+                )?;
+            }
             Command::ConfigureProject { binding } => {
                 let id = harness::add_project(&mut snapshot, binding, self.defaults.clone())?;
+                snapshot.migrate_projects();
                 action = Some(Action::Sync(id));
             }
             Command::ConfigureHarness {
@@ -354,6 +381,18 @@ impl Store {
                     .harness;
                 let session_id = format!("session-{}", envelope.request_id);
                 snapshot.sessions.push(Session {
+                    workspaces: vec![],
+                    connection_ids: snapshot
+                        .connections
+                        .iter()
+                        .filter(|c| {
+                            c.project_id == issue.project_id
+                                && c.enabled
+                                && c.state == ConnectionState::Ready
+                                && !matches!(c.kind, ConnectionKind::Board { .. })
+                        })
+                        .map(|c| c.id.clone())
+                        .collect(),
                     id: session_id.clone(),
                     project_id: issue.project_id.clone(),
                     issue_id: Some(issue_id),
@@ -402,7 +441,7 @@ impl Store {
                         "Worker has no recorded thread/worktree to resume",
                     ));
                 }
-                runtime::authorize_turn(
+                runtime::authorize_session(
                     &snapshot,
                     session
                         .issue_id
@@ -410,6 +449,7 @@ impl Store {
                         .ok_or_else(|| Error::invalid("Session has no issue"))?,
                     &session.director_id,
                     approve_implementation,
+                    &session.role,
                     config,
                 )?;
                 let worker = snapshot
@@ -498,14 +538,34 @@ struct Workspace {
     drafts: watch::Sender<Vec<Draft>>,
     transport_shutdown: watch::Sender<bool>,
     transports: Arc<std::sync::atomic::AtomicUsize>,
+    project_jobs: Arc<std::sync::atomic::AtomicUsize>,
     store: Arc<Mutex<Store>>,
     snapshots: watch::Sender<Snapshot>,
     token: Arc<str>,
     config: Arc<RuntimeConfig>,
 }
 
+struct ProjectJob {
+    count: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl ProjectJob {
+    fn new(workspace: &Workspace) -> Self {
+        workspace
+            .project_jobs
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self {
+            count: workspace.project_jobs.clone(),
+        }
+    }
+}
+impl Drop for ProjectJob {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 enum Action {
     Sync(String),
+    Operations(Vec<String>),
     Run { session_id: String, prompt: String },
     Stop(String),
     Promote(String),
@@ -665,12 +725,11 @@ impl Workspace {
                     // Preserve local issue result metadata while replacing remote fields.
                     let mut issues = board.issues;
                     for issue in &mut issues {
-                        if let Some(old) = snapshot.issues.iter().find(|i| {
-                            i.project_id == project_id
-                                && i.reference.provider == issue.reference.provider
-                                && i.reference.repository == issue.reference.repository
-                                && i.reference.number == issue.reference.number
-                        }) {
+                        if let Some(old) = snapshot
+                            .issues
+                            .iter()
+                            .find(|i| i.project_id == project_id && i.reference == issue.reference)
+                        {
                             issue.id = old.id.clone();
                             issue.result = old.result.clone();
                         }
@@ -696,6 +755,39 @@ impl Workspace {
                     project.github.as_mut().unwrap().sync_error = Some(error.to_string());
                 }
             }
+            if let Some(project) = snapshot.projects.iter().find(|p| p.id == project_id)
+                && let Some(board) = snapshot
+                    .boards
+                    .iter_mut()
+                    .find(|b| b.id == format!("board-{project_id}"))
+            {
+                board.columns = project.columns.clone();
+                if let Some(g) = &project.github {
+                    board.name = project.name.clone();
+                    board.last_synced_at = g.last_synced_at;
+                    board.error = g.sync_error.clone();
+                    board.source = BoardSource::Github {
+                        owner: g.owner.clone(),
+                        number: g.number,
+                        url: g.url.clone(),
+                    };
+                }
+                if board.error.is_none() {
+                    let board_id = board.id.clone();
+                    snapshot.memberships.retain(|m| m.board_id != board_id);
+                    for issue in snapshot.issues.iter().filter(|i| {
+                        i.project_id == project_id
+                            && board.columns.iter().any(|c| c.id == i.column_id)
+                    }) {
+                        snapshot.memberships.push(BoardMembership {
+                            board_id: board_id.clone(),
+                            issue_id: issue.id.clone(),
+                            column_ids: vec![issue.column_id.clone()],
+                            remote_item_id: None,
+                        });
+                    }
+                }
+            }
             snapshot.revision = snapshot
                 .revision
                 .checked_add(1)
@@ -710,6 +802,25 @@ impl Workspace {
     }
 }
 impl Workspace {
+    /// Commit complete operation state and publish it under the single writer.
+    fn update_project(
+        &self,
+        update: impl FnOnce(&mut Snapshot) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let mut store = self.store.lock().map_err(Error::internal)?;
+        if store.closing {
+            return Err(Error::invalid("Server is shutting down"));
+        }
+        let mut snapshot = store.snapshot()?;
+        update(&mut snapshot)?;
+        snapshot.revision = snapshot
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| Error::invalid("Revision exhausted"))?;
+        store.save(&snapshot)?;
+        self.snapshots.send_replace(snapshot);
+        Ok(())
+    }
     fn authorize(&self, headers: &HeaderMap) -> Result<(), Error> {
         let supplied = headers
             .get("authorization")
@@ -755,6 +866,16 @@ impl Shutdown {
         {
             let mut store = self.workspace.store.lock().map_err(Error::internal)?;
             store.closing = true;
+            let mut snapshot = store.snapshot()?;
+            let changed = projects::interrupt_operations(
+                &mut snapshot,
+                "Server stopped the operation; inspect results before continuing",
+            );
+            if changed {
+                snapshot.revision += 1;
+                store.save(&snapshot)?;
+                self.workspace.snapshots.send_replace(snapshot);
+            }
             for control in store.controls.values() {
                 control.send_replace(true);
             }
@@ -783,6 +904,11 @@ impl Shutdown {
                     .collect::<Result<_, Error>>()?
             };
             if unfinished.is_empty()
+                && self
+                    .workspace
+                    .project_jobs
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    == 0
                 && self
                     .workspace
                     .transports
@@ -889,6 +1015,7 @@ pub fn router_with_shutdown(
                 ));
             }
             initial.projects.push(Project {
+                root: None,
                 id: id.clone(),
                 name: format!("{} · GitHub project {}", remote.repository, remote.number),
                 repository: remote.repository.clone(),
@@ -946,6 +1073,45 @@ pub fn router_with_shutdown(
             changed = true;
         }
     }
+    let before_projects = initial.clone();
+    initial.migrate_projects();
+    // A prior schema migration may have created boards before environment bindings exist.
+    for project in &mut initial.projects {
+        if project.fixture {
+            continue;
+        }
+        if let Some(binding) = initial.bindings.iter().find(|b| {
+            b.repository == project.repository
+                && project
+                    .github
+                    .as_ref()
+                    .is_some_and(|g| g.owner == b.owner && g.number == b.number)
+        }) && !initial.connections.iter().any(|c| {
+            c.project_id == project.id && matches!(c.kind, ConnectionKind::Repository { .. })
+        }) {
+            project.root = Path::new(&binding.checkout)
+                .parent()
+                .map(|p| p.display().to_string());
+            initial.connections.push(ProjectConnection {
+                id: format!("repository-{}", project.id),
+                project_id: project.id.clone(),
+                name: binding.repository.clone(),
+                enabled: true,
+                state: ConnectionState::Ready,
+                error: None,
+                kind: ConnectionKind::Repository {
+                    remote: format!("git@github.com:{}.git", binding.repository),
+                    checkout: Some(binding.checkout.clone()),
+                    owned: false,
+                },
+            });
+        }
+    }
+    projects::interrupt_operations(
+        &mut initial,
+        "Server restarted; inspect results before continuing",
+    );
+    changed |= initial != before_projects;
     if changed {
         initial.revision = initial
             .revision
@@ -960,6 +1126,7 @@ pub fn router_with_shutdown(
         drafts: watch::channel(conversation::read_drafts(&store.connection)?).0,
         transport_shutdown: watch::channel(false).0,
         transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        project_jobs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         store: Arc::new(Mutex::new(store)),
         snapshots,
         token: token.into(),
@@ -970,6 +1137,8 @@ pub fn router_with_shutdown(
     };
     Ok((
         Router::new()
+            .route("/v1/boards/discover", post(discover_board))
+            .route("/v1/operations/reconcile", post(reconcile_lookup))
             .route("/v1/harnesses", get(harness::statuses))
             .route("/v1/harnesses/refresh", post(harness::refresh))
             .route("/v1/snapshot", get(snapshot))
@@ -991,6 +1160,10 @@ pub fn router_with_shutdown(
                     .post(conversation::upload_asset)
                     .layer(DefaultBodyLimit::max(ASSET_LIMIT)),
             )
+            .layer(axum::middleware::from_fn_with_state(
+                workspace.clone(),
+                protocol,
+            ))
             .layer(DefaultBodyLimit::max(64 * 1024))
             .layer(axum::middleware::from_fn_with_state(
                 workspace.clone(),
@@ -1016,6 +1189,92 @@ async fn snapshot(
 ) -> Result<Json<Snapshot>, Error> {
     workspace.authorize(&headers)?;
     Ok(Json(workspace.snapshots.borrow().clone()))
+}
+
+async fn protocol(
+    State(workspace): State<Workspace>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if !matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    ) {
+        if let Err(error) = workspace.authorize(request.headers()) {
+            return error.into_response();
+        }
+        if request
+            .headers()
+            .get("x-relay-protocol")
+            .and_then(|v| v.to_str().ok())
+            != Some("2")
+        {
+            return Error::new(
+                StatusCode::CONFLICT,
+                "protocol_mismatch",
+                "This server requires Relay protocol 2; update and restart the desktop client",
+            )
+            .into_response();
+        }
+    }
+    next.run(request).await
+}
+
+async fn discover_board(
+    State(workspace): State<Workspace>,
+    headers: HeaderMap,
+    Json(source): Json<BoardSource>,
+) -> Result<Json<BoardDiscovery>, Error> {
+    workspace.authorize(&headers)?;
+    let job = ProjectJob::new(&workspace);
+    tokio::task::spawn_blocking(move || {
+        let _job = job;
+        process::with_cancellation(workspace.transport_shutdown.subscribe(), || {
+            providers::discover(&workspace.config, &source)
+        })
+    })
+    .await
+    .map_err(Error::internal)?
+    .map(|b| {
+        Json(BoardDiscovery {
+            source: b.source,
+            name: b.name,
+            columns: b.columns,
+        })
+    })
+}
+
+async fn reconcile_lookup(
+    State(workspace): State<Workspace>,
+    headers: HeaderMap,
+    Json(input): Json<ReconciliationInput>,
+) -> Result<Json<ReconciliationResult>, Error> {
+    workspace.authorize(&headers)?;
+    if input.url.len() > 4096 || input.operation_id.len() > 256 {
+        return Err(Error::invalid("Provider result URL is too long"));
+    }
+    let job = ProjectJob::new(&workspace);
+    tokio::task::spawn_blocking(move || {
+        let _job = job;
+        let snapshot = workspace.snapshots.borrow().clone();
+        process::with_cancellation(workspace.transport_shutdown.subscribe(), || {
+            providers::lookup_reconciliation(
+                &workspace.config,
+                &snapshot,
+                &input.operation_id,
+                &input.url,
+            )
+        })
+    })
+    .await
+    .map_err(Error::internal)?
+    .map(|(key, result, description)| {
+        Json(ReconciliationResult {
+            key,
+            result,
+            description,
+        })
+    })
 }
 
 async fn command(
@@ -1071,6 +1330,16 @@ async fn command(
             Some(Action::Promote(session_id)) => {
                 if let Some(control) = store.controls.get(&session_id) {
                     control.send_replace(true);
+                }
+            }
+            Some(Action::Operations(ids)) => {
+                for id in ids {
+                    let workspace = workspace.clone();
+                    let job = ProjectJob::new(&workspace);
+                    handle.spawn_blocking(move || {
+                        let _job = job;
+                        projects::run(workspace, id)
+                    });
                 }
             }
             Some(Action::Sync(project_id)) => {

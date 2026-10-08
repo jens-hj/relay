@@ -23,8 +23,8 @@ fn live() -> Snapshot {
     });
     for i in &mut s.issues {
         i.project_id = p.id.clone();
-        i.reference.provider = Provider::Github;
-        i.reference.repository = p.repository.clone();
+        i.reference.as_mut().unwrap().provider = Provider::Github;
+        i.reference.as_mut().unwrap().repository = p.repository.clone();
     }
     for director in &mut s.directors {
         director.project_id = p.id.clone();
@@ -45,7 +45,7 @@ fn config() -> RuntimeConfig {
         ..Default::default()
     }
 }
-fn env(revision: u64, command: Command) -> CommandEnvelope {
+pub(super) fn env(revision: u64, command: Command) -> CommandEnvelope {
     CommandEnvelope {
         request_id: uuid::Uuid::new_v4().to_string(),
         expected_revision: revision,
@@ -60,7 +60,7 @@ fn start(s: &Snapshot) -> Command {
         approve_implementation: true,
     }
 }
-fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig) -> Workspace {
+pub(super) fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig) -> Workspace {
     let mut store = Store::open(path, DirectorProfile::default()).unwrap();
     store.save(snapshot).unwrap();
     let (snapshots, _) = watch::channel(snapshot.clone());
@@ -70,13 +70,14 @@ fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig) -> Workspa
         drafts: watch::channel(vec![]).0,
         transport_shutdown: watch::channel(false).0,
         transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        project_jobs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         store: Arc::new(Mutex::new(store)),
         snapshots,
         token: "test-token".into(),
         config: Arc::new(config),
     }
 }
-fn script(path: &Path, body: &str) {
+pub(super) fn script(path: &Path, body: &str) {
     // Existing lifecycle fixtures describe a turn using the old normalized
     // events. Their fake CLI now hosts that turn behind the app-server wire
     // protocol, exercising the production transport rather than Codex exec.
@@ -127,7 +128,7 @@ done
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-fn git(repo: &Path, args: &[&str]) {
+pub(super) fn git(repo: &Path, args: &[&str]) {
     assert!(
         std::process::Command::new("git")
             .arg("-C")
@@ -508,9 +509,9 @@ async fn subprocess_exact_resume_sandbox_stdin_usage_and_untracked_diff() {
     assert_eq!(
         context["source_issue"],
         serde_json::json!({
-            "provider": issue.reference.provider, "repository": issue.reference.repository,
-            "number": issue.reference.number, "url": issue.reference.url,
-            "title": issue.title, "body": context["source_issue"]["body"],
+            "provider": issue.reference.as_ref().unwrap().provider, "repository": issue.reference.as_ref().unwrap().repository,
+            "number": issue.reference.as_ref().unwrap().number, "url": issue.reference.as_ref().unwrap().url,
+            "title": issue.title, "body": context["source_issue"]["body"], "local_task": false,
         })
     );
     assert_eq!(context["source_truncated"], true);
@@ -813,6 +814,7 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
     let current: Snapshot = client
         .get(format!("http://{addr}/v1/snapshot"))
         .bearer_auth(token)
+        .header("x-relay-protocol", "2")
         .send()
         .await
         .unwrap()
@@ -825,6 +827,7 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
         client
             .post(format!("http://{addr}/v1/commands"))
             .bearer_auth(token)
+            .header("x-relay-protocol", "2")
             .json(e)
             .send()
     };
@@ -835,6 +838,7 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
         client
             .get(format!("http://{addr}/v1/snapshot"))
             .bearer_auth(token)
+            .header("x-relay-protocol", "2")
             .send()
     };
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -966,6 +970,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
             .unwrap();
         drop(connection);
         let mut store = Store::open(&db, DirectorProfile::default()).unwrap();
+        s.migrate_projects();
         assert_eq!(store.snapshot().unwrap(), s);
         // Legacy optional fields default to None; persisted defaults win over new seed defaults.
         assert!(
@@ -996,7 +1001,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            4
+            5
         );
         drop(store);
         let mut reopened = Store::open(&db, DirectorProfile::default()).unwrap();
@@ -1027,7 +1032,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 5)
+        .pragma_update(None, "user_version", 6)
         .unwrap();
     drop(store);
     let error = Store::open(&db, DirectorProfile::default()).err().unwrap();
@@ -1037,7 +1042,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        5
+        6
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -1322,7 +1327,7 @@ fn codex_jsonl_tolerates_unknown_events_items_and_extra_fields() {
         })
     );
 }
-fn review_repo(dir: &Path) -> PathBuf {
+pub(super) fn review_repo(dir: &Path) -> PathBuf {
     let repo = dir.join("repo");
     std::fs::create_dir(&repo).unwrap();
     git(&repo, &["init", "-q"]);
@@ -1408,7 +1413,10 @@ async fn stop_cancel_and_shutdown_terminate_owned_descendants() {
         let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
         let task = tokio::spawn(runtime::run(w.clone(), id.clone(), run, prompt, rx));
         tokio::time::timeout(Duration::from_secs(10), async {
-            while !pid_file.exists()
+            while std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .is_none()
                 || w.snapshots
                     .borrow()
                     .sessions
@@ -1669,13 +1677,16 @@ fn removed_board_items_keep_linked_identity_without_becoming_active() {
     );
     assert!(runtime::authorize_turn(&removed, &issue_id, &director, true, &w.config).is_err());
     let original = s.issues[0].clone();
-    let response = serde_json::json!({"data":{"node":{"items":{"nodes":[{"type":"ISSUE","content":{"__typename":"Issue","number":original.reference.number,"title":original.title,"body":original.body,"url":original.reference.url,"repository":{"nameWithOwner":"jens-hj/relay"},"labels":{"nodes":[]}}}],"pageInfo":{"hasNextPage":false}}}}});
+    let response = serde_json::json!({"data":{"node":{"items":{"nodes":[{"type":"ISSUE","content":{"__typename":"Issue","number":original.reference.as_ref().unwrap().number,"title":original.title,"body":original.body,"url":original.reference.as_ref().unwrap().url,"repository":{"nameWithOwner":"jens-hj/relay"},"labels":{"nodes":[]}}}],"pageInfo":{"hasNextPage":false}}}}});
     std::fs::write(items, response.to_string()).unwrap();
     // Fixture ID differs from provider-qualified remote ID; simulate provider-qualified history.
     {
         let mut store = w.store.lock().unwrap();
         let mut snapshot = store.snapshot().unwrap();
-        let new_id = format!("github:jens-hj/relay:{}", original.reference.number);
+        let new_id = format!(
+            "github:jens-hj/relay:{}",
+            original.reference.as_ref().unwrap().number
+        );
         snapshot
             .issues
             .iter_mut()
@@ -2093,6 +2104,11 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
         assert!(runtime::authorize_turn(&synced, &issue.id, &director.id, true, &other).is_ok());
         let mut unregistered = synced.clone();
         unregistered.bindings.clear();
+        // Migrated independent connections are authoritative too.
+        assert!(
+            runtime::authorize_turn(&unregistered, &issue.id, &director.id, true, &other).is_ok()
+        );
+        unregistered.connections.clear();
         assert!(
             runtime::authorize_turn(&unregistered, &issue.id, &director.id, true, &other).is_err()
         );

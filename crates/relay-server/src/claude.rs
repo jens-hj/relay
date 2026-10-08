@@ -9,6 +9,7 @@ pub(super) fn arguments(
     thread: Option<&str>,
     path: &str,
     inputs: &str,
+    roots: &[String],
 ) {
     cmd.args([
         "--print",
@@ -31,8 +32,13 @@ pub(super) fn arguments(
         cmd.args(["--resume", thread]);
     }
     cmd.args(["--add-dir", inputs]);
+    for root in roots {
+        if root != path {
+            cmd.args(["--add-dir", root]);
+        }
+    }
     if mode != ApprovalMode::Unrestricted {
-        cmd.arg("--settings").arg(json!({"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"autoAllowBashIfSandboxed":true,"filesystem":{"allowWrite":[path]},"network":{"allowAllUnixSockets":false}}}).to_string());
+        cmd.arg("--settings").arg(json!({"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"autoAllowBashIfSandboxed":true,"filesystem":{"allowWrite":roots},"network":{"allowAllUnixSockets":false}}}).to_string());
     }
     // Explicit turns drive resume; an inherited setting must not replay an interrupted turn.
     cmd.env_remove("CLAUDE_CODE_RESUME_INTERRUPTED_TURN")

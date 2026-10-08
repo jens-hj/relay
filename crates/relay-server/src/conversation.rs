@@ -323,7 +323,7 @@ fn authorize(
         .position(|s| s.id == session)
         .ok_or_else(|| Error::invalid("Session not found"))?;
     let session = candidate.sessions.remove(index);
-    if session.fixture || session.worker.is_none() || session.role != SessionRole::Worker {
+    if session.fixture || session.worker.is_none() {
         return Err(Error::invalid("This session cannot run agent turns"));
     }
     let worker = session.worker.as_ref().unwrap();
@@ -333,7 +333,7 @@ fn authorize(
             "This worker has no resumable thread; start a new linked worker",
         ));
     }
-    runtime::authorize_turn(
+    runtime::authorize_session(
         &candidate,
         session
             .issue_id
@@ -341,6 +341,7 @@ fn authorize(
             .ok_or_else(|| Error::invalid("Session has no linked issue"))?,
         &session.director_id,
         approved,
+        &session.role,
         config,
     )
 }

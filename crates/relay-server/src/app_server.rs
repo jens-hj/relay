@@ -228,6 +228,7 @@ pub(super) async fn execute(
     input: Vec<Value>,
     previous_thread: Option<&str>,
     path: &str,
+    roots: &[String],
     mode: ApprovalMode,
     child: &mut tokio::process::Child,
     stop: &mut watch::Receiver<bool>,
@@ -249,7 +250,7 @@ pub(super) async fn execute(
     let sandbox_policy = if mode == ApprovalMode::Unrestricted {
         json!({"type":"dangerFullAccess"})
     } else {
-        json!({"type":"workspaceWrite","writableRoots":[path],"networkAccess":false})
+        json!({"type":"workspaceWrite","writableRoots":roots,"networkAccess":false})
     };
     let setup = async {
         rpc.request("initialize", json!({"clientInfo":{"name":"relay","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":false}})).await?;

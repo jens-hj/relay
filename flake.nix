@@ -42,6 +42,7 @@
             pkg-config
             git
             gh
+            glab
             relayCodex
             claude-code
             curl

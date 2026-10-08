@@ -27,6 +27,7 @@ async fn snapshot(server: &Server) -> Snapshot {
     reqwest::Client::new()
         .get(format!("{}/v1/snapshot", server.endpoint))
         .bearer_auth(TOKEN)
+        .header("x-relay-protocol", "2")
         .send()
         .await
         .unwrap()
@@ -38,6 +39,7 @@ async fn send(server: &Server, envelope: &CommandEnvelope) -> reqwest::Response 
     reqwest::Client::new()
         .post(format!("{}/v1/commands", server.endpoint))
         .bearer_auth(TOKEN)
+        .header("x-relay-protocol", "2")
         .json(envelope)
         .send()
         .await
@@ -57,6 +59,110 @@ fn comment() -> Command {
         author: "Reviewer".into(),
         body: "Keep explicit overrides intact.".into(),
     }
+}
+
+#[tokio::test]
+async fn protocol_guard_and_multiple_local_projects_round_trip_without_remote_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(&dir.path().join("db")).await;
+    let initial = snapshot(&server).await;
+    assert_eq!(initial.protocol_version, PROTOCOL_VERSION);
+    let old = reqwest::Client::new()
+        .post(format!("{}/v1/commands", server.endpoint))
+        .bearer_auth(TOKEN)
+        .json(&envelope(initial.revision, comment()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(old.status(), 409);
+    assert_eq!(
+        old.json::<ApiError>().await.unwrap().code,
+        "protocol_mismatch"
+    );
+    assert_eq!(snapshot(&server).await, initial);
+    let mut current = initial;
+    for name in ["One", "Two"] {
+        let request = envelope(
+            current.revision,
+            Command::CreateProject {
+                name: name.into(),
+                root: dir.path().join(name).display().to_string(),
+                connections: vec![],
+            },
+        );
+        current = send(&server, &request)
+            .await
+            .json::<Snapshot>()
+            .await
+            .unwrap();
+        assert_eq!(
+            send(&server, &request)
+                .await
+                .json::<Snapshot>()
+                .await
+                .unwrap(),
+            current
+        );
+    }
+    assert_eq!(current.projects.iter().filter(|p| !p.fixture).count(), 2);
+    let project = current
+        .projects
+        .iter()
+        .find(|p| p.name == "One")
+        .unwrap()
+        .id
+        .clone();
+    let board = current
+        .boards
+        .iter()
+        .find(|b| b.project_id == project)
+        .unwrap()
+        .id
+        .clone();
+    let request = envelope(
+        current.revision,
+        Command::CreateTask {
+            board_id: board.clone(),
+            title: "Local".into(),
+            body: "No issue provider".into(),
+            repository_connection_id: None,
+        },
+    );
+    current = send(&server, &request).await.json().await.unwrap();
+    let task = current
+        .issues
+        .iter()
+        .find(|i| i.title == "Local")
+        .unwrap()
+        .id
+        .clone();
+    assert!(
+        current
+            .issues
+            .iter()
+            .find(|i| i.id == task)
+            .unwrap()
+            .reference
+            .is_none()
+    );
+    let request = envelope(
+        current.revision,
+        Command::MoveTask {
+            board_id: board.clone(),
+            issue_id: task.clone(),
+            column_id: "done".into(),
+        },
+    );
+    current = send(&server, &request).await.json().await.unwrap();
+    assert_eq!(
+        current
+            .memberships
+            .iter()
+            .find(|m| m.board_id == board && m.issue_id == task)
+            .unwrap()
+            .column_ids,
+        vec!["done"]
+    );
 }
 
 #[tokio::test]
@@ -105,6 +211,7 @@ async fn authentication_covers_reads_writes_and_event_upgrade() {
         client
             .get(format!("{}/v1/snapshot", server.endpoint))
             .bearer_auth("wrong-token")
+            .header("x-relay-protocol", "2")
             .send()
             .await
             .unwrap()
@@ -297,6 +404,7 @@ async fn shared_draft_revisions_are_independent_idempotent_and_survive_restart()
     let saved: Draft = client
         .post(&url)
         .bearer_auth(TOKEN)
+        .header("x-relay-protocol", "2")
         .json(&request)
         .send()
         .await
@@ -312,6 +420,7 @@ async fn shared_draft_revisions_are_independent_idempotent_and_survive_restart()
     let duplicate: Draft = client
         .post(&url)
         .bearer_auth(TOKEN)
+        .header("x-relay-protocol", "2")
         .json(&request)
         .send()
         .await
@@ -329,6 +438,7 @@ async fn shared_draft_revisions_are_independent_idempotent_and_survive_restart()
         client
             .post(&url)
             .bearer_auth(TOKEN)
+            .header("x-relay-protocol", "2")
             .json(&stale)
             .send()
             .await
@@ -356,6 +466,7 @@ async fn shared_draft_revisions_are_independent_idempotent_and_survive_restart()
         client
             .post(&url)
             .bearer_auth(TOKEN)
+            .header("x-relay-protocol", "2")
             .json(&invalid)
             .send()
             .await
@@ -368,6 +479,7 @@ async fn shared_draft_revisions_are_independent_idempotent_and_survive_restart()
     let drafts: Vec<Draft> = client
         .get(format!("{}/v1/drafts", restarted.endpoint))
         .bearer_auth(TOKEN)
+        .header("x-relay-protocol", "2")
         .send()
         .await
         .unwrap()
@@ -398,6 +510,7 @@ async fn inline_assets_are_authenticated_bounded_immutable_and_validated_in_draf
     let asset: Asset = client
         .post(&url)
         .bearer_auth(TOKEN)
+        .header("x-relay-protocol", "2")
         .header("x-relay-filename", "notes%20%CE%BB.txt")
         .header("content-type", "application/octet-stream")
         .body(bytes.as_slice())
@@ -414,6 +527,7 @@ async fn inline_assets_are_authenticated_bounded_immutable_and_validated_in_draf
         client
             .get(&url)
             .bearer_auth(TOKEN)
+            .header("x-relay-protocol", "2")
             .send()
             .await
             .unwrap()
@@ -427,6 +541,7 @@ async fn inline_assets_are_authenticated_bounded_immutable_and_validated_in_draf
         client
             .post(&url)
             .bearer_auth(TOKEN)
+            .header("x-relay-protocol", "2")
             .header("x-relay-filename", "notes%20%CE%BB.txt")
             .body("different")
             .send()
@@ -454,6 +569,7 @@ async fn inline_assets_are_authenticated_bounded_immutable_and_validated_in_draf
         client
             .post(&draft_url)
             .bearer_auth(TOKEN)
+            .header("x-relay-protocol", "2")
             .json(&request)
             .send()
             .await
@@ -468,6 +584,7 @@ async fn inline_assets_are_authenticated_bounded_immutable_and_validated_in_draf
         client
             .post(&draft_url)
             .bearer_auth(TOKEN)
+            .header("x-relay-protocol", "2")
             .json(&valid)
             .send()
             .await
@@ -480,6 +597,7 @@ async fn inline_assets_are_authenticated_bounded_immutable_and_validated_in_draf
         client
             .post(large_url)
             .bearer_auth(TOKEN)
+            .header("x-relay-protocol", "2")
             .body(vec![0; ASSET_LIMIT + 1])
             .send()
             .await
@@ -492,6 +610,7 @@ async fn inline_assets_are_authenticated_bounded_immutable_and_validated_in_draf
         client
             .post(image_url)
             .bearer_auth(TOKEN)
+            .header("x-relay-protocol", "2")
             .header("content-type", "image/png")
             .body("invalid PNG")
             .send()
@@ -554,6 +673,7 @@ async fn shared_draft_websocket_publishes_and_reconnects_without_workspace_revis
     let saved: Draft = reqwest::Client::new()
         .post(format!("{}/v1/drafts/session-plan", server.endpoint))
         .bearer_auth(TOKEN)
+        .header("x-relay-protocol", "2")
         .json(&request)
         .send()
         .await

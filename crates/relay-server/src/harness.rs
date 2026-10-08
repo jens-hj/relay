@@ -168,6 +168,7 @@ pub(super) fn add_project(
         }
     } else {
         snapshot.projects.push(Project {
+            root: None,
             id: id.clone(),
             name: format!("{} · GitHub project {}", binding.repository, binding.number),
             repository: binding.repository.clone(),

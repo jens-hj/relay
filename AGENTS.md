@@ -1,6 +1,6 @@
 # Working on Relay
 
-Relay is a native Rust/Mosaic client connected to a server that owns issue-linked agent execution and persistent workspace state. GitHub Projects is authoritative for board membership and status.
+Relay is a native Rust/Mosaic client connected to a server that owns task-linked agent execution and persistent project workspaces. Projects contain independent repository, board, and directory connections. Local boards are stored on the server; connected GitHub/GitLab boards are authoritative for their remote membership and status.
 
 ## Development environment
 

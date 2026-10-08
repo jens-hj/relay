@@ -59,6 +59,259 @@ fn worker<'a>(s: &'a Snapshot, id: &str) -> &'a WorkerRun {
         .as_ref()
         .unwrap()
 }
+
+const MULTI_CODEX: &str = r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | jq -c '.id')
+  method=$(printf '%s' "$line" | jq -r '.method')
+  printf '%s\n' "$line" >> codex-rpc.jsonl
+  case "$method" in
+    initialize) printf '{"id":%s,"result":{}}\n' "$id";;
+    thread/start|thread/resume) printf '{"id":%s,"result":{"thread":{"id":"multi-workspace-thread"}}}\n' "$id";;
+    turn/start)
+      printf '%s' "$line" | jq -r '.params.sandboxPolicy.writableRoots[]' > roots
+      while IFS= read -r root; do
+        if [ -f "$root/tracked" ]; then printf 'changed\n' > "$root/tracked"; else printf 'direct\n' > "$root/direct"; fi
+      done < roots
+      printf '{"id":%s,"result":{"turn":{"id":"multi"}}}\n' "$id"
+      printf '%s\n' '{"method":"item/completed","params":{"threadId":"multi-workspace-thread","turnId":"multi","item":{"id":"multi-answer","type":"agentMessage","text":"Edited selected workspaces"}}}'
+      printf '%s\n' '{"method":"turn/completed","params":{"threadId":"multi-workspace-thread","turn":{"id":"multi","status":"completed"}}}'
+      exit;;
+  esac
+done
+"#;
+
+async fn multi_workspace(harness: Harness) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = Snapshot::default();
+    let defaults = DirectorProfile {
+        harness,
+        ..Default::default()
+    };
+    crate::projects::apply(
+        &mut snapshot,
+        Command::CreateProject {
+            name: "Multi".into(),
+            root: dir.path().join("project").display().to_string(),
+            connections: vec![],
+        },
+        "multi",
+        defaults,
+        &RuntimeConfig::default(),
+    )
+    .unwrap();
+    let project_id = snapshot.projects[0].id.clone();
+    for index in 0..2 {
+        let parent = dir.path().join(format!("source-{index}"));
+        std::fs::create_dir(&parent).unwrap();
+        let repo = review_repo(&parent);
+        std::fs::write(repo.join("tracked"), "base\n").unwrap();
+        git(&repo, &["add", "tracked"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=T",
+                "-c",
+                "user.email=t@e",
+                "commit",
+                "-qm",
+                "tracked",
+            ],
+        );
+        snapshot.connections.push(ProjectConnection {
+            id: format!("repo-{index}"),
+            project_id: project_id.clone(),
+            name: format!("Repo {index}"),
+            enabled: true,
+            state: ConnectionState::Ready,
+            error: None,
+            kind: ConnectionKind::Repository {
+                remote: format!("git@github.com:org/repo-{index}.git"),
+                checkout: Some(repo.display().to_string()),
+                owned: false,
+            },
+        });
+    }
+    let external = dir.path().join("external");
+    std::fs::create_dir(&external).unwrap();
+    crate::projects::apply(
+        &mut snapshot,
+        Command::AddConnection {
+            project_id: project_id.clone(),
+            connection: ConnectionInput::Directory {
+                path: external.display().to_string(),
+            },
+        },
+        "external",
+        DirectorProfile::default(),
+        &RuntimeConfig::default(),
+    )
+    .unwrap();
+    let board = snapshot.boards[0].id.clone();
+    crate::projects::apply(
+        &mut snapshot,
+        Command::CreateTask {
+            board_id: board,
+            title: "Edit both".into(),
+            body: "Use all selected workspaces".into(),
+            repository_connection_id: None,
+        },
+        "multi-task",
+        DirectorProfile::default(),
+        &RuntimeConfig::default(),
+    )
+    .unwrap();
+    let bin = dir.path().join("agent");
+    match harness {
+        Harness::Codex => script(&bin, MULTI_CODEX),
+        Harness::ClaudeCode => script(
+            &bin,
+            &format!(
+                r#"
+previous=''
+for arg; do
+  if [ "$previous" = --settings ]; then
+    printf '%s' "$arg" | jq -r '.sandbox.filesystem.allowWrite[]' > roots
+    while IFS= read -r root; do
+      if [ -f "$root/tracked" ]; then printf 'changed\n' > "$root/tracked"; else printf 'direct\n' > "$root/direct"; fi
+    done < roots
+  fi
+  previous="$arg"
+done
+{CLAUDE_FAKE}
+"#
+            ),
+        ),
+    }
+    let config = RuntimeConfig {
+        codex: bin.clone(),
+        claude: bin,
+        ..Default::default()
+    };
+    let w = workspace(&dir.path().join("db"), &snapshot, config);
+    let command = Command::StartSession {
+        director_id: snapshot.directors[0].id.clone(),
+        issue_id: Some(snapshot.issues[0].id.clone()),
+        role: SessionRole::Worker,
+        prompt: "Implement the task".into(),
+        approve_implementation: false,
+        connection_ids: None,
+    };
+    let (id, run, rx, prompt) = reserve(&w, env(snapshot.revision, command));
+    runtime::run(w.clone(), id.clone(), run, prompt, rx).await;
+    let mut completed = finished(&w, &id).await;
+    assert_eq!(
+        worker(&completed, &id).status,
+        WorkerStatus::Completed,
+        "{:?}",
+        worker(&completed, &id).error
+    );
+    let session = completed
+        .sessions
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap()
+        .clone();
+    assert_eq!(session.workspaces.len(), 4);
+    for workspace in session.workspaces.iter().filter(|s| s.repository) {
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&workspace.path).join("tracked")).unwrap(),
+            "changed\n"
+        );
+        assert!(
+            workspace
+                .changes
+                .as_ref()
+                .unwrap()
+                .diff
+                .contains("+changed")
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(external.join("direct")).unwrap(),
+        "direct\n"
+    );
+    for connection in &completed.connections {
+        if let ConnectionKind::Repository {
+            checkout: Some(path),
+            ..
+        } = &connection.kind
+        {
+            assert_eq!(
+                std::fs::read_to_string(Path::new(path).join("tracked")).unwrap(),
+                "base\n"
+            );
+        }
+    }
+    let roots = std::fs::read_to_string(
+        Path::new(worker(&completed, &id).worktree.as_ref().unwrap()).join("roots"),
+    )
+    .unwrap();
+    assert_eq!(roots.lines().count(), 4);
+    // Adding a connection cannot silently widen a resumed thread's roots.
+    let extra = dir.path().join("later");
+    std::fs::create_dir(&extra).unwrap();
+    completed = apply(
+        &w,
+        Command::AddConnection {
+            project_id,
+            connection: ConnectionInput::Directory {
+                path: extra.display().to_string(),
+            },
+        },
+    );
+    let thread = worker(&completed, &id).thread_id.clone();
+    let (session_id, run, rx, prompt) = reserve(
+        &w,
+        env(
+            completed.revision,
+            Command::SendWorker {
+                session_id: id.clone(),
+                prompt: "Continue".into(),
+                approve_implementation: false,
+            },
+        ),
+    );
+    runtime::run(w.clone(), session_id, run, prompt, rx).await;
+    let resumed = finished(&w, &id).await;
+    assert_eq!(
+        worker(&resumed, &id).status,
+        WorkerStatus::Completed,
+        "{:?}",
+        worker(&resumed, &id).error
+    );
+    assert_eq!(worker(&resumed, &id).thread_id, thread);
+    assert_eq!(
+        resumed
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .connection_ids,
+        session.connection_ids
+    );
+    assert_eq!(
+        resumed
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .workspaces
+            .len(),
+        4
+    );
+    assert!(!extra.join("direct").exists());
+}
+
+#[tokio::test]
+async fn codex_multiple_repositories_and_directories_keep_isolation_and_resume_roots() {
+    multi_workspace(Harness::Codex).await;
+}
+#[tokio::test]
+async fn claude_multiple_repositories_and_directories_keep_isolation_and_resume_roots() {
+    multi_workspace(Harness::ClaudeCode).await;
+}
 fn apply(w: &Workspace, command: Command) -> Snapshot {
     let mut store = w.store.lock().unwrap();
     let snapshot = store.snapshot().unwrap();
