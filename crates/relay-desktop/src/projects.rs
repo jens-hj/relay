@@ -313,7 +313,7 @@ pub fn TaskEditor(model: Model) -> Element {
         .into_iter()
         .find(|i| Some(&i.id) == model.issue.get_untracked().as_ref());
     let title = State::new(issue.as_ref().map(|i| i.title.clone()).unwrap_or_default());
-    let body = State::new(issue.map(|i| i.body).unwrap_or_default());
+    let body = State::new(issue.map(|i| task_body(&i.body)).unwrap_or_default());
     let editing = State::new(false);
     view! {
         col height:min-content gap:{px(8.0)}px {
@@ -730,4 +730,52 @@ pub fn WorkspaceChoices(model: Model) -> Element {
             }
         }
     }
+}
+
+fn task_markers(body: &str) -> Vec<&str> {
+    let mut markers = Vec::new();
+    let mut rest = body;
+    while let Some(start) = rest.find("<!-- relay-operation:") {
+        rest = &rest[start..];
+        let Some(end) = rest.find("-->") else {
+            break;
+        };
+        let marker = &rest[..end + 3];
+        let payload = marker
+            .strip_prefix("<!-- relay-operation:")
+            .unwrap()
+            .strip_suffix("-->")
+            .unwrap()
+            .trim();
+        if let Some((operation, task)) = payload.split_once(":task:")
+            && !operation.is_empty()
+            && !task.is_empty()
+            && !payload.contains(['\n', '\r', '<', '>'])
+        {
+            markers.push(marker);
+        }
+        rest = &rest[end + 3..];
+    }
+    markers
+}
+pub(crate) fn task_body(body: &str) -> String {
+    let markers = task_markers(body);
+    if markers.is_empty() {
+        return body.into();
+    }
+    let mut visible = body.to_owned();
+    for marker in markers {
+        visible = visible.replace(marker, "");
+    }
+    visible.trim_end().into()
+}
+pub(crate) fn preserve_task_markers(edited: &str, original: &str) -> String {
+    let mut body = edited.to_owned();
+    for marker in task_markers(original) {
+        if !body.contains(marker) {
+            body.push_str("\n\n");
+            body.push_str(marker);
+        }
+    }
+    body
 }

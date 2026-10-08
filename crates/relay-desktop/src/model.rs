@@ -807,7 +807,17 @@ impl Model {
                 && issue.column_id == column
         }
     }
-    pub fn action(&self, command: Command) {
+    pub fn action(&self, mut command: Command) {
+        if let Command::UpdateTask { issue_id, body, .. } = &mut command
+            && let Some(issue) = self
+                .snapshot
+                .get_untracked()
+                .issues
+                .iter()
+                .find(|i| &i.id == issue_id)
+        {
+            *body = crate::projects::preserve_task_markers(body, &issue.body);
+        }
         if let Command::UpdateTask { issue_id, .. } = &command
             && !self.snapshot.get_untracked().visible_task(issue_id)
         {

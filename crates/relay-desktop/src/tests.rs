@@ -2911,3 +2911,46 @@ fn disabled_board_connections_hide_selectors_and_block_new_work_without_losing_h
     mounted.settle();
     assert_eq!(mounted.model.selected_board().unwrap().id, board.id);
 }
+
+#[test]
+fn imported_task_recovery_marker_is_hidden_and_preserved_when_editing() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    let marker = "<!-- relay-operation:publish-1:task:issue-2 -->";
+    snapshot
+        .issues
+        .iter_mut()
+        .find(|i| i.id == "issue-2")
+        .unwrap()
+        .body = format!("Ordinary task description\n\n{marker}");
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.issue.set(Some("issue-2".into()));
+    mounted.settle();
+    mounted.rect("Ordinary task description");
+    assert!(!mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+        n.label
+            .as_ref()
+            .is_some_and(|l| l.contains("relay-operation:"))
+    }));
+    mounted.click("Edit task");
+    type_in(&mounted, "Task body", "Updated task description");
+    mounted.focus("Save task");
+    mounted.click("Save task");
+    let Command::UpdateTask { body, .. } = mounted.commands.try_recv().unwrap().command else {
+        panic!("Expected edit")
+    };
+    assert_eq!(body, format!("Updated task description\n\n{marker}"));
+    assert_eq!(
+        crate::projects::task_body(&body),
+        "Updated task description"
+    );
+    assert_eq!(
+        crate::projects::task_body("User <!-- ordinary comment --> text"),
+        "User <!-- ordinary comment --> text"
+    );
+    assert_eq!(
+        crate::projects::task_body("<!-- relay-operation:unfinished"),
+        "<!-- relay-operation:unfinished"
+    );
+    assert_eq!(crate::projects::preserve_task_markers(&body, &body), body);
+}

@@ -427,8 +427,9 @@ fn IssueDetail(model: Model) -> Element {
                         text font-size:{px(12.0)}px font-color:accent (current.get().label())
                         text font-size:{px(21.0)}px font-weight:650 font-family:sans-serif
                             label:{ current.get().title } { current.get().title }
-                        text font-size:{px(14.0)}px label:{ current.get().body }
-                            { current.get().body }
+                        text font-size:{px(14.0)}px
+                            label:{ crate::projects::task_body(&current.get().body) }
+                            { crate::projects::task_body(&current.get().body) }
                         text font-size:{px(11.0)}px font-color:muted
                             { if model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture) { "Fixture issue · execution unavailable".to_string() } else { current.get().reference.map(|r| r.url).unwrap_or_default() } }
                         if !model.snapshot.get().visible_task(&current.get().id) {
