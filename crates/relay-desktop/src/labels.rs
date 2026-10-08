@@ -269,10 +269,8 @@ pub fn LabelStrip(labels: Derived<Vec<String>>) -> Element {
     }
 }
 
-/// A caps key above a value. Typography sits on the containers: the pinned
-/// Mosaic resets a text leaf with reactive content to inherited style when
-/// the content changes (`text_dyn_styled`), so the value inherits its size
-/// and color from `#relay.value` rather than setting them on the leaf.
+/// A caps key above a value. Typography sits on the containers, as in the
+/// Mosaic example apps, so live values inherit one shared style.
 #[component]
 pub fn Readout(key: String, value: Derived<String>) -> Element {
     view! {

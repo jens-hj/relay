@@ -31,6 +31,17 @@ A restyle of the existing views, without changing behavior or contracts. Every v
 - **Not shown:** mock-only elements such as the turn timeline, timestamps, turn numbers, elapsed time, Compact/Reset, unsaved-change counters, per-file line bars, and permission locks.
 - **Permissions:** every action's permission stays editable. The profile caption states only what the server enforces: an Implement Deny blocks worker turns, and an Implement Ask requires approval each turn.
 
+## Fidelity refinement
+
+The second pass matches the concept geometry at the same viewport and follows the pinned Mosaic example conventions:
+
+- **Structure:** grouped theme tokens (`ink`, `surface`, `rule`, `run`, `attention`, `tint`, `meter`, `status`), a separate icon scheme, one `#relay.*` style namespace (`styles.rs`) and focused view modules under `ui/`.
+- **Chrome:** 56px page header with integrated cells, aligned with the 56px sidebar brand; 52px footers on both sides; framed modules with 30px caps heads.
+- **Board:** 40px column heads on the header rule, full-height column rules, cards with a 22px tinted identifier strip, a three-line preview clipped by layout and a 26px foot; a 392px inspector that opens on its 74×92 identifier header with the worker setup anchored at the bottom.
+- **Profile:** a framed 74px identifier header at the page padding, the inheritance strip, the action matrix and configuration modules, and a 50px save bar.
+- **Session:** 74px header, 28px run strip, and a 92px author column beside content capped at 760px.
+- **Text fitting:** labels keep their full text and fade at the edge, as in the text editor example; no width estimates.
+
 ## Deferred
 
 - Keyboard grid addresses.

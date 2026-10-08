@@ -4471,3 +4471,67 @@ fn narrow_sessions_stack_entries_without_rebuilding_the_draft() {
     mounted.click("Session actions");
     assert!(has_label(&mounted, "Stop worker"));
 }
+
+
+/// Pinned Mosaic `text_dyn_styled` binds a live text leaf's content and style
+/// in separate effects. Typography from leaf attributes, leaf classes and
+/// styled parent containers stays the same at mount, after content updates
+/// and after a theme switch.
+#[test]
+fn live_text_typography_survives_content_and_theme_updates() {
+    use crate::{styles::relay, theme::ink};
+    mosaic::core::builtins::install();
+    install_theme(&theme::palette(false));
+    let scope = Scope::new(|| {});
+    let ui = scope.run(Ui::new);
+    let mut fonts = FontContext::embedded_only();
+    crate::fonts::configure(&mut fonts);
+    ui.set_fonts(fonts);
+    let value = State::new("one".to_string());
+    scope.run(|| {
+        let _ambient = ui.enter();
+        ui.mount(&view! {
+            col font-size:20px {
+                row font-size:13px { text {format!("container {}", value.get())} }
+                text font-size:13px {format!("leaf {}", value.get())}
+                text #relay.caption {format!("class {}", value.get())}
+                row #relay.caption { text {format!("parent class {}", value.get())} }
+                text font-color:ink.muted {format!("leaf color {}", value.get())}
+                row font-color:ink.muted { text {format!("container color {}", value.get())} }
+            }
+        });
+    });
+    let attribute = |label: &str, name: &str| {
+        flush();
+        ui.frame(Size::new(400.0, 300.0), 1.0);
+        let snapshot = ui.inspection_snapshot();
+        let node = snapshot
+            .nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("Missing text: {label}"));
+        ui.inspection_details(node.id)
+            .unwrap()
+            .attributes
+            .into_iter()
+            .find(|a| a.name == name)
+            .map(|a| a.value)
+            .unwrap_or_default()
+    };
+    let size = |label: &str| attribute(label, "font-size");
+    let colors = |n: &str| [attribute(&format!("leaf color {n}"), "text-color"), attribute(&format!("container color {n}"), "text-color")];
+    let read = |n: &str| [size(&format!("container {n}")), size(&format!("leaf {n}")), size(&format!("class {n}")), size(&format!("parent class {n}"))];
+    let initial = read("one");
+    let initial_colors = colors("one");
+    value.set("two".into());
+    let updated = read("two");
+    let updated_colors = colors("two");
+    install_theme(&theme::palette(true));
+    let themed = read("two");
+    let themed_colors = colors("two");
+    assert_eq!(initial, ["13.0", "13.0", "12.0", "12.0"].map(String::from));
+    assert_eq!(updated, initial, "content update");
+    assert_eq!(themed, initial, "theme switch");
+    assert_eq!(updated_colors, initial_colors, "content update");
+    assert_eq!(themed_colors, initial_colors, "theme switch");
+}

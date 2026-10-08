@@ -39,8 +39,10 @@ pub fn shell(model: Model) -> Element {
                 col width:1fr {
                     if !matches!(model.page.get(), Page::Sessions | Page::Board | Page::Directors) {
                         PageHeader model:(model)
-                            eyebrow:(page_label(model.page.get_untracked()).to_string())
-                            title:(Derived::new(move || model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| p.name.clone()).unwrap_or_default()))
+                            // Settings and New Project are not about the open project, so
+                            // they title themselves.
+                            eyebrow:(if matches!(model.page.get_untracked(), Page::Settings | Page::NewProject) { "Relay".to_string() } else { page_label(model.page.get_untracked()).to_string() })
+                            title:(Derived::new(move || if matches!(model.page.get(), Page::Settings | Page::NewProject) { page_label(model.page.get()).to_string() } else { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| p.name.clone()).unwrap_or_default() }))
                             compact:(Derived::new(move || width.get() < px(900.0)))
                     }
                     if !model.notice.get().is_empty() {
@@ -92,7 +94,7 @@ pub fn shell(model: Model) -> Element {
                                 col {
                                     if model.page.get() == Page::Board {
                                         if width.get() < px(1050.0) && model.issue.get().is_some() {
-                                            IssueDetail model:(model)
+                                            IssueDetail model:(model) full:true
                                         } else {
                                             row height:1fr {
                                                 Board model:(model)

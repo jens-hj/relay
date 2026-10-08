@@ -68,3 +68,20 @@ pub(crate) fn HeaderCell(
         }
     }
 }
+
+/// A framed form module: a 30px caps head, then padded content.
+#[component]
+pub(crate) fn Module(title: String, #[prop(optional)] children: Children) -> Element {
+    view! {
+        col #relay.module max-width:{px(760.0)}px {
+            row #relay.module-head {
+                row #relay.eyebrow height:min-content width:max-content {
+                    text text-transform:uppercase letter-spacing:{px(0.6)}px (title.clone())
+                }
+            }
+            col height:min-content gap:{px(10.0)}px pad:{px(12.0)}px {
+                children
+            }
+        }
+    }
+}
