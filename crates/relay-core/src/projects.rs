@@ -206,6 +206,12 @@ impl Snapshot {
             .find(|b| b.id == id)
             .ok_or_else(|| "Board not found".into())
     }
+    pub fn board_active(&self, board_id: &str) -> bool {
+        self.connections
+            .iter()
+            .find(|c| matches!(&c.kind,ConnectionKind::Board{board_id:id} if id==board_id))
+            .is_none_or(|c| c.enabled)
+    }
     pub fn visible_task(&self, issue_id: &str) -> bool {
         let Some(issue) = self.issues.iter().find(|i| i.id == issue_id) else {
             return false;
@@ -213,6 +219,7 @@ impl Snapshot {
         if self.boards.iter().any(|b| b.project_id == issue.project_id) {
             self.memberships.iter().any(|m| {
                 m.issue_id == issue_id
+                    && self.board_active(&m.board_id)
                     && self.boards.iter().any(|b| {
                         b.id == m.board_id
                             && m.column_ids
