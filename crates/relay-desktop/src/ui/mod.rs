@@ -41,7 +41,7 @@ pub fn shell(model: Model) -> Element {
                         PageHeader model:(model)
                             // Settings and New Project are not about the open project, so
                             // they title themselves.
-                            eyebrow:(if matches!(model.page.get_untracked(), Page::Settings | Page::NewProject) { "Relay".to_string() } else { page_label(model.page.get_untracked()).to_string() })
+                            eyebrow:(Derived::new(move || if matches!(model.page.get(), Page::Settings | Page::NewProject) { "Relay".to_string() } else { page_label(model.page.get()).to_string() }))
                             title:(Derived::new(move || if matches!(model.page.get(), Page::Settings | Page::NewProject) { page_label(model.page.get()).to_string() } else { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| p.name.clone()).unwrap_or_default() }))
                             compact:(Derived::new(move || width.get() < px(900.0)))
                     }

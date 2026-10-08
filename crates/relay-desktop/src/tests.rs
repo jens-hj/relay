@@ -4756,3 +4756,45 @@ fn bounded_operation_history_exposes_recorded_results_and_keeps_close_reachable(
     assert!(!has_label(&mounted, "Operation details operation-49"));
     assert_control_hit(&mounted, "New task");
 }
+
+#[test]
+fn page_header_eyebrow_follows_navigation_between_shared_header_pages() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    snapshot.projects[0].fixture = false;
+    snapshot.migrate_projects();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    // The eyebrow is the first text in the page header.
+    let eyebrow = |mounted: &Mounted| {
+        let snapshot = mounted.ui.inspection_snapshot();
+        let header = snapshot
+            .nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some("Page header"))
+            .unwrap()
+            .rect;
+        snapshot
+            .nodes
+            .iter()
+            .filter(|n| {
+                n.element_name.as_deref() == Some("text") && header.contains(n.rect.center())
+            })
+            .min_by(|a, b| a.rect.origin.y.total_cmp(&b.rect.origin.y))
+            .and_then(|n| n.label.clone())
+            .unwrap_or_default()
+    };
+    for (page, expected) in [
+        (Page::Settings, "Relay"),
+        (Page::Connections, "Project Connections"),
+        (Page::Publish, "Publish board"),
+        (Page::NewProject, "Relay"),
+    ] {
+        mounted.model.page.set(page);
+        mounted.settle();
+        assert_eq!(eyebrow(&mounted), expected, "{page:?}");
+    }
+}

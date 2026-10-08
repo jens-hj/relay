@@ -9,7 +9,7 @@ use super::*;
 #[component]
 pub(crate) fn PageHeader(
     model: Model,
-    eyebrow: String,
+    eyebrow: Derived<String>,
     title: Derived<String>,
     compact: Derived<bool>,
     #[prop(optional)] children: Children,
@@ -18,7 +18,8 @@ pub(crate) fn PageHeader(
         row #relay.strip height:{px(56.0)}px shrink:0 label:"Page header" {
             col #relay.cell width:1fr min-width:0px {
                 row #relay.eyebrow height:min-content {
-                    text text-transform:uppercase letter-spacing:{px(0.6)}px (eyebrow.clone())
+                    text text-transform:{TextTransform::Uppercase} letter-spacing:{px(0.6)}px
+                        {eyebrow.get()}
                 }
                 row #relay.crumb height:min-content clip {
                     text text-wrap:none {title.get()}

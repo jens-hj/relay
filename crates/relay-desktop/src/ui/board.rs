@@ -160,8 +160,8 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
     view! {
         col width:1fr min-width:0px
             @layout:{move |rect: Rect| {width.set(rect.size.width);height.set(rect.size.height);}} {
-            PageHeader model:(model) eyebrow:("Project board".to_string()) title:(project_name)
-                compact:(Derived::new(move || !full.get())) {
+            PageHeader model:(model) eyebrow:(Derived::new(|| "Project board".to_string()))
+                title:(project_name) compact:(Derived::new(move || !full.get())) {
                 if full.get() {
                     HeaderCell key:("Source".to_string()) value:(source)
                 }
