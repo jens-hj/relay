@@ -674,6 +674,16 @@ pub fn Conversation(model: Model) -> Element {
         ((doc_height.get() - px(160.0)).max(0.0) * 0.6 / count.max(1) as f32).min(px(280.0))
     });
     let compact = Derived::new(move || doc_width.get() < px(720.0));
+    // Size the grid track itself: its fractional track otherwise stretches
+    // the content item beyond the intended reading measure.
+    let content_width = Derived::new(move || {
+        let inset = if compact.get() {
+            24.0
+        } else {
+            28.0 + 36.0 + 92.0
+        };
+        (doc_width.get() - px(inset)).max(0.0).min(px(760.0))
+    });
     let root = view! {
         col width:1fr gap:0px
             @layout:{move |rect: Rect| { doc_width.set(rect.size.width); doc_height.set(rect.size.height); }} {
@@ -912,11 +922,13 @@ pub fn Conversation(model: Model) -> Element {
                         col height:min-content {
                             TranscriptMessage model:(model) message-id:(message.id.clone())
                                 controller:(controller) compact:(compact)
+                                content-width:(content_width)
                         }
                     }
                     for (_, permission) in {model.snapshot.get().tool_permissions.into_iter().filter(|p|p.session_id == model.session.get() && p.decision.is_none() && !p.expired).map(|p|(p.id.clone(),p)).collect::<Vec<_>>()} {
                         let permission = State::new(permission.clone());
-                        grid height:min-content shrink:0 cols:{entry_cols(compact.get())} {
+                        grid height:min-content shrink:0
+                            cols:{entry_cols(compact.get(), content_width.get())} {
                             Gutter author:(Derived::new(|| "Request".to_string()))
                                 tone:(Derived::new(|| attention.text))
                             row width:1fr min-width:0px max-width:{px(760.0)}px height:min-content
@@ -977,7 +989,8 @@ pub fn Conversation(model: Model) -> Element {
                         let cancel = State::new(queued.id.clone());
                         let promote = State::new(queued.id.clone());
                         let edit = State::new(queued.id.clone());
-                        grid height:min-content shrink:0 cols:{entry_cols(compact.get())} {
+                        grid height:min-content shrink:0
+                            cols:{entry_cols(compact.get(), content_width.get())} {
                             Gutter
                                 author:(Derived::new(move || match model.snapshot.get().submissions.iter().find(|s|s.id==queued_id.get()).map(|s|s.state.clone()) {Some(SubmissionState::Paused) => "Paused".to_string(), _ => "Queued".to_string()}))
                                 tone:(Derived::new(|| ink.muted))
@@ -1031,7 +1044,8 @@ pub fn Conversation(model: Model) -> Element {
                                 label:"Resume paused queue" "Resume queue"
                         }
                     }
-                    grid height:min-content pad:(top:{px(10.0)}px) cols:{entry_cols(compact.get())}
+                    grid height:min-content pad:(top:{px(10.0)}px)
+                        cols:{entry_cols(compact.get(), content_width.get())}
                         stroke:(width:{px(1.0)} color:rule.hair edges:top) label:"Next message" {
                         col width:{px(92.0)}px shrink:0 height:min-content gap:{px(8.0)}px
                             pad:(top:{px(2.0)}px) {
@@ -1167,6 +1181,7 @@ fn TranscriptMessage(
     message_id: String,
     controller: ControllerState,
     compact: Derived<bool>,
+    content_width: Derived<f32>,
 ) -> Element {
     let message_id = State::new(message_id);
     let message = Derived::new(move || {
@@ -1186,7 +1201,7 @@ fn TranscriptMessage(
     });
     let prompt = Derived::new(move || message.get().is_some_and(|m| m.kind == "prompt"));
     view! {
-        grid height:min-content cols:{entry_cols(compact.get())} {
+        grid height:min-content cols:{entry_cols(compact.get(), content_width.get())} {
             Gutter author:(Derived::new(move || message.get().map(|m|m.author).unwrap_or_default()))
                 tone:(Derived::new(move || if prompt.get() {ink.fg} else {ink.muted}))
             col width:1fr min-width:0px max-width:{px(760.0)}px height:min-content gap:{px(8.0)}px
@@ -1245,11 +1260,11 @@ fn TranscriptMessage(
 
 /// Transcript entry tracks: the 92px author column beside the content, or
 /// the author above it in narrow conversations.
-fn entry_cols(compact: bool) -> GridTracks {
+fn entry_cols(compact: bool, content_width: f32) -> GridTracks {
     if compact {
-        GridTracks::new([GridTrack::fr(1.0)])
+        GridTracks::new([content_width.into()])
     } else {
-        GridTracks::new([px(92.0).into(), GridTrack::fr(1.0)])
+        GridTracks::new([px(92.0).into(), content_width.into()])
     }
 }
 

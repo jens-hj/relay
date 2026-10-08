@@ -4798,3 +4798,44 @@ fn page_header_eyebrow_follows_navigation_between_shared_header_pages() {
         assert_eq!(eyebrow(&mounted), expected, "{page:?}");
     }
 }
+
+#[test]
+fn conversation_tracks_constrain_recorded_text_and_draft_to_the_reading_width() {
+    let mounted = mount(false, 1600.0);
+    let mut snapshot = live_snapshot();
+    let session_id = snapshot.sessions[0].id.clone();
+    snapshot.messages.push(Message {
+        id: "reading-width".into(),
+        session_id: session_id.clone(),
+        author: "Codex".into(),
+        kind: "agent_message".into(),
+        body: "A recorded paragraph should wrap inside the reading column. ".repeat(10),
+        parts: vec![],
+    });
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(session_id);
+    mounted.settle();
+    let text = mounted.rect("Message reading-width");
+    assert!(text.size.width <= 760.0 + 1.0, "{text:?}");
+    assert!(text.size.height > 40.0, "long text must wrap: {text:?}");
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| {
+            n.label
+                .as_deref()
+                .is_some_and(|l| l.starts_with("Draft text"))
+        })
+        .unwrap();
+    assert!(draft.rect.size.width <= 760.0 + 1.0, "{:?}", draft.rect);
+    assert!(
+        (draft.rect.origin.x - text.origin.x).abs() < 1.0,
+        "draft and recorded text share a reading column"
+    );
+}
