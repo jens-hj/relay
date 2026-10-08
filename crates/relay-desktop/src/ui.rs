@@ -54,7 +54,8 @@ fn Settings(model: Model) -> Element {
                     text font-size:{px(12.0)}px font-color:{color(muted)}
                         {model.settings_store.get().backup.map(|b| format!("Previous settings file kept at {}", b.display())).unwrap_or_default()}
                 }
-                col height:min-content gap:{px(10.0)}px {
+                col height:min-content gap:{px(10.0)}px pad:{px(14.0)}px max-width:{px(760.0)}px
+                    stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) {
                     text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Harnesses"
                     text font-size:{px(12.0)}px font-color:muted
                         "Installed on the connected server. Existing harness logins and model settings are used."
@@ -70,7 +71,8 @@ fn Settings(model: Model) -> Element {
                         HarnessCard model:(model) harness:(harness)
                     }
                 }
-                col height:min-content gap:{px(10.0)}px {
+                col height:min-content gap:{px(10.0)}px pad:{px(14.0)}px max-width:{px(760.0)}px
+                    stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) {
                     text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Appearance"
                     AppearanceSegments model:(model) field:(0usize)
                     text font-family:sans-serif font-size:{px(14.0)}px "Light palette"
@@ -78,7 +80,8 @@ fn Settings(model: Model) -> Element {
                     text font-family:sans-serif font-size:{px(14.0)}px "Dark palette"
                     AppearanceSegments model:(model) field:(2usize)
                 }
-                col height:min-content gap:{px(10.0)}px {
+                col height:min-content gap:{px(10.0)}px pad:{px(14.0)}px max-width:{px(760.0)}px
+                    stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) {
                     text font-family:sans-serif font-size:{px(18.0)}px font-weight:650
                         "Interface scale"
                     text font-size:{px(12.0)}px font-color:muted
@@ -91,7 +94,8 @@ fn Settings(model: Model) -> Element {
                     button #action @click:{model.preferences.update(|p|p.scale=1.0);}
                         label:"Reset interface scale" "Reset"
                 }
-                col height:min-content gap:{px(10.0)}px {
+                col height:min-content gap:{px(10.0)}px pad:{px(14.0)}px max-width:{px(760.0)}px
+                    stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) {
                     text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Sidebar"
                     text font-size:{px(12.0)}px font-color:muted "Drag its right edge to resize."
                     grid
@@ -108,7 +112,8 @@ fn Settings(model: Model) -> Element {
                             width:fill label:"Reset sidebar width" "Reset"
                     }
                 }
-                col height:min-content gap:{px(10.0)}px {
+                col height:min-content gap:{px(10.0)}px pad:{px(14.0)}px max-width:{px(760.0)}px
+                    stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) {
                     text font-family:sans-serif font-size:{px(18.0)}px font-weight:650 "Fonts"
                     text font-size:{px(12.0)}px "Titles: Reddit Sans · Text: Zed Mono"
                 }
