@@ -1,6 +1,7 @@
 //! Shared Labelism primitives: square, rule-framed controls and readouts
 //! whose every mark is a control or a reading.
 
+use crate::styles::*;
 use crate::theme::*;
 use mosaic::core::theme::color;
 use mosaic::prelude::*;
@@ -16,7 +17,7 @@ pub fn SlidingSegments(
     options: Vec<String>,
     index: Derived<usize>,
     select: Select,
-    attention: Option<usize>,
+    attention_slot: Option<usize>,
     cell_width: f32,
     disabled: Derived<bool>,
 ) -> Element {
@@ -24,13 +25,13 @@ pub fn SlidingSegments(
     let focus: Rc<RefCell<BTreeMap<usize, Element>>> = Rc::default();
     let width = State::new(cell_width * count as f32);
     let group = State::new(name.clone());
-    let is_attention = move || attention == Some(index.get());
+    let is_attention = move || attention_slot == Some(index.get());
     view! {
         stack width:{px(cell_width*count as f32)}px max-width:100% height:{px(34.0)}px shrink:0
-            @layout:{move |rect:Rect|width.set(rect.size.width)} fill:surface
-            stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) label:{group.get()} {
+            @layout:{move |rect:Rect|width.set(rect.size.width)} fill:surface.panel
+            stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)}) label:{group.get()} {
             el nohit width:{width.get()/count as f32}px height:fill
-                fill:{color(if is_attention() {attention_fill} else {inverse})}
+                fill:{color(if is_attention() {attention.fill} else {ink.inverse})}
                 translate:(x:{width.get()/count as f32*index.get() as f32}px)
                 transition:(translate:ease(140.0)) {}
             row {
@@ -39,13 +40,13 @@ pub fn SlidingSegments(
                 for (slot, label) in options.into_iter().enumerate() {
                     let option_name=State::new(label);
                     let choose=select.clone();
-                    button #tree-control @click:{choose(slot);} width:1fr height:fill role:radio
-                        disabled:{disabled.get()}
+                    button #relay.tree-control @click:{choose(slot);} width:1fr height:fill
+                        role:radio disabled:{disabled.get()}
                         label:{format!("{}: {}",group.get(),option_name.get())}
-                        stroke:(width:{px(if slot==0 {0.0} else {1.0})} color:edge edges:left)
-                        font-color:{color(if index.get()!=slot {ink} else if is_attention() {on_attention} else {on_inverse})} {
+                        stroke:(width:{px(if slot==0 {0.0} else {1.0})} color:rule.hair edges:left)
+                        font-color:{color(if index.get()!=slot {ink.fg} else if is_attention() {attention.on} else {ink.on_inverse})} {
                         text text-wrap:none font-weight:{if index.get()==slot {700} else {400}}
-                            font-color:{color(if index.get()!=slot {ink} else if is_attention() {on_attention} else {on_inverse})}
+                            font-color:{color(if index.get()!=slot {ink.fg} else if is_attention() {attention.on} else {ink.on_inverse})}
                             {option_name.get()}
                     } as option
                     {let semantic_option=option.clone();Effect::new(move || {semantic_option.toggled(index.get()==slot);});}
@@ -90,10 +91,10 @@ impl RunState {
     /// Text-grade color for the status word.
     pub fn text_color(self) -> ColorToken {
         match self {
-            Self::Running => run_text,
-            Self::Waiting => attention_text,
-            Self::Failed => danger,
-            _ => muted,
+            Self::Running => run.text,
+            Self::Waiting => attention.text,
+            Self::Failed => status.danger,
+            _ => ink.muted,
         }
     }
 }
@@ -152,39 +153,39 @@ pub fn issue_status(snapshot: &relay_core::Snapshot, sessions: &[relay_core::Ses
 pub fn StatusGlyph(state: Derived<RunState>) -> Element {
     let size = 11.0;
     let frame = move || match state.get() {
-        RunState::Running => run_text,
-        RunState::Waiting => attention_text,
-        RunState::Failed => danger,
-        RunState::Completed => ink,
-        _ => rule,
+        RunState::Running => run.text,
+        RunState::Waiting => attention.text,
+        RunState::Failed => status.danger,
+        RunState::Completed => ink.fg,
+        _ => rule.line,
     };
     view! {
         stack nohit width:{px(size)}px height:{px(size)}px shrink:0 align:center justify:center
-            fill:{if state.get() == RunState::Completed {color(ink)} else {Color::TRANSPARENT}}
+            fill:{if state.get() == RunState::Completed {color(ink.fg)} else {Color::TRANSPARENT}}
             stroke:(width:{px(1.0)} color:{color(frame())} offset:{px(-0.5)}) {
             if state.get() == RunState::Running {
                 col {
                     el width:fill height:1fr {}
-                    el width:fill height:1fr fill:run-text {}
+                    el width:fill height:1fr fill:run.text {}
                 }
             }
             if state.get() == RunState::Waiting {
-                el width:{px(5.0)}px height:{px(5.0)}px fill:attention-text {}
+                el width:{px(5.0)}px height:{px(5.0)}px fill:attention.text {}
             }
             if state.get() == RunState::Fixture {
-                el width:{px(3.0)}px height:{px(3.0)}px fill:muted {}
+                el width:{px(3.0)}px height:{px(3.0)}px fill:ink.muted {}
             }
             if state.get() == RunState::Stopped {
-                el width:{px(7.0)}px height:{px(2.0)}px fill:ink {}
+                el width:{px(7.0)}px height:{px(2.0)}px fill:ink.fg {}
             }
             if state.get() == RunState::Interrupted {
-                el width:{px(1.5)}px height:{px(12.0)}px fill:ink
+                el width:{px(1.5)}px height:{px(12.0)}px fill:ink.fg
                     rotate:{std::f32::consts::FRAC_PI_4} {}
             }
             if state.get() == RunState::Failed {
-                el width:{px(1.5)}px height:{px(9.0)}px fill:danger
+                el width:{px(1.5)}px height:{px(9.0)}px fill:status.danger
                     rotate:{std::f32::consts::FRAC_PI_4} {}
-                el width:{px(1.5)}px height:{px(9.0)}px fill:danger
+                el width:{px(1.5)}px height:{px(9.0)}px fill:status.danger
                     rotate:{-std::f32::consts::FRAC_PI_4} {}
             }
         }
@@ -197,17 +198,17 @@ pub fn label_tint(label: &str) -> ColorToken {
     let hash = label.bytes().fold(0x811c_9dc5u32, |h, b| {
         (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
     });
-    [tint_lilac, tint_sky, tint_mint, tint_sand][(hash % 4) as usize]
+    [tint.lilac, tint.sky, tint.mint, tint.sand][(hash % 4) as usize]
 }
 
 /// An issue label: a tinted square tag that always shows its word.
 #[component]
 pub fn Tag(text: String) -> Element {
-    let tint = label_tint(&text);
+    let swatch = label_tint(&text);
     view! {
         row width:max-content height:{px(20.0)}px shrink:0 align:center
-            pad:(horizontal:{px(6.0)}px vertical:0px) fill:{color(tint)} {
-            text text-wrap:none font-size:{px(11.0)}px font-color:ink (text.clone())
+            pad:(horizontal:{px(6.0)}px vertical:0px) fill:{color(swatch)} {
+            text text-wrap:none font-size:{px(11.0)}px font-color:ink.fg (text.clone())
         }
     }
 }
@@ -217,9 +218,9 @@ pub fn Tag(text: String) -> Element {
 pub fn Readout(key: String, value: Derived<String>) -> Element {
     view! {
         col height:min-content min-width:0px gap:{px(3.0)}px {
-            text text-wrap:none font-size:{px(11.0)}px font-color:muted text-transform:uppercase
+            text text-wrap:none font-size:{px(11.0)}px font-color:ink.muted text-transform:uppercase
                 letter-spacing:{px(0.6)}px (key.clone())
-            text font-size:{px(13.0)}px font-color:{color(ink)} {value.get()}
+            text font-size:{px(13.0)}px font-color:{color(ink.fg)} {value.get()}
         }
     }
 }
@@ -238,11 +239,11 @@ pub fn SlotMeter(
             for (_, slot) in {(0..limit.get().min(16)).map(|i| (i, i)).collect::<Vec<_>>()} {
                 let cell = *slot;
                 el width:{px(6.0)}px height:{px(11.0)}px shrink:0
-                    fill:{if cell < running.get() {color(run_fill)} else if cell < active.get() {color(muted)} else {Color::TRANSPARENT}}
-                    stroke:(width:{px(1.0)} color:{color(if cell < running.get() {run_text} else {rule})} offset:{px(-0.5)}) {}
+                    fill:{if cell < running.get() {color(run.fill)} else if cell < active.get() {color(ink.muted)} else {Color::TRANSPARENT}}
+                    stroke:(width:{px(1.0)} color:{color(if cell < running.get() {run.text} else {rule.line})} offset:{px(-0.5)}) {}
             }
             if limit.get() > 16 {
-                text text-wrap:none font-size:{px(11.0)}px font-color:{color(muted)}
+                text text-wrap:none font-size:{px(11.0)}px font-color:{color(ink.muted)}
                     {format!("+{}", limit.get() - 16)}
             }
         }
@@ -314,7 +315,7 @@ pub fn UsageReadout(usage: Derived<Option<relay_core::TokenUsage>>) -> Element {
     let share = move |i: usize| fractions.get().map(|f| f[i]).unwrap_or(0.0);
     view! {
         col height:min-content gap:{px(8.0)}px label:"Latest turn usage" {
-            text font-size:{px(11.0)}px font-color:muted text-transform:uppercase
+            text font-size:{px(11.0)}px font-color:ink.muted text-transform:uppercase
                 letter-spacing:{px(0.6)}px "Latest reported turn · measured"
             grid cols:(1fr 1fr 1fr) height:min-content gap:{px(12.0)}px {
                 Readout key:("Input · includes cached".to_string()) value:(input)
@@ -322,27 +323,27 @@ pub fn UsageReadout(usage: Derived<Option<relay_core::TokenUsage>>) -> Element {
                 Readout key:("Output".to_string()) value:(output)
             }
             if fractions.get().is_some() {
-                row height:{px(12.0)}px gap:{px(1.0)}px fill:surface
-                    stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)}) label:"Usage meter" {
-                    el width:{share(0)}fr height:fill fill:meter-input {}
-                    el width:{share(1)}fr height:fill fill:meter-cached {}
-                    el width:{share(2)}fr height:fill fill:meter-output {}
+                row height:{px(12.0)}px gap:{px(1.0)}px fill:surface.panel
+                    stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)}) label:"Usage meter" {
+                    el width:{share(0)}fr height:fill fill:meter.input {}
+                    el width:{share(1)}fr height:fill fill:meter.cached {}
+                    el width:{share(2)}fr height:fill fill:meter.output {}
                 }
                 row height:min-content gap:{px(12.0)}px {
-                    for (name, tint) in [("Uncached input", meter_input), ("Cached input", meter_cached), ("Output", meter_output)] {
+                    for (name, swatch) in [("Uncached input", meter.input), ("Cached input", meter.cached), ("Output", meter.output)] {
                         row width:max-content height:min-content align:center gap:{px(5.0)}px {
-                            el width:{px(9.0)}px height:{px(9.0)}px fill:{color(tint)}
-                                stroke:(width:{px(1.0)} color:rule offset:{px(-0.5)}) {}
-                            text text-wrap:none font-size:{px(11.0)}px font-color:muted (name)
+                            el width:{px(9.0)}px height:{px(9.0)}px fill:{color(swatch)}
+                                stroke:(width:{px(1.0)} color:rule.line offset:{px(-0.5)}) {}
+                            text text-wrap:none font-size:{px(11.0)}px font-color:ink.muted (name)
                         }
                     }
                 }
             } else {
-                text font-size:{px(12.0)}px font-color:muted
+                text font-size:{px(12.0)}px font-color:ink.muted
                     "No tokens reported for the latest turn"
             }
             if split.get().is_some_and(|s| s.clamped) {
-                text font-size:{px(12.0)}px font-color:warning
+                text font-size:{px(12.0)}px font-color:status.warning
                     "Reported cached tokens exceed input; meter clamped"
             }
         }

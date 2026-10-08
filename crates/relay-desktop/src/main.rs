@@ -10,6 +10,7 @@ mod project_network;
 mod projects;
 mod settings;
 mod sidebar;
+mod styles;
 #[cfg(test)]
 mod tests;
 mod theme;
@@ -35,7 +36,8 @@ fn main() -> Result<(), String> {
     App::new("Relay")
         .window(WindowConfig::new(1380.0, 900.0))
         .theme(settings::themes(&preferences).1)
-        .clear(theme::base)
+        .theme(theme::icons())
+        .clear(theme::surface.base)
         .run(move |ui, context| {
             fonts::configure(&mut ui.fonts().borrow_mut());
             let (updates, sender) = state_channel(network::NetworkState::default());

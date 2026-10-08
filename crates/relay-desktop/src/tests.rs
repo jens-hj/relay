@@ -24,6 +24,7 @@ impl Drop for Mounted {
 fn mount(light: bool, width: f32) -> Mounted {
     mosaic::core::builtins::install();
     install_theme(&theme::palette(light));
+    install_theme(&theme::icons());
     let scope = Scope::new(|| {});
     let ui = scope.run(Ui::new);
     let mut fonts = FontContext::embedded_only();
@@ -373,16 +374,16 @@ fn settings_work_disconnected_and_scale_layout_and_hit_targets_without_losing_dr
         mounted.model.preferences.get_untracked().mode,
         crate::settings::ThemeMode::Light
     );
-    let paper = mosaic::core::theme::color(theme::base);
+    let paper = mosaic::core::theme::color(theme::surface.base);
     mounted.focus("Light palette: Warm");
     mounted.click("Light palette: Warm");
-    assert_ne!(mosaic::core::theme::color(theme::base), paper);
+    assert_ne!(mosaic::core::theme::color(theme::surface.base), paper);
     mounted.focus("Theme: Dark");
     mounted.click("Theme: Dark");
-    let slate = mosaic::core::theme::color(theme::base);
+    let slate = mosaic::core::theme::color(theme::surface.base);
     mounted.focus("Dark palette: Neutral");
     mounted.click("Dark palette: Neutral");
-    assert_ne!(mosaic::core::theme::color(theme::base), slate);
+    assert_ne!(mosaic::core::theme::color(theme::surface.base), slate);
     mounted.focus("Theme: System");
     mounted.click("Theme: System");
     assert_eq!(
@@ -512,7 +513,7 @@ impl Mounted {
             .nodes
             .iter()
             .find(|n| n.label.as_deref() == Some(label))
-            .unwrap()
+            .unwrap_or_else(|| panic!("Missing control: {label}"))
             .id;
         for _ in 0..snapshot.nodes.len() {
             self.key(Key::Tab, false);
@@ -3455,7 +3456,7 @@ fn palette_selectors_slide_between_families_and_high_contrast() {
     let preferences = mounted.model.preferences.get_untracked();
     assert!(!preferences.dark_high_contrast && !preferences.dark_neutral);
     assert_eq!(
-        mosaic::core::theme::color(crate::theme::base),
+        mosaic::core::theme::color(crate::theme::surface.base),
         crate::theme::colors(crate::theme::Palette::Slate).base
     );
 }

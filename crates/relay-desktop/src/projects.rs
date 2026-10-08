@@ -1,3 +1,4 @@
+use crate::styles::*;
 use crate::{
     controls::{ButtonStyle, button},
     model::{Model, Page, Saved},
@@ -107,13 +108,13 @@ fn ProjectSetup(model: Model) -> Element {
     view! {
         col height:min-content max-width:{px(640.0)}px gap:{px(12.0)}px {
             text font-family:sans-serif font-size:{px(13.0)}px "Name"
-            input #input-field label:"Project name" placeholder:"Project name" name
+            input #relay.field label:"Project name" placeholder:"Project name" name
             text font-family:sans-serif font-size:{px(13.0)}px "Absolute root on server"
-            input #input-field label:"Absolute project root on server"
+            input #relay.field label:"Absolute project root on server"
                 placeholder:"/home/you/projects/project" root
-            text font-color:muted font-size:{px(12.0)}px
+            text font-color:ink.muted font-size:{px(12.0)}px
                 "The root is on the connected server. A local board is created automatically."
-            button #action @click:{connections_open.set(!connections_open.get_untracked());}
+            button #relay.action @click:{connections_open.set(!connections_open.get_untracked());}
                 width:{px(200.0)}px max-width:100%
                 label:{if connections_open.get(){"Hide connection form"}else{"Add connection"}}
                 {if connections_open.get(){"Hide connection form"}else{"Add connection"}}
@@ -125,12 +126,12 @@ fn ProjectSetup(model: Model) -> Element {
                 let connection = Derived::new(move || model.project_draft.get().connections.get(index).cloned());
                 col height:min-content gap:{px(6.0)}px {
                     text {connection.get().as_ref().map(connection_label).unwrap_or_default()}
-                    button #action
+                    button #relay.action
                         @click:{model.project_draft.update(|d| {d.connections.remove(index);});}
                         "Remove initial connection"
                 }
             }
-            button #action
+            button #relay.action
                 @click:{
                     let draft = model.project_draft.get_untracked();
                     if draft.name.trim().is_empty() || !std::path::Path::new(draft.root.trim()).is_absolute() {
@@ -197,26 +198,26 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
         col height:min-content gap:{px(8.0)}px max-width:{px(640.0)}px {
             col height:min-content gap:{px(6.0)}px {
                 for (index, label) in [(0,"Repository"),(1,"Directory"),(2,"GitHub board"),(3,"GitLab board")] {
-                    button #action @click:{kind.set(index);}
-                        fill:if kind.get() == index {inverse} else {surface}
-                        font-color:{color(if kind.get() == index {on_inverse} else {ink})}
+                    button #relay.action @click:{kind.set(index);}
+                        fill:if kind.get() == index {ink.inverse} else {surface.panel}
+                        font-color:{color(if kind.get() == index {ink.on_inverse} else {ink.fg})}
                         font-weight:{if kind.get() == index {700} else {400}} (label)
                 }
             }
-            input #input-field label:"Connection address"
+            input #relay.field label:"Connection address"
                 placeholder:{match kind.get(){0=>"Repository URL or SSH remote",1=>"Absolute directory on server",2=>"GitHub user or organization",_=>"GitLab project or group path"}}
                 address
             if kind.get() == 3 {
-                input #input-field label:"GitLab host" host
-                button #action @click:{group.set(!group.get_untracked());}
+                input #relay.field label:"GitLab host" host
+                button #relay.action @click:{group.set(!group.get_untracked());}
                     {if group.get(){"Group board"}else{"Project board"}}
             }
             if kind.get() >= 2 {
-                input #input-field label:"Board number" placeholder:"Existing board number" number
+                input #relay.field label:"Board number" placeholder:"Existing board number" number
             }
-            text font-size:{px(12.0)}px font-color:{color(muted)}
+            text font-size:{px(12.0)}px font-color:{color(ink.muted)}
                 {if kind.get()==0 {"Repositories are cloned by the server."} else if kind.get()==1 {"Directory access follows the session execution mode."} else {"Connect an existing remote board."}}
-            button #action
+            button #relay.action
                 @click:{
                     let address = address.get_untracked().trim().to_owned();
                     let connection = match kind.get_untracked() {
@@ -245,22 +246,23 @@ fn Connections(model: Model) -> Element {
                     text font-family:{FontFamily::SansSerif} {connection.get().name}
                     text
                         {format!("{:?}{}",connection.get().state,if connection.get().enabled {""}else{" · disabled"})}
-                    text font-size:{px(12.0)}px font-color:{color(muted)}
+                    text font-size:{px(12.0)}px font-color:{color(ink.muted)}
                         {match &connection.get().kind {ConnectionKind::Repository{remote,checkout,..}=>format!("{remote}\n{}",checkout.as_deref().unwrap_or("Clone pending")),ConnectionKind::Directory{path}=>path.clone(),ConnectionKind::Board{board_id}=>model.snapshot.get().boards.iter().find(|b| &b.id==board_id).map(|b|source_label(&b.source)).unwrap_or_else(||"Board unavailable".into())}}
-                    text font-color:{color(danger)} {connection.get().error.unwrap_or_default()}
+                    text font-color:{color(status.danger)}
+                        {connection.get().error.unwrap_or_default()}
                     if !connection.get().enabled {
-                        button #action
+                        button #relay.action
                             @click:{model.action(Command::RetryConnection{connection_id:id.get_untracked()});}
                             label:{format!("Restore connection {}",connection.get().name)}
                             disabled:{model.busy.get() || !model.connected.get()}
                             "Restore connection"
                     } else if matches!(connection.get().state,ConnectionState::Failed|ConnectionState::Interrupted) {
-                        button #action
+                        button #relay.action
                             @click:{model.action(Command::RetryConnection{connection_id:id.get_untracked()});}
                             disabled:{model.busy.get() || !model.connected.get()} "Retry connection"
                     }
                     if connection.get().enabled {
-                        button #action
+                        button #relay.action
                             @click:{model.action(Command::RemoveConnection{connection_id:id.get_untracked()});}
                             disabled:{model.busy.get() || !model.connected.get()}
                             "Remove connection"
@@ -288,11 +290,11 @@ pub fn BoardActions(model: Model) -> Element {
                     for (_, board) in {model.snapshot.get().boards.into_iter().filter(|b|b.project_id==model.project.get() && model.snapshot.get().board_active(&b.id)).map(|b|(b.id.clone(),b)).collect::<Vec<_>>()} {
                         let id = State::new(board.id.clone());
                         let board_name = State::new(board.name.clone());
-                        button #action
+                        button #relay.action
                             @click:{model.preferences.update(|p| {p.selected_boards.insert(model.project.get_untracked(),id.get_untracked());});model.issue.set(None);}
                             label:{format!("Select board {}",board_name.get())}
-                            fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {inverse} else {surface}
-                            font-color:{color(if model.selected_board().is_some_and(|b|b.id==id.get()) {on_inverse} else {ink})}
+                            fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {ink.inverse} else {surface.panel}
+                            font-color:{color(if model.selected_board().is_some_and(|b|b.id==id.get()) {ink.on_inverse} else {ink.fg})}
                             font-weight:{if model.selected_board().is_some_and(|b|b.id==id.get()) {700} else {400}}
                             {board_name.get()}
                     }
@@ -300,31 +302,33 @@ pub fn BoardActions(model: Model) -> Element {
             }
             if model.selected_board().is_some() {
                 row height:min-content gap:{px(8.0)}px label:"Board actions" {
-                    button #action @click:{creating.set(!creating.get_untracked());} "New task"
+                    button #relay.action @click:{creating.set(!creating.get_untracked());}
+                        "New task"
                     if model.selected_board().is_some_and(|b|b.source==BoardSource::Local) {
-                        button #action @click:{managing.set(!managing.get_untracked());}
+                        button #relay.action @click:{managing.set(!managing.get_untracked());}
                             "Manage columns"
-                        button #action @click:{model.page.set(Page::Publish);} "Publish board"
+                        button #relay.action @click:{model.page.set(Page::Publish);} "Publish board"
                     }
                 }
                 if creating.get() {
-                    input #input-field label:"New task title" title
-                    input #area multiline label:"New task body" height:{px(100.0)}px body
+                    input #relay.field label:"New task title" title
+                    input #relay.area multiline label:"New task body" height:{px(100.0)}px body
                     text font-size:{px(12.0)}px "Issue repository (optional for local tasks)"
                     if model.selected_board().is_some_and(|b|b.source==BoardSource::Local) {
-                        button #action @click:{repository.set(None);} "Local task"
+                        button #relay.action @click:{repository.set(None);} "Local task"
                     }
                     for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && c.enabled && c.state==ConnectionState::Ready && matches!(c.kind,ConnectionKind::Repository{..})).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
                         let connection_id=State::new(connection.id.clone());
                         let connection_name=State::new(connection.name.clone());
-                        button #action @click:{repository.set(Some(connection_id.get_untracked()));}
+                        button #relay.action
+                            @click:{repository.set(Some(connection_id.get_untracked()));}
                             label:{format!("New task repository {}",connection_name.get())}
-                            fill:if repository.get().as_ref()==Some(&connection_id.get()) {inverse} else {surface}
-                            font-color:{color(if repository.get().as_ref()==Some(&connection_id.get()) {on_inverse} else {ink})}
+                            fill:if repository.get().as_ref()==Some(&connection_id.get()) {ink.inverse} else {surface.panel}
+                            font-color:{color(if repository.get().as_ref()==Some(&connection_id.get()) {ink.on_inverse} else {ink.fg})}
                             font-weight:{if repository.get().as_ref()==Some(&connection_id.get()) {700} else {400}}
                             {connection_name.get()}
                     }
-                    button #action
+                    button #relay.action
                         @click:{if let Some(board)=model.selected_board(){model.action(Command::CreateTask{board_id:board.id,title:title.get_untracked(),body:body.get_untracked(),repository_connection_id:repository.get_untracked()});}}
                         disabled:{model.busy.get() || !model.connected.get() || title.get().trim().is_empty() || (model.selected_board().is_some_and(|b|b.source!=BoardSource::Local) && repository.get().is_none())}
                         "Create task"
@@ -352,11 +356,11 @@ pub fn TaskEditor(model: Model) -> Element {
     let editing = State::new(false);
     view! {
         col height:min-content gap:{px(8.0)}px {
-            button #action @click:{editing.set(!editing.get_untracked());} "Edit task"
+            button #relay.action @click:{editing.set(!editing.get_untracked());} "Edit task"
             if editing.get() {
-                input #input-field label:"Task title" title
-                input #area multiline label:"Task body" height:{px(120.0)}px body
-                button #action
+                input #relay.field label:"Task title" title
+                input #relay.area multiline label:"Task body" height:{px(120.0)}px body
+                button #relay.action
                     @click:{if let Some(issue_id)=model.issue.get_untracked(){model.action(Command::UpdateTask{issue_id,title:title.get_untracked(),body:body.get_untracked()});}}
                     disabled:{model.busy.get() || !model.connected.get() || title.get().trim().is_empty()}
                     "Save task"
@@ -365,7 +369,7 @@ pub fn TaskEditor(model: Model) -> Element {
                 for (_, column) in {model.board_columns().into_iter().map(|c|(c.id.clone(),c))} {
                     let id = State::new(column.id.clone());
                     let column_title = State::new(column.title.clone());
-                    button #action
+                    button #relay.action
                         @click:{if let (Some(board),Some(issue_id))=(model.selected_board(),model.issue.get_untracked()){model.action(Command::MoveTask{board_id:board.id,issue_id,column_id:id.get_untracked()});}}
                         label:{format!("Move task to {}",column_title.get())}
                         disabled:{model.busy.get() || !model.connected.get()}
@@ -382,8 +386,8 @@ fn Columns(model: Model, open: State<bool>) -> Element {
     view! {
         col height:min-content gap:{px(8.0)}px {
             if open.get() && model.selected_board().is_some_and(|b|b.source==BoardSource::Local) {
-                input #input-field label:"New column name" name
-                button #action
+                input #relay.field label:"New column name" name
+                button #relay.action
                     @click:{if let Some(board)=model.selected_board(){let mut columns=board.columns;columns.push(BoardColumn{id:uuid::Uuid::new_v4().to_string(),title:name.get_untracked()});model.action(Command::UpdateBoardColumns{board_id:board.id,columns});}}
                     disabled:{name.get().trim().is_empty() || model.busy.get() || !model.connected.get()}
                     "Add column"
@@ -409,17 +413,17 @@ fn ColumnEditor(model: Model, column: BoardColumn) -> Element {
     });
     view! {
         col height:min-content gap:{px(6.0)}px {
-            input #input-field label:"Column title" title
-            button #action
+            input #relay.field label:"Column title" title
+            button #relay.action
                 @click:{if let Some(mut board)=model.selected_board(){if let Some(c)=board.columns.iter_mut().find(|c|c.id==id.get_untracked()){c.title=title.get_untracked();}model.action(Command::UpdateBoardColumns{board_id:board.id,columns:board.columns});}}
                 disabled:{title.get().trim().is_empty() || model.busy.get() || !model.connected.get()}
                 "Rename column"
-            button #action
+            button #relay.action
                 @click:{if let Some(mut board)=model.selected_board(){board.columns.retain(|c|c.id!=id.get_untracked());model.action(Command::UpdateBoardColumns{board_id:board.id,columns:board.columns});}}
                 disabled:{occupied.get() || model.board_columns().len()<2 || model.busy.get() || !model.connected.get()}
                 "Delete empty column"
             if occupied.get() {
-                text font-size:{px(12.0)}px font-color:muted
+                text font-size:{px(12.0)}px font-color:ink.muted
                     "Move the tasks to another column before deleting this column."
             }
         }
@@ -446,8 +450,8 @@ fn DirectorStart(model: Model, director_id: String) -> Element {
     view! {
         col height:min-content max-width:{px(640.0)}px gap:{px(12.0)}px {
             text font-family:sans-serif "Start the director conversation"
-            input #area multiline label:"First director prompt" height:{px(160.0)}px prompt
-            button #action
+            input #relay.area multiline label:"First director prompt" height:{px(160.0)}px prompt
+            button #relay.action
                 @click:{let prompt=prompt.get_untracked();model.submit(Command::StartDirector{director_id:id.get_untracked(),prompt:prompt.clone(),approve_implementation:false},model.snapshot.get_untracked().revision,Saved::DirectorStart{director_id:id.get_untracked(),prompt});}
                 disabled:{model.busy.get() || !model.connected.get() || prompt.get().trim().is_empty()}
                 "Send first prompt"
@@ -525,22 +529,22 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
         col height:min-content gap:{px(6.0)}px {
             text
                 {format!("{} · {:?}",match operation.get().kind{OperationKind::Clone{..}=>"Clone",OperationKind::Sync{..}=>"Sync",OperationKind::Publish{..}=>"Publish",_=>"Task update"},operation.get().state)}
-            text font-color:{color(danger)} {operation.get().error.unwrap_or_default()}
+            text font-color:{color(status.danger)} {operation.get().error.unwrap_or_default()}
             if matches!(operation.get().state,OperationState::Failed|OperationState::Interrupted) {
-                button #action
+                button #relay.action
                     @click:{model.action(Command::RetryOperation{operation_id:id.get_untracked()});}
                     disabled:{model.busy.get() || !model.connected.get()} "Retry operation"
             }
             if operation.get().state==OperationState::NeedsReconciliation {
                 text font-size:{px(12.0)}px
                     "Confirm the provider result before continuing. Inspect the remote board or issue; do not repeat an unknown write."
-                text font-size:{px(12.0)}px font-color:{color(muted)}
+                text font-size:{px(12.0)}px font-color:{color(ink.muted)}
                     {reconciliation_instruction(&key.get())}
-                text font-size:{px(12.0)}px font-color:{color(muted)}
+                text font-size:{px(12.0)}px font-color:{color(ink.muted)}
                     {key.get().split_once('/').and_then(|(_,id)|model.snapshot.get().issues.into_iter().find(|i|i.id==id)).map(|i|format!("{}\n{}",i.title,i.reference.map(|r|r.url).or_else(||operation.get().results.get(&format!("issue/{}",i.id)).and_then(|json|serde_json::from_str::<IssueRef>(json).ok()).map(|r|r.url)).unwrap_or_default())).unwrap_or_default()}
                 if key.get()=="board" || key.get().starts_with("issue/") {
-                    input #input-field label:"Created board or issue URL" url
-                    button #action
+                    input #relay.field label:"Created board or issue URL" url
+                    button #relay.action
                         @click:{let request=crate::project_network::RecoveryRequest{input:ReconciliationInput{operation_id:id.get_untracked(),url:url.get_untracked().trim().into()},pending:key.get_untracked(),id:uuid::Uuid::new_v4().to_string()};requested.set(Some(request.clone()));model.recovery.set(crate::project_network::RecoveryUpdate{request:Some(request.clone()),result:None});if model.recovery_requests.get_untracked().is_none_or(|sender|sender.send(request.clone()).is_err()){model.recovery.set(crate::project_network::RecoveryUpdate{request:Some(request),result:Some(Err("Cannot check the provider result. Reconnect and try again.".into()))});}}
                         disabled:{model.busy.get() || !model.connected.get() || url.get().trim().is_empty()}
                         "Check result"
@@ -549,13 +553,13 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
                             {match lookup.get().unwrap(){Ok(result)=>result.description,Err(error)=>error}}
                     }
                     if lookup.get().is_some_and(|r|r.is_ok()) {
-                        button #action
+                        button #relay.action
                             @click:{if let Some(Ok(result))=lookup.get_untracked(){model.action(Command::ReconcileOperation{operation_id:id.get_untracked(),key:result.key,result:result.result});requested.set(None);}}
                             disabled:{model.busy.get() || !model.connected.get()}
                             "Use this result and continue"
                     }
                 } else {
-                    text font-size:{px(12.0)}px font-color:muted
+                    text font-size:{px(12.0)}px font-color:ink.muted
                         "This recovery step does not support URL lookup. Ask the server administrator to inspect the provider result before continuing."
                 }
             }
@@ -660,40 +664,41 @@ fn Publish(model: Model) -> Element {
         col height:min-content max-width:{px(640.0)}px gap:{px(12.0)}px {
             grid cols:{GridTracks::auto_fit(GridTrack::minmax(px(120.0).into(),GridTrack::fr(1.0)))}
                 height:min-content gap:{px(8.0)}px {
-                button #action @click:{github.set(true);} width:fill
-                    fill:if github.get() {inverse} else {surface}
-                    font-color:{color(if github.get() {on_inverse} else {ink})}
+                button #relay.action @click:{github.set(true);} width:fill
+                    fill:if github.get() {ink.inverse} else {surface.panel}
+                    font-color:{color(if github.get() {ink.on_inverse} else {ink.fg})}
                     font-weight:{if github.get() {700} else {400}} "GitHub project"
-                button #action @click:{github.set(false);} width:fill
-                    fill:if github.get() {surface} else {inverse}
-                    font-color:{color(if github.get() {ink} else {on_inverse})}
+                button #relay.action @click:{github.set(false);} width:fill
+                    fill:if github.get() {surface.panel} else {ink.inverse}
+                    font-color:{color(if github.get() {ink.fg} else {ink.on_inverse})}
                     font-weight:{if github.get() {400} else {700}} "GitLab board"
             }
-            text font-size:{px(12.0)}px font-color:muted
+            text font-size:{px(12.0)}px font-color:ink.muted
                 "Use 0 to create a new destination, or enter an existing board number."
             if !github.get() {
-                input #input-field label:"Publish GitLab host" host
-                button #action @click:{group.set(!group.get_untracked());}
+                input #relay.field label:"Publish GitLab host" host
+                button #relay.action @click:{group.set(!group.get_untracked());}
                     {if group.get(){"Group"}else{"Project"}}
             }
-            input #input-field label:"Destination owner or path" path
-            input #input-field label:"Destination number (0 creates new)" number
-            input #input-field label:"Destination title" title
+            input #relay.field label:"Destination owner or path" path
+            input #relay.field label:"Destination number (0 creates new)" number
+            input #relay.field label:"Destination title" title
             col height:min-content gap:{px(8.0)}px {
-                button #action
+                button #relay.action
                     @click:{if let Some(source)=source.get_untracked(){model.discover_destination(source);}}
                     label:"Read destination statuses"
                     disabled:{!model.connected.get() || path.get().trim().is_empty() || source.get().is_none()}
                     "Read destination statuses"
                 if discovered.get().is_some() {
-                    text font-size:{px(12.0)}px font-color:{color(muted)}
+                    text font-size:{px(12.0)}px font-color:{color(ink.muted)}
                         {match discovered.get().unwrap(){Ok(metadata)=>format!("Destination: {}",metadata.name),Err(error)=>error.clone()}}
                 }
                 if model.discovery.get().source==source.get() && model.discovery.get().result.is_none() {
-                    text font-size:{px(12.0)}px font-color:muted "Reading destination statuses…"
+                    text font-size:{px(12.0)}px font-color:ink.muted
+                        "Reading destination statuses…"
                 }
             }
-            text font-size:{px(12.0)}px font-color:muted
+            text font-size:{px(12.0)}px font-color:ink.muted
                 "Map each local column to a destination status or list."
             for (_, column) in {model.board_columns().into_iter().map(|c|(c.id.clone(),c))} {
                 let id = State::new(column.id.clone());
@@ -702,11 +707,11 @@ fn Publish(model: Model) -> Element {
                 for (_, choice) in {choices.get().into_iter().map(|c|(c.id.clone(),c))} {
                     let choice_id=State::new(choice.id.clone());
                     let choice_title=Derived::new(move || choices.get().iter().find(|c|c.id==choice_id.get()).map(|c|c.title.clone()).unwrap_or_default());
-                    button #action
+                    button #relay.action
                         @click:{mappings.update(|m|{m.insert(id.get_untracked(),choice_id.get_untracked());});}
                         label:{format!("Map {} to {}",column_title.get(),choice_title.get())}
-                        fill:if mappings.get().get(&id.get())==Some(&choice_id.get()) {inverse} else {surface}
-                        font-color:{color(if mappings.get().get(&id.get())==Some(&choice_id.get()) {on_inverse} else {ink})}
+                        fill:if mappings.get().get(&id.get())==Some(&choice_id.get()) {ink.inverse} else {surface.panel}
+                        font-color:{color(if mappings.get().get(&id.get())==Some(&choice_id.get()) {ink.on_inverse} else {ink.fg})}
                         font-weight:{if mappings.get().get(&id.get())==Some(&choice_id.get()) {700} else {400}}
                         {choice_title.get()}
                 }
@@ -719,17 +724,17 @@ fn Publish(model: Model) -> Element {
                     for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && c.enabled && c.state==ConnectionState::Ready && matches!(c.kind,ConnectionKind::Repository{..})).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
                         let connection_id = State::new(connection.id.clone());
                         let connection_name = State::new(connection.name.clone());
-                        button #action
+                        button #relay.action
                             @click:{repositories.update(|r|{r.insert(issue_id.get_untracked(),connection_id.get_untracked());});}
                             label:{format!("Issue repository {} for {}",connection_name.get(),issue_title.get())}
-                            fill:if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {inverse} else {surface}
-                            font-color:{color(if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {on_inverse} else {ink})}
+                            fill:if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {ink.inverse} else {surface.panel}
+                            font-color:{color(if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {ink.on_inverse} else {ink.fg})}
                             font-weight:{if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {700} else {400}}
                             {connection_name.get()}
                     }
                 }
             }
-            button #action
+            button #relay.action
                 @click:{
                     if let (Some(board),Ok(number))=(model.selected_board(),number.get_untracked().parse::<u64>()) {
                         let columns:Vec<_>=board.columns.iter().map(|c|ColumnMapping{local_id:c.id.clone(),remote_id:mappings.get_untracked().get(&c.id).cloned().unwrap_or_default()}).collect();
@@ -753,24 +758,24 @@ pub fn WorkspaceChoices(model: Model) -> Element {
     let open = State::new(false);
     view! {
         col height:min-content gap:{px(6.0)}px {
-            button #action @click:{open.set(!open.get_untracked());}
+            button #relay.action @click:{open.set(!open.get_untracked());}
                 label:"Choose session resources" "Workspace resources"
             if open.get() {
-                text font-size:{px(12.0)}px font-color:muted
+                text font-size:{px(12.0)}px font-color:ink.muted
                     "Automatic selects all ready repositories and directories on the server. Selection is fixed for subsequent turns."
-                button #action @click:{model.workspace_selection.set(None);}
-                    fill:if model.workspace_selection.get().is_none() {inverse} else {surface}
-                    font-color:{color(if model.workspace_selection.get().is_none() {on_inverse} else {ink})}
+                button #relay.action @click:{model.workspace_selection.set(None);}
+                    fill:if model.workspace_selection.get().is_none() {ink.inverse} else {surface.panel}
+                    font-color:{color(if model.workspace_selection.get().is_none() {ink.on_inverse} else {ink.fg})}
                     font-weight:{if model.workspace_selection.get().is_none() {700} else {400}}
                     "Automatic resources"
                 for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && c.enabled && c.state==ConnectionState::Ready && !matches!(c.kind,ConnectionKind::Board{..})).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
                     let id=State::new(connection.id.clone());
                     let name=State::new(connection.name.clone());
-                    button #action
+                    button #relay.action
                         @click:{let all=model.snapshot.get_untracked().connections.iter().filter(|c|c.project_id==model.project.get_untracked() && c.enabled && c.state==ConnectionState::Ready && !matches!(c.kind,ConnectionKind::Board{..})).map(|c|c.id.clone()).collect();model.workspace_selection.update(|selected|{let ids=selected.get_or_insert(all);if ids.contains(&id.get_untracked()){ids.retain(|c|c!=&id.get_untracked());}else{ids.push(id.get_untracked());}});}
                         label:{format!("Workspace resource {}",name.get())}
-                        fill:if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {inverse} else {surface}
-                        font-color:{color(if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {on_inverse} else {ink})}
+                        fill:if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {ink.inverse} else {surface.panel}
+                        font-color:{color(if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {ink.on_inverse} else {ink.fg})}
                         font-weight:{if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {700} else {400}}
                         {name.get()}
                 }

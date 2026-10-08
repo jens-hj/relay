@@ -77,6 +77,7 @@ pub fn AppearanceSegments(model: Model, field: usize) -> Element {
     view! {
         SlidingSegments name:(name.to_string())
             options:(options.iter().map(|o| o.to_string()).collect::<Vec<_>>()) index:(index)
-            select:(select) attention:(None) cell-width:(112.0) disabled:(Derived::new(|| false))
+            select:(select) attention-slot:(None) cell-width:(112.0)
+            disabled:(Derived::new(|| false))
     }
 }

@@ -1,21 +1,46 @@
+//! Relay's Labelism palettes: semantic token groups, the six selectable
+//! palettes and the embedded icon scheme. Reusable classes live in
+//! `styles.rs`.
+
 use mosaic::prelude::*;
 
 mosaic::scheme! {
     pub RelayTheme {
-        base:Color, sidebar:Color, surface:Color, raised:Color, selected-fill:Color,
-        ink:Color, muted:Color, edge:Color, rule:Color, accent:Color, accent-soft:Color,
-        inverse:Color, on-inverse:Color,
-        run-fill:Color, run-text:Color, on-run:Color,
-        attention-fill:Color, attention-text:Color, on-attention:Color,
-        tint-lilac:Color, tint-sky:Color, tint-mint:Color, tint-sand:Color, scrim:Color,
-        meter-input:Color, meter-cached:Color, meter-output:Color,
-        success:Color, warning:Color, danger:Color, ui-scale:Scalar = 1,
-        tree-chevron-right:Svg, tree-chevron-down:Svg, board-icon:Svg,
-        harness-codex:Svg, harness-claude:Svg, harness-ready:Svg, harness-warning:Svg, harness-failed:Svg, harness-neutral:Svg,
-        director-icon:Svg, worker-icon:Svg, gear-icon:Svg, plus-icon:Svg, sliders-icon:Svg, command-icon:Svg,
+        surface { base:Color, sidebar:Color, panel:Color, raised:Color, selected:Color },
+        ink { fg:Color, muted:Color, inverse:Color, on-inverse:Color },
+        rule { line:Color, hair:Color },
+        accent { focus:Color, soft:Color },
+        run { fill:Color, text:Color, on:Color },
+        attention { fill:Color, text:Color, on:Color },
+        tint { lilac:Color, sky:Color, mint:Color, sand:Color },
+        meter { input:Color, cached:Color, output:Color },
+        status { success:Color, warning:Color, danger:Color },
+        scrim:Color, ui-scale:Scalar = 1,
     }
 }
 
+mosaic::scheme! {
+    pub RelayIcons {
+        tree-chevron-right:Svg, tree-chevron-down:Svg, board-icon:Svg,
+        harness-codex:Svg, harness-claude:Svg, harness-ready:Svg, harness-warning:Svg,
+        harness-failed:Svg, harness-neutral:Svg,
+        director-icon:Svg, worker-icon:Svg, gear-icon:Svg, plus-icon:Svg, sliders-icon:Svg,
+        command-icon:Svg,
+    }
+}
+
+pub fn icons() -> RelayIcons {
+    mosaic::theme! { RelayIcons {
+        tree-chevron-right:"assets/icons/chevron-right.svg", tree-chevron-down:"assets/icons/chevron-down.svg",
+        board-icon:"assets/icons/board.svg", director-icon:"assets/icons/director.svg",
+        worker-icon:"assets/icons/worker.svg", gear-icon:"assets/icons/gear.svg",
+        harness-codex:"assets/icons/harness-codex.svg", harness-claude:"assets/icons/harness-claude.svg",
+        harness-ready:"assets/icons/harness-ready.svg", harness-warning:"assets/icons/harness-warning.svg",
+        harness-failed:"assets/icons/harness-failed.svg", harness-neutral:"assets/icons/harness-neutral.svg",
+        plus-icon:"assets/icons/plus.svg", sliders-icon:"assets/icons/sliders.svg",
+        command-icon:"assets/icons/command.svg",
+    } }
+}
 /// The six palettes a user can select: two soft families per mode plus the
 /// stark high-contrast variant of each mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,19 +329,16 @@ pub fn configured_palette(
     let [lilac, sky, mint, sand] = c.tints;
     let [input_fill, cached_fill, output_fill] = c.meter;
     mosaic::theme! { RelayTheme {
-        base:(c.base), sidebar:(c.sidebar), surface:(c.surface), raised:(c.raised), selected-fill:(c.selected),
-        ink:(c.ink), muted:(c.muted), edge:(c.edge), rule:(c.line), accent:(c.accent),
-        accent-soft:(c.accent_soft), inverse:(c.inverse), on-inverse:(c.on_inverse),
-        run-fill:(c.run), run-text:(c.run_text), on-run:(c.on_run),
-        attention-fill:(c.attention), attention-text:(c.attention_text), on-attention:(c.on_attention),
-        tint-lilac:lilac, tint-sky:sky, tint-mint:mint, tint-sand:sand,
-        meter-input:input_fill, meter-cached:cached_fill, meter-output:output_fill,
-        scrim:(c.scrim), success:(c.success), warning:(c.warning), danger:(c.danger), ui-scale:scale,
-        tree-chevron-right:"assets/icons/chevron-right.svg", tree-chevron-down:"assets/icons/chevron-down.svg",
-        board-icon:"assets/icons/board.svg", director-icon:"assets/icons/director.svg",
-        worker-icon:"assets/icons/worker.svg", gear-icon:"assets/icons/gear.svg",
-        harness-codex:"assets/icons/harness-codex.svg", harness-claude:"assets/icons/harness-claude.svg", harness-ready:"assets/icons/harness-ready.svg", harness-warning:"assets/icons/harness-warning.svg", harness-failed:"assets/icons/harness-failed.svg", harness-neutral:"assets/icons/harness-neutral.svg",
-        plus-icon:"assets/icons/plus.svg", sliders-icon:"assets/icons/sliders.svg", command-icon:"assets/icons/command.svg",
+        surface { base:(c.base), sidebar:(c.sidebar), panel:(c.surface), raised:(c.raised), selected:(c.selected) },
+        ink { fg:(c.ink), muted:(c.muted), inverse:(c.inverse), on-inverse:(c.on_inverse) },
+        rule { line:(c.line), hair:(c.edge) },
+        accent { focus:(c.accent), soft:(c.accent_soft) },
+        run { fill:(c.run), text:(c.run_text), on:(c.on_run) },
+        attention { fill:(c.attention), text:(c.attention_text), on:(c.on_attention) },
+        tint { lilac:lilac, sky:sky, mint:mint, sand:sand },
+        meter { input:input_fill, cached:cached_fill, output:output_fill },
+        status { success:(c.success), warning:(c.warning), danger:(c.danger) },
+        scrim:(c.scrim), ui-scale:scale,
     } }
 }
 
@@ -327,39 +349,4 @@ pub fn contrast(a: Color, b: Color) -> f32 {
     let luminance = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
     let (x, y) = (luminance(a), luminance(b));
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
-}
-
-mosaic::style! {
-    pub #tree-leaf hover { fill:raised }
-    pub #tree-row hover { fill:raised }
-    pub #scale-stepper width:{px(160.0)}px height:{px(36.0)}px fill:surface radius:0px
-        stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
-        focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) } {
-        decrement fill:raised font-color:ink radius:0px hover { fill:selected-fill }
-        field font-size:{px(14.0)}px font-color:ink
-        increment fill:raised font-color:ink radius:0px hover { fill:selected-fill }
-    }
-    pub #tree-control height:{px(34.0)}px min-width:0px shrink:0 justify:center radius:0px
-        pad:0px fill:(Color::TRANSPARENT) font-color:muted font-size:{px(12.0)}px
-        focused { stroke:(width:{px(2.0)} color:accent offset:{px(-2.0)}) }
-    pub #tree-label width:1fr height:{px(34.0)}px align:center clip
-    pub #tree-tooltip fill:surface radius:0px font-color:ink font-size:{px(12.0)}px max-width:{px(320.0)}px
-        pad:{px(9.0)}px stroke:(width:{px(1.0)} color:rule)
-    pub #action width:max-content height:min-content shrink:0 radius:0px
-        pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px) fill:surface font-color:ink font-size:{px(13.0)}px
-        stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
-        hover { fill:raised } focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) }
-        disabled { opacity:0.5 }
-    pub #primary width:max-content height:min-content shrink:0 radius:0px
-        pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px) fill:inverse font-color:on-inverse font-size:{px(13.0)}px font-weight:700
-        focused { stroke:(width:{px(2.0)} color:accent offset:{px(2.0)}) }
-        disabled { opacity:0.5 }
-    pub #input-field
-        fill:surface radius:0px font-color:ink font-size:{px(14.0)}px stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
-        pad:{px(10.0)}px
-        focused { stroke:(width:{px(2.0)} color:accent offset:{px(-1.0)}) }
-    pub #area
-        fill:surface radius:0px font-color:ink font-size:{px(14.0)}px stroke:(width:{px(1.0)} color:rule offset:{px(-1.0)})
-        pad:{px(10.0)}px
-        focused { stroke:(width:{px(2.0)} color:accent offset:{px(-1.0)}) }
 }

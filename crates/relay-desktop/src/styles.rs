@@ -1,0 +1,64 @@
+//! Reusable Labelism classes: square, rule-framed controls and the shared
+//! chrome, module and typography vocabulary. Typography classes belong on the
+//! container around a text leaf, so reactive text inherits them.
+
+use crate::theme::*;
+use mosaic::prelude::*;
+
+mosaic::style! {
+    // Controls.
+    pub(crate) #relay.tree-leaf hover { fill:surface.raised }
+    pub(crate) #relay.tree-row hover { fill:surface.raised }
+    pub(crate) #relay.tree-control height:{px(30.0)}px min-width:0px shrink:0 justify:center radius:0px
+        pad:0px fill:(Color::TRANSPARENT) font-color:ink.muted font-size:{px(12.0)}px
+        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+    pub(crate) #relay.tree-label width:1fr height:{px(30.0)}px align:center clip
+    pub(crate) #relay.tooltip fill:surface.panel radius:0px font-color:ink.fg font-size:{px(12.0)}px
+        max-width:{px(320.0)}px pad:{px(9.0)}px stroke:(width:{px(1.0)} color:rule.line)
+    pub(crate) #relay.action width:max-content height:min-content shrink:0 radius:0px
+        pad:(horizontal:{px(12.0)}px vertical:{px(7.0)}px) fill:surface.panel font-color:ink.fg
+        font-size:{px(13.0)}px stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)})
+        hover { fill:surface.raised } focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(2.0)}) }
+        disabled { opacity:0.5 }
+    pub(crate) #relay.primary width:max-content height:min-content shrink:0 radius:0px
+        pad:(horizontal:{px(12.0)}px vertical:{px(7.0)}px) fill:ink.inverse font-color:ink.on-inverse
+        font-size:{px(13.0)}px font-weight:700
+        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(2.0)}) }
+        disabled { opacity:0.5 }
+    pub(crate) #relay.field fill:surface.panel radius:0px font-color:ink.fg font-size:{px(14.0)}px
+        stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)}) pad:{px(10.0)}px
+        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-1.0)}) }
+    pub(crate) #relay.area fill:surface.panel radius:0px font-color:ink.fg font-size:{px(14.0)}px
+        stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)}) pad:{px(10.0)}px
+        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-1.0)}) }
+    pub(crate) #relay.scale-stepper width:{px(160.0)}px height:{px(34.0)}px fill:surface.panel radius:0px
+        stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)})
+        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(2.0)}) } {
+        decrement fill:surface.raised font-color:ink.fg radius:0px hover { fill:surface.selected }
+        field font-size:{px(14.0)}px font-color:ink.fg
+        increment fill:surface.raised font-color:ink.fg radius:0px hover { fill:surface.selected }
+    }
+
+    // Chrome and modules.
+    // A full-width strip closed by a strong rule (bars, column heads).
+    pub(crate) #relay.strip stroke:(width:{px(1.0)} color:rule.line edges:bottom)
+    // A header bar cell, separated from the next by a rule.
+    pub(crate) #relay.cell height:fill pad:(horizontal:{px(14.0)}px vertical:0px) justify:center
+        gap:{px(3.0)}px stroke:(width:{px(1.0)} color:rule.line edges:right)
+    // A framed module: panel fill inside a 1px rule.
+    pub(crate) #relay.module height:min-content fill:surface.panel
+        stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)})
+    // The 30px key header of a module.
+    pub(crate) #relay.module-head height:{px(30.0)}px shrink:0 align:center justify:between
+        pad:(horizontal:{px(12.0)}px vertical:0px) stroke:(width:{px(1.0)} color:rule.line edges:bottom)
+
+    // Typography: apply to the container around a text leaf.
+    pub(crate) #relay.eyebrow font-size:{px(11.0)}px font-color:ink.muted text-transform:uppercase
+        letter-spacing:{px(0.6)}px
+    pub(crate) #relay.caption font-size:{px(12.0)}px font-color:ink.muted
+    pub(crate) #relay.value font-size:{px(13.0)}px font-color:ink.fg
+    pub(crate) #relay.title font-family:sans-serif font-weight:600 font-color:ink.fg
+    pub(crate) #relay.crumb font-family:sans-serif font-weight:600 font-size:{px(17.0)}px
+        font-color:ink.fg
+    pub(crate) #relay.id-label font-weight:700 font-color:ink.on-inverse
+}
