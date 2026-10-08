@@ -4402,8 +4402,8 @@ fn new_task_draft_survives_closing_and_reopening_the_form() {
 }
 
 #[test]
-fn narrow_sessions_stack_entries_without_rebuilding_the_draft() {
-    let mounted = mount(false, 760.0);
+fn wide_sessions_turn_narrow_at_double_scale_without_rebuilding_the_draft() {
+    let mounted = mount(false, 1380.0);
     mounted
         ._scope
         .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
@@ -4462,7 +4462,7 @@ fn narrow_sessions_stack_entries_without_rebuilding_the_draft() {
     ] {
         let rect = mounted.rect(label);
         assert!(
-            rect.origin.x >= 0.0 && rect.origin.x + rect.size.width <= 761.0,
+            rect.origin.x >= 0.0 && rect.origin.x + rect.size.width <= 1381.0,
             "{label}: {rect:?}"
         );
     }
@@ -4471,7 +4471,6 @@ fn narrow_sessions_stack_entries_without_rebuilding_the_draft() {
     mounted.click("Session actions");
     assert!(has_label(&mounted, "Stop worker"));
 }
-
 
 /// Pinned Mosaic `text_dyn_styled` binds a live text leaf's content and style
 /// in separate effects. Typography from leaf attributes, leaf classes and
@@ -4492,12 +4491,18 @@ fn live_text_typography_survives_content_and_theme_updates() {
         let _ambient = ui.enter();
         ui.mount(&view! {
             col font-size:20px {
-                row font-size:13px { text {format!("container {}", value.get())} }
+                row font-size:13px {
+                    text {format!("container {}", value.get())}
+                }
                 text font-size:13px {format!("leaf {}", value.get())}
                 text #relay.caption {format!("class {}", value.get())}
-                row #relay.caption { text {format!("parent class {}", value.get())} }
+                row #relay.caption {
+                    text {format!("parent class {}", value.get())}
+                }
                 text font-color:ink.muted {format!("leaf color {}", value.get())}
-                row font-color:ink.muted { text {format!("container color {}", value.get())} }
+                row font-color:ink.muted {
+                    text {format!("container color {}", value.get())}
+                }
             }
         });
     });
@@ -4519,8 +4524,20 @@ fn live_text_typography_survives_content_and_theme_updates() {
             .unwrap_or_default()
     };
     let size = |label: &str| attribute(label, "font-size");
-    let colors = |n: &str| [attribute(&format!("leaf color {n}"), "text-color"), attribute(&format!("container color {n}"), "text-color")];
-    let read = |n: &str| [size(&format!("container {n}")), size(&format!("leaf {n}")), size(&format!("class {n}")), size(&format!("parent class {n}"))];
+    let colors = |n: &str| {
+        [
+            attribute(&format!("leaf color {n}"), "text-color"),
+            attribute(&format!("container color {n}"), "text-color"),
+        ]
+    };
+    let read = |n: &str| {
+        [
+            size(&format!("container {n}")),
+            size(&format!("leaf {n}")),
+            size(&format!("class {n}")),
+            size(&format!("parent class {n}")),
+        ]
+    };
     let initial = read("one");
     let initial_colors = colors("one");
     value.set("two".into());

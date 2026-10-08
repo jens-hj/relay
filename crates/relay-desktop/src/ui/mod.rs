@@ -91,22 +91,17 @@ pub fn shell(model: Model) -> Element {
                                         "Start relay-server and connect with its workspace token."
                                 }
                             } else {
+                                // One independent branch per page, each depending on the page
+                                // alone: width and scale changes must not rebuild a page and
+                                // its editing surfaces.
                                 col {
                                     if model.page.get() == Page::Board {
-                                        if width.get() < px(1050.0) && model.issue.get().is_some() {
-                                            IssueDetail model:(model) full:true
-                                        } else {
-                                            row height:1fr {
-                                                Board model:(model)
-                                                    narrow:{ width.get() < px(850.0) }
-                                                if model.issue.get().is_some() {
-                                                    IssueDetail model:(model)
-                                                }
-                                            }
-                                        }
-                                    } else if model.page.get() == Page::Sessions {
+                                        BoardArea model:(model) width:(width)
+                                    }
+                                    if model.page.get() == Page::Sessions {
                                         Sessions model:(model)
-                                    } else {
+                                    }
+                                    if !matches!(model.page.get(), Page::Board | Page::Sessions) {
                                         Profiles model:(model)
                                     }
                                 }
@@ -167,6 +162,26 @@ pub fn shell(model: Model) -> Element {
         }
     });
     root
+}
+
+/// The board with its inspector; narrow windows show a selected issue full
+/// width instead.
+#[component]
+fn BoardArea(model: Model, width: State<f32>) -> Element {
+    view! {
+        col {
+            if width.get() < px(1050.0) && model.issue.get().is_some() {
+                IssueDetail model:(model) full:true
+            } else {
+                row height:1fr {
+                    Board model:(model) narrow:{ width.get() < px(850.0) }
+                    if model.issue.get().is_some() {
+                        IssueDetail model:(model)
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[component]
