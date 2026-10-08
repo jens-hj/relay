@@ -1,0 +1,180 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="labelism.css">
+<style>
+  .app { position: absolute; inset: 0; display: grid; grid-template-columns: 56px 1fr 360px; z-index: 1; }
+  /* turn ruler: vertical scrub track, each tick = one message, labels = turns */
+  .track { border-right: 1px solid var(--line); position: relative; }
+  .track .ticks { position: absolute; left: 34px; top: 96px; bottom: 150px; width: 10px;
+    background-image: linear-gradient(var(--hair) 1px, transparent 1px); background-size: 10px 9px; border-left: 1px solid var(--line); }
+  .track .t { position: absolute; left: 6px; font: 700 10px "Zed Mono"; color: var(--ink-2); }
+  .track .mk { position: absolute; left: 30px; width: 18px; height: 1px; background: var(--ink); }
+  .track .view { position: absolute; left: 30px; width: 20px; border: 1px solid var(--ink-2); background: var(--signal-soft); background: var(--guide); }
+
+  .main { display: flex; flex-direction: column; min-width: 0; }
+  .hdr { display: grid; grid-template-columns: 74px 1fr auto auto auto; border-bottom: 1px solid var(--line); height: 74px; }
+  .hdr .no { background: var(--run); color: var(--on-run); font: 700 24px "Zed Mono"; display: flex; align-items: center; justify-content: center; }
+  .hdr > div { display: flex; flex-direction: column; justify-content: center; padding: 0 16px; gap: 4px; }
+  .hdr > div + div + div { border-left: 1px solid var(--line); }
+  .sub { display: grid; grid-template-columns: repeat(4, auto) 1fr; border-bottom: 1px solid var(--line); height: 28px; }
+  .sub > div { display: flex; align-items: center; gap: 6px; padding: 0 14px; border-right: 1px solid var(--hair); }
+  .sub > div:last-child { border-right: none; justify-content: flex-end; }
+
+  .doc { flex: 1; padding: 22px 36px 0 28px; display: flex; flex-direction: column; gap: 16px; overflow: hidden; position: relative; }
+  .msg { display: grid; grid-template-columns: 92px 1fr; gap: 0; }
+  .msg .who { padding-top: 2px; display: flex; flex-direction: column; gap: 4px; }
+  .msg .txt { font-size: 14px; line-height: 1.55; color: var(--ink); max-width: 760px; }
+  .msg.user .txt { border-left: 2px solid var(--ink); padding-left: 14px; }
+  .msg.agent .txt { color: var(--ink-2); }
+  .msg .txt b { color: var(--ink); font-weight: 600; }
+  .quote { margin-top: 8px; border: 1px solid var(--hair); padding: 6px 10px; font-size: 12.5px; color: var(--ink-2); display: flex; gap: 10px; align-items: baseline; }
+  code { font: 400 12.5px "Zed Mono"; color: var(--ink); }
+  .tools { border: 1px solid var(--hair); margin-top: 10px; }
+  .tool { display: grid; grid-template-columns: 54px 1fr 60px 40px; height: 26px; align-items: center; border-bottom: 1px solid var(--hair); font: 400 11.5px "Zed Mono"; color: var(--ink-2); }
+  .tool:last-child { border-bottom: none; }
+  .tool > * { padding: 0 10px; }
+  .tool > * + * { border-left: 1px solid var(--hair); height: 100%; display: flex; align-items: center; }
+  .hl { background: var(--signal-soft); box-shadow: inset 0 -1px 0 var(--signal-ink); color: var(--ink); }
+  .cursor { display: inline-block; width: 8px; height: 15px; background: var(--run-ink); vertical-align: -2px; }
+
+  .req { border: 1px solid var(--signal-ink); display: grid; grid-template-columns: 6px 1fr auto; }
+  .req .bar { background: var(--signal); }
+  .req .body { padding: 10px 14px; display: flex; flex-direction: column; gap: 4px; }
+  .req .acts { display: flex; align-items: center; gap: 8px; padding: 0 14px; border-left: 1px solid var(--signal-ink); }
+
+  .composer { border-top: 1px solid var(--line); }
+  .composer .ed { padding: 14px 28px 10px 120px; font-size: 14px; min-height: 76px; position: relative; color: var(--ink); }
+  .composer .ed .reply { display: inline-flex; gap: 8px; align-items: center; border: 1px solid var(--hair); padding: 2px 8px; font-size: 12px; color: var(--ink-2); margin-bottom: 8px; }
+  .composer .meta { display: grid; grid-template-columns: auto auto auto 1fr auto; border-top: 1px solid var(--hair); height: 40px; }
+  .composer .meta > div { display: flex; align-items: center; gap: 8px; padding: 0 14px; border-right: 1px solid var(--hair); }
+  .composer .meta > div:last-child { border-right: none; }
+
+  /* side panel */
+  .side { border-left: 1px solid var(--line); display: flex; flex-direction: column; }
+  .sh { height: 30px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--line); border-top: 1px solid var(--line); }
+  .sh:first-child { border-top: none; }
+  .usage { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .meter { height: 14px; display: flex; border: 1px solid var(--line); }
+  .meter > i { display: block; height: 100%; }
+  .file { display: grid; grid-template-columns: 1fr 46px 70px; height: 26px; align-items: center; padding: 0 14px; border-bottom: 1px solid var(--hair); font: 400 11.5px "Zed Mono"; color: var(--ink-2); }
+  .bars { display: flex; gap: 1px; justify-content: flex-end; }
+  .bars i { width: 5px; height: 9px; display: block; background: var(--ink); }
+  .bars i.d { background: transparent; border: 1px solid var(--ink-2); }
+  .bars i.e { background: var(--hair); }
+  .q { display: grid; grid-template-columns: 26px 1fr; border-bottom: 1px solid var(--hair); }
+  .q .ix { border-right: 1px solid var(--hair); font: 700 10px "Zed Mono"; display: flex; align-items: flex-start; justify-content: center; padding-top: 9px; color: var(--ink-2); }
+  .q .c { padding: 8px 12px; font-size: 12.5px; display: flex; flex-direction: column; gap: 6px; }
+  .q .c .row span.lbl { cursor: pointer; }
+</style></head>
+<body class="dark">
+<div class="guides">
+  <div class="vg" style="left:56px"></div><div class="vg" style="left:148px"></div><div class="vg" style="left:1240px"></div>
+  <div class="hg" style="top:74px"></div><div class="hg" style="top:102px"></div><div class="hg" style="top:884px"></div>
+</div>
+<span class="reg" style="left:56px;top:74px"></span><span class="reg" style="left:1240px;top:74px"></span>
+<span class="reg" style="left:56px;top:884px"></span><span class="reg" style="left:1240px;top:884px"></span>
+<span class="reg" style="left:148px;top:102px"></span>
+
+<div class="app">
+  <nav class="track">
+    <div style="height:74px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:center"><span style="font:700 15px 'Reddit Sans'">R</span></div>
+    <div class="ticks"></div>
+    <span class="t" style="top:92px">T1</span><span class="mk" style="top:98px"></span>
+    <span class="t" style="top:330px">T2</span><span class="mk" style="top:336px"></span>
+    <span class="t" style="top:520px;color:var(--run-ink)">T3</span><span class="mk" style="top:526px;background:var(--run-ink)"></span>
+    <span class="view" style="top:560px;height:250px"></span>
+    <span class="lbl m" style="position:absolute;bottom:110px;left:8px;writing-mode:vertical-rl;transform:rotate(180deg)">Transcript · 64 messages</span>
+  </nav>
+
+  <main class="main">
+    <div class="hdr">
+      <div class="no">#2</div>
+      <div><span class="lbl m">Worker · Project director · demo/relay</span><span class="title" style="font-size:20px">Make director profiles declarative</span></div>
+      <div><span class="lbl m">Status</span><span class="row" style="gap:7px;color:var(--run-ink)"><span class="g run"></span>Running</span></div>
+      <div><span class="lbl m">Elapsed</span><span class="num" style="font-size:15px">04:12</span></div>
+      <div style="justify-content:center"><span class="btn" style="border-color:var(--hair)">Stop <span class="key">⌘.</span></span></div>
+    </div>
+    <div class="sub">
+      <div><span class="lbl m">Harness</span><span class="lbl">Codex · app-server</span></div>
+      <div><span class="lbl m">Thread</span><span class="lbl">019a3f…c27e</span></div>
+      <div><span class="lbl m">Worktree</span><span class="lbl">worktrees/issue-2-a41c</span></div>
+      <div><span class="lbl m">Approval</span><span class="lbl">Ask</span></div>
+      <div><span class="lbl m">Turn 3 of 3</span></div>
+    </div>
+
+    <div class="doc">
+      <div class="msg user">
+        <div class="who"><span class="lbl">You</span><span class="lbl m num">T3 · 18:02</span></div>
+        <div class="txt">Keep explicit overrides intact when project defaults change. Show the origin of each effective value in the profile view.
+          <div class="quote"><span class="lbl m">Re · T2 ¶4</span>“Changing defaults validates all affected directors.”</div></div>
+      </div>
+      <div class="msg agent">
+        <div class="who"><span class="lbl">Codex</span><span class="lbl m num">T3 · 18:03</span></div>
+        <div class="txt">Overrides are stored per field in <code>ProfileOverrides</code>; omitted values already follow the current defaults. I'll add an <span class="hl">origin per field</span> to the resolved profile so the desktop can label <b>Default</b> and <b>Override</b> without recomputing.
+          <div class="tools">
+            <div class="tool"><span>READ</span><span>crates/relay-core/src/profile.rs</span><span>412 ln</span><span style="color:var(--ink)">OK</span></div>
+            <div class="tool"><span>EDIT</span><span>crates/relay-core/src/profile.rs</span><span>+38 −6</span><span style="color:var(--ink)">OK</span></div>
+            <div class="tool"><span>EXEC</span><span>cargo test -p relay-core profile</span><span>6.4s</span><span style="color:var(--ink)">OK</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="msg agent">
+        <div class="who"><span class="lbl">Codex</span><span class="lbl m num">T3 · 18:05</span></div>
+        <div class="txt">Core tests pass. Next I need to edit the desktop profile view and run the workspace tests<span class="cursor"></span></div>
+      </div>
+      <div class="msg">
+        <div class="who"><span class="lbl" style="color:var(--signal-ink)">Request</span><span class="lbl m num">18:06</span></div>
+        <div class="req">
+          <span class="bar"></span>
+          <div class="body"><span class="lbl" style="color:var(--signal-ink)">Approval required · Implement · run 7f3a</span><span style="font-size:13.5px">Edit <code>crates/relay-desktop/src/ui.rs</code> and run <code>just test</code></span><span class="lbl m">Answered once · expires when the run ends</span></div>
+          <div class="acts"><span class="btn" style="border-color:var(--hair)">Deny <span class="key">N</span></span><span class="btn sig">Approve <span class="key">Y</span></span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="ed">
+        <span style="position:absolute;left:28px;top:16px" class="lbl">Next message</span>
+        <div class="reply"><span class="lbl m">Reply to</span>“origin per field”<span class="lbl m">×</span></div>
+        <div>Also show the origin in the TOML preview.</div>
+      </div>
+      <div class="meta">
+        <div><span class="lbl m">Draft</span><span class="lbl">r12 · saved</span></div>
+        <div><span class="lbl">Attach</span></div>
+        <div><span class="lbl">Quote selection</span><span class="key">Q</span></div>
+        <div style="justify-content:flex-end"><span class="lbl m">Agent running · message will queue</span></div>
+        <div><span class="btn pri" style="height:26px">Queue <span class="key">⏎</span></span></div>
+      </div>
+    </div>
+  </main>
+
+  <aside class="side">
+    <div class="sh"><span class="lbl">Usage</span><span class="lbl m">Measured · T1–T2</span></div>
+    <div class="usage">
+      <div class="meter"><i style="width:46%;background:var(--m1)"></i><i style="width:29%;background:var(--m2)"></i><i style="width:5%;background:var(--m3)"></i><i style="flex:1" class="hatch"></i></div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0">
+        <div class="col"><span class="row lbl m" style="gap:5px"><i style="width:7px;height:7px;background:var(--m1)"></i>Input</span><span class="num" style="font-size:15px">48,213</span></div>
+        <div class="col"><span class="row lbl m" style="gap:5px"><i style="width:7px;height:7px;background:var(--m2)"></i>Cached</span><span class="num" style="font-size:15px">31,004</span></div>
+        <div class="col"><span class="row lbl m" style="gap:5px"><i style="width:7px;height:7px;background:var(--m3)"></i>Output</span><span class="num" style="font-size:15px">2,910</span></div>
+      </div>
+      <span class="lbl m">T3 not reported until the turn completes</span>
+    </div>
+
+    <div class="sh"><span class="lbl">Worktree diff</span><span class="lbl m">3 files · +71 −12</span></div>
+    <div class="file"><span>relay-core/src/profile.rs</span><span style="text-align:right">+38</span><span class="bars"><i></i><i></i><i></i><i></i><i class="d"></i><i class="e"></i></span></div>
+    <div class="file"><span>relay-core/src/lib.rs</span><span style="text-align:right">+4</span><span class="bars"><i></i><i class="e"></i><i class="e"></i><i class="e"></i><i class="e"></i><i class="e"></i></span></div>
+    <div class="file"><span>relay-core/tests/profile.rs</span><span style="text-align:right">+29</span><span class="bars"><i></i><i></i><i></i><i class="d"></i><i class="e"></i><i class="e"></i></span></div>
+    <div class="row sp" style="height:30px;padding:0 14px;border-bottom:1px solid var(--hair)"><span class="lbl m">Bounded diff</span><span class="lbl">Review →</span></div>
+
+    <div class="sh" style="margin-top:14px"><span class="lbl">Queue</span><span class="lbl m">02 · runs after T3</span></div>
+    <div class="q"><div class="ix">01</div><div class="c"><span>Rename “Inherit” to “Use default” in the profile editor.</span><div class="row" style="gap:14px"><span class="lbl">Edit</span><span class="lbl" style="color:var(--signal-ink)">Promote</span><span class="lbl m">Remove</span></div></div></div>
+    <div class="q"><div class="ix">02</div><div class="c"><span>Run <code>just check</code> and report failures.</span><div class="row" style="gap:14px"><span class="lbl">Edit</span><span class="lbl" style="color:var(--signal-ink)">Promote</span><span class="lbl m">Remove</span></div></div></div>
+
+    <div style="margin-top:auto;border-top:1px solid var(--line);display:grid;grid-template-columns:1fr 1fr 1fr;height:52px">
+      <div class="col" style="padding:8px 14px;justify-content:center;gap:3px"><span class="lbl m">Compact</span><span class="lbl m">n/a</span></div>
+      <div class="col" style="padding:8px 14px;justify-content:center;gap:3px;border-left:1px solid var(--hair)"><span class="lbl m">Reset ctx</span><span class="lbl m">n/a</span></div>
+      <div class="col" style="padding:8px 14px;justify-content:center;gap:3px;border-left:1px solid var(--hair)"><span class="lbl">Archive</span><span class="lbl m">new session</span></div>
+    </div>
+  </aside>
+</div>
+<script>for (const c of location.hash.slice(1).split(",").filter(Boolean)) document.body.classList.add(c)</script>
+</body></html>

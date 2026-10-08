@@ -44,6 +44,7 @@ fn main() -> Result<(), String> {
             let (updates, sender) = state_channel(network::NetworkState::default());
             let (commands, harness_refresh) = network::start(config.clone(), sender);
             let model = model::Model::new(ui, commands);
+            model.server_endpoint.set(config.endpoint.to_string());
             model.harness_refresh.set(Some(harness_refresh));
             let (discovery_updates, discovery_sender) =
                 state_channel(project_network::DiscoveryUpdate::default());

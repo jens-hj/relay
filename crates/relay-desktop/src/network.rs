@@ -48,6 +48,7 @@ pub struct NetworkState {
     pub snapshot: Snapshot,
     pub connected: bool,
     pub status: String,
+    pub round_trip_ms: Option<u64>,
     pub outcome: Option<(String, Result<(), String>)>,
     pub outcome_serial: u64,
     pub outcome_conflict: bool,
@@ -58,6 +59,7 @@ enum Event {
     Harnesses(Result<Vec<relay_core::HarnessStatus>, String>),
     Snapshot(Snapshot),
     Status(bool, String),
+    RoundTrip(u64),
     Outcome(String, Result<Snapshot, String>, bool, bool),
 }
 
@@ -130,6 +132,12 @@ pub fn start(
                     Event::Status(connected, status) => {
                         state.connected = connected;
                         state.status = status;
+                        if !connected {
+                            state.round_trip_ms = None;
+                        }
+                    }
+                    Event::RoundTrip(round_trip_ms) => {
+                        state.round_trip_ms = Some(round_trip_ms);
                     }
                     Event::Outcome(id, result, conflict, ambiguous) => {
                         state.outcome_conflict = conflict;
@@ -221,6 +229,7 @@ async fn stream(config: Config, client: reqwest::Client, events: mpsc::Unbounded
             events.send(Event::Status(true, "Connected".into())).map_err(|_| "Client closed")?;
             let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
             let mut last_response = tokio::time::Instant::now();
+            let mut ping_sent = None;
             loop {
                 tokio::select! {
                     incoming = socket.next() => match incoming {
@@ -231,13 +240,23 @@ async fn stream(config: Config, client: reqwest::Client, events: mpsc::Unbounded
                             events.send(Event::Snapshot(snapshot)).map_err(|_| "Client closed")?;
                         },
                         Some(Ok(Message::Ping(data))) => { last_response = tokio::time::Instant::now(); socket.send(Message::Pong(data)).await.map_err(|_| "Event connection lost")?; },
-                        Some(Ok(Message::Pong(_))) => { last_response = tokio::time::Instant::now(); },
+                        Some(Ok(Message::Pong(_))) => {
+                            let received = tokio::time::Instant::now();
+                            last_response = received;
+                            if let Some(sent) = ping_sent.take() {
+                                let round_trip_ms = received.duration_since(sent).as_millis() as u64;
+                                events.send(Event::RoundTrip(round_trip_ms)).map_err(|_| "Client closed")?;
+                            }
+                        },
                         Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return Err::<(), String>("Connection lost".into()),
                         _ => {},
                     },
                     _ = heartbeat.tick() => {
                         if last_response.elapsed() > Duration::from_secs(45) { return Err("Event connection stopped responding".into()); }
-                        socket.send(Message::Ping(Vec::new().into())).await.map_err(|_| "Event connection lost")?;
+                        if ping_sent.is_none() {
+                            socket.send(Message::Ping(Vec::new().into())).await.map_err(|_| "Event connection lost")?;
+                            ping_sent = Some(tokio::time::Instant::now());
+                        }
                     },
                 }
             }
@@ -303,6 +322,65 @@ async fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn websocket_heartbeat_publishes_round_trip_time() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut http, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let mut buffer = [0; 1024];
+                let length = http.read(&mut buffer).await.unwrap();
+                assert_ne!(length, 0);
+                request.extend_from_slice(&buffer[..length]);
+            }
+            let body = serde_json::to_string(&Snapshot {
+                protocol_version: relay_core::PROTOCOL_VERSION,
+                ..Default::default()
+            })
+            .unwrap();
+            http.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let Some(Ok(Message::Ping(data))) = socket.next().await else {
+                panic!("expected client heartbeat ping");
+            };
+            socket.send(Message::Pong(data)).await.unwrap();
+        });
+
+        let config = Config {
+            endpoint: reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
+            token: "test-only".into(),
+        };
+        let client = reqwest::Client::new();
+        let (events, mut updates) = mpsc::unbounded_channel();
+        let task = tokio::spawn(stream(config, client, events));
+        let round_trip = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(Event::RoundTrip(round_trip)) = updates.recv().await {
+                    break round_trip;
+                }
+            }
+        })
+        .await
+        .expect("heartbeat round trip should arrive");
+        assert!(round_trip < 2_000);
+        task.abort();
+        server.await.unwrap();
+    }
+
     #[test]
     fn rejects_old_servers_without_rejecting_protocol_two() {
         assert!(

@@ -55,6 +55,8 @@ pub struct Model {
     pub snapshot: State<Snapshot>,
     pub connected: State<bool>,
     pub status: State<String>,
+    pub server_endpoint: State<String>,
+    pub round_trip_ms: State<Option<u64>>,
     pub notice: State<String>,
     pub busy: State<bool>,
     pub page: State<Page>,
@@ -118,6 +120,8 @@ impl Model {
             snapshot: State::new(Snapshot::default()),
             connected: State::new(false),
             status: State::new("Connecting…".into()),
+            server_endpoint: State::new(String::new()),
+            round_trip_ms: State::new(None),
             notice: State::new(String::new()),
             busy: State::new(false),
             page: State::new(Page::Board),
@@ -190,6 +194,7 @@ impl Model {
         }
         self.connected.set(update.connected);
         self.status.set(update.status);
+        self.round_trip_ms.set(update.round_trip_ms);
         self.reconcile_pending();
         if update.outcome_serial <= self.outcome_serial.get_untracked() {
             return;

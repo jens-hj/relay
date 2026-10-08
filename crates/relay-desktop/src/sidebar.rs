@@ -37,11 +37,44 @@ fn tooltip(
     )
 }
 
+fn server_identity(endpoint: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(endpoint) else {
+        return endpoint.to_owned();
+    };
+    let Some(host) = url.host_str() else {
+        return endpoint.to_owned();
+    };
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    }
+}
+
 #[component]
 pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     let edges = State::new(ResizeEdges::RIGHT);
     let actual_width = State::new(px(220.0));
     let compact_footer = Derived::new(move || actual_width.get() < px(200.0));
+    let server_details_open = State::new(false);
+    let server_identity = Derived::new(move || server_identity(&model.server_endpoint.get()));
+    let connection_quality = Derived::new(move || match model.round_trip_ms.get() {
+        Some(ms) if ms < 100 => format!("Good · {ms} ms"),
+        Some(ms) if ms < 300 => format!("Fair · {ms} ms"),
+        Some(ms) => format!("Slow · {ms} ms"),
+        None if model.connected.get() => "Waiting for sample".into(),
+        None => "Unavailable".into(),
+    });
+    let connection_quality_color = Derived::new(move || match model.round_trip_ms.get() {
+        Some(ms) if ms < 100 => status.success,
+        Some(ms) if ms < 300 => status.warning,
+        Some(_) => status.danger,
+        None => ink.muted,
+    });
     let focus: TreeFocus = Rc::default();
     let view = view! {
         col width:{px(model.preferences.get().sidebar_width)}px min-width:{px(160.0)}
@@ -88,53 +121,139 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                     }
                 }
             }
-            row height:{px(52.0)}px shrink:0 stroke:(width:{px(1.0)} color:rule.line edges:top)
+            col height:min-content shrink:0 stroke:(width:{px(1.0)} color:rule.line edges:top)
                 label:"Connection" {
-                button #relay.tree-control @click:{model.page.set(Page::Settings);}
-                    width:{px(52.0)}px height:fill label:"Settings"
-                    stroke:(width:{px(1.0)} color:rule.line edges:right)
-                    fill:{if model.page.get() == Page::Settings {color(ink.inverse)} else {Color::TRANSPARENT}}
-                    hover { fill:{if model.page.get() == Page::Settings {color(ink.inverse_hover)} else {color(surface.raised)}} }
-                    pressed { fill:{if model.page.get() == Page::Settings {color(ink.inverse_pressed)} else {color(surface.raised)}} }
-                    font-color:{color(if model.page.get() == Page::Settings {ink.on_inverse} else {ink.muted})} {
-                    icon size:{px(18.0)}px gear-icon
-                    tooltip #relay.tooltip summary:"Settings" {text "Settings · Ctrl/Cmd+,"}
-                }
-                col width:1fr min-width:0px justify:center align:center
-                    gap:{px(if compact_footer.get() {0.0} else {3.0})}px clip
-                    label:"Server connection" description:{model.status.get()}
-                    pad:(horizontal:{px(if compact_footer.get() {0.0} else {12.0})}px vertical:0px)
-                    stroke:(width:{px(1.0)} color:rule.hair edges:right) {
-                    if !compact_footer.get() {
-                        row #relay.eyebrow height:min-content {
-                            text text-wrap:none text-transform:uppercase letter-spacing:{px(0.6)}px
-                                "Server"
-                        }
-                    }
-                    row height:min-content align:center
-                        justify:{if compact_footer.get() {Justify::Center} else {Justify::Start}}
-                        gap:{px(if compact_footer.get() {0.0} else {6.0})}px {
-                        el width:{px(7.0)}px height:{px(7.0)}px shrink:0
-                            fill:if model.connected.get() {status.success} else {status.danger} {}
-                        if !compact_footer.get() {
-                            row #relay.value height:min-content width:max-content
-                                font-size:{px(12.0)}px {
-                                text text-wrap:none
-                                    {String::from(if model.connected.get() {"Connected"} else if model.status.get().starts_with("Connecting") {"Connecting…"} else {"Offline"})}
+                row height:{px(52.0)}px shrink:0 {
+                    button #relay.tree-control
+                        @click:{server_details_open.set(!server_details_open.get_untracked());}
+                        width:1fr height:fill justify:start
+                        pad:(horizontal:{px(if compact_footer.get() {8.0} else {12.0})}px vertical:0px)
+                        label:"Server connection details"
+                        description:{format!("{} · {}",server_identity.get(),model.status.get())} {
+                        if compact_footer.get() {
+                            el width:{px(7.0)}px height:{px(7.0)}px shrink:0
+                                fill:if model.connected.get() {status.success} else {status.danger} {}
+                        } else {
+                            col min-width:0px justify:center gap:{px(3.0)}px {
+                                row height:min-content justify:between align:center {
+                                    row #relay.eyebrow height:min-content {
+                                        text text-wrap:none text-transform:uppercase
+                                            letter-spacing:{px(0.6)}px "Server"
+                                    }
+                                    row height:min-content align:center gap:{px(5.0)}px {
+                                        el width:{px(6.0)}px height:{px(6.0)}px shrink:0
+                                            fill:if model.connected.get() {status.success} else {status.danger} {}
+                                        row #relay.eyebrow height:min-content {
+                                            text text-wrap:none
+                                                {if model.connected.get() {"Connected"} else if model.status.get().starts_with("Connecting") {"Connecting"} else {"Offline"}}
+                                        }
+                                    }
+                                }
+                                row #relay.value height:min-content width:fill clip
+                                    font-size:{px(12.0)}px {
+                                    text text-wrap:none font-family:monospace
+                                        {server_identity.get()}
+                                }
                             }
                         }
                     }
-                    tooltip #relay.tooltip summary:"Server connection" side:top {
-                        text font-size:{px(12.0)}px {model.status.get()}
+                    button #relay.tree-control @click:{model.page.set(Page::Settings);}
+                        width:{px(52.0)}px height:fill label:"Settings"
+                        stroke:(width:{px(1.0)} color:rule.hair edges:left)
+                        fill:{if model.page.get() == Page::Settings {color(ink.inverse)} else {Color::TRANSPARENT}}
+                        hover { fill:{if model.page.get() == Page::Settings {color(ink.inverse_hover)} else {color(surface.raised)}} }
+                        pressed { fill:{if model.page.get() == Page::Settings {color(ink.inverse_pressed)} else {color(surface.raised)}} }
+                        font-color:{color(if model.page.get() == Page::Settings {ink.on_inverse} else {ink.muted})} {
+                        icon size:{px(18.0)}px gear-icon
+                        tooltip #relay.tooltip summary:"Settings" {text "Settings · Ctrl/Cmd+,"}
+                    }
+                    col width:max-content justify:center gap:{px(3.0)}px
+                        pad:(horizontal:{px(12.0)}px vertical:0px) label:"Workspace revision"
+                        description:"Shared workspace state version used to detect stale edits" {
+                        row #relay.eyebrow height:min-content {
+                            text text-transform:uppercase letter-spacing:{px(0.6)}px "Revision"
+                        }
+                        row #relay.value height:min-content font-size:{px(12.0)}px {
+                            text text-wrap:none font-family:monospace
+                                {format!("r{:04}", model.snapshot.get().revision)}
+                        }
+                        tooltip #relay.tooltip summary:"Workspace revision" side:top {
+                            text font-size:{px(12.0)}px "Shared state version used to reject stale edits."
+                        }
                     }
                 }
-                col width:max-content justify:center gap:{px(3.0)}px
-                    pad:(horizontal:{px(12.0)}px vertical:0px) label:"Workspace revision" {
-                    row #relay.eyebrow height:min-content {
-                        text text-transform:uppercase letter-spacing:{px(0.6)}px "Revision"
-                    }
-                    row #relay.value height:min-content font-size:{px(12.0)}px {
-                        text text-wrap:none {format!("r{:04}", model.snapshot.get().revision)}
+                if server_details_open.get() {
+                    col height:min-content gap:{px(8.0)}px
+                        pad:(horizontal:{px(12.0)}px vertical:{px(10.0)}px) fill:surface.panel
+                        stroke:(width:{px(1.0)} color:rule.hair edges:top)
+                        label:"Server connection details" {
+                        row height:min-content justify:between align:center {
+                            row #relay.eyebrow height:min-content {
+                                text text-transform:uppercase letter-spacing:{px(0.6)}px
+                                    "Connection details"
+                            }
+                            row #relay.eyebrow height:min-content font-family:monospace {
+                                text {if model.connected.get() {"UP"} else {"DOWN"}}
+                            }
+                        }
+                        col min-width:0px gap:{px(3.0)}px clip label:"Server address" {
+                            row #relay.eyebrow height:min-content {
+                                text text-transform:uppercase letter-spacing:{px(0.6)}px "Address"
+                            }
+                            row #relay.value height:min-content width:fill font-size:{px(11.0)}px {
+                                text selectable text-wrap:none font-family:monospace
+                                    {model.server_endpoint.get()}
+                            }
+                        }
+                        row height:min-content gap:{px(14.0)}px {
+                            col width:1fr gap:{px(3.0)}px label:"Connection transport" {
+                                row #relay.eyebrow height:min-content {
+                                    text text-transform:uppercase letter-spacing:{px(0.6)}px
+                                        "Transport"
+                                }
+                                row #relay.value height:min-content font-size:{px(11.0)}px {
+                                    text "HTTP + WebSocket"
+                                }
+                            }
+                            col width:1fr gap:{px(3.0)}px label:"Server protocol" {
+                                row #relay.eyebrow height:min-content {
+                                    text text-transform:uppercase letter-spacing:{px(0.6)}px
+                                        "Protocol"
+                                }
+                                row #relay.value height:min-content font-size:{px(11.0)}px {
+                                    text
+                                        {if model.connected.get() {format!("v{}", model.snapshot.get().protocol_version)} else {"—".into()}}
+                                }
+                            }
+                            col width:1fr gap:{px(3.0)}px label:"Connection quality" {
+                                row #relay.eyebrow height:min-content {
+                                    text text-transform:uppercase letter-spacing:{px(0.6)}px
+                                        "Quality · RTT"
+                                }
+                                row height:min-content font-size:{px(11.0)}px
+                                    font-color:{color(connection_quality_color.get())} {
+                                    text {connection_quality.get()}
+                                }
+                            }
+                        }
+                        col gap:{px(3.0)}px label:"Connection status" {
+                            row #relay.eyebrow height:min-content {
+                                text text-transform:uppercase letter-spacing:{px(0.6)}px "Status"
+                            }
+                            row #relay.caption height:min-content {
+                                text {model.status.get()}
+                            }
+                        }
+                        col gap:{px(3.0)}px label:"Revision meaning" {
+                            row #relay.eyebrow height:min-content {
+                                text text-transform:uppercase letter-spacing:{px(0.6)}px
+                                    "Workspace revision"
+                            }
+                            row #relay.caption height:min-content {
+                                text
+                                    "Shared state version used to detect edits based on older data."
+                            }
+                        }
                     }
                 }
             }

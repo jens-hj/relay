@@ -1,0 +1,189 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="labelism.css">
+<style>
+  .page { position: absolute; inset: 0; display: grid; grid-template-columns: 300px 1fr; z-index: 1; }
+  .rail { border-right: 1px solid var(--line); padding: 0; }
+  .wrap { padding: 28px 40px; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto 1fr auto; gap: 24px 24px; min-width: 0; }
+
+  .h { display: flex; align-items: stretch; border: 1px solid var(--line); grid-column: 1 / 3; height: 74px; }
+  .h .id { width: 74px; background: var(--ink); color: var(--inv); display: flex; align-items: center; justify-content: center; }
+  .h .id .dia { width: 22px; height: 22px; transform: rotate(45deg); border: 2px solid var(--inv); }
+  .h .nm { padding: 12px 16px; flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 4px; }
+  .h .cell { border-left: 1px solid var(--line); padding: 12px 16px; display: flex; flex-direction: column; justify-content: center; gap: 4px; min-width: 130px; }
+
+  /* inheritance chain */
+  .chain { grid-column: 1 / 3; display: grid; grid-template-columns: 1fr 40px 1fr 40px 1fr; align-items: center; }
+  .chain .n { border: 1px solid var(--line); height: 54px; display: flex; flex-direction: column; justify-content: center; padding: 0 14px; gap: 3px; }
+  .chain .n.cur { background: var(--ink); color: var(--inv); }
+  .chain .n.cur .lbl { color: var(--inv); opacity: .7; }
+  .chain .n.dash { border-style: dashed; }
+  .chain .a { height: 1px; background: var(--line); position: relative; }
+  .chain .a::after { content: ""; position: absolute; right: 0; top: -3px; border: 3.5px solid transparent; border-left: 6px solid var(--line); border-right: none; }
+
+  .mod { border: 1px solid var(--line); background: var(--plate); display: flex; flex-direction: column; }
+  .mh { height: 30px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--line); }
+
+  /* matrix */
+  table { border-collapse: collapse; width: 100%; }
+  th, td { height: 34px; border-bottom: 1px solid var(--hair); padding: 0; text-align: center; }
+  th { height: 26px; font: 400 9.5px "Zed Mono"; letter-spacing: .08em; color: var(--mute); text-transform: uppercase; border-bottom: 1px solid var(--line); }
+  td.name { text-align: left; padding-left: 12px; font-size: 13px; }
+  td.name .key { margin-right: 10px; }
+  td.v { border-left: 1px solid var(--hair); width: 64px; }
+  td.v.sep { border-left: 1px solid var(--line); }
+  .cb { display: inline-block; width: 12px; height: 12px; border: 1px solid var(--ink); vertical-align: middle; position: relative; }
+  .cb.on { background: var(--ink); }
+  .cb.on::after { content: ""; position: absolute; left: 3px; top: 0px; width: 3px; height: 7px; border: solid var(--inv); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+  .rad { display: inline-block; width: 22px; height: 14px; border: 1px solid var(--hair); vertical-align: middle; }
+  .rad.on { background: var(--ink); border-color: var(--ink); }
+  .rad.ask.on { background: var(--signal); border-color: var(--signal-ink); }
+  .rad.deny.on { background: var(--ink); background-image: repeating-linear-gradient(-45deg, var(--inv) 0 1px, transparent 1px 4px); }
+  td.org { width: 104px; border-left: 1px solid var(--line); text-align: left; padding-left: 10px; }
+  tr.ovr td.org .lbl { color: var(--ink); }
+  tr.ovr td.name { box-shadow: inset 3px 0 0 var(--ink); }
+
+  .slots { display: grid; grid-template-columns: repeat(16, 1fr); gap: 0; border: 1px solid var(--line); height: 40px; }
+  .slots > i { border-right: 1px solid var(--hair); display: block; }
+  .slots > i:last-child { border-right: none; }
+  .slots > i.lim { background: var(--plate); }
+  .slots > i.act { background: var(--run); }
+  .slots > i.cap { background: var(--ink); }
+  .slots > i.lim.edge { border-right: 2px solid var(--ink); }
+  .scale { display: grid; grid-template-columns: repeat(16, 1fr); }
+  .scale span { font: 400 9px "Zed Mono"; color: var(--mute); padding-top: 3px; border-left: 1px solid var(--hair); padding-left: 2px; height: 14px; }
+
+  .chip { display: inline-flex; align-items: stretch; border: 1px solid var(--line); height: 24px; font-size: 12px; margin: 0 6px 6px 0; }
+  .chip b { font: 700 10px "Zed Mono"; padding: 0 6px; display: flex; align-items: center; border-right: 1px solid var(--line); }
+  .chip span { padding: 0 8px; display: flex; align-items: center; }
+  .chip.on b { background: var(--ink); color: var(--inv); }
+  .chip.off { border-color: var(--hair); color: var(--mute); }
+  .chip.off b { border-color: var(--hair); }
+
+  .harn { display: grid; grid-template-columns: 1fr 1fr; }
+  .harn > div { padding: 10px 12px; display: flex; flex-direction: column; gap: 5px; }
+  .harn > div + div { border-left: 1px solid var(--line); }
+  .harn > .on { background: var(--ink); color: var(--inv); }
+  .harn > .on .lbl { color: var(--inv); opacity: .75; }
+
+  .savebar { grid-column: 1 / 3; border: 1px solid var(--line); height: 50px; display: flex; align-items: stretch; }
+  .savebar > div { display: flex; align-items: center; padding: 0 14px; gap: 10px; }
+  .savebar > div + div { border-left: 1px solid var(--line); }
+</style></head>
+<body>
+<div class="guides">
+  <div class="vg" style="left:340px"></div><div class="vg" style="left:950px"></div><div class="vg" style="left:962px"></div><div class="vg" style="left:1560px"></div>
+  <div class="hg" style="top:28px"></div><div class="hg" style="top:102px"></div><div class="hg" style="top:126px"></div><div class="hg" style="top:972px"></div>
+</div>
+<span class="reg" style="left:340px;top:28px"></span><span class="reg" style="left:1560px;top:28px"></span>
+<span class="reg" style="left:340px;top:972px"></span><span class="reg" style="left:1560px;top:972px"></span>
+<span class="reg" style="left:950px;top:126px"></span><span class="reg" style="left:962px;top:126px"></span>
+
+<div class="page">
+  <aside class="rail">
+    <div style="height:56px;padding:0 16px;display:flex;align-items:center;border-bottom:1px solid var(--line)"><b style="font:700 20px 'Reddit Sans'">Relay</b></div>
+    <div class="col" style="padding:14px 16px;gap:10px">
+      <span class="lbl m">Relay · demo / Directors</span>
+      <div class="row" style="gap:8px;font-weight:600"><span class="dia f" style="width:9px;height:9px;transform:rotate(45deg);background:var(--ink)"></span>Project director</div>
+      <div class="row" style="gap:8px;padding:6px 8px;margin:0 -8px;background:var(--ink);color:var(--inv);font-weight:600"><span style="width:9px;height:9px;transform:rotate(45deg);border:1px solid var(--inv)"></span>Review director</div>
+      <div class="row" style="gap:8px;color:var(--ink-2)"><span style="width:12px;height:12px;border:1px solid var(--ink);display:flex;align-items:center;justify-content:center;font-size:10px">+</span>Create director</div>
+      <div style="border-top:1px solid var(--hair);margin-top:6px"></div>
+      <div class="row" style="gap:8px;color:var(--ink-2)"><span style="width:12px;height:12px;background:var(--ink)"></span>Project defaults</div>
+    </div>
+  </aside>
+
+  <div class="wrap">
+    <div class="h">
+      <div class="id"><span class="dia"></span></div>
+      <div class="nm"><span class="lbl m">Director profile · draft</span><span class="title" style="font-size:22px">Review director</span></div>
+      <div class="cell"><span class="lbl m">Overrides</span><span class="num" style="font-size:16px">05 / 07</span></div>
+      <div class="cell"><span class="lbl m">Workers</span><span class="row" style="gap:6px"><span class="pips"><i></i></span><span class="num">0 / 1</span></span></div>
+      <div class="cell"><span class="lbl m">Validation</span><span class="row" style="gap:6px"><span class="g done"></span>Valid</span></div>
+    </div>
+
+    <div class="chain">
+      <div class="n"><span class="lbl m">01 · Project defaults</span><span style="font-size:12.5px">Codex · Whole project · 4 workers</span></div>
+      <div class="a"></div>
+      <div class="n cur"><span class="lbl">02 · Director overrides</span><span style="font-size:12.5px">Claude Code · #3 only · 1 worker</span></div>
+      <div class="a"></div>
+      <div class="n dash"><span class="lbl m">03 · Captured at worker launch</span><span style="font-size:12.5px;color:var(--ink-2)">Applies to the next turn</span></div>
+    </div>
+
+    <!-- LEFT: matrix -->
+    <div class="col" style="gap:24px;grid-row: 3 / 4"><div class="mod">
+      <div class="mh"><span class="lbl">Actions</span><span class="lbl m">Responsibilities · completion · permission</span></div>
+      <table>
+        <tr><th style="text-align:left;padding-left:12px">Action</th><th>Resp.</th><th>Done</th><th style="border-left:1px solid var(--line)">Deny</th><th>Ask</th><th>Allow</th><th style="text-align:left;padding-left:10px;border-left:1px solid var(--line)">Origin</th></tr>
+        <tr><td class="name"><span class="key">P</span>Plan</td><td class="v"><span class="cb"></span></td><td class="v"><span class="cb"></span></td><td class="v sep"><span class="rad deny"></span></td><td class="v"><span class="rad ask"></span></td><td class="v"><span class="rad on"></span></td><td class="org"><span class="lbl m">Default</span></td></tr>
+        <tr><td class="name"><span class="key">D</span>Delegate</td><td class="v"><span class="cb"></span></td><td class="v"><span class="cb"></span></td><td class="v sep"><span class="rad deny"></span></td><td class="v"><span class="rad ask"></span></td><td class="v"><span class="rad on"></span></td><td class="org"><span class="lbl m">Default</span></td></tr>
+        <tr class="ovr"><td class="name"><span class="key">I</span>Implement</td><td class="v"><span class="cb"></span></td><td class="v"><span class="cb"></span></td><td class="v sep"><span class="rad deny"></span></td><td class="v"><span class="rad ask on"></span></td><td class="v"><span class="rad"></span></td><td class="org"><span class="lbl">Override ×</span></td></tr>
+        <tr class="ovr"><td class="name"><span class="key">V</span>Verify</td><td class="v"><span class="cb on"></span></td><td class="v"><span class="cb on"></span></td><td class="v sep"><span class="rad deny"></span></td><td class="v"><span class="rad ask"></span></td><td class="v"><span class="rad on"></span></td><td class="org"><span class="lbl">Override ×</span></td></tr>
+        <tr class="ovr"><td class="name"><span class="key">R</span>Review</td><td class="v"><span class="cb on"></span></td><td class="v"><span class="cb on"></span></td><td class="v sep"><span class="rad deny"></span></td><td class="v"><span class="rad ask on"></span></td><td class="v"><span class="rad"></span></td><td class="org"><span class="lbl">Override ×</span></td></tr>
+        <tr><td class="name"><span class="key">M</span>Merge</td><td class="v hatch"></td><td class="v hatch"></td><td class="v sep"><span class="rad deny on"></span></td><td class="v hatch"></td><td class="v hatch"></td><td class="org"><span class="lbl m">Default · locked</span></td></tr>
+        <tr><td class="name"><span class="key">Y</span>Deploy</td><td class="v hatch"></td><td class="v hatch"></td><td class="v sep"><span class="rad deny on"></span></td><td class="v hatch"></td><td class="v hatch"></td><td class="org"><span class="lbl m">Default · locked</span></td></tr>
+      </table>
+      <div class="row" style="gap:16px;padding:10px 12px;margin-top:auto;border-top:1px solid var(--line);font-size:11px;color:var(--ink-2)">
+        <span class="row" style="gap:6px"><span class="rad on" style="width:14px;height:9px"></span>Allow</span>
+        <span class="row" style="gap:6px"><span class="rad ask on" style="width:14px;height:9px"></span>Ask · approve inline</span>
+        <span class="row" style="gap:6px"><span class="rad deny on" style="width:14px;height:9px"></span>Deny · not overridable</span>
+        <span class="row" style="gap:6px;margin-left:auto"><span style="width:3px;height:12px;background:var(--ink)"></span>Overridden here</span>
+      </div>
+    </div>
+    <div class="mod grow">
+      <div class="mh"><span class="lbl">Effective profile · TOML</span><span class="row" style="gap:12px"><span class="lbl">Copy</span><span class="lbl">Import into draft</span></span></div>
+      <div class="grow" style="display:grid;grid-template-columns:34px 1fr;font:400 12px/20px 'Zed Mono';">
+        <div style="border-right:1px solid var(--hair);color:var(--mute);text-align:right;padding:8px 8px 0 0">1<br>2<br>3<br>4<br>5<br>6<br>7<br>8<br>9</div>
+        <div style="padding:8px 12px 0;color:var(--ink-2);white-space:pre"><span style="background:var(--signal-soft);color:var(--ink)">harness = "claude-code"</span>
+<span style="background:var(--signal-soft);color:var(--ink)">responsibilities = ["verify", "review"]</span>
+completion = ["verify", "review"]
+<span style="background:var(--signal-soft);color:var(--ink)">max_workers = 1</span>
+
+[scope]
+<span style="background:var(--signal-soft);color:var(--ink)">kind = "issues"  issues = ["#3"]</span>
+[permissions]
+implement = <span style="color:var(--signal-ink)">"ask"</span>   review = <span style="color:var(--signal-ink)">"ask"</span>   merge = "deny"</div>
+      </div>
+    </div>
+    </div>
+
+    <!-- RIGHT: harness, execution, scope, workers -->
+    <div class="col" style="gap:24px;grid-row: 3 / 4">
+      <div class="mod">
+        <div class="mh"><span class="lbl">Agent harness</span><span class="lbl">Override ×</span></div>
+        <div class="harn">
+          <div><span class="lbl m">A · Codex</span><span class="title">Codex</span><span class="row" style="gap:6px;font-size:11px;color:var(--ink-2)"><span class="g done" style="width:7px;height:7px"></span>Installed · signed in</span></div>
+          <div class="on"><span class="lbl">B · Claude Code</span><span class="title">Claude Code</span><span class="row" style="gap:6px;font-size:11px"><span style="width:7px;height:7px;background:var(--inv)"></span>Installed · signed in</span></div>
+        </div>
+        <div class="row sp" style="border-top:1px solid var(--line);height:32px;padding:0 12px"><span class="lbl m">Execution approval</span>
+          <span class="seg" style="border-color:var(--line)"><span>Automatic</span><span class="on">Ask</span><span>Unrestricted</span></span></div>
+      </div>
+
+      <div class="mod">
+        <div class="mh"><span class="lbl">Scope</span><span class="seg" style="border:none"><span style="height:22px;border:1px solid var(--hair)">Whole project</span><span class="on" style="height:22px">Selected issues</span></span></div>
+        <div style="padding:12px 12px 6px">
+          <span class="chip off"><b>#1</b><span>Connect the project board</span></span>
+          <span class="chip off"><b>#2</b><span>Make director profiles declarative</span></span>
+          <span class="chip on"><b>#3</b><span>Review conversations in context</span></span>
+          <span class="chip off"><b>#4</b><span>Expose context and usage controls</span></span>
+        </div>
+      </div>
+
+      <div class="mod">
+        <div class="mh"><span class="lbl">Concurrent workers</span><span class="row" style="gap:0"><span class="btn ghost" style="height:20px;padding:0 8px">−</span><span class="num" style="width:40px;text-align:center">01</span><span class="btn ghost" style="height:20px;padding:0 8px">+</span></span></div>
+        <div style="padding:14px 12px 10px">
+          <div class="slots"><i class="lim edge"></i><i class="hatch"></i><i class="hatch"></i><i class="hatch"></i><i class="hatch"></i><i class="hatch"></i><i class="hatch"></i><i class="hatch"></i><i class="hatch"></i><i class="hatch"></i><i class="hatch"></i><i class="hatch"></i><i class="hatch"></i><i class="hatch"></i><i class="hatch"></i><i class="hatch"></i></div>
+          <div class="scale"><span>0</span><span></span><span></span><span></span><span>4</span><span></span><span></span><span></span><span>8</span><span></span><span></span><span></span><span>12</span><span></span><span></span><span>16+</span></div>
+          <div class="row sp" style="margin-top:6px"><span class="lbl m">0 active · limit 1 · range 0–64</span><span class="lbl m">Default 4</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="savebar">
+      <div class="grow"><span class="g ask"></span><span>3 unsaved changes</span><span class="lbl m">Implement · Review · Scope</span></div>
+
+      <div><span class="lbl">Import TOML</span></div>
+      <div><span class="btn ghost">Discard</span><span class="btn pri">Save profile <span class="key">⌘S</span></span></div>
+    </div>
+  </div>
+</div>
+<script>for (const c of location.hash.slice(1).split(",").filter(Boolean)) document.body.classList.add(c)</script>
+</body></html>

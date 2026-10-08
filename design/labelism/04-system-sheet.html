@@ -1,0 +1,173 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="labelism.css">
+<style>
+  .sheet { position: absolute; inset: 40px 48px; display: grid; grid-template-columns: 250px 1fr 1fr 1fr; grid-template-rows: 300px 290px 1fr; gap: 0 32px; z-index: 1; }
+  .cap { border-top: 1px solid var(--line); padding-top: 6px; display: flex; justify-content: space-between; margin-bottom: 18px; }
+  .cap b { font: 700 10.5px "Reddit Sans"; }
+  .intro { grid-row: 1 / 4; display: flex; flex-direction: column; gap: 14px; }
+  .intro .big { font: 700 44px/0.95 "Reddit Sans"; letter-spacing: -.03em; }
+  .rule-list { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+  .rule-list > div { display: grid; grid-template-columns: 26px 1fr; padding: 8px 0; border-bottom: 1px solid var(--hair); font-size: 12px; color: var(--ink-2); }
+  .rule-list > div b { font: 700 10px "Zed Mono"; color: var(--ink); padding-top: 1px; }
+
+  .anat { grid-column: 2 / 4; position: relative; }
+  .card { border: 1px solid var(--line); background: var(--plate); width: 330px; position: absolute; left: 150px; top: 48px; }
+  .card .top { display: flex; align-items: stretch; height: 22px; border-bottom: 1px solid var(--line); }
+  .card .top .no { background: var(--ink); color: var(--inv); font: 700 11px "Zed Mono"; padding: 0 8px; display: flex; align-items: center; }
+  .card .top .lab { padding: 0 8px; display: flex; align-items: center; flex: 1; }
+  .card .top .pos { padding: 0 8px; display: flex; align-items: center; border-left: 1px solid var(--hair); }
+  .card .body { padding: 10px; }
+  .card .foot { display: grid; grid-template-columns: 1fr auto auto; border-top: 1px solid var(--hair); height: 26px; }
+  .card .foot > div { display: flex; align-items: center; gap: 6px; padding: 0 8px; }
+  .card .foot > div + div { border-left: 1px solid var(--hair); }
+  .co { position: absolute; display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink-2); white-space: nowrap; }
+  .co .n { width: 16px; height: 16px; background: var(--ink); color: var(--inv); font: 700 9px "Zed Mono"; display: flex; align-items: center; justify-content: center; flex: none; }
+  .ld { position: absolute; border-top: 1px solid var(--line); }
+  .ldv { position: absolute; border-left: 1px solid var(--line); }
+  .dot { position: absolute; width: 5px; height: 5px; background: var(--signal); transform: translate(-2px, -2px); }
+
+  .glyphs { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border-top: 1px solid var(--hair); }
+  .glyphs > div { display: flex; align-items: center; gap: 10px; height: 32px; border-bottom: 1px solid var(--hair); font-size: 12.5px; }
+  .glyphs .g { width: 12px; height: 12px; }
+
+  .spec { display: grid; grid-template-columns: 90px 1fr; align-items: center; row-gap: 14px; }
+  .sw { height: 70px; display: flex; flex-direction: column; justify-content: flex-end; padding: 8px; }
+  .swrow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; border: 1px solid var(--line); }
+  .swrow > div + div { border-left: 1px solid var(--line); }
+  .swrow.hc-only { display: none; } .hc .swrow.hc-only { display: grid; } .hc div.soft-only { display: none !important; }
+  .swl { padding: 6px 8px; display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--line); }
+</style></head>
+<body>
+<div class="guides">
+  <div class="vg" style="left:48px"></div><div class="vg" style="left:330px"></div><div class="vg" style="left:1552px"></div>
+  <div class="hg" style="top:40px"></div><div class="hg" style="top:340px"></div><div class="hg" style="top:600px"></div><div class="hg" style="top:960px"></div>
+</div>
+<span class="reg" style="left:48px;top:40px"></span><span class="reg" style="left:1552px;top:40px"></span>
+<span class="reg" style="left:48px;top:960px"></span><span class="reg" style="left:1552px;top:960px"></span>
+<span class="reg" style="left:330px;top:340px"></span><span class="reg" style="left:330px;top:600px"></span>
+
+<div class="sheet">
+  <!-- intro / rules -->
+  <div class="intro">
+    <div class="lbl">Relay interface<br>Label system · draft 0.1</div>
+    <div class="big">Relay<br>labels</div>
+    <div style="font-size:12.5px;color:var(--ink-2);line-height:1.5">Each group of controls is drawn as one label: a fixed frame, an identifier block, and cells that are either a control or a reading.</div>
+    <div class="rule-list">
+      <div><b>01</b>No corner radius anywhere. 1px rules; 2px only for focus.</div>
+      <div><b>02</b>Every mark is a control, a reading, or a boundary. Remove anything else.</div>
+      <div><b>03</b><span class="soft-only">Mint means running, peach means waiting on you; pastel tints mark issue labels. Colour is never decoration.</span><span class="hc-only">Signal orange means running or waiting on you. Never decoration.</span></div>
+      <div><b>04</b>Layout guides stay visible: dashed lines at module edges, register marks at their corners.</div>
+      <div><b>05</b>Mono caps for labels and values; sans for titles and prose.</div>
+      <div><b>06</b>Grid coordinates double as keyboard addresses (A–C columns, P/D/I… actions).</div>
+      <div><b>07</b>Hatching means unavailable or locked. Dashed frame means not yet captured.</div>
+    </div>
+  </div>
+
+  <!-- anatomy -->
+  <div class="anat">
+    <div class="cap"><b>Issue label — anatomy</b><span class="lbl m">Every zone is a target</span></div>
+    <div class="card">
+      <div class="top"><span class="no">#2</span><span class="lab lbl" style="background:var(--l1)">Workflow</span><span class="pos lbl m">B1</span></div>
+      <div class="body"><div class="title" style="font-size:14.5px">Make director profiles declarative</div><p style="font-size:12px;color:var(--ink-2);margin-top:5px">Define project defaults and per-director overrides.</p></div>
+      <div class="foot"><div><span class="g run"></span><span class="lbl">Running · T3 · 04:12</span></div><div><span class="pips"><i class="r"></i><i class="f"></i><i></i><i></i></span></div><div><span class="lbl">Open →</span></div></div>
+    </div>
+    <!-- callouts left -->
+    <span class="dot" style="left:166px;top:59px"></span><span class="ld" style="left:120px;top:59px;width:46px"></span>
+    <div class="co" style="left:0;top:51px"><span class="n">1</span>Issue on GitHub</div>
+    <span class="dot" style="left:200px;top:59px"></span><span class="ldv" style="left:200px;top:20px;height:39px"></span><span class="ld" style="left:200px;top:20px;width:60px"></span>
+    <div class="co" style="left:264px;top:12px"><span class="n">2</span>Filter by label</div>
+    <span class="dot" style="left:470px;top:59px"></span><span class="ld" style="left:470px;top:59px;width:40px"></span>
+    <div class="co" style="left:514px;top:51px"><span class="n">3</span>Board address · keyboard</div>
+    <span class="dot" style="left:470px;top:84px"></span><span class="ld" style="left:470px;top:84px;width:40px"></span>
+    <div class="co" style="left:514px;top:76px"><span class="n">4</span>Body · opens inspector</div>
+    <span class="dot" style="left:166px;top:145px"></span><span class="ld" style="left:120px;top:145px;width:46px"></span>
+    <div class="co" style="left:0;top:137px"><span class="n">5</span>Run · opens transcript</div>
+    <span class="dot" style="left:395px;top:145px"></span><span class="ldv" style="left:395px;top:145px;height:70px"></span><span class="ld" style="left:240px;top:215px;width:155px"></span>
+    <div class="co" style="left:110px;top:207px"><span class="n">6</span>Workers · profile limit</div>
+    <span class="dot" style="left:455px;top:145px"></span><span class="ldv" style="left:455px;top:145px;height:70px"></span><span class="ld" style="left:455px;top:215px;width:55px"></span>
+    <div class="co" style="left:514px;top:207px"><span class="n">7</span>Open session</div>
+  </div>
+
+  <!-- glyphs -->
+  <div>
+    <div class="cap"><b>Worker status</b><span class="lbl m">One square, fill = state</span></div>
+    <div class="glyphs">
+      <div><span class="g"></span>Queued</div><div><span class="g run"></span>Running</div>
+      <div><span class="g ask"></span>Waiting on you</div><div><span class="g done"></span>Completed</div>
+      <div><span class="g fail"></span>Failed</div><div><span class="g stop"></span>Stopped</div>
+      <div><span class="g int"></span>Interrupted</div><div><span class="g fix"></span>Fixture</div>
+    </div>
+    <div class="row" style="gap:18px;margin-top:16px;font-size:12px;color:var(--ink-2)">
+      <span class="row" style="gap:6px"><span style="width:12px;height:12px;background:var(--ink)"></span>Project</span>
+      <span class="row" style="gap:6px"><span style="width:9px;height:9px;transform:rotate(45deg);background:var(--ink)"></span>Director</span>
+      <span class="row" style="gap:6px"><span class="pips"><i class="r"></i><i class="f"></i><i></i></span>Worker slots</span>
+    </div>
+  </div>
+
+  <!-- controls -->
+  <div style="grid-column: 2 / 3">
+    <div class="cap"><b>Controls</b><span class="lbl m">States</span></div>
+    <div class="spec">
+      <span class="lbl m">Default</span><span><span class="btn">Sync project</span></span>
+      <span class="lbl m">Primary</span><span><span class="btn pri">Save profile <span class="key">⌘S</span></span></span>
+      <span class="lbl m">Signal</span><span><span class="btn sig">Approve <span class="key">Y</span></span></span>
+      <span class="lbl m">Focus</span><span><span class="btn focus">Start worker</span></span>
+      <span class="lbl m">Disabled</span><span><span class="btn hatch" style="color:var(--mute);border-color:var(--hair)">Send / continue</span></span>
+    </div>
+  </div>
+  <div style="grid-column: 3 / 4">
+    <div class="cap"><b>Selectors</b><span class="lbl m">Shared borders</span></div>
+    <div class="spec">
+      <span class="lbl m">Segment</span><span><span class="seg"><span>Automatic</span><span class="on">Ask</span><span>Unrestricted</span></span></span>
+      <span class="lbl m">Permission</span><span class="row" style="gap:0"><span style="width:30px;height:20px;border:1px solid var(--hair);background:var(--ink);background-image:repeating-linear-gradient(-45deg,var(--inv) 0 1px,transparent 1px 4px)"></span><span style="width:30px;height:20px;border:1px solid var(--hair);background:var(--signal)"></span><span style="width:30px;height:20px;border:1px solid var(--hair);background:var(--ink)"></span><span class="lbl m" style="margin-left:10px">Deny · Ask · Allow</span></span>
+      <span class="lbl m">Toggle</span><span class="row" style="gap:12px"><span style="width:12px;height:12px;border:1px solid var(--ink)"></span><span style="width:12px;height:12px;background:var(--ink)"></span><span class="lbl m">Off · On</span></span>
+      <span class="lbl m">Key</span><span class="row" style="gap:4px"><span class="key">A</span><span class="key">B</span><span class="key">⌘K</span><span class="key">⏎</span></span>
+      <span class="lbl m">Tag</span><span class="row" style="gap:6px"><span class="tag">#2</span><span class="tag h" style="background:var(--l1)">Workflow</span><span class="tag s">Ask</span></span>
+    </div>
+  </div>
+  <div style="grid-column: 4 / 5">
+    <div class="cap"><b>Readouts</b><span class="lbl m">Measured values only</span></div>
+    <div class="col" style="gap:14px">
+      <div style="height:14px;display:flex;border:1px solid var(--line)"><i style="width:46%;background:var(--m1)"></i><i style="width:29%;background:var(--m2)"></i><i style="width:5%;background:var(--m3)"></i><i class="hatch" style="flex:1"></i></div>
+      <div class="row sp"><span class="lbl m">Input · cached · output</span><span class="lbl">T1–T2</span></div>
+      <div style="display:grid;grid-template-columns:repeat(8,1fr);border:1px solid var(--line);height:24px"><i style="background:var(--run)"></i><i style="background:var(--ink);border-left:1px solid var(--hair)"></i><i style="border-left:1px solid var(--hair)"></i><i style="border-left:2px solid var(--ink)" class="hatch"></i><i class="hatch" style="border-left:1px solid var(--hair)"></i><i class="hatch" style="border-left:1px solid var(--hair)"></i><i class="hatch" style="border-left:1px solid var(--hair)"></i><i class="hatch" style="border-left:1px solid var(--hair)"></i></div>
+      <div class="row sp"><span class="lbl m">Workers · running / idle / limit</span><span class="lbl">2 / 3</span></div>
+    </div>
+  </div>
+
+  <!-- type + colour -->
+  <div style="grid-column: 2 / 4; align-self:start;margin-top:10px">
+    <div class="cap"><b>Typography</b><span class="lbl m">Bundled fonts</span></div>
+    <div style="display:grid;grid-template-columns:1.1fr 1fr 1fr;gap:24px;align-items:end">
+      <div><div class="lbl m" style="margin-bottom:8px">Reddit Sans 600 · 22</div><div style="font:600 34px 'Reddit Sans';letter-spacing:-.02em">Review director</div></div>
+      <div><div class="lbl m" style="margin-bottom:8px">Reddit Sans 400 · 13</div><div style="font-size:13px;color:var(--ink-2)">Overrides are stored per field; omitted values follow the current project defaults.</div></div>
+      <div><div class="lbl m" style="margin-bottom:8px">Zed Mono · 9.5 caps</div><div class="lbl" style="font-size:11px;color:var(--ink)">Approval required · Implement · run 7f3a</div></div>
+    </div>
+  </div>
+  <div style="grid-column: 4 / 5; align-self:start;margin-top:10px">
+    <div class="cap"><b>Colour</b><span class="lbl m">Light · dark</span></div>
+    <div class="swrow soft-only" style="display:grid">
+      <div><div class="sw" style="background:#E8E5DF"></div><div class="swl"><span class="lbl">Paper</span><span class="lbl m">E8E5DF</span></div></div>
+      <div><div class="sw" style="background:#33363B"></div><div class="swl"><span class="lbl">Ink</span><span class="lbl m">33363B</span></div></div>
+      <div><div class="sw" style="background:#B5D6C3"></div><div class="swl"><span class="lbl">Running</span><span class="lbl m">B5D6C3</span></div></div>
+      <div><div class="sw" style="background:#F2B8A0"></div><div class="swl"><span class="lbl">Waiting</span><span class="lbl m">F2B8A0</span></div></div>
+      <div><div class="sw" style="background:#1F2125"></div><div class="swl"><span class="lbl">Night</span><span class="lbl m">1F2125</span></div></div>
+    </div>
+    <div class="swrow soft-only" style="display:grid;border-top:none">
+      <div><div class="sw" style="height:26px;background:#D9D3EE"></div></div>
+      <div><div class="sw" style="height:26px;background:#CADDED"></div></div>
+      <div><div class="sw" style="height:26px;background:#D2E6D8"></div></div>
+      <div><div class="sw" style="height:26px;background:#EFE3B8"></div></div>
+      <div class="swl" style="border-top:none;justify-content:center"><span class="lbl m">Issue labels</span></div>
+    </div>
+    <div class="swrow hc-only">
+      <div><div class="sw" style="background:#E4E7EA"></div><div class="swl"><span class="lbl">Paper</span><span class="lbl m">E4E7EA</span></div></div>
+      <div><div class="sw" style="background:#15181D"></div><div class="swl"><span class="lbl">Ink</span><span class="lbl m">15181D</span></div></div>
+      <div><div class="sw" style="background:#4A535C"></div><div class="swl"><span class="lbl">Graphite</span><span class="lbl m">4A535C</span></div></div>
+      <div><div class="sw" style="background:#FF4E00"></div><div class="swl"><span class="lbl">Signal</span><span class="lbl m">FF4E00</span></div></div>
+      <div><div class="sw" style="background:#0D0E10"></div><div class="swl"><span class="lbl">Void</span><span class="lbl m">0D0E10</span></div></div>
+    </div>
+  </div>
+</div>
+<script>for (const c of location.hash.slice(1).split(",").filter(Boolean)) document.body.classList.add(c)</script>
+</body></html>

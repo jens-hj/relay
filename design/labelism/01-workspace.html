@@ -1,0 +1,258 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="labelism.css">
+<style>
+  .app { position: absolute; inset: 0; display: grid; grid-template-columns: 300px 1fr 392px; z-index: 1; }
+
+  /* rail */
+  .rail { border-right: 1px solid var(--line); display: flex; flex-direction: column; position: relative; }
+  .brand { height: 56px; padding: 0 16px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+  .brand b { font: 700 20px "Reddit Sans"; letter-spacing: -.02em; }
+  .sect { height: 30px; padding: 0 16px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--hair); }
+  .tree { padding: 10px 0 0 0; flex: 1; position: relative; }
+  .node { height: 30px; display: flex; align-items: center; gap: 8px; position: relative; padding-right: 12px; }
+  .node .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .proj { padding-left: 16px; font-weight: 600; }
+  .proj .sq { width: 12px; height: 12px; background: var(--ink); flex: none; }
+  .proj.live .sq { background: transparent; border: 1px solid var(--ink); }
+  .dir { padding-left: 40px; }
+  .wkr { padding-left: 64px; font-size: 12px; color: var(--ink-2); }
+  .dia { width: 9px; height: 9px; transform: rotate(45deg); border: 1px solid var(--ink); flex: none; margin: 0 1px; }
+  .dia.f { background: var(--ink); }
+  .stem { position: absolute; border-left: 1px solid var(--line); }
+  .elbow { position: absolute; width: 12px; border-top: 1px solid var(--line); }
+  .sel { background: var(--ink); color: var(--inv); }
+  .sel .lbl, .sel .t { color: var(--inv); }
+  .sel .g.run { border-color: var(--run); background: linear-gradient(to top, var(--run) 50%, transparent 50%); }
+  .tools { display: flex; }
+  .tools span { width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--hair); margin-left: -1px; font: 400 10px "Zed Mono"; color: var(--ink-2); }
+
+  .conn { border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr 1fr 44px; height: 52px; }
+  .conn > div { padding: 8px 12px; display: flex; flex-direction: column; justify-content: center; gap: 3px; }
+  .conn > div + div { border-left: 1px solid var(--line); }
+
+  /* resize edge = ruler (functional: sidebar width) */
+  .ruler { position: absolute; right: -1px; top: 56px; bottom: 52px; width: 7px; border-left: 1px solid var(--line);
+    background-image: linear-gradient(var(--hair) 1px, transparent 1px); background-size: 7px 8px; }
+  .ruler .grip { position: absolute; left: -4px; top: 46%; width: 7px; height: 28px; background: var(--ink); }
+
+  /* main */
+  .main { display: flex; flex-direction: column; min-width: 0; }
+  .bar { height: 56px; border-bottom: 1px solid var(--line); display: flex; align-items: stretch; }
+  .bar > .cell { display: flex; flex-direction: column; justify-content: center; padding: 0 14px; gap: 3px; border-right: 1px solid var(--line); }
+  .bar > .cell:last-child { border-right: none; }
+  .crumb { font: 600 17px "Reddit Sans"; letter-spacing: -.01em; }
+
+  .cols { flex: 1; display: grid; grid-template-columns: repeat(3, 1fr); position: relative; }
+  .column { border-right: 1px solid var(--hair); display: flex; flex-direction: column; min-width: 0; }
+  .column:last-child { border-right: none; }
+  .chead { height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--line); }
+  .chead .addr { width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line); font: 700 11px "Zed Mono"; }
+  .chead .count { margin-left: auto; font: 400 11px "Zed Mono"; }
+  .cards { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+
+  /* issue card as a label */
+  .card { border: 1px solid var(--line); background: var(--plate); }
+  .card .top { display: flex; align-items: stretch; height: 22px; border-bottom: 1px solid var(--line); }
+  .card .top .no { background: var(--ink); color: var(--inv); font: 700 11px "Zed Mono"; padding: 0 8px; display: flex; align-items: center; }
+  .card .top .lab { padding: 0 8px; display: flex; align-items: center; flex: 1; }
+  .card .top .pos { padding: 0 8px; display: flex; align-items: center; border-left: 1px solid var(--hair); }
+  .card .body { padding: 10px 10px 12px; }
+  .card .body .title { font-size: 14.5px; line-height: 1.25; }
+  .card .body p { font-size: 12px; color: var(--ink-2); margin-top: 6px; line-height: 1.4; }
+  .card .foot { display: grid; grid-template-columns: 1fr auto auto; border-top: 1px solid var(--hair); height: 26px; }
+  .card .foot > div { display: flex; align-items: center; gap: 6px; padding: 0 8px; }
+  .card .foot > div + div { border-left: 1px solid var(--hair); }
+  .card.active { border-color: var(--ink); box-shadow: 4px 4px 0 var(--ink); }
+  .card.run .top .no { background: var(--run); color: var(--on-run); }
+  .card.empty { border-style: dashed; border-color: var(--hair); height: 84px; display: flex; align-items: center; justify-content: center; background: transparent; }
+
+  /* inspector */
+  .insp { border-left: 1px solid var(--line); display: flex; flex-direction: column; }
+  .ihead { display: grid; grid-template-columns: 74px 1fr; border-bottom: 1px solid var(--line); }
+  .ihead .big { background: var(--ink); color: var(--inv); font: 700 30px "Zed Mono"; display: flex; align-items: center; justify-content: center; min-height: 92px; }
+  .ihead .meta { padding: 10px 14px; display: flex; flex-direction: column; gap: 6px; }
+  .grid2 { display: grid; grid-template-columns: 96px 1fr; }
+  .grid2 > div { padding: 7px 14px; border-bottom: 1px solid var(--hair); font-size: 12px; }
+  .grid2 > div:nth-child(odd) { border-right: 1px solid var(--hair); }
+  .block { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .sess { display: grid; grid-template-columns: 16px 1fr auto; gap: 8px; align-items: center; height: 28px; border-bottom: 1px solid var(--hair); padding: 0 14px; font-size: 12px; }
+  .policy { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .policy > div { padding: 7px 10px; display: flex; flex-direction: column; gap: 3px; }
+  .policy > div + div { border-left: 1px solid var(--hair); }
+  .prompt { margin: 12px 14px 0; border: 1px solid var(--line); height: 92px; padding: 10px; font-size: 12.5px; color: var(--mute); background: var(--plate); position: relative; }
+  .prompt::after { content: ""; position: absolute; left: 10px; top: 10px; width: 1px; height: 15px; background: var(--ink-2); }
+</style></head>
+<body>
+<div class="guides">
+  <div class="vg" style="left:300px"></div><div class="vg" style="left:1208px"></div>
+  <div class="hg" style="top:56px"></div><div class="hg" style="top:96px"></div><div class="hg" style="top:948px"></div>
+  <div class="vg" style="left:602px"></div><div class="vg" style="left:905px"></div>
+</div>
+<span class="reg" style="left:300px;top:56px"></span><span class="reg" style="left:1208px;top:56px"></span>
+<span class="reg" style="left:300px;top:96px"></span><span class="reg" style="left:1208px;top:96px"></span>
+<span class="reg" style="left:300px;top:948px"></span><span class="reg" style="left:1208px;top:948px"></span>
+
+<div class="app">
+  <!-- RAIL -->
+  <aside class="rail">
+    <div class="brand"><b>Relay</b><div class="row" style="gap:6px"><span class="key">⌘K</span><span class="tools"><span title="Settings">⚙</span></span></div></div>
+    <div class="sect"><span class="lbl">Projects</span><span class="lbl m num">02</span></div>
+    <div class="tree">
+      <!-- project 1 -->
+      <div class="node proj"><span class="sq"></span><span class="t">Relay · demo</span><span class="tools"><span>▦</span><span>+D</span><span>≡</span></span></div>
+      <div class="node dir"><span class="dia f"></span><span class="t">Project director</span><span class="lbl">CDX</span><span class="pips"><i class="r"></i><i class="f"></i><i></i><i></i></span></div>
+      <div class="node wkr sel"><span class="g run"></span><span class="t">#2 Make director profiles…</span><span class="lbl">T3</span></div>
+      <div class="node wkr"><span class="g done"></span><span class="t">#1 Connect the project board</span><span class="lbl m">T1</span></div>
+      <div class="node wkr"><span class="g ask"></span><span class="t">#4 Expose context and usage</span><span class="lbl" style="color:var(--signal-ink)">ASK</span></div>
+      <div class="node dir"><span class="dia"></span><span class="t">Review director</span><span class="lbl">CLD</span><span class="pips"><i></i></span></div>
+      <div class="node wkr"><span class="g int"></span><span class="t">#3 Review conversations…</span><span class="lbl m">T2</span></div>
+      <div style="height:10px"></div>
+      <div class="node proj live"><span class="sq"></span><span class="t">relay</span><span class="lbl m">GH #5</span><span class="tools"><span>▦</span><span>+D</span><span>≡</span></span></div>
+      <div class="node dir"><span class="dia f"></span><span class="t">Dogfood director</span><span class="lbl">CLD</span><span class="pips"><i class="f"></i><i></i></span></div>
+      <div class="node wkr"><span class="g done"></span><span class="t">#8 Named projects, connect…</span><span class="lbl m">T6</span></div>
+
+      <!-- schematic stems -->
+      <span class="stem" style="left:22px;top:28px;height:166px"></span>
+      <span class="elbow" style="left:22px;top:55px"></span><span class="elbow" style="left:22px;top:175px"></span>
+      <span class="stem" style="left:46px;top:58px;height:87px"></span>
+      <span class="elbow" style="left:46px;top:85px"></span><span class="elbow" style="left:46px;top:115px"></span><span class="elbow" style="left:46px;top:145px"></span>
+      <span class="stem" style="left:46px;top:178px;height:28px"></span><span class="elbow" style="left:46px;top:205px"></span>
+      <span class="stem" style="left:22px;top:248px;height:27px"></span><span class="elbow" style="left:22px;top:275px"></span>
+      <span class="stem" style="left:46px;top:278px;height:27px"></span><span class="elbow" style="left:46px;top:305px"></span>
+    </div>
+
+    <div style="padding:0 16px 12px" class="col">
+      <div class="lbl m" style="margin-bottom:6px">Legend</div>
+      <div class="row" style="gap:12px;font-size:11px;color:var(--ink-2);flex-wrap:wrap">
+        <span class="row" style="gap:5px"><span class="g run"></span>Running</span>
+        <span class="row" style="gap:5px"><span class="g ask"></span>Waiting</span>
+        <span class="row" style="gap:5px"><span class="g done"></span>Completed</span>
+        <span class="row" style="gap:5px"><span class="g int"></span>Interrupted</span>
+      </div>
+    </div>
+    <div class="conn">
+      <div><span class="lbl m">Server</span><span class="row" style="gap:6px;font-size:12px"><span class="g done" style="width:7px;height:7px"></span>Connected</span></div>
+      <div><span class="lbl m">Revision</span><span class="num" style="font-size:12px">r0142</span></div>
+      <div style="align-items:center"><span class="lbl">↻</span></div>
+    </div>
+    <div class="ruler"><span class="grip"></span></div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <div class="bar">
+      <div class="cell grow"><span class="lbl m">Project board</span><span class="crumb">Relay · demo</span></div>
+      <div class="cell"><span class="lbl m">Repository</span><span class="num" style="font-size:12px">demo/relay</span></div>
+      <div class="cell"><span class="lbl m">Source</span><span class="tag h" style="box-shadow:none;outline:1px dotted var(--ink);outline-offset:-1px">Fixture</span></div>
+      <div class="cell"><span class="lbl m">Last sync</span><span class="row" style="gap:8px"><span class="num" style="font-size:12px">2 min</span><span class="btn ghost" style="height:20px;padding:0 6px;font-size:11px">Sync</span></span></div>
+    </div>
+
+    <div class="cols">
+      <!-- A -->
+      <section class="column">
+        <div class="chead"><span class="addr">A</span><span class="title" style="font-size:13px">Backlog</span><span class="count">02</span></div>
+        <div class="cards">
+          <article class="card">
+            <div class="top"><span class="no">#1</span><span class="lab lbl" style="background:var(--l2)">Integration</span><span class="pos lbl m">A1</span></div>
+            <div class="body"><div class="title">Connect the project board</div><p>Mirror the authoritative remote board and preserve its column order and issue identity.</p></div>
+            <div class="foot"><div><span class="g done"></span><span class="lbl">Completed · T1</span></div><div><span class="lbl m">1 session</span></div><div><span class="lbl">Open →</span></div></div>
+          </article>
+          <article class="card">
+            <div class="top"><span class="no" style="background:transparent;color:var(--ink);border-right:1px solid var(--line)">#4</span><span class="lab lbl" style="background:var(--l4)">Efficiency</span><span class="pos lbl m">A2</span></div>
+            <div class="body"><div class="title">Expose context and usage controls</div><p>Support compact, reset context, and archive/start-new as separate actions.</p></div>
+            <div class="foot" style="background:var(--signal-soft)"><div><span class="g ask"></span><span class="lbl" style="color:var(--signal-ink)">Approval needed</span></div><div><span class="lbl m">Implement</span></div><div><span class="lbl">Answer →</span></div></div>
+          </article>
+        </div>
+      </section>
+      <!-- B -->
+      <section class="column">
+        <div class="chead"><span class="addr">B</span><span class="title" style="font-size:13px">In progress</span><span class="count">01</span></div>
+        <div class="cards">
+          <article class="card active run">
+            <div class="top"><span class="no">#2</span><span class="lab lbl" style="background:var(--l1)">Workflow</span><span class="pos lbl m">B1</span></div>
+            <div class="body"><div class="title">Make director profiles declarative</div><p>Define project defaults and per-director overrides. Let several directors specialize within a project.</p></div>
+            <div class="foot"><div><span class="g run"></span><span class="lbl">Running · T3 · 04:12</span></div><div><span class="pips"><i class="r"></i><i class="f"></i><i></i><i></i></span></div><div><span class="lbl">Open →</span></div></div>
+          </article>
+          <div class="card empty"><span class="lbl m">Drop or move issue · GitHub is authoritative</span></div>
+        </div>
+      </section>
+      <!-- C -->
+      <section class="column">
+        <div class="chead"><span class="addr">C</span><span class="title" style="font-size:13px">In review</span><span class="count">01</span></div>
+        <div class="cards">
+          <article class="card">
+            <div class="top"><span class="no">#3</span><span class="lab lbl" style="background:var(--l3)">Experience</span><span class="pos lbl m">C1</span></div>
+            <div class="body"><div class="title">Review conversations in context</div><p>Attach feedback to the exact message or quoted passage that prompted it.</p>
+              <div style="margin-top:10px;border-left:2px solid var(--ink);padding:4px 8px" class="dots"><span class="lbl">Result</span><div style="font-size:12px;margin-top:2px">A contextual comment prototype is ready for review.</div></div></div>
+            <div class="foot"><div><span class="g int"></span><span class="lbl">Interrupted · T2</span></div><div><span class="lbl m">Review dir.</span></div><div><span class="lbl">Open →</span></div></div>
+          </article>
+        </div>
+      </section>
+    </div>
+
+    <!-- status strip -->
+    <div style="height:52px;border-top:1px solid var(--line);display:grid;grid-template-columns:repeat(4,1fr) 1.4fr">
+      <div style="padding:8px 14px;border-right:1px solid var(--hair)" class="col"><span class="lbl m">Issues</span><span class="num" style="font-size:15px">04</span></div>
+      <div style="padding:8px 14px;border-right:1px solid var(--hair)" class="col"><span class="lbl m">Running</span><span class="num" style="font-size:15px;color:var(--run-ink)">01</span></div>
+      <div style="padding:8px 14px;border-right:1px solid var(--hair)" class="col"><span class="lbl m">Waiting on you</span><span class="num" style="font-size:15px;color:var(--signal-ink)">01</span></div>
+      <div style="padding:8px 14px;border-right:1px solid var(--hair)" class="col"><span class="lbl m">Workers</span><span class="num" style="font-size:15px">1 / 5</span></div>
+      <div style="padding:8px 14px" class="row sp"><span class="lbl m">Navigate</span><span class="row" style="gap:4px"><span class="key">A</span><span class="key">B</span><span class="key">C</span><span class="lbl m" style="margin:0 6px">column</span><span class="key">↑</span><span class="key">↓</span><span class="lbl m" style="margin-left:6px">issue</span></span></div>
+    </div>
+  </main>
+
+  <!-- INSPECTOR -->
+  <aside class="insp">
+    <div class="ihead">
+      <div class="big">#2</div>
+      <div class="meta"><div class="row sp"><span class="lbl m">Issue · B1</span><span class="lbl">Close ×</span></div><div class="title" style="font-size:17px;line-height:1.2">Make director profiles declarative</div><div class="row" style="gap:6px"><span class="tag h" style="background:var(--l1)">Workflow</span><span class="tag h">In progress</span></div></div>
+    </div>
+    <div class="grid2">
+      <div class="lbl m">Provider</div><div>GitHub</div>
+      <div class="lbl m">Repository</div><div class="num">demo/relay</div>
+      <div class="lbl m">Director</div><div class="row" style="gap:6px"><span class="dia f" style="width:7px;height:7px"></span>Project director</div>
+      <div class="lbl m">Worktree</div><div class="num" style="font-size:11px">…/worktrees/issue-2-a41c</div>
+    </div>
+    <div class="block" style="font-size:12.5px;color:var(--ink-2)">Define project defaults and per-director overrides. Let several directors specialize within a project and expose their effective configuration.</div>
+    <div class="row sp" style="height:30px;padding:0 14px;border-bottom:1px solid var(--hair)"><span class="lbl">Linked sessions</span><span class="lbl m num">02</span></div>
+    <div class="sess"><span class="g run"></span><span>Worker · Codex</span><span class="lbl">T3 · running</span></div>
+    <div class="sess"><span class="g done"></span><span>Director · planning</span><span class="lbl m">T1</span></div>
+
+    <div class="row sp" style="height:30px;padding:0 14px;border-bottom:1px solid var(--hair);margin-top:14px;border-top:1px solid var(--line)"><span class="lbl">Turns</span><span class="lbl m">Select to open transcript</span></div>
+    <div style="padding:14px 14px 6px;position:relative">
+      <div style="position:relative;height:58px">
+        <div style="position:absolute;left:0;right:0;top:22px;border-top:1px solid var(--line)"></div>
+        <div style="position:absolute;left:0;right:0;top:23px;height:6px;background-image:linear-gradient(90deg,var(--hair) 1px,transparent 1px);background-size:9px 6px"></div>
+        <div style="position:absolute;left:0;top:14px;width:118px;height:8px;background:var(--ink)"></div>
+        <div style="position:absolute;left:122px;top:14px;width:70px;height:8px;background:var(--ink)"></div>
+        <div style="position:absolute;left:196px;top:14px;width:96px;height:8px;background:var(--run)"></div>
+        <div style="position:absolute;left:292px;top:6px;height:24px;border-left:1px solid var(--run-ink)"></div>
+        <span class="lbl" style="position:absolute;left:0;top:0">T1 Plan</span>
+        <span class="lbl" style="position:absolute;left:122px;top:0">T2</span>
+        <span class="lbl" style="position:absolute;left:196px;top:0;color:var(--run-ink)">T3 Running</span>
+        <span class="lbl m num" style="position:absolute;left:0;top:36px">00:00</span>
+        <span class="lbl m num" style="position:absolute;left:122px;top:36px">11:40</span>
+        <span class="lbl m num" style="position:absolute;left:196px;top:36px">18:02</span>
+        <span class="lbl num" style="position:absolute;right:0;top:36px">22:14</span>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid var(--hair);border-bottom:1px solid var(--hair)">
+      <div style="padding:7px 14px" class="col"><span class="lbl m">Input</span><span class="num">48.2k</span></div>
+      <div style="padding:7px 14px;border-left:1px solid var(--hair)" class="col"><span class="lbl m">Cached</span><span class="num">31.0k</span></div>
+      <div style="padding:7px 14px;border-left:1px solid var(--hair)" class="col"><span class="lbl m">Output</span><span class="num">2.9k</span></div>
+    </div>
+    <div class="lbl m" style="padding:5px 14px">Measured · completed turns only</div>
+    <div style="margin-top:auto"></div>
+    <div class="row sp" style="height:30px;padding:0 14px;border-top:1px solid var(--line)"><span class="lbl">Continue this session</span><span class="lbl m">Captured at launch</span></div>
+    <div class="policy">
+      <div><span class="lbl m">Harness</span><span style="font-size:12px">Codex</span></div>
+      <div><span class="lbl m">Implement</span><span style="font-size:12px">Allow</span></div>
+      <div><span class="lbl m">Scope</span><span style="font-size:12px">Project</span></div>
+      <div><span class="lbl m">Workers</span><span class="row" style="gap:6px"><span class="pips"><i class="r"></i><i class="f"></i><i></i><i></i></span></span></div>
+    </div>
+    <div class="prompt">Prompt for this turn…</div>
+    <div class="row sp" style="padding:10px 14px 14px"><span class="row" style="gap:6px"><span class="btn ghost">Attach</span><span class="btn ghost">Stop worker</span></span><span class="btn pri">Send / continue <span class="key">⏎</span></span></div>
+  </aside>
+</div>
+
+<script>for (const c of location.hash.slice(1).split(",").filter(Boolean)) document.body.classList.add(c)</script>
+</body></html>

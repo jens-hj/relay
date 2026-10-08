@@ -1,0 +1,175 @@
+@font-face { font-family: "Reddit Sans"; font-weight: 400; src: url("../../crates/relay-desktop/assets/fonts/RedditSans-Regular.ttf"); }
+@font-face { font-family: "Reddit Sans"; font-weight: 600; src: url("../../crates/relay-desktop/assets/fonts/RedditSans-SemiBold.ttf"); }
+@font-face { font-family: "Reddit Sans"; font-weight: 700; src: url("../../crates/relay-desktop/assets/fonts/RedditSans-Bold.ttf"); }
+@font-face { font-family: "Zed Mono"; font-weight: 400; src: url("../../crates/relay-desktop/assets/fonts/zed-mono-regular.ttf"); }
+@font-face { font-family: "Zed Mono"; font-weight: 700; src: url("../../crates/relay-desktop/assets/fonts/zed-mono-bold.ttf"); }
+
+/*
+  Themes. Default = soft (pastel, off-white / off-black). Add `hc` for high contrast.
+  Semantic roles:
+    signal  = waiting on you (approval, attention)     run = agent running
+    l1..l4  = issue label categories                    m1..m3 = usage meter series
+  `*-ink` is the stroke/text form of a role; `on-*` is text placed on its fill.
+*/
+:root {
+  --base: #E8E5DF;
+  --plate: #EFEDE8;
+  --ink: #33363B;
+  --ink-2: #62666D;
+  --mute: #8E9095;
+  --line: #55585E;
+  --hair: rgba(51, 54, 59, .16);
+  --guide: rgba(51, 54, 59, .11);
+  --inv: #F1EFEA;
+  --signal: #F2B8A0;
+  --signal-ink: #C46A4A;
+  --signal-soft: rgba(242, 184, 160, .38);
+  --on-signal: #3A2A24;
+  --run: #B5D6C3;
+  --run-ink: #4F8A6A;
+  --on-run: #23382C;
+  --l1: #D9D3EE; --l2: #CADDED; --l3: #D2E6D8; --l4: #EFE3B8;
+  --m1: #9FB4CC; --m2: #C9C2E3; --m3: #F2B8A0;
+}
+.dark {
+  --base: #1F2125;
+  --plate: #25282C;
+  --ink: #E2DFD8;
+  --ink-2: #A7A7A3;
+  --mute: #74767A;
+  --line: #75787D;
+  --hair: rgba(226, 223, 216, .13);
+  --guide: rgba(226, 223, 216, .07);
+  --inv: #1F2125;
+  --signal: #E8A78C;
+  --signal-ink: #EFB39A;
+  --signal-soft: rgba(232, 167, 140, .16);
+  --on-signal: #2A1D18;
+  --run: #9CC7AE;
+  --run-ink: #A7D3B9;
+  --on-run: #1B2A21;
+  --l1: rgba(190, 180, 235, .22); --l2: rgba(160, 196, 228, .22); --l3: rgba(160, 210, 180, .22); --l4: rgba(235, 215, 140, .22);
+  --m1: #8DA3BD; --m2: #B4ABD6; --m3: #E8A78C;
+}
+
+/* High contrast: the original ink-and-orange scheme */
+.hc {
+  --base: #E4E7EA;
+  --plate: #EDF0F2;
+  --ink: #15181D;
+  --ink-2: #4A535C;
+  --mute: #7D8790;
+  --line: #15181D;
+  --hair: rgba(21, 24, 29, .22);
+  --guide: rgba(21, 24, 29, .13);
+  --inv: #EDF0F2;
+  --signal: #FF4E00;
+  --signal-ink: #FF4E00;
+  --signal-soft: rgba(255, 78, 0, .12);
+  --on-signal: #fff;
+  --run: #FF4E00; --run-ink: #FF4E00; --on-run: #fff;
+  --l1: transparent; --l2: transparent; --l3: transparent; --l4: transparent;
+  --m1: #15181D; --m2: #9AA1A8; --m3: #FF4E00;
+}
+.hc.dark {
+  --base: #0D0E10;
+  --plate: #131518;
+  --ink: #E3E6E8;
+  --ink-2: #A9B0B6;
+  --mute: #6C747B;
+  --line: #E3E6E8;
+  --hair: rgba(227, 230, 232, .20);
+  --guide: rgba(227, 230, 232, .09);
+  --inv: #0D0E10;
+  --signal: #FF5A14;
+  --signal-ink: #FF5A14;
+  --signal-soft: rgba(255, 90, 20, .14);
+  --run: #FF5A14; --run-ink: #FF5A14;
+  --m1: #E3E6E8; --m2: #6C747B; --m3: #FF5A14;
+}
+.hc-only { display: none; }
+.hc .hc-only { display: inline; }
+.hc .soft-only { display: none; }
+
+* { box-sizing: border-box; margin: 0; padding: 0; border-radius: 0 !important; }
+html, body { width: 1600px; height: 1000px; overflow: hidden; }
+body {
+  background: var(--base); color: var(--ink);
+  font: 400 13px/1.35 "Reddit Sans", sans-serif;
+  position: relative;
+  -webkit-font-smoothing: antialiased;
+}
+.mono, .lbl, .tag, .key { font-family: "Zed Mono", monospace; }
+.lbl { font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-2); }
+.lbl.m { color: var(--mute); }
+.num { font-family: "Zed Mono", monospace; font-variant-numeric: tabular-nums; }
+.title { font-weight: 600; letter-spacing: -.01em; }
+
+/* construction layer: guides that show the layout's own grid */
+.guides { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
+.vg { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--guide); }
+.hg { position: absolute; left: 0; right: 0; height: 0; border-top: 1px dashed var(--guide); }
+.reg { position: absolute; width: 11px; height: 11px; transform: translate(-5px, -5px); z-index: 3; }
+.reg::before, .reg::after { content: ""; position: absolute; background: var(--ink); }
+.reg::before { left: 5px; top: 0; width: 1px; height: 11px; }
+.reg::after { top: 5px; left: 0; height: 1px; width: 11px; }
+
+/* frames */
+.frame { border: 1px solid var(--line); position: relative; background: var(--plate); }
+.hair { border: 1px solid var(--hair); }
+.rule { border-top: 1px solid var(--line); }
+.rule-h { border-top: 1px solid var(--hair); }
+.row { display: flex; align-items: center; }
+.col { display: flex; flex-direction: column; }
+.grow { flex: 1; min-width: 0; }
+.sp { justify-content: space-between; }
+
+/* label tag: inverted block carrying an identifier */
+.tag { display: inline-flex; align-items: center; height: 18px; padding: 0 6px; font-size: 10px; letter-spacing: .06em; background: var(--ink); color: var(--inv); text-transform: uppercase; white-space: nowrap; }
+.tag.o { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+.tag.s { background: var(--signal); color: var(--on-signal); }
+.tag.h { background: transparent; color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--hair); }
+.key { display: inline-flex; align-items: center; justify-content: center; min-width: 15px; height: 15px; padding: 0 3px; font-size: 9px; color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--hair); }
+
+/* buttons */
+.btn { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px; border: 1px solid var(--line); background: transparent; color: var(--ink); font: 600 12px "Reddit Sans"; white-space: nowrap; }
+.btn.pri { background: var(--ink); color: var(--inv); }
+.btn.sig { background: var(--signal); border-color: var(--signal-ink); color: var(--on-signal); }
+.btn.ghost { border-color: var(--hair); }
+.btn .key { box-shadow: inset 0 0 0 1px currentColor; color: inherit; opacity: .7; }
+
+/* segmented control: shared borders, selected = inverted */
+.seg { display: inline-flex; border: 1px solid var(--line); }
+.seg > * { height: 26px; padding: 0 10px; display: flex; align-items: center; gap: 6px; font: 400 10px "Zed Mono"; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); }
+.seg > * + * { border-left: 1px solid var(--line); }
+.seg > .on { background: var(--ink); color: var(--inv); }
+.seg > .sig { background: var(--signal); color: var(--on-signal); }
+
+/* status glyphs: one square, the fill encodes state */
+.g { display: inline-block; width: 10px; height: 10px; border: 1px solid var(--ink); position: relative; flex: none; background: transparent; }
+.g.run { border-color: var(--run-ink); background: linear-gradient(to top, var(--run-ink) 50%, transparent 50%); }
+.g.done { background: var(--ink); }
+.g.fail { border-color: var(--signal-ink); background: linear-gradient(45deg, transparent 45%, var(--signal-ink) 45%, var(--signal-ink) 55%, transparent 55%), linear-gradient(-45deg, transparent 45%, var(--signal-ink) 45%, var(--signal-ink) 55%, transparent 55%); }
+.g.stop::after { content: ""; position: absolute; left: 1px; right: 1px; top: 3px; height: 2px; background: var(--ink); }
+.g.int { background: linear-gradient(-45deg, transparent 44%, var(--ink) 44%, var(--ink) 58%, transparent 58%); }
+.g.fix { border-style: dotted; }
+.g.ask { border-color: var(--signal-ink); }
+.g.ask::after { content: ""; position: absolute; inset: 2px; background: var(--signal-ink); }
+
+/* capacity pips (worker slots) */
+.pips { display: inline-flex; gap: 2px; }
+.pips i { width: 6px; height: 10px; border: 1px solid var(--ink); display: block; }
+.pips i.f { background: var(--ink); }
+.pips i.r { background: var(--run); border-color: var(--run-ink); }
+
+/* hatching for disabled / unavailable */
+.hatch { background-image: repeating-linear-gradient(-45deg, var(--hair) 0 1px, transparent 1px 5px); }
+.dots { background-image: radial-gradient(var(--hair) 1px, transparent 1.2px); background-size: 8px 8px; }
+
+/* corner brackets: focus indicator */
+.focus { position: relative; }
+.focus::before, .focus::after { content: ""; position: absolute; width: 7px; height: 7px; border: 1.5px solid var(--signal-ink); }
+.focus::before { left: -4px; top: -4px; border-right: none; border-bottom: none; }
+.focus::after { right: -4px; bottom: -4px; border-left: none; border-top: none; }
+
+.ann { position: absolute; font: 400 9px "Zed Mono"; letter-spacing: .06em; color: var(--mute); text-transform: uppercase; z-index: 4; }

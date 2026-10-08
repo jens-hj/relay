@@ -302,6 +302,33 @@ fn sidebar_footer_stays_fixed_while_large_trees_scroll_and_scale() {
 }
 
 #[test]
+fn sidebar_server_details_expose_endpoint_quality_and_revision_meaning() {
+    let mounted = mount(false, 1380.0);
+    mounted
+        .model
+        .server_endpoint
+        .set("https://relay.example:7440/".into());
+    mounted.model.round_trip_ms.set(Some(42));
+
+    mounted.click("Server connection details");
+
+    for label in [
+        "Server connection details",
+        "Server address",
+        "Connection transport",
+        "Server protocol",
+        "Connection quality",
+        "Connection status",
+        "Revision meaning",
+    ] {
+        assert!(has_label(&mounted, label), "Missing details row: {label}");
+    }
+    assert_eq!(mounted.model.round_trip_ms.get_untracked(), Some(42));
+    mounted.click("Server connection details");
+    assert!(!has_label(&mounted, "Server address"));
+}
+
+#[test]
 fn approval_control_scales_with_its_label_and_keeps_the_existing_approval() {
     let mounted = mount(false, 1380.0);
     mounted.model.receive(NetworkState {
