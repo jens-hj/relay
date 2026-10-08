@@ -739,10 +739,9 @@ pub fn Conversation(model: Model) -> Element {
                             disabled:{!model.connected.get() || model.busy.get()} "Stop"
                     }
                 }
-                col #relay.cell width:max-content
-                    stroke:(width:{px(1.0)} color:rule.line edges:left) {
-                    button #relay.icon-action @click:{menu.set(!menu.get_untracked());}
-                        label:"Session actions" {
+                row width:max-content stroke:(width:{px(1.0)} color:rule.line edges:left) {
+                    button #relay.header-action @click:{menu.set(!menu.get_untracked());}
+                        width:{px(56.0)}px pad:0px label:"Session actions" {
                         icon size:{px(16.0)}px more-icon
                     }
                 }

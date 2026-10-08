@@ -26,18 +26,25 @@ pub(crate) fn PageHeader(
                 }
             }
             children
-            button #relay.header-action @click:{ model.palette.set(true); }
-                width:{if compact.get() {Dimension::Px(px(56.0))} else {Dimension::MaxContent}}
-                gap:{px(10.0)}px label:"Open command palette" {
-                if compact.get() {
-                    icon size:{px(16.0)}px command-icon
-                }
-                if !compact.get() {
-                    text "Commands"
-                    row #relay.caption height:min-content width:max-content {
-                        text
-                            {String::from(if cfg!(target_os = "macos") { "⌘K" } else { "Ctrl K" })}
-                    }
+            CommandPaletteButton model:(model) compact:(compact)
+        }
+    }
+}
+
+/// The shared command palette entry, including the platform shortcut.
+#[component]
+pub(crate) fn CommandPaletteButton(model: Model, compact: Derived<bool>) -> Element {
+    view! {
+        button #relay.header-action @click:{ model.palette.set(true); }
+            width:{if compact.get() {Dimension::Px(px(56.0))} else {Dimension::MaxContent}}
+            gap:{px(10.0)}px label:"Open command palette" {
+            if compact.get() {
+                icon size:{px(16.0)}px command-icon
+            }
+            if !compact.get() {
+                text "Commands"
+                row #relay.caption height:min-content width:max-content {
+                    text {String::from(if cfg!(target_os = "macos") { "⌘K" } else { "Ctrl K" })}
                 }
             }
         }
@@ -69,7 +76,11 @@ pub(crate) fn HeaderCell(
 
 /// A framed form module: a 30px caps head, then padded content.
 #[component]
-pub(crate) fn Module(title: String, #[prop(optional)] children: Children) -> Element {
+pub(crate) fn Module(
+    title: String,
+    #[prop(default = false)] flush: bool,
+    #[prop(optional)] children: Children,
+) -> Element {
     view! {
         col #relay.module max-width:{px(760.0)}px {
             row #relay.module-head {
@@ -77,7 +88,8 @@ pub(crate) fn Module(title: String, #[prop(optional)] children: Children) -> Ele
                     text text-transform:uppercase letter-spacing:{px(0.6)}px (title.clone())
                 }
             }
-            col height:min-content gap:{px(10.0)}px pad:{px(12.0)}px {
+            col height:min-content gap:{px(if flush {0.0} else {10.0})}px
+                pad:{px(if flush {0.0} else {12.0})}px {
                 children
             }
         }

@@ -216,29 +216,36 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
         });
     }
     let select: crate::labels::Select = std::rc::Rc::new(move |slot| kind.set(slot));
+    let picker_width = State::new(0.0f32);
     view! {
-        col height:min-content gap:{px(8.0)}px max-width:{px(640.0)}px {
-            row height:{px(34.0)}px {
-                scroll width:max-content {
+        col height:min-content gap:0px {
+            row height:{px(34.0)}px @layout:{move |rect:Rect| picker_width.set(rect.size.width)} {
+                scroll width:fill {
                     SlidingSegments name:("Connection type".to_string())
                         options:(vec!["Repository".into(),"Directory".into(),"GitHub board".into(),"GitLab board".into()])
                         index:(Derived::new(move || kind.get())) select:(select)
                         attention-slot:(None) cell-width:(112.0) disabled:(Derived::new(||false))
-                }
+                        fill-width:true
+                } as picker_scroll
+                { picker_scroll.content().style_dyn(move || Style::column().width(picker_width.get().max(px(448.0))).height(px(34.0)).shrink(0.0)); }
             }
-            input #relay.field label:"Connection address"
+            input #relay.field width:fill label:"Connection address"
                 placeholder:{match kind.get(){0=>"Repository URL or SSH remote",1=>"Absolute directory on server",2=>"GitHub user or organization",_=>"GitLab project or group path"}}
                 address
             if kind.get() == 3 {
-                input #relay.field label:"GitLab host" host
-                button #relay.action @click:{group.set(!group.get_untracked());}
+                input #relay.field width:fill label:"GitLab host" host
+                button #relay.action @click:{group.set(!group.get_untracked());} width:fill
+                    focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
                     {if group.get(){"Group board"}else{"Project board"}}
             }
             if kind.get() >= 2 {
-                input #relay.field label:"Board number" placeholder:"Existing board number" number
+                input #relay.field width:fill label:"Board number"
+                    placeholder:"Existing board number" number
             }
-            text font-size:{px(12.0)}px font-color:{color(ink.muted)}
-                {if kind.get()==0 {"Repositories are cloned by the server."} else if kind.get()==1 {"Directory access follows the session execution mode."} else {"Connect an existing remote board."}}
+            row #relay.caption height:min-content pad:{px(12.0)}px {
+                text
+                    {if kind.get()==0 {"Repositories are cloned by the server."} else if kind.get()==1 {"Directory access follows the session execution mode."} else {"Connect an existing remote board."}}
+            }
             button #relay.action
                 @click:{
                     let address = address.get_untracked().trim().to_owned();
@@ -250,8 +257,10 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
                     };
                     if let Some(connection)=connection {if initial {model.project_draft.update(|d|d.connections.push(connection));} else {model.action(Command::AddConnection{project_id:model.project.get_untracked(),connection});}} else {model.notice.set("Enter a valid connection address and existing board number.".into());}
                 }
-                label:"Add connection"
-                disabled:{!initial && (model.busy.get() || !model.connected.get())} "Add connection"
+                width:fill label:"Add connection"
+                disabled:{!initial && (model.busy.get() || !model.connected.get())}
+                focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+                "Add connection"
         }
     }
 }
@@ -309,7 +318,7 @@ fn Connections(model: Model) -> Element {
                     }
                 }
             }
-            Module title:("New connection".to_string()) {
+            Module title:("New connection".to_string()) flush:true {
                 ConnectionForm model:(model) initial:false
             }
             Operations model:(model)
@@ -859,19 +868,26 @@ fn Publish(model: Model) -> Element {
 }
 
 #[component]
-pub fn WorkspaceChoices(model: Model) -> Element {
+pub fn WorkspaceChoices(model: Model, #[prop(default = false)] flush: bool) -> Element {
     let open = State::new(false);
     view! {
-        col height:min-content gap:{px(6.0)}px {
+        col height:min-content gap:{px(if flush {0.0} else {6.0})}px {
             button #relay.action @click:{open.set(!open.get_untracked());}
-                label:"Choose session resources" "Workspace resources"
+                width:{if flush {Dimension::Fill} else {Dimension::MaxContent}}
+                label:"Choose session resources"
+                focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+                "Workspace resources"
             if open.get() {
-                text font-size:{px(12.0)}px font-color:ink.muted
-                    "Automatic selects all ready repositories and directories on the server. Selection is fixed for subsequent turns."
+                row #relay.caption height:min-content pad:{px(if flush {12.0} else {0.0})}px {
+                    text
+                        "Automatic selects all ready repositories and directories on the server. Selection is fixed for subsequent turns."
+                }
                 button #relay.action @click:{model.workspace_selection.set(None);}
+                    width:{if flush {Dimension::Fill} else {Dimension::MaxContent}}
                     fill:if model.workspace_selection.get().is_none() {ink.inverse} else {surface.panel}
                     font-color:{color(if model.workspace_selection.get().is_none() {ink.on_inverse} else {ink.fg})}
                     font-weight:{if model.workspace_selection.get().is_none() {700} else {400}}
+                    focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
                     hover {
                         fill:if model.workspace_selection.get().is_none() {ink.inverse} else {surface.raised}
                     }
@@ -884,10 +900,12 @@ pub fn WorkspaceChoices(model: Model) -> Element {
                     let name=State::new(connection.name.clone());
                     button #relay.action
                         @click:{let all=model.snapshot.get_untracked().connections.iter().filter(|c|c.project_id==model.project.get_untracked() && c.enabled && c.state==ConnectionState::Ready && !matches!(c.kind,ConnectionKind::Board{..})).map(|c|c.id.clone()).collect();model.workspace_selection.update(|selected|{let ids=selected.get_or_insert(all);if ids.contains(&id.get_untracked()){ids.retain(|c|c!=&id.get_untracked());}else{ids.push(id.get_untracked());}});}
+                        width:{if flush {Dimension::Fill} else {Dimension::MaxContent}}
                         label:{format!("Workspace resource {}",name.get())}
                         fill:if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {ink.inverse} else {surface.panel}
                         font-color:{color(if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {ink.on_inverse} else {ink.fg})}
                         font-weight:{if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {700} else {400}}
+                        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
                         hover {
                             fill:if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {ink.inverse} else {surface.raised}
                         }

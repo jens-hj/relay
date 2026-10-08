@@ -244,7 +244,7 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
                             }
                         }
                         row height:{px(32.0)}px align:center gap:{px(2.0)}px
-                            pad:(left:{px(4.0)}px) {
+                            pad:(left:{px(4.0)}px right:{px(4.0)}px) {
                             button #relay.tree-control
                                 @click:{model.select_project(id.get_untracked()); model.open_profile(EditTarget::New);}
                                 width:1fr shrink:1 gap:{px(6.0)}px

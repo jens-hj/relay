@@ -177,11 +177,9 @@ fn ProfileHeader(model: Model) -> Element {
                     }
                 }
             }
-            col width:max-content justify:center pad:(horizontal:{px(12.0)}px vertical:0px) {
-                button #relay.action @click:{model.palette.set(true);} width:{px(32.0)}px
-                    height:{px(32.0)}px pad:0px justify:center label:"Open command palette" {
-                    icon size:{px(15.0)}px command-icon
-                }
+            row width:max-content stroke:(width:{px(1.0)} color:rule.line edges:left) {
+                CommandPaletteButton model:(model)
+                    compact:(Derived::new(move || width.get() < px(400.0)))
             }
         }
     }
@@ -264,6 +262,7 @@ fn FieldHead(
     let wide = Derived::new(move || width.get() >= px(400.0));
     view! {
         grid #relay.module-head @layout:{move |rect:Rect| width.set(rect.size.width)}
+            content-align:(x:start y:center) items-align:(x:start y:center)
             height:{if wide.get() {px(30.0).into()} else {Dimension::MinContent}}
             pad:(horizontal:{px(12.0)}px vertical:{px(if wide.get() {0.0} else {8.0})}px)
             gap:{px(8.0)}px
@@ -455,19 +454,20 @@ pub(crate) fn ActionMatrix(model: Model) -> Element {
 fn ProfileToml(model: Model) -> Element {
     view! {
         col #relay.module {
-            row #relay.module-head gap:{px(6.0)}px {
-                row #relay.eyebrow height:min-content width:1fr {
+            row #relay.module-head gap:0px pad:0px {
+                row #relay.eyebrow height:min-content width:1fr
+                    pad:(horizontal:{px(12.0)}px vertical:0px) {
                     text text-transform:uppercase letter-spacing:{px(0.6)}px
                         "Effective profile · TOML"
                 }
-                button #relay.action
+                button #relay.header-action
                     @click:{
                         if !model.advanced.get_untracked() && model.toml.get_untracked().is_empty() {
                             model.toml.set(model.editor_profile.get_untracked().to_toml());
                         }
                         model.advanced.update(|open| *open = !*open);
                     }
-                    pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px) label:"Toggle profile TOML"
+                    stroke:(width:{px(1.0)} color:rule.line edges:left) label:"Toggle profile TOML"
                     {if model.advanced.get() {"Hide"} else {"Edit"}}
             }
             if model.advanced.get() {

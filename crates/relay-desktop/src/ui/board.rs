@@ -693,17 +693,12 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                                 }
                             }
                             if !anchored.get() {
-                                col height:min-content
-                                    pad:(horizontal:{px(14.0)}px vertical:{px(12.0)}px) {
-                                    WorkerForm model:(model) continuation:false
-                                }
+                                WorkerForm model:(model) continuation:false
                             }
                         }
                     }
                     if anchored.get() {
-                        col height:min-content shrink:0
-                            pad:(horizontal:{px(14.0)}px vertical:{px(12.0)}px)
-                            stroke:(width:{px(1.0)} color:rule.line edges:top) {
+                        col height:min-content shrink:0 {
                             WorkerForm model:(model) continuation:false
                         }
                     }
@@ -784,30 +779,33 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
             .unwrap_or_else(|| "Ready · server rechecks policy and revision".into())
     });
     view! {
-        col #relay.module min-width:0px label:"Worker setup"
+        col height:min-content min-width:0px fill:surface.panel
+            stroke:(width:{px(1.0)} color:rule.line edges:top) label:"Worker setup"
             @layout:{move |rect:Rect| width.set(rect.size.width)} {
-            grid #relay.module-head gap:{px(8.0)}px
-                cols:{GridTracks::new([GridTrack::fr(1.0),GridTrack::MaxContent])} {
-                row #relay.eyebrow height:min-content min-width:0px clip width:1fr {
+            row #relay.module-head gap:0px pad:0px {
+                row #relay.eyebrow height:min-content min-width:0px clip width:1fr
+                    pad:(horizontal:{px(12.0)}px vertical:0px) {
                     text text-wrap:none text-transform:uppercase letter-spacing:{px(0.6)}px
                         (if continuation { "Continue this session" } else { "Start task worker" })
                 }
                 if !continuation {
-                    button #relay.action @click:{ choosing.set(!choosing.get_untracked()); }
-                        shrink:0 pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
+                    button #relay.header-action @click:{ choosing.set(!choosing.get_untracked()); }
+                        stroke:(width:{px(1.0)} color:rule.line edges:left)
                         label:"Choose director and resources"
                         { if choosing.get() { "Done" } else { "Change" } }
                 }
             }
             if !continuation {
                 row #relay.caption height:min-content min-width:0px clip
-                    pad:(horizontal:{px(12.0)}px vertical:{px(6.0)}px) description:{setup.get()} {
+                    pad:(horizontal:{px(12.0)}px vertical:{px(6.0)}px)
+                    stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
+                    description:{setup.get()} {
                     text text-wrap:none {setup.get()}
                 }
             }
             BoundedPanel limit:(Derived::new(|| px(180.0))) {
                 if choosing.get() && !continuation {
-                    col height:min-content gap:{px(6.0)}px pad:{px(12.0)}px
+                    col height:min-content gap:0px
                         stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
                         for (_, director) in { model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
                             let id = State::new(director.id.clone());
@@ -818,7 +816,7 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
                                 stroke:(width:{px(if model.worker_director.get() == id.get() {3.0} else {1.0})} color:{color(if model.worker_director.get() == id.get() {ink.fg} else {rule.line})} edges:left)
                                 { model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| format!("Director: {}", d.name)).unwrap_or_default() }
                         }
-                        WorkspaceChoices model:(model)
+                        WorkspaceChoices model:(model) flush:true
                     }
                 }
                 if model.worker_profile(continuation).is_ok() {
@@ -839,20 +837,28 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
                     }
                 }
             }
-            col height:min-content gap:{px(10.0)}px pad:{px(12.0)}px {
-                input #relay.area multiline height:{px(92.0)}px label:"Worker prompt"
+            col height:min-content gap:0px {
+                input #relay.area multiline height:{px(92.0)}px label:"Worker prompt" width:fill
+                    stroke:(width:{px(1.0)} color:rule.line edges:bottom)
                     placeholder:"Prompt for this turn…" model.worker_prompt
                 if model.worker_profile(continuation).is_ok_and(|(p, _)| p.permissions.get(&Task::Implement) == Some(&Permission::Ask)) {
-                    WorkerApproval model:(model)
+                    row height:min-content pad:{px(12.0)}px
+                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                        WorkerApproval model:(model)
+                    }
                 }
-                grid height:min-content align:center gap:{px(12.0)}px
+                grid height:min-content align:center gap:0px
                     cols:{if compact.get() {GridTracks::new([GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0),GridTrack::MaxContent])}} {
-                    row #relay.caption width:1fr min-width:0px height:min-content {
+                    row #relay.caption width:1fr min-width:0px height:min-content pad:{px(12.0)}px {
                         text {gate_status.get()}
                     }
                     button #relay.primary @click:{ model.run_worker(continuation); }
+                        width:{if compact.get() {Dimension::Fill} else {Dimension::MaxContent}}
+                        height:fill
+                        stroke:(width:{px(1.0)} color:rule.line edges:if compact.get() {StrokeEdges::TOP} else {StrokeEdges::LEFT})
                         label:if continuation { "Send worker prompt" } else { "Start worker" }
                         disabled:{ model.worker_gate(continuation).is_err() }
+                        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
                         { if continuation { "Send / continue" } else { "Start worker" } }
                 }
             }
