@@ -2231,12 +2231,8 @@ fn reconciliation_has_no_retry_and_tracks_live_operation_state() {
             .iter()
             .any(|n| n.label.as_deref() == Some("Retry operation"))
     );
-    type_in(&mounted, "Confirmed provider result", "remote-item-42");
-    mounted.focus("Confirm provider result");
-    mounted.click("Confirm provider result");
-    assert!(
-        matches!(mounted.commands.try_recv().unwrap().command,Command::ReconcileOperation{operation_id,key,result} if operation_id=="publish-1" && key=="membership/issue-2" && result=="remote-item-42")
-    );
+    mounted.rect("This recovery step does not support URL lookup. Ask the server administrator to inspect the provider result before continuing.");
+    assert!(mounted.commands.try_recv().is_err());
     mounted
         .model
         .snapshot
@@ -2248,7 +2244,7 @@ fn reconciliation_has_no_retry_and_tracks_live_operation_state() {
             .inspection_snapshot()
             .nodes
             .iter()
-            .any(|n| n.label.as_deref() == Some("Confirm provider result"))
+            .any(|n| n.label.as_deref() == Some("Use this result and continue"))
     );
 }
 
@@ -2790,13 +2786,62 @@ fn board_reconciliation_accepts_a_url_and_builds_the_typed_result_for_the_pendin
             .iter()
             .any(|n| n.label.as_deref() == Some("Provider operation key"))
     );
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.recovery_requests.set(Some(sender));
     type_in(
         &mounted,
-        "Confirmed provider result",
+        "Created board or issue URL",
         "https://github.com/orgs/team/projects/9",
     );
-    mounted.focus("Confirm provider result");
-    mounted.click("Confirm provider result");
+    mounted.focus("Check result");
+    mounted.click("Check result");
+    let request = requests.try_recv().unwrap();
+    let result = ReconciliationResult {
+        key: "board".into(),
+        result: serde_json::to_string(&BoardSource::Github {
+            owner: "team".into(),
+            number: 9,
+            url: request.input.url.clone(),
+        })
+        .unwrap(),
+        description: "Found board Work in team".into(),
+    };
+    type_in(
+        &mounted,
+        "Created board or issue URL",
+        "https://github.com/orgs/team/projects/10",
+    );
+    mounted
+        .model
+        .recovery
+        .set(crate::project_network::RecoveryUpdate {
+            request: Some(request.clone()),
+            result: Some(Ok(result.clone())),
+        });
+    mounted.settle();
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Use this result and continue"))
+    );
+    type_in(&mounted, "Created board or issue URL", &request.input.url);
+    mounted.focus("Check result");
+    mounted.click("Check result");
+    let request = requests.try_recv().unwrap();
+    mounted
+        .model
+        .recovery
+        .set(crate::project_network::RecoveryUpdate {
+            request: Some(request),
+            result: Some(Ok(result)),
+        });
+    mounted.settle();
+    mounted.rect("Found board Work in team");
+    mounted.focus("Use this result and continue");
+    mounted.click("Use this result and continue");
     let Command::ReconcileOperation { key, result, .. } =
         mounted.commands.try_recv().unwrap().command
     else {

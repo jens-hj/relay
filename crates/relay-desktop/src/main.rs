@@ -51,6 +51,15 @@ fn main() -> Result<(), String> {
                 discovery_sender,
             )));
             Effect::new(move || model.discovery.set(discovery_updates.get()));
+            let (recovery_updates, recovery_sender) =
+                state_channel(project_network::RecoveryUpdate::default());
+            model
+                .recovery_requests
+                .set(Some(project_network::start_recovery(
+                    config.clone(),
+                    recovery_sender,
+                )));
+            Effect::new(move || model.recovery.set(recovery_updates.get()));
             let (buffer_updates, buffer_sender) = state_channel(buffer_network::Update::default());
             model
                 .buffer_requests

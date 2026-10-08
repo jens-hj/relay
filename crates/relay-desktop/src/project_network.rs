@@ -129,3 +129,131 @@ mod tests {
         server.join().unwrap();
     }
 }
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct RecoveryRequest {
+    pub input: relay_core::ReconciliationInput,
+    pub pending: String,
+    pub id: String,
+}
+#[derive(Clone, Default)]
+pub struct RecoveryUpdate {
+    pub request: Option<RecoveryRequest>,
+    pub result: Option<Result<relay_core::ReconciliationResult, String>>,
+}
+pub fn start_recovery(
+    config: Config,
+    sender: StateSender<RecoveryUpdate>,
+) -> mpsc::UnboundedSender<RecoveryRequest> {
+    let (requests, mut receiver) = mpsc::unbounded_channel::<RecoveryRequest>();
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let client = reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(5))
+                    .timeout(Duration::from_secs(30))
+                    .build()
+                    .unwrap();
+                while let Some(request) = receiver.recv().await {
+                    let result = recovery(&client, &config, &request.input).await;
+                    if sender
+                        .send(RecoveryUpdate {
+                            request: Some(request),
+                            result: Some(result),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+    });
+    requests
+}
+async fn recovery(
+    client: &reqwest::Client,
+    config: &Config,
+    input: &relay_core::ReconciliationInput,
+) -> Result<relay_core::ReconciliationResult, String> {
+    let response = client
+        .post(config.url("v1/operations/reconcile"))
+        .bearer_auth(&config.token)
+        .header("X-Relay-Protocol", "2")
+        .json(input)
+        .send()
+        .await
+        .map_err(|_| {
+            "Cannot check the provider result. Check the server connection and try again."
+                .to_owned()
+        })?;
+    if response.status().is_success() {
+        response
+            .json()
+            .await
+            .map_err(|_| "Server returned incompatible recovery metadata.".into())
+    } else {
+        let status = response.status();
+        Err(response
+            .json::<ApiError>()
+            .await
+            .map(|e| e.message)
+            .unwrap_or_else(|_| format!("Provider result lookup failed ({status})")))
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+    #[tokio::test]
+    async fn recovery_lookup_posts_authenticated_url_and_decodes_readable_result() {
+        let input = relay_core::ReconciliationInput {
+            operation_id: "op-1".into(),
+            url: "https://github.com/orgs/team/projects/9".into(),
+        };
+        let expected = serde_json::to_vec(&input).unwrap();
+        let result = relay_core::ReconciliationResult {
+            key: "board".into(),
+            result: "typed-provider-result".into(),
+            description: "Found board Work".into(),
+        };
+        let body = serde_json::to_string(&result).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            while !bytes.windows(expected.len()).any(|b| b == expected) {
+                let mut chunk = [0; 2048];
+                let count = socket.read(&mut chunk).unwrap();
+                assert_ne!(count, 0);
+                bytes.extend_from_slice(&chunk[..count]);
+            }
+            let request = String::from_utf8_lossy(&bytes).to_lowercase();
+            assert!(request.starts_with("post /v1/operations/reconcile "));
+            assert!(request.contains("authorization: bearer test"));
+            assert!(request.contains("x-relay-protocol: 2"));
+            write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+        });
+        let config = Config {
+            endpoint: reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
+            token: "test".into(),
+        };
+        assert_eq!(
+            recovery(&reqwest::Client::new(), &config, &input)
+                .await
+                .unwrap(),
+            result
+        );
+        server.join().unwrap();
+    }
+}

@@ -451,7 +451,41 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
             .cloned()
             .unwrap_or_default()
     });
-    let result = State::new(String::new());
+    let url = State::new(String::new());
+    let requested = State::new(None::<crate::project_network::RecoveryRequest>);
+    Effect::new(move || {
+        if requested.get().is_some_and(|r| {
+            r.input.url != url.get().trim()
+                || r.pending != key.get()
+                || operation.get().state != OperationState::NeedsReconciliation
+        }) {
+            requested.set(None);
+        }
+    });
+    let lookup = Derived::new(move || {
+        let update = model.recovery.get();
+        let request = requested.get()?;
+        if update.request.as_ref() != Some(&request)
+            || request.input.operation_id != id.get()
+            || request.input.url != url.get().trim()
+            || request.pending != key.get()
+            || operation.get().state != OperationState::NeedsReconciliation
+        {
+            return None;
+        }
+        update.result.map(|result| {
+            result.and_then(|result| {
+                if result.key != key.get()
+                    || result.result.is_empty()
+                    || result.description.trim().is_empty()
+                {
+                    Err("The recovery step changed. Check the result again.".into())
+                } else {
+                    Ok(result)
+                }
+            })
+        })
+    });
     view! {
         col height:min-content gap:{px(6.0)}px {
             text
@@ -469,15 +503,26 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
                     {reconciliation_instruction(&key.get())}
                 text font-size:{px(12.0)}px font-color:muted
                     {key.get().split_once('/').and_then(|(_,id)|model.snapshot.get().issues.into_iter().find(|i|i.id==id)).map(|i|format!("{}\n{}",i.title,i.reference.map(|r|r.url).or_else(||operation.get().results.get(&format!("issue/{}",i.id)).and_then(|json|serde_json::from_str::<IssueRef>(json).ok()).map(|r|r.url)).unwrap_or_default())).unwrap_or_default()}
-                if !key.get().starts_with("status/") && !key.get().starts_with("edit/") {
-                    input #input-field label:"Confirmed provider result"
-                        placeholder:{if key.get()=="board" || key.get().starts_with("issue/"){ "Confirmed destination or issue URL" }else{"Confirmed board item ID"}}
-                        result
+                if key.get()=="board" || key.get().starts_with("issue/") {
+                    input #input-field label:"Created board or issue URL" url
+                    button #action
+                        @click:{let request=crate::project_network::RecoveryRequest{input:ReconciliationInput{operation_id:id.get_untracked(),url:url.get_untracked().trim().into()},pending:key.get_untracked(),id:uuid::Uuid::new_v4().to_string()};requested.set(Some(request.clone()));model.recovery.set(crate::project_network::RecoveryUpdate{request:Some(request.clone()),result:None});if model.recovery_requests.get_untracked().is_none_or(|sender|sender.send(request.clone()).is_err()){model.recovery.set(crate::project_network::RecoveryUpdate{request:Some(request),result:Some(Err("Cannot check the provider result. Reconnect and try again.".into()))});}}
+                        disabled:{model.busy.get() || !model.connected.get() || url.get().trim().is_empty()}
+                        "Check result"
+                    if lookup.get().is_some() {
+                        text font-size:{px(12.0)}px
+                            {match lookup.get().unwrap(){Ok(result)=>result.description,Err(error)=>error}}
+                    }
+                    if lookup.get().is_some_and(|r|r.is_ok()) {
+                        button #action
+                            @click:{if let Some(Ok(result))=lookup.get_untracked(){model.action(Command::ReconcileOperation{operation_id:id.get_untracked(),key:result.key,result:result.result});requested.set(None);}}
+                            disabled:{model.busy.get() || !model.connected.get()}
+                            "Use this result and continue"
+                    }
+                } else {
+                    text font-size:{px(12.0)}px font-color:muted
+                        "This recovery step does not support URL lookup. Ask the server administrator to inspect the provider result before continuing."
                 }
-                button #action
-                    @click:{match reconciliation_result(&operation.get_untracked(),&key.get_untracked(),&result.get_untracked()){Ok(result)=>model.action(Command::ReconcileOperation{operation_id:id.get_untracked(),key:key.get_untracked(),result}),Err(error)=>model.notice.set(error)}}
-                    disabled:{model.busy.get() || !model.connected.get() || key.get().is_empty() || ((!key.get().starts_with("status/") && !key.get().starts_with("edit/")) && result.get().trim().is_empty())}
-                    "Confirm provider result"
             }
         }
     }
@@ -497,81 +542,6 @@ fn reconciliation_instruction(key: &str) -> &'static str {
     } else {
         "The server has not provided a recoverable step. Review the operation with the server administrator."
     }
-}
-
-fn reconciliation_result(
-    operation: &ProjectOperation,
-    key: &str,
-    input: &str,
-) -> Result<String, String> {
-    if key.starts_with("status/") || key.starts_with("edit/") {
-        return Ok("confirmed".into());
-    }
-    if key.starts_with("membership/") {
-        return if input.trim().is_empty() {
-            Err("Enter the confirmed board item ID.".into())
-        } else {
-            Ok(input.trim().into())
-        };
-    }
-    let url = reqwest::Url::parse(input.trim())
-        .map_err(|_| "Enter the confirmed provider URL.".to_owned())?;
-    if !matches!(url.scheme(), "https" | "http") {
-        return Err("Enter an HTTP or HTTPS provider URL.".into());
-    }
-    if key == "board" {
-        let OperationKind::Publish { target, .. } = &operation.kind else {
-            return Err("This operation has no publication destination.".into());
-        };
-        let number = url
-            .path_segments()
-            .and_then(|segments| segments.filter(|s| !s.is_empty()).next_back())
-            .and_then(|s| s.parse::<u64>().ok())
-            .filter(|n| *n > 0)
-            .ok_or("The destination URL must end in its board number.")?;
-        let mut source = target.source.clone();
-        match &mut source {
-            BoardSource::Github {
-                number: n, url: u, ..
-            }
-            | BoardSource::Gitlab {
-                number: n, url: u, ..
-            } => {
-                *n = number;
-                *u = url.to_string();
-            }
-            BoardSource::Local => return Err("Select a remote publication destination.".into()),
-        }
-        return serde_json::to_string(&source).map_err(|e| e.to_string());
-    }
-    if key.starts_with("issue/") {
-        let (repository, number, provider) =
-            if let Some((repo, number)) = url.path().rsplit_once("/-/issues/") {
-                (repo, number, Provider::Gitlab)
-            } else if url.host_str() == Some("github.com") {
-                let (repo, number) = url
-                    .path()
-                    .rsplit_once("/issues/")
-                    .ok_or("Enter the created GitHub issue URL.")?;
-                (repo, number, Provider::Github)
-            } else {
-                return Err("Enter the created GitHub or GitLab issue URL.".into());
-            };
-        let number = number
-            .trim_end_matches('/')
-            .parse::<u64>()
-            .ok()
-            .filter(|n| *n > 0)
-            .ok_or("The issue URL must include its issue number.")?;
-        return serde_json::to_string(&IssueRef {
-            provider,
-            repository: repository.trim_start_matches('/').into(),
-            number,
-            url: url.to_string(),
-        })
-        .map_err(|e| e.to_string());
-    }
-    Err("The server has not provided a supported reconciliation step.".into())
 }
 
 #[component]
