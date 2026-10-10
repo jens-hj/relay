@@ -6,7 +6,10 @@ use std::{collections::HashSet, process::Command};
 
 fn graphql(config: &RuntimeConfig, query: &str, variables: Value) -> Result<Value, Error> {
     let mut cmd = Command::new(&config.gh);
-    cmd.env_remove("RELAY_TOKEN");
+    cmd.env_remove("RELAY_TOKEN")
+        .env_remove("RELAY_TOKEN_FILE")
+        .env_remove("RELAY_SETUP_TOKEN_FILE")
+        .env_remove("CREDENTIALS_DIRECTORY");
     cmd.args(["api", "--hostname", "github.com", "graphql", "-f"])
         .arg(format!("query={query}"));
     for (key, value) in variables.as_object().unwrap() {

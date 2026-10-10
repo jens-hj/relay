@@ -1,6 +1,7 @@
 use crate::network::Config;
 use mosaic::prelude::StateSender;
 use relay_core::{ApiError, BoardDiscovery, BoardSource};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -10,6 +11,7 @@ pub struct DiscoveryUpdate {
     pub result: Option<Result<BoardDiscovery, String>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start(
     config: Config,
     sender: StateSender<DiscoveryUpdate>,
@@ -43,6 +45,7 @@ pub fn start(
     requests
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn discover(
     client: &reqwest::Client,
     config: &Config,
@@ -73,7 +76,7 @@ async fn discover(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use std::{
@@ -141,6 +144,7 @@ pub struct RecoveryUpdate {
     pub request: Option<RecoveryRequest>,
     pub result: Option<Result<relay_core::ReconciliationResult, String>>,
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start_recovery(
     config: Config,
     sender: StateSender<RecoveryUpdate>,
@@ -173,6 +177,7 @@ pub fn start_recovery(
     });
     requests
 }
+#[cfg(not(target_arch = "wasm32"))]
 async fn recovery(
     client: &reqwest::Client,
     config: &Config,
@@ -204,7 +209,7 @@ async fn recovery(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod recovery_tests {
     use super::*;
     use std::{
@@ -257,3 +262,9 @@ mod recovery_tests {
         server.join().unwrap();
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+#[path = "project_network_web.rs"]
+mod web;
+#[cfg(target_arch = "wasm32")]
+pub use web::*;

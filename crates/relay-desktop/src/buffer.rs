@@ -1,14 +1,17 @@
+use crate::platform::Instant;
 use crate::{
     buffer_network::{Outcome, Request, Update},
     model::{Model, Saved},
 };
 use relay_core::*;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[derive(Clone)]
@@ -55,6 +58,7 @@ pub struct BufferState {
     pub initialized: bool,
     pub connected: bool,
     pub serial: u64,
+    #[cfg(not(target_arch = "wasm32"))]
     pub journal: Option<PathBuf>,
     pub approval_needed: bool,
     pub promote_after_ack: BTreeMap<String, String>,
@@ -70,6 +74,7 @@ struct JournalDocument {
     editing_queue: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_journal(model: Model, settings: &Path, config: &crate::network::Config) {
     use std::hash::{Hash, Hasher};
     let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -141,6 +146,7 @@ pub fn load_journal(model: Model, settings: &Path, config: &crate::network::Conf
     model.buffer.set(state);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn journal(state: &BufferState) -> Result<(), String> {
     let Some(path) = &state.journal else {
         return Ok(());
@@ -270,6 +276,9 @@ fn journal(state: &BufferState) -> Result<(), String> {
 }
 
 fn commit(model: Model, state: BufferState) {
+    #[cfg(target_arch = "wasm32")]
+    persist_browser(model, &state);
+    #[cfg(not(target_arch = "wasm32"))]
     if let Err(error) = journal(&state) {
         model.notice.set(error);
     }
@@ -389,7 +398,70 @@ pub fn promote(model: Model, id: &str) {
     );
 }
 
+fn send_first(model: Model) {
+    let session_id = model.session.get_untracked();
+    let state = model.buffer.get_untracked();
+    let parts = parts(model, &session_id);
+    if !has_content(&parts) || model.busy.get_untracked() || model.can_retry() {
+        return;
+    }
+    if !model.connected.get_untracked() {
+        model
+            .notice
+            .set("Reconnect before sending. Your draft is retained.".into());
+        return;
+    }
+    if assets(&parts)
+        .iter()
+        .any(|a| state.uploads.contains_key(&a.id) || state.failed_uploads.contains(&a.id))
+    {
+        model
+            .notice
+            .set("Wait for inline files to finish uploading before sending".into());
+        return;
+    }
+    if let Err(error) = validate_parts(&model.snapshot.get_untracked(), &session_id, &parts) {
+        model.notice.set(error);
+        return;
+    }
+    model.submit(
+        Command::StartDirector {
+            director_id: model.worker_director.get_untracked(),
+            prompt: plain_text(&parts),
+            parts: parts.clone(),
+            approve_implementation: false,
+        },
+        model.snapshot.get_untracked().revision,
+        Saved::DirectorStart {
+            draft: Draft {
+                session_id,
+                revision: 0,
+                parts,
+            },
+        },
+    );
+}
+
+pub fn acknowledge_first(model: Model, submitted: &Draft, session: &str) {
+    let mut state = model.buffer.get_untracked();
+    if let Some(mut doc) = state.documents.remove(&submitted.session_id) {
+        if doc.parts == submitted.parts {
+            doc.parts.clear();
+        }
+        doc.remote = Draft {
+            session_id: session.into(),
+            ..Default::default()
+        };
+        state.documents.insert(session.into(), doc);
+    }
+    commit(model, state);
+}
+
 pub fn send(model: Model) {
+    if model.page.get_untracked() == crate::model::Page::DirectorStart {
+        send_first(model);
+        return;
+    }
     let session_id = model.session.get_untracked();
     let mut state = model.buffer.get_untracked();
     let snapshot = model.snapshot.get_untracked();
@@ -694,6 +766,9 @@ pub fn flush(model: Model) {
     let mut changed = false;
     let mut submit = None;
     for (session, doc) in &mut state.documents {
+        if session.starts_with("director-draft-") {
+            continue;
+        }
         if doc.conflict || !doc.error.is_empty() || doc.submitting || doc.saving.is_some() {
             continue;
         }
@@ -913,6 +988,7 @@ pub fn insert_asset(
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn paste(model: Model) -> Result<Vec<Part>, String> {
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(clipboard) => clipboard,
@@ -1015,4 +1091,142 @@ pub fn paste(model: Model) -> Result<Vec<Part>, String> {
             .or_else(|| model.ui.get_untracked().clipboard_text())
             .ok_or("Clipboard has no text, image, or files")?,
     )])
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize, Deserialize)]
+struct BrowserJournal {
+    documents: BTreeMap<String, JournalDocument>,
+    blobs: BTreeMap<String, Vec<u8>>,
+}
+#[cfg(target_arch = "wasm32")]
+pub fn load_journal(model: Model, _settings: &Path, _config: &crate::network::Config) {
+    let source = crate::browser::recovered();
+    if source.is_empty() {
+        return;
+    }
+    match serde_json::from_str::<BrowserJournal>(&source) {
+        Ok(journal) => {
+            let mut state = model.buffer.get_untracked();
+            for (session, record) in journal.documents {
+                let mut doc = Document::new(record.remote);
+                doc.parts = record.parts;
+                doc.recovery = record.recovery;
+                doc.saving = record.saving;
+                doc.editing_queue = record.editing_queue;
+                if doc.saving.is_some() {
+                    doc.error =
+                        "Recovered save awaiting confirmation; retry preserves its original ID"
+                            .into();
+                }
+                state.documents.insert(session, doc);
+            }
+            state.blobs = journal
+                .blobs
+                .into_iter()
+                .filter(|(_, bytes)| bytes.len() <= ASSET_LIMIT)
+                .map(|(id, bytes)| (id, Arc::new(bytes)))
+                .collect();
+            let referenced = state
+                .documents
+                .values()
+                .flat_map(|doc| {
+                    assets(&doc.parts)
+                        .into_iter()
+                        .chain(assets(&doc.remote.parts))
+                        .chain(doc.recovery.iter().flat_map(|p| assets(p)))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for asset in referenced {
+                if uuid::Uuid::parse_str(&asset.id).is_err() {
+                    continue;
+                }
+                if let Some(bytes) = state.blobs.get(&asset.id)
+                    && bytes.len() as u64 == asset.size
+                {
+                    state.uploads.insert(asset.id.clone(), asset.clone());
+                    // Immutable uploads may be retried; execution commands are never replayed.
+                    if let Some(requests) = model.buffer_requests.get_untracked() {
+                        let _ = requests.send(Request::Upload {
+                            asset,
+                            bytes: bytes.clone(),
+                        });
+                    }
+                }
+            }
+            model.buffer.set(state);
+        }
+        Err(_) => model
+            .notice
+            .set("Cannot read recovered drafts; the IndexedDB record was preserved".into()),
+    }
+}
+#[cfg(target_arch = "wasm32")]
+fn persist_browser(model: Model, state: &BufferState) {
+    let documents = state
+        .documents
+        .iter()
+        .map(|(id, doc)| {
+            let mut recovery = doc.recovery.clone();
+            if let Some(parts) = &doc.finalize {
+                recovery.push(parts.clone());
+            }
+            if doc.submitting && !doc.remote.parts.is_empty() {
+                recovery.push(doc.remote.parts.clone());
+            }
+            (
+                id.clone(),
+                JournalDocument {
+                    remote: doc.remote.clone(),
+                    parts: doc.parts.clone(),
+                    recovery,
+                    saving: doc.saving.clone(),
+                    editing_queue: doc.editing_queue.clone(),
+                },
+            )
+        })
+        .collect();
+    let referenced = state
+        .documents
+        .values()
+        .flat_map(|doc| {
+            assets(&doc.parts)
+                .into_iter()
+                .chain(assets(&doc.remote.parts))
+                .chain(doc.recovery.iter().flat_map(|p| assets(p)))
+                .chain(doc.finalize.iter().flat_map(|p| assets(p)))
+        })
+        .map(|asset| asset.id.clone())
+        .chain(state.uploads.keys().cloned())
+        .collect::<BTreeSet<_>>();
+    let blobs = state
+        .blobs
+        .iter()
+        .filter(|(id, _)| referenced.contains(*id))
+        .map(|(id, bytes)| (id.clone(), bytes.as_ref().clone()))
+        .collect();
+    match serde_json::to_string(&BrowserJournal { documents, blobs }) {
+        Ok(source) => crate::browser::persist(source, model),
+        Err(_) => model
+            .notice
+            .set("Cannot encode browser draft recovery".into()),
+    }
+}
+#[cfg(target_arch = "wasm32")]
+pub fn paste(model: Model) -> Result<Vec<Part>, String> {
+    model
+        .ui
+        .get_untracked()
+        .clipboard_text()
+        .map(|text| vec![Part::text(text)])
+        .ok_or_else(|| "Use the browser Paste action or choose files".into())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn validate_browser_recovery(source: &str) -> Result<(), String> {
+    if source.is_empty() {
+        return Ok(());
+    }
+    serde_json::from_str::<BrowserJournal>(source).map(|_|()).map_err(|_| "Cannot read browser draft recovery. The IndexedDB record was preserved; restore or back it up before restarting Relay.".into())
 }

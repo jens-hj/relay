@@ -1,4 +1,5 @@
 use super::*;
+use crate::window_chrome::{WindowControls, WindowControlsProps};
 
 /// The seven profile fields a director can override, each as a whole.
 const OVERRIDE_FIELDS: usize = 7;
@@ -44,10 +45,11 @@ pub(crate) fn Profiles(model: Model) -> Element {
     let gutter = Derived::new(move || px(if wide.get() { 40.0 } else { 20.0 }));
     view! {
         col width:1fr gap:0px @layout:{move |rect: Rect| width.set(rect.size.width)} {
+            ProfileHeader model:(model)
+            Notice model:(model)
             scroll {
                 col height:min-content gap:{px(24.0)}px
                     pad:(left:{gutter.get()}px right:{gutter.get()}px top:{px(28.0)}px bottom:{px(24.0)}px) {
-                    ProfileHeader model:(model)
                     Inheritance model:(model)
                     // One grid for both layouts: the track template changes with the
                     // width, the controls themselves are never rebuilt.
@@ -89,7 +91,7 @@ pub(crate) fn Profiles(model: Model) -> Element {
 #[component]
 fn ProfileHeader(model: Model) -> Element {
     let width = State::new(0.0f32);
-    let readings = Derived::new(move || width.get() >= px(760.0));
+    let readings = Derived::new(move || width.get() >= px(856.0));
     let defaults = Derived::new(move || model.editor.get() == EditTarget::Defaults);
     let director = Derived::new(move || match model.editor.get() {
         EditTarget::Director(id) => Some(id),
@@ -136,14 +138,17 @@ fn ProfileHeader(model: Model) -> Element {
         format!("{count:02}")
     });
     view! {
-        row #relay.module height:{px(74.0)}px shrink:0 label:"Profile header"
+        row #relay.strip height:{px(74.0)}px shrink:0 label:"Profile header"
+            @pointer:{move |event, ctx| crate::window_chrome::drag_header(model, event, ctx)}
             @layout:{move |rect:Rect| width.set(rect.size.width)} {
-            stack width:{px(74.0)}px shrink:0 align:center justify:center fill:ink.inverse {
+            NavigationButton model:(model)
+            stack width:{px(if width.get() < px(600.0) {36.0} else {74.0})}px shrink:0 align:center
+                justify:center fill:ink.inverse {
                 DirectorMark size:(22.0) active:(Derived::new(move || capacity.get().1 > 0))
                     inverse:(Derived::new(|| true)) defaults:(defaults)
             }
             col width:1fr min-width:0px justify:center gap:{px(4.0)}px
-                pad:(horizontal:{px(16.0)}px vertical:0px) {
+                pad:(horizontal:{px(if width.get() < px(600.0) {8.0} else {16.0})}px vertical:0px) {
                 row #relay.eyebrow height:min-content {
                     text text-transform:{TextTransform::Uppercase} letter-spacing:{px(0.6)}px
                         {kind.get()}
@@ -183,8 +188,9 @@ fn ProfileHeader(model: Model) -> Element {
             }
             row width:max-content stroke:(width:{px(1.0)} color:rule.line edges:left) {
                 CommandPaletteButton model:(model)
-                    compact:(Derived::new(move || width.get() < px(400.0)))
+                    compact:(Derived::new(move || width.get() < px(600.0)))
             }
+            WindowControls model:(model)
         }
     }
 }

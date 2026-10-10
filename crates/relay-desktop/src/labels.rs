@@ -244,12 +244,6 @@ pub fn StatusGlyph(
             align:center justify:center
             fill:{if state.get() == RunState::Completed {tone(ink.fg)} else {Color::TRANSPARENT}}
             stroke:(width:{px(1.0)} color:{tone(frame())} offset:{px(-0.5)}) {
-            if state.get() == RunState::Running {
-                col {
-                    el width:fill height:1fr {}
-                    el width:fill height:1fr fill:{tone(run.text)} {}
-                }
-            }
             if state.get() == RunState::Waiting {
                 el width:{px(5.0)}px height:{px(5.0)}px fill:{tone(attention.text)} {}
             }
@@ -271,6 +265,27 @@ pub fn StatusGlyph(
             }
         }
     };
+    // Mosaic rotates each visual, rather than its descendants. Paint the
+    // half fill about the same center as the rotating outline.
+    view.paint(move |ctx| {
+        if state.get() == RunState::Running {
+            let half = ctx.rect.size.width * 0.5;
+            ctx.scene.shape(
+                mosaic::render::Shape::new(ctx.rect)
+                    .path(
+                        vec![
+                            Vector2::new(-half, 0.0),
+                            Vector2::new(half, 0.0),
+                            Vector2::new(half, half),
+                            Vector2::new(-half, half),
+                        ],
+                        true,
+                    )
+                    .fill(tone(run.text))
+                    .rotation(ctx.rotation),
+            );
+        }
+    });
     activity_rotation(
         &view,
         Derived::new(move || state.get() == RunState::Running),
@@ -497,6 +512,43 @@ pub fn director_capacity(
 mod activity_tests {
     use super::*;
     use mosaic::core::reactive::flush;
+    #[test]
+    fn running_outline_and_half_fill_share_the_same_rotating_center() {
+        mosaic::core::builtins::install();
+        install_theme(&crate::theme::palette(false));
+        let scope = Scope::new(|| {});
+        let (ui, root) = scope.run(|| {
+            let ui = Ui::new();
+            let _ambient = ui.enter();
+            let root = view! {
+                StatusGlyph state:(Derived::new(|| RunState::Running))
+                    inverse:(Derived::new(|| false))
+            };
+            ui.mount(&root);
+            (ui, root)
+        });
+        flush();
+        ui.frame(Size::new(100.0, 100.0), 1.0);
+        ui.tick(std::time::Duration::from_millis(600));
+        flush();
+        ui.frame(Size::new(100.0, 100.0), 1.0);
+        let scene = ui.scene();
+        let shapes = scene
+            .cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                mosaic::render::PaintCmd::Shape(shape) if shape.rect == root.layout_rect() => {
+                    Some(shape)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(shapes.len(), 2);
+        assert!(shapes[0].rotation > 0.0);
+        assert_eq!(shapes[0].rotation, shapes[1].rotation);
+        drop(scene);
+        scope.dispose();
+    }
     #[test]
     fn running_animation_stops_resets_and_restarts_without_duplicate_drivers() {
         let scope = Scope::new(|| {});

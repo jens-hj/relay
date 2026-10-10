@@ -25,7 +25,8 @@ mosaic::scheme! {
         harness-codex:Svg, harness-claude:Svg, harness-ready:Svg, harness-warning:Svg,
         harness-failed:Svg, harness-neutral:Svg,
         director-icon:Svg, worker-icon:Svg, gear-icon:Svg, plus-icon:Svg, sliders-icon:Svg,
-        command-icon:Svg, more-icon:Svg, connections-icon:Svg, reset-icon:Svg,
+        window-minimize:Svg, window-maximize:Svg, window-close:Svg,
+        command-icon:Svg, more-icon:Svg, connections-icon:Svg, reset-icon:Svg, navigation-icon:Svg,
     }
 }
 
@@ -38,7 +39,8 @@ pub fn icons() -> RelayIcons {
         harness-ready:"assets/icons/harness-ready.svg", harness-warning:"assets/icons/harness-warning.svg",
         harness-failed:"assets/icons/harness-failed.svg", harness-neutral:"assets/icons/harness-neutral.svg",
         plus-icon:"assets/icons/plus.svg", sliders-icon:"assets/icons/sliders.svg",
-        command-icon:"assets/icons/command.svg", more-icon:"assets/icons/more.svg", connections-icon:"assets/icons/connections.svg", reset-icon:"assets/icons/reset.svg",
+        window-minimize:"assets/icons/window-minimize.svg", window-maximize:"assets/icons/window-maximize.svg", window-close:"assets/icons/window-close.svg",
+        command-icon:"assets/icons/command.svg", more-icon:"assets/icons/more.svg", connections-icon:"assets/icons/connections.svg", reset-icon:"assets/icons/reset.svg", navigation-icon:"assets/icons/navigation.svg",
     } }
 }
 /// The six palettes a user can select: two soft families per mode plus the

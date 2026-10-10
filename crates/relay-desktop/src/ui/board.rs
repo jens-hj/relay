@@ -1,5 +1,6 @@
 use super::*;
 use crate::panels::{BoundedPanel, BoundedPanelProps};
+use crate::window_chrome::{WindowControls, WindowControlsProps};
 use std::{cell::RefCell, rc::Rc};
 
 /// Whether a project is the read-only demo fixture.
@@ -128,7 +129,7 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
     let disclosure_limit = Derived::new(move || (height.get() - px(90.0)).max(0.0) * 0.5);
     // Full header cells need room; below this the source, sync and board
     // choice move into the Board actions menu.
-    let full = Derived::new(move || width.get() >= px(960.0));
+    let full = Derived::new(move || width.get() >= px(1056.0));
     let stacked = Derived::new(move || narrow.get() || width.get() < px(620.0));
     let creating = State::new(false);
     let managing = State::new(false);
@@ -187,15 +188,22 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                                 @click:{creating.set(!creating.get_untracked());}
                                 fill:{color(ink.inverse)} font-color:{color(ink.on_inverse)}
                                 font-weight:700 label:"New task"
+                                width:{if width.get() < px(620.0) {Dimension::Px(px(36.0))} else {Dimension::MaxContent}}
+                                pad:(horizontal:{px(if width.get() < px(620.0) {0.0} else {16.0})}px vertical:0px)
                                 hover { fill:{color(ink.inverse_hover)} }
                                 pressed { fill:{color(ink.inverse_pressed)} } {
-                                text font-weight:{700} font-color:{color(ink.on_inverse)} "New task"
+                                if width.get() < px(620.0) {
+                                    icon size:{px(16.0)}px stroke:ink.on-inverse plus-icon
+                                } else {
+                                    text font-weight:{700} font-color:{color(ink.on_inverse)}
+                                        "New task"
+                                }
                             }
                         }
                     }
                     row width:max-content {
                         button #relay.header-action @click:{menu.set(!menu.get_untracked());}
-                            width:{px(56.0)}px pad:0px label:"Board actions" {
+                            width:{px(36.0)}px pad:0px label:"Board actions" {
                             icon size:{px(16.0)}px more-icon
                         } as menu_trigger
                         { *trigger_slot.borrow_mut() = Some(menu_trigger.clone()); }
@@ -242,6 +250,9 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                     } as menu_anchor
                     { bind_menu(model, menu, &menu_anchor, trigger_slot.clone()); }
                 }
+            }
+            if model.issue.get().is_none() {
+                Notice model:(model)
             }
             BoundedPanel limit:(disclosure_limit) {
                 if board_error(model).is_some() {
@@ -565,6 +576,8 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
     // A tall inspector keeps the worker setup anchored at the bottom; a short
     // one (small window, large scale) scrolls it with the details.
     let height = State::new(0.0f32);
+    let detail_width = State::new(0.0f32);
+    let compact_header = Derived::new(move || detail_width.get() < px(500.0));
     let anchored = Derived::new(move || height.get() >= px(760.0));
     let issue = Derived::new(move || {
         model
@@ -577,17 +590,25 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
     view! {
         col width:{if full {Dimension::Fill} else {Dimension::Px(px(392.0))}} min-width:0px shrink:1
             fill:surface.panel stroke:(width:{px(1.0)} color:rule.line edges:left)
-            @layout:{move |rect: Rect| height.set(rect.size.height)} label:"Issue details" {
+            @layout:{move |rect: Rect| {height.set(rect.size.height);detail_width.set(rect.size.width);}}
+            label:"Issue details" {
             if issue.get().is_none() {
-                row #relay.strip height:{px(56.0)}px shrink:0 align:center {
+                row #relay.strip height:{px(56.0)}px shrink:0 align:center
+                    label:"Issue unavailable header"
+                    @pointer:{move |event, ctx| crate::window_chrome::drag_header(model, event, ctx)} {
+                    NavigationButton model:(model)
                     row #relay.caption height:min-content width:1fr
                         pad:(horizontal:{px(14.0)}px vertical:0px) {
                         text "Issue unavailable"
                     }
                     button #relay.header-action @click:{ model.issue.set(None); }
                         stroke:(width:{px(1.0)} color:rule.line edges:left)
-                        label:"Close issue details" "Close"
+                        label:"Close issue details" width:{px(36.0)}px pad:0px {
+                        icon size:{px(13.0)}px window-close
+                    }
+                    WindowControls model:(model)
                 }
+                Notice model:(model)
             }
             for (_, detail) in { issue.get().into_iter().map(|i| (i.id.clone(), i)) } {
                 let detail_id = State::new(detail.id.clone());
@@ -596,20 +617,24 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                 let fixture = Derived::new(move || model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture));
                 col min-width:0px gap:0px {
                     row height:min-content shrink:0
-                        stroke:(width:{px(1.0)} color:rule.line edges:bottom) label:"Issue header" {
-                        col #relay.id-label width:{px(74.0)}px min-height:{px(92.0)}px shrink:0
-                            align:center justify:center fill:ink.inverse font-size:{px(24.0)}px {
+                        stroke:(width:{px(1.0)} color:rule.line edges:bottom) label:"Issue header"
+                        @pointer:{move |event, ctx| crate::window_chrome::drag_header(model, event, ctx)} {
+                        NavigationButton model:(model)
+                        col #relay.id-label width:{px(if compact_header.get() {36.0} else {74.0})}px
+                            min-height:{px(92.0)}px shrink:0 align:center justify:center
+                            fill:ink.inverse
+                            font-size:{px(if compact_header.get() {14.0} else {24.0})}px {
                             text text-wrap:none { issue_number(&current.get()) }
                         }
                         col width:1fr min-width:0px height:min-content gap:{px(6.0)}px
-                            pad:(left:{px(14.0)}px right:{px(14.0)}px top:{px(8.0)}px bottom:{px(10.0)}px) {
+                            pad:(left:{px(if compact_header.get() {8.0} else {14.0})}px right:{px(if compact_header.get() {8.0} else {14.0})}px top:{px(8.0)}px bottom:{px(10.0)}px) {
                             row height:min-content align:center {
                                 row #relay.eyebrow height:min-content width:1fr {
                                     text text-transform:uppercase letter-spacing:{px(0.6)}px
                                         "Issue details"
                                 }
                             }
-                            row #relay.title font-size:{px(17.0)}px height:min-content selectable {
+                            row #relay.title font-size:{px(17.0)}px height:min-content {
                                 text label:{ current.get().title } { current.get().title }
                             }
                             row height:min-content gap:{px(4.0)}px clip {
@@ -620,8 +645,14 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                         }
                         button #relay.header-action @click:{ model.issue.set(None); }
                             stroke:(width:{px(1.0)} color:rule.line edges:left)
-                            label:"Close issue details" "Close"
+                            label:"Close issue details" width:{px(36.0)}px pad:0px {
+                            icon size:{px(13.0)}px window-close
+                        }
+                        row width:max-content height:{px(56.0)}px shrink:0 {
+                            WindowControls model:(model)
+                        }
                     }
+                    Notice model:(model)
                     scroll {
                         col height:min-content gap:0px selectable {
                             DetailRow key:("Source".to_string())
@@ -888,8 +919,8 @@ pub(crate) fn sync_label(synced_at: Option<u64>) -> String {
     let Some(synced_at) = synced_at else {
         return "Not synced yet".into();
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = crate::platform::SystemTime::now()
+        .duration_since(crate::platform::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let age = now.saturating_sub(synced_at);

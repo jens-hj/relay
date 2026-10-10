@@ -250,7 +250,8 @@ fn sidebar_tree_groups_by_project_and_director_and_reacts_without_losing_expansi
             mounted.model.worker_director.get_untracked(),
             "director-other"
         );
-        mounted.rect("First director prompt");
+        mounted.rect("Next message");
+        mounted.rect("Send message");
         mounted.click("Create director in Relay · demo");
         assert_eq!(mounted.model.project.get_untracked(), "demo");
         assert_eq!(mounted.model.editor.get_untracked(), EditTarget::New);
@@ -316,8 +317,14 @@ fn sidebar_connection_details_fit_narrow_widths_and_connection_states() {
         mounted.click("Server connection details");
         let settings = mounted.rect("Settings");
         let revision = mounted.rect("Workspace revision");
-        assert!((revision.size.width - settings.size.width).abs() < 1.0);
+        assert!(revision.size.width >= settings.size.width);
         assert!((revision.origin.x - settings.origin.x - settings.size.width).abs() < 1.0);
+        let indicator = mounted.rect("Connection indicator");
+        let sidebar = mounted.rect("Sidebar");
+        assert!(
+            (indicator.origin.x + indicator.size.width - sidebar.size.width + 12.0).abs() < 1.0
+        );
+        assert!(!has_label(&mounted, "Revision meaning"));
         for sample in [Some(42), Some(180), Some(480), None] {
             mounted.model.round_trip_ms.set(sample);
             mounted.settle();
@@ -330,7 +337,6 @@ fn sidebar_connection_details_fit_narrow_widths_and_connection_states() {
                 "Server protocol",
                 "Connection quality",
                 "Connection status",
-                "Revision meaning",
             ] {
                 let head = snapshot
                     .nodes
@@ -360,7 +366,7 @@ fn sidebar_connection_details_fit_narrow_widths_and_connection_states() {
 }
 
 #[test]
-fn sidebar_server_details_expose_endpoint_quality_and_revision_meaning() {
+fn sidebar_server_details_expose_endpoint_quality_and_header_status() {
     let mounted = mount(false, 1380.0);
     mounted
         .model
@@ -377,7 +383,6 @@ fn sidebar_server_details_expose_endpoint_quality_and_revision_meaning() {
         "Server protocol",
         "Connection quality",
         "Connection status",
-        "Revision meaning",
     ] {
         assert!(has_label(&mounted, label), "Missing details row: {label}");
     }
@@ -646,6 +651,162 @@ impl Mounted {
     }
 }
 
+fn touch(mounted: &Mounted, kind: PointerEventKind, x: f32, y: f32) {
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind,
+        position: Vector2::new(x, y),
+        pointer_type: PointerType::Touch,
+        modifiers: Modifiers::default(),
+        timestamp: Duration::from_millis(100),
+    });
+    mounted.settle();
+}
+
+#[test]
+fn phone_shell_reserves_safe_areas_without_scaling_or_squeezing_the_board() {
+    for light in [false, true] {
+        let mounted = mount(light, 390.0);
+        mounted.ui.set_safe_area(mosaic::layout::ResolvedEdges {
+            top: 59.0,
+            bottom: 34.0,
+            left: 0.0,
+            right: 0.0,
+        });
+        mounted.settle();
+        assert!(mounted.model.mobile_navigation.get_untracked());
+        assert!(!mounted.model.sidebar_open.get_untracked());
+        assert!(
+            !mounted
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .iter()
+                .any(|n| n.label.as_deref() == Some("Sidebar"))
+        );
+        let content = mounted.rect("Main content");
+        assert_eq!(content.origin, Vector2::new(0.0, 59.0));
+        assert_eq!(content.size, Size::new(390.0, 807.0));
+        assert_eq!(mounted.rect("Page header").origin.y, 59.0);
+        mounted.model.browser_top_clearance.set(16.0);
+        mounted.settle();
+        assert_eq!(mounted.rect("Page header").origin.y, 75.0);
+        mounted.model.browser_top_clearance.set(0.0);
+        mounted.settle();
+        let menu = mounted.rect("Open navigation");
+        assert!(menu.size.width >= 44.0 && menu.size.height >= 44.0);
+        mounted.click("Open navigation");
+        let sidebar = mounted.rect("Sidebar");
+        assert_eq!(sidebar.origin.y, 59.0);
+        assert_eq!(sidebar.size.width, 320.0);
+        assert_eq!(sidebar.origin.y + sidebar.size.height, 866.0);
+        mounted.click("Close navigation");
+        mounted.model.preferences.update(|p| p.scale = 2.0);
+        mounted
+            ._scope
+            .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
+        mounted.settle();
+        assert_eq!(mounted.rect("Page header").origin.y, 59.0);
+        mounted.model.browser_top_clearance.set(16.0);
+        mounted.settle();
+        assert_eq!(mounted.rect("Page header").origin.y, 75.0);
+        mounted.ui.set_safe_area(mosaic::layout::ResolvedEdges {
+            left: 24.0,
+            right: 24.0,
+            top: 0.0,
+            bottom: 21.0,
+        });
+        mounted.settle();
+        assert_eq!(mounted.rect("Main content").origin.x, 24.0);
+        assert_eq!(mounted.rect("Main content").size.width, 342.0);
+    }
+}
+
+#[test]
+fn phone_navigation_tracks_edge_swipes_and_dismisses_without_activating_content() {
+    let mounted = mount(false, 390.0);
+    let down = PointerEventKind::Down(PointerButton::Primary);
+    let up = PointerEventKind::Up(PointerButton::Primary);
+    // A vertical edge scroll and a horizontal gesture in the board stay there.
+    for (x, dx, dy) in [(10.0, 8.0, 80.0), (100.0, 180.0, 0.0)] {
+        touch(&mounted, down, x, 150.0);
+        touch(&mounted, PointerEventKind::Move, x + dx, 150.0 + dy);
+        touch(&mounted, up, x + dx, 150.0 + dy);
+        assert!(!mounted.model.sidebar_open.get_untracked());
+    }
+    touch(&mounted, down, 10.0, 150.0);
+    touch(&mounted, PointerEventKind::Move, 90.0, 152.0);
+    assert!(!mounted.model.sidebar_open.get_untracked());
+    assert_eq!(mounted.rect("Sidebar").size.width, 320.0);
+    assert!((mounted.rect("Sidebar").origin.x + 240.0).abs() < 1.0);
+    touch(&mounted, PointerEventKind::Move, 230.0, 152.0);
+    touch(&mounted, up, 230.0, 152.0);
+    assert!(mounted.model.sidebar_open.get_untracked());
+    assert!(mounted.commands.is_empty());
+    assert!(mounted.model.issue.get_untracked().is_none());
+    touch(&mounted, down, 200.0, 70.0);
+    touch(&mounted, PointerEventKind::Move, 25.0, 70.0);
+    touch(&mounted, up, 25.0, 70.0);
+    assert!(!mounted.model.sidebar_open.get_untracked());
+    // A cancelled drag leaves the initial state intact.
+    touch(&mounted, down, 10.0, 150.0);
+    touch(&mounted, PointerEventKind::Move, 200.0, 150.0);
+    touch(&mounted, PointerEventKind::Cancel, 200.0, 150.0);
+    assert!(!mounted.model.sidebar_open.get_untracked());
+    mounted.click("Open navigation");
+    mounted.key(Key::Escape, false);
+    assert!(!mounted.model.sidebar_open.get_untracked());
+    mounted.click("Open navigation");
+    touch(&mounted, down, 370.0, 200.0);
+    touch(&mounted, up, 370.0, 200.0);
+    assert!(!mounted.model.sidebar_open.get_untracked());
+    mounted.click("Open navigation");
+    mounted.click("Open board for Relay · demo");
+    assert!(!mounted.model.sidebar_open.get_untracked());
+    assert_eq!(mounted.model.page.get_untracked(), Page::Board);
+}
+
+#[test]
+fn resizing_between_phone_and_desktop_keeps_the_conversation_editor_mounted() {
+    let mut mounted = mount(false, 820.0);
+    mounted.click("Open issue #2");
+    mounted.click("Profile design");
+    let editor = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| {
+            n.role == Role::TextInput
+                && n.label
+                    .as_deref()
+                    .is_some_and(|label| label.starts_with("Draft text "))
+        })
+        .map(|n| n.id);
+    mounted.size.width = 390.0;
+    mounted.settle();
+    assert!(mounted.model.mobile_navigation.get_untracked());
+    mounted.click("Open navigation");
+    mounted.click("Close navigation");
+    mounted.size.width = 820.0;
+    mounted.settle();
+    assert!(!mounted.model.mobile_navigation.get_untracked());
+    mounted.rect("Sidebar");
+    let after = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| {
+            n.role == Role::TextInput
+                && n.label
+                    .as_deref()
+                    .is_some_and(|label| label.starts_with("Draft text "))
+        })
+        .map(|n| n.id);
+    assert!(editor.is_some(), "Conversation editor must exist");
+    assert_eq!(editor, after);
+}
+
 #[test]
 fn board_issue_and_session_navigation_work_in_both_themes_and_widths() {
     for light in [true, false] {
@@ -670,6 +831,61 @@ fn board_issue_and_session_navigation_work_in_both_themes_and_widths() {
             );
         }
     }
+}
+
+#[test]
+fn command_palette_shares_edges_scrolls_and_dismisses_without_clicking_through() {
+    for (width, scale) in [(1380.0, 1.0), (760.0, 2.0)] {
+        let mounted = mount(false, width);
+        mounted
+            ._scope
+            .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
+        mounted.model.preferences.update(|p| p.scale = scale);
+        mounted.focus("Settings");
+        let previous = mounted.ui.focused().unwrap().id();
+        mounted.key(Key::Character("k".into()), true);
+        let panel = mounted.rect("Command palette panel");
+        let search = mounted.rect("Command search");
+        let results = mounted.rect("Command results");
+        assert!((search.origin.x - panel.origin.x).abs() < 1.0);
+        assert!((search.size.width - panel.size.width).abs() < 1.0);
+        assert!(panel.origin.y >= 0.0 && panel.origin.y + panel.size.height <= mounted.size.height);
+        assert!(
+            results.size.height > 0.0
+                && results.origin.y + results.size.height <= panel.origin.y + panel.size.height
+        );
+        for label in ["Open board", "Open sessions", "Reset sidebar width"] {
+            let action = mounted.rect(label);
+            assert!((action.origin.x - panel.origin.x).abs() < 1.0);
+            assert!((action.size.width - panel.size.width).abs() < 1.0);
+        }
+        mounted.click("Command search");
+        assert!(mounted.model.palette.get_untracked());
+        let page = mounted.model.page.get_untracked();
+        mounted.click("Settings");
+        assert!(!mounted.model.palette.get_untracked());
+        assert_eq!(mounted.model.page.get_untracked(), page);
+        assert_eq!(mounted.ui.focused().unwrap().id(), previous);
+        mounted.key(Key::Character("k".into()), true);
+        mounted.model.palette_query.set("not a command".into());
+        mounted.settle();
+        assert!(has_label(&mounted, "No matching commands"));
+        mounted.key(Key::Enter, false);
+        assert!(mounted.model.palette.get_untracked());
+        mounted.key(Key::Escape, false);
+        assert!(!mounted.model.palette.get_untracked());
+    }
+}
+
+#[test]
+fn command_palette_enter_runs_the_keyboard_selected_row() {
+    let mounted = mount(false, 1380.0);
+    mounted.key(Key::Character("k".into()), true);
+    mounted.key(Key::ArrowDown, false);
+    mounted.key(Key::ArrowDown, false);
+    mounted.key(Key::Enter, false);
+    assert!(!mounted.model.palette.get_untracked());
+    assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
 }
 
 #[test]
@@ -1962,6 +2178,183 @@ fn long_buffer_lines_wrap_within_the_viewport_and_leave_a_reachable_next_message
 }
 
 #[test]
+fn browser_keyboard_edits_preserve_the_draft_when_the_visible_viewport_shrinks() {
+    let mut mounted = mount(false, 390.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let label = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|l| l.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&label);
+    let field = mounted.ui.focused().unwrap().id();
+    crate::browser_text::update(&mounted.ui, field.raw(), "a🙂 teh", 7, 7, false);
+    mounted.settle();
+    mounted.size.height = 460.0;
+    mounted.settle();
+    assert_eq!(mounted.ui.focused().unwrap().id(), field);
+    crate::browser_text::update(&mounted.ui, field.raw(), "a🙂 the", 7, 7, false);
+    mounted.settle();
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "a🙂 the"
+    );
+    crate::browser_text::update(&mounted.ui, field.raw(), "a🙂 the你", 8, 8, true);
+    mounted.settle();
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "a🙂 the"
+    );
+    crate::browser_text::update(&mounted.ui, field.raw(), "a🙂 the你好", 9, 9, false);
+    mounted.settle();
+    crate::browser_text::update(&mounted.ui, field.raw(), "a🙂 the你好", 9, 9, false);
+    mounted.settle();
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "a🙂 the你好"
+    );
+    assert_eq!(crate::buffer::parts(mounted.model, "session-plan").len(), 1);
+    assert_eq!(mounted.ui.focused().unwrap().id(), field);
+    assert!(
+        mounted.commands.try_recv().is_err(),
+        "Typing must not submit an execution"
+    );
+}
+
+#[test]
+fn chat_reveals_the_caret_when_the_keyboard_resizes_without_a_new_edit() {
+    let mut mounted = mount(false, 390.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let label = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|l| l.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&label);
+    let field = mounted.ui.focused().unwrap().id();
+    let text = (0..45)
+        .map(|n| format!("Line {n}: a longer chat draft 🙂\n"))
+        .collect::<String>();
+    let end = text.encode_utf16().count();
+    crate::browser_text::update(&mounted.ui, field.raw(), &text, end, end, false);
+    mounted.settle();
+    for height in [600.0, 460.0, 390.0, 844.0] {
+        mounted.size.height = height;
+        mounted.settle();
+        let tree = mounted.ui.inspection_snapshot();
+        let mut parent = tree.node(field).unwrap().parent;
+        let viewport = loop {
+            let node = tree.node(parent.unwrap()).unwrap();
+            if node.role == Role::ScrollView {
+                break node.rect;
+            }
+            parent = node.parent;
+        };
+        let caret = mounted.ui.ime_cursor_area().unwrap();
+        assert!(
+            caret.origin.y >= viewport.origin.y - 0.5,
+            "caret above chat at height {height}: {caret:?} / {viewport:?}"
+        );
+        assert!(
+            caret.origin.y + caret.size.height <= viewport.origin.y + viewport.size.height + 0.5,
+            "caret below chat at height {height}: {caret:?} / {viewport:?}"
+        );
+        assert_eq!(mounted.ui.focused().unwrap().id(), field);
+        assert_eq!(
+            mounted.ui.text_input_contents().unwrap().selection,
+            (text.len(), text.len())
+        );
+    }
+    let before_scroll = mounted.ui.ime_cursor_area().unwrap();
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Wheel {
+            delta: Vector2::new(0.0, 180.0),
+        },
+        position: Vector2::new(190.0, 300.0),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: Duration::ZERO,
+    });
+    mounted.settle();
+    let after_scroll = mounted.ui.ime_cursor_area().unwrap();
+    assert!(
+        after_scroll.origin.y > before_scroll.origin.y + 100.0,
+        "manual transcript scrolling must not be pulled back to the caret"
+    );
+    mounted.settle();
+    assert_eq!(mounted.ui.ime_cursor_area().unwrap(), after_scroll);
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        text
+    );
+    assert!(mounted.commands.try_recv().is_err());
+}
+
+#[test]
+fn browser_visual_viewport_reflows_chat_without_resizing_the_canvas() {
+    let mut mounted = mount(false, 390.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let label = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|node| node.label.filter(|label| label.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&label);
+    let field = mounted.ui.focused().unwrap().id();
+    let text = (0..40)
+        .map(|n| format!("Keyboard and zoom, line {n}: 🙂\n"))
+        .collect::<String>();
+    let end = text.encode_utf16().count();
+    crate::browser_text::update(&mounted.ui, field.raw(), &text, end, end, false);
+    mounted.settle();
+    for size in [
+        Size::new(390.0, 460.0),
+        Size::new(195.0, 230.0),
+        Size::new(390.0, 844.0),
+    ] {
+        mounted.model.browser_viewport.set(Some(size));
+        mounted.settle();
+        let tree = mounted.ui.inspection_snapshot();
+        let mut parent = tree.node(field).unwrap().parent;
+        let viewport = loop {
+            let node = tree.node(parent.unwrap()).unwrap();
+            if node.role == Role::ScrollView {
+                break node.rect;
+            }
+            parent = node.parent;
+        };
+        let caret = mounted.ui.ime_cursor_area().unwrap();
+        assert!(viewport.origin.y + viewport.size.height <= size.height);
+        assert!(viewport.size.width <= size.width);
+        assert!(caret.origin.y >= viewport.origin.y - 0.5);
+        assert!(
+            caret.origin.y + caret.size.height <= viewport.origin.y + viewport.size.height + 0.5,
+            "caret must fit the visible chat while the canvas stays 390×900: {caret:?} / {viewport:?}"
+        );
+        assert_eq!(mounted.ui.focused().unwrap().id(), field);
+        assert_eq!(
+            mounted.ui.text_input_contents().unwrap().selection,
+            (text.len(), text.len())
+        );
+    }
+    assert_eq!(mounted.size, Size::new(390.0, 900.0));
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        text
+    );
+    assert!(mounted.commands.try_recv().is_err());
+}
+
+#[test]
 fn first_character_keeps_draft_focus_and_plain_paste_keeps_the_same_text_surface() {
     let mounted = mount(false, 1380.0);
     mounted.model.open_session("session-plan".into());
@@ -2427,28 +2820,35 @@ fn first_director_prompt_uses_planning_session_without_issue_or_implementation_a
     mounted.model.open_director("director-main".into());
     mounted.settle();
     assert_eq!(mounted.model.page.get_untracked(), Page::DirectorStart);
-    type_in(&mounted, "First director prompt", "Plan the project");
+    let draft_label = |mounted: &Mounted| {
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .find_map(|n| n.label.filter(|l| l.starts_with("Draft text")))
+            .unwrap()
+    };
+    type_in(&mounted, &draft_label(&mounted), "Plan the project");
     mounted.model.open_director("director-review".into());
     mounted.settle();
-    type_in(&mounted, "First director prompt", "Review plan");
+    type_in(&mounted, &draft_label(&mounted), "Review plan");
     mounted.model.open_director("director-main".into());
     mounted.settle();
     assert_eq!(
-        mounted
-            .model
-            .director_prompts
-            .get_untracked()
-            .get("director-main")
-            .unwrap(),
+        plain_text(&crate::buffer::parts(
+            mounted.model,
+            "director-draft-director-main"
+        )),
         "Plan the project"
     );
     assert_eq!(
         mounted.model.worker_prompt.get_untracked(),
         "Unrelated worker draft"
     );
-    mounted.click("Send first prompt");
+    mounted.click("Send message");
     assert!(
-        matches!(mounted.commands.try_recv().unwrap().command,Command::StartDirector{director_id,prompt,approve_implementation:false} if director_id=="director-main" && prompt=="Plan the project")
+        matches!(mounted.commands.try_recv().unwrap().command,Command::StartDirector{director_id,prompt,parts,approve_implementation:false} if director_id=="director-main" && prompt=="Plan the project" && plain_text(&parts)==prompt)
     );
 }
 
@@ -2456,6 +2856,9 @@ fn first_director_prompt_uses_planning_session_without_issue_or_implementation_a
 fn sidebar_hover_surface_spans_sibling_controls_and_new_director_marker_aligns() {
     let mounted = mount(false, 1380.0);
     let sidebar = mounted.rect("Sidebar");
+    let project = mounted.rect("Project row Relay · demo");
+    assert!((project.origin.x - sidebar.origin.x).abs() < 0.1);
+    assert!((project.size.width - sidebar.size.width).abs() < 0.1);
     let first = mounted.rect("Director row Project director");
     let second = mounted.rect("Director row Review director");
     assert!((first.origin.x + first.size.width - sidebar.size.width).abs() < 0.1);
@@ -2517,6 +2920,52 @@ fn sidebar_hover_surface_spans_sibling_controls_and_new_director_marker_aligns()
         .iter()
         .find(|n| n.label.as_deref() == Some("Create director in Relay · demo"))
         .unwrap();
+    for (target, surface) in [
+        ("New Project", "New Project"),
+        (
+            "Create director in Relay · demo",
+            "New director row Relay · demo",
+        ),
+        (
+            "Project defaults for Relay · demo",
+            "New director row Relay · demo",
+        ),
+    ] {
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Move,
+            position: mounted.rect("Sidebar header").center(),
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+        mounted.settle();
+        let id = snapshot
+            .nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some(surface))
+            .unwrap()
+            .id;
+        let fill = || {
+            mounted
+                .ui
+                .inspection_details(id)
+                .unwrap()
+                .attributes
+                .into_iter()
+                .find(|a| a.name == "fill")
+                .map(|a| a.value)
+        };
+        let baseline = fill();
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Move,
+            position: mounted.rect(target).center(),
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+        mounted.settle();
+        assert_ne!(fill(), baseline, "Hovering {target} must fill {surface}");
+    }
     let marker = snapshot.node(create.children[0]).unwrap();
     assert!(
         (marker.rect.center().x - mounted.rect("Toggle director Project director").center().x)
@@ -4298,7 +4747,7 @@ fn profile_header_counts_real_overrides_and_keeps_its_geometry() {
     mounted.model.open_director_profile("director-main".into());
     mounted.settle();
     let near = |a: f32, b: f32| (a - b).abs() <= 1.0;
-    assert!(near(mounted.rect("Profile header").origin.y, 28.0));
+    assert!(near(mounted.rect("Profile header").origin.y, 0.0));
     assert!(near(mounted.rect("Profile header").size.height, 74.0));
     assert!(near(mounted.rect("Inheritance").size.height, 54.0));
     assert!(near(mounted.rect("Save bar").size.height, 50.0));
@@ -5388,5 +5837,379 @@ fn removed_settings_selectors_do_not_react_to_later_preferences() {
     assert_eq!(
         mounted.model.preferences.get_untracked().mode,
         crate::settings::ThemeMode::System
+    );
+}
+
+#[test]
+fn first_director_message_uses_inline_assets_shortcuts_and_retains_edits_on_acknowledgement() {
+    let mut mounted = mount(false, 600.0);
+    mounted.model.snapshot.set(local_project_snapshot());
+    mounted.model.snapshot.update(|s| s.sessions.clear());
+    mounted.model.open_director("director-main".into());
+    mounted.settle();
+    let label = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|l| l.starts_with("Draft text")))
+        .unwrap();
+    type_in(&mounted, &label, "Before λ");
+    mounted.key(Key::Enter, false);
+    mounted.ui.set_clipboard_text("After");
+    mounted.key(Key::Character("v".into()), true);
+    let session = mounted.model.session.get_untracked();
+    let mut parts = crate::buffer::parts(mounted.model, &session);
+    assert_eq!(plain_text(&parts), "Before λ\nAfter");
+    let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(requests));
+    mounted.model.buffer.update(|s| {
+        s.initialized = true;
+        s.connected = true;
+    });
+    crate::buffer::flush(mounted.model);
+    assert!(received.try_recv().is_err());
+    mounted.model.buffer_requests.set(None);
+    let asset = Asset {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: "first.png".into(),
+        media_type: "image/png".into(),
+        size: 1,
+    };
+    parts.push(Part {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: PartKind::Asset {
+            asset: asset.clone(),
+        },
+    });
+    crate::buffer::edit(mounted.model, &session, parts.clone());
+    mounted.model.buffer.update(|s| {
+        s.uploads.insert(asset.id.clone(), asset.clone());
+    });
+    mounted.settle();
+    mounted.rect("Preview first.png");
+    mounted.click("Send message");
+    assert!(mounted.commands.try_recv().is_err());
+    mounted.model.buffer.update(|s| {
+        s.uploads.clear();
+    });
+    mounted.settle();
+    mounted.focus(&label);
+    mounted.key(Key::Enter, true);
+    let command = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(command.command, Command::StartDirector { parts: ref sent, approve_implementation: false, .. } if sent == &parts)
+    );
+    // Typing while the request is in flight must survive switching to the real session.
+    let mut later = parts.clone();
+    later.push(Part::text("more"));
+    crate::buffer::edit(mounted.model, &session, later.clone());
+    crate::buffer::acknowledge_first(
+        mounted.model,
+        &Draft {
+            session_id: session.clone(),
+            revision: 0,
+            parts,
+        },
+        "session-created",
+    );
+    assert_eq!(
+        crate::buffer::parts(mounted.model, "session-created"),
+        later
+    );
+    assert!(crate::buffer::parts(mounted.model, &session).is_empty());
+}
+
+#[test]
+fn platform_chrome_keeps_native_macos_buttons_and_client_controls_elsewhere() {
+    let config = crate::window_chrome::window_config();
+    assert_eq!(config.size, Size::new(1380.0, 900.0));
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(config.decorations, WindowDecorations::Native);
+        assert!(config.macos.transparent_titlebar);
+        assert!(config.macos.title_hidden);
+        assert!(!config.macos.hidden_titlebar);
+        assert!(config.macos.full_size_content_view);
+        assert!(config.macos.traffic_lights_visible);
+        assert_eq!(config.macos.traffic_light_inset, Some(28.0));
+    }
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(config.decorations, WindowDecorations::Client);
+}
+
+#[test]
+fn merged_headers_keep_window_controls_at_the_right_across_pages_and_scales() {
+    for (light, width, scale) in [
+        (false, 1380.0, 1.0),
+        (true, 820.0, 1.0),
+        (false, 760.0, 2.0),
+    ] {
+        let mounted = mount(light, width);
+        mounted
+            ._scope
+            .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
+        mounted.model.preferences.update(|p| p.scale = scale);
+        for page in [
+            Page::Board,
+            Page::Sessions,
+            Page::Directors,
+            Page::Settings,
+            Page::NewProject,
+            Page::Connections,
+            Page::Publish,
+            Page::DirectorStart,
+        ] {
+            mounted.model.page.set(page);
+            mounted.model.notice.set("A connection notice".into());
+            mounted.settle();
+            #[cfg(not(target_os = "macos"))]
+            {
+                for label in [
+                    "Minimize window",
+                    "Maximize or restore window",
+                    "Close window",
+                ] {
+                    assert_control_hit(&mounted, label);
+                    assert!(
+                        mounted.rect(label).origin.y.abs() < 1.0,
+                        "{page:?}: {label}"
+                    );
+                }
+                let close = mounted.rect("Close window");
+                assert!(
+                    (close.origin.x + close.size.width - width).abs() < 1.0,
+                    "{page:?}: {close:?}"
+                );
+                assert_eq!(
+                    mounted
+                        .ui
+                        .inspection_snapshot()
+                        .nodes
+                        .iter()
+                        .filter(|n| n.label.as_deref() == Some("Close window"))
+                        .count(),
+                    1
+                );
+            }
+            #[cfg(target_os = "macos")]
+            {
+                assert!(!has_label(&mounted, "Close window"));
+                assert_eq!(mounted.rect("Sidebar header").size.height, 56.0);
+            }
+        }
+        mounted.model.page.set(Page::Board);
+        mounted.model.issue.set(Some("issue-1".into()));
+        mounted.settle();
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_control_hit(&mounted, "Close window");
+            let close = mounted.rect("Close window");
+            assert!(close.origin.y.abs() < 1.0);
+            assert!((close.origin.x + close.size.width - width).abs() < 1.0);
+            assert_eq!(
+                mounted
+                    .ui
+                    .inspection_snapshot()
+                    .nodes
+                    .iter()
+                    .filter(|n| n.label.as_deref() == Some("Close window"))
+                    .count(),
+                1
+            );
+        }
+        mounted.model.receive(NetworkState::default());
+        mounted.model.snapshot.set(Snapshot::default());
+        mounted.settle();
+        #[cfg(not(target_os = "macos"))]
+        assert_control_hit(&mounted, "Close window");
+    }
+}
+
+#[test]
+fn header_drag_targets_include_text_and_gaps_but_exclude_interactive_descendants() {
+    let mounted = mount(false, 1380.0);
+    let draggable = |header: &str, position: Vector2| {
+        let nodes = mounted.ui.inspection_snapshot().nodes;
+        let header = nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some(header))
+            .unwrap()
+            .id;
+        let target = mounted.ui.hit_test(position).unwrap().id();
+        crate::window_chrome::is_drag_target(&nodes, target, header)
+    };
+    assert!(draggable(
+        "Sidebar header",
+        mounted.rect("Sidebar header").center()
+    ));
+    let header = mounted.rect("Page header");
+    for offset in [10.0, 100.0, 240.0] {
+        assert!(draggable(
+            "Page header",
+            header.origin + Vector2::new(offset, 20.0)
+        ));
+    }
+    assert!(!draggable(
+        "Page header",
+        mounted.rect("Open command palette").center()
+    ));
+    assert!(!draggable(
+        "Page header",
+        mounted.rect("Board actions").center()
+    ));
+    #[cfg(not(target_os = "macos"))]
+    assert!(!draggable(
+        "Page header",
+        mounted.rect("Close window").center()
+    ));
+    mounted.click("Open command palette");
+    assert!(mounted.model.palette.get_untracked());
+    mounted.model.palette.set(false);
+    mounted.model.open_director_profile("director-main".into());
+    mounted.settle();
+    assert!(!draggable(
+        "Profile header",
+        mounted.rect("Director name").center()
+    ));
+    mounted.click("Director name");
+    mounted.key(Key::Character("X".into()), false);
+    assert!(mounted.model.editor_name.get_untracked().contains('X'));
+}
+
+#[test]
+fn client_resize_targets_cover_edges_without_covering_header_controls() {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let mounted = mount(false, 1380.0);
+    for (label, point) in [
+        ("Resize window North", Vector2::new(500.0, 2.0)),
+        ("Resize window East", Vector2::new(1378.0, 400.0)),
+        ("Resize window South", Vector2::new(500.0, 898.0)),
+        ("Resize window West", Vector2::new(2.0, 400.0)),
+        ("Resize window NorthWest", Vector2::new(2.0, 2.0)),
+        ("Resize window SouthEast", Vector2::new(1378.0, 898.0)),
+    ] {
+        let target = mounted.ui.hit_test(point).unwrap().id();
+        assert_eq!(
+            mounted
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .iter()
+                .find(|n| n.id == target)
+                .unwrap()
+                .label
+                .as_deref(),
+            Some(label)
+        );
+    }
+    assert_control_hit(&mounted, "Close window");
+}
+
+#[test]
+fn native_gesture_handoff_releases_capture_when_the_os_consumes_mouse_up() {
+    let mounted = mount(false, 1380.0);
+    let header = mounted.rect("Page header");
+    let positions = std::iter::once(header.origin + Vector2::new(100.0, 20.0)).chain(
+        if cfg!(target_os = "macos") {
+            vec![]
+        } else {
+            vec![Vector2::new(1378.0, 400.0), Vector2::new(1378.0, 898.0)]
+        },
+    );
+    for (index, position) in positions.enumerate() {
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Down(PointerButton::Primary),
+            position,
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::from_secs(index as u64 + 1),
+        });
+        // No Up: the window manager owns that release. Flush the handoff
+        // before the next pointer press, as the native runtime does.
+        mounted.settle();
+        assert!(mounted.model.window_gesture.get_untracked().is_none());
+        mounted.click("Open command palette");
+        assert!(
+            mounted.model.palette.get_untracked(),
+            "capture retained at {position:?}"
+        );
+        mounted.model.palette.set(false);
+        mounted.settle();
+    }
+}
+
+#[test]
+fn streamed_messages_keep_the_bottom_visible_and_preserve_manual_reading_position() {
+    let mounted = mount(false, 1100.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.model.snapshot.update(|s| {
+        s.messages.push(Message {
+            id: "stream-follow".into(),
+            session_id: "session-plan".into(),
+            author: "Agent".into(),
+            kind: "assistant".into(),
+            body: "line\n".repeat(80),
+            parts: vec![],
+        })
+    });
+    mounted.settle();
+    let next = mounted.rect("Next message");
+    assert!(next.origin.y + next.size.height < mounted.size.height);
+    mounted.model.snapshot.update(|s| {
+        s.messages
+            .iter_mut()
+            .find(|m| m.id == "stream-follow")
+            .unwrap()
+            .body
+            .push_str(&"new line\n".repeat(40))
+    });
+    mounted.settle();
+    let following = mounted.rect("Next message");
+    assert!((following.origin.y - next.origin.y).abs() < 2.0);
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Wheel {
+            delta: Vector2::new(0.0, 400.0),
+        },
+        position: Vector2::new(800.0, 400.0),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: Duration::ZERO,
+    });
+    mounted.settle();
+    let reading = mounted.rect("Message stream-follow");
+    mounted.model.snapshot.update(|s| {
+        s.messages
+            .iter_mut()
+            .find(|m| m.id == "stream-follow")
+            .unwrap()
+            .body
+            .push_str(&"more line\n".repeat(40))
+    });
+    mounted.settle();
+    assert!((mounted.rect("Message stream-follow").origin.y - reading.origin.y).abs() < 2.0);
+}
+
+#[test]
+fn stop_control_fills_the_session_header_cell() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == "session-worker")
+            .unwrap()
+            .worker = Some(worker_run(WorkerStatus::Running));
+    });
+    mounted.model.open_session("session-worker".into());
+    mounted.settle();
+    let header = mounted.rect("Session header");
+    let stop = mounted.rect("Stop worker");
+    assert!((stop.origin.y - header.origin.y).abs() < 0.1);
+    assert!((stop.size.height - header.size.height).abs() < 0.1);
+    assert!(
+        (stop.origin.x + stop.size.width - mounted.rect("Session actions").origin.x).abs() < 0.1
     );
 }

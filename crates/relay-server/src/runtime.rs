@@ -1077,6 +1077,9 @@ async fn execute(
     }
     cmd.current_dir(&path)
         .env_remove("RELAY_TOKEN")
+        .env_remove("RELAY_TOKEN_FILE")
+        .env_remove("RELAY_SETUP_TOKEN_FILE")
+        .env_remove("CREDENTIALS_DIRECTORY")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

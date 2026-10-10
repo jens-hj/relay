@@ -58,6 +58,13 @@ fn server_identity(endpoint: &str) -> String {
 #[component]
 pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     let edges = State::new(ResizeEdges::RIGHT);
+    Effect::new(move || {
+        edges.set(if model.mobile_navigation.get() {
+            ResizeEdges::NONE
+        } else {
+            ResizeEdges::RIGHT
+        })
+    });
     let actual_width = State::new(px(220.0));
     let compact_footer = Derived::new(move || actual_width.get() < px(200.0));
     let server_details_open = State::new(false);
@@ -84,18 +91,30 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     });
     let focus: TreeFocus = Rc::default();
     let view = view! {
-        col width:{px(model.preferences.get().sidebar_width)}px min-width:{px(160.0)}
-            max-width:{(viewport.get()*0.4).max(px(160.0)).min(px(360.0))} fill:surface.sidebar
-            gap:0px shrink:0 clip resizable:($edges) label:"Sidebar"
+        col
+            width:{if model.mobile_navigation.get() {crate::ui::navigation::drawer_width(viewport.get())} else {px(model.preferences.get().sidebar_width)}}px
+            min-width:{if model.mobile_navigation.get() {0.0} else {px(160.0)}}px
+            max-width:{if model.mobile_navigation.get() {crate::ui::navigation::drawer_width(viewport.get())} else {(viewport.get()*0.4).max(px(160.0)).min(px(360.0))}}
+            fill:surface.sidebar gap:0px shrink:0 clip resizable:($edges) label:"Sidebar"
             @layout:{move |rect:Rect|actual_width.set(rect.size.width)}
             @resize:{ move |event: &ResizeEvent, _| if event.phase == ResizePhase::End {
                 model.preferences.update(|p| p.sidebar_width = (event.size.width / p.scale).clamp(160.0, 360.0));
             } } {
-            row #relay.strip height:{px(56.0)}px shrink:0 align:center
-                pad:(horizontal:{px(16.0)}px vertical:0px) label:"Sidebar header" {
-                row #relay.title height:min-content width:max-content font-size:{px(20.0)}px
-                    font-weight:700 {
+            row #relay.strip height:{crate::window_chrome::sidebar_header_height()}px shrink:0
+                align:center
+                pad:(left:{crate::window_chrome::sidebar_title_inset()}px right:{px(16.0)}px)
+                label:"Sidebar header"
+                @pointer:{move |event, ctx| crate::window_chrome::drag_header(model, event, ctx)} {
+                row #relay.title height:min-content width:1fr min-width:0px clip
+                    font-size:{px(20.0)}px font-weight:700 {
                     text "Relay"
+                }
+                if model.mobile_navigation.get() {
+                    button #relay.header-action @click:{model.sidebar_open.set(false);} width:44px
+                        pad:0px label:"Close navigation" stroke:(width:0px color:rule.line) {
+                        icon size:18px window-close
+                    } as close_navigation
+                    {close_navigation.focus();}
                 }
             }
             row height:{px(30.0)}px shrink:0 align:center justify:between
@@ -109,17 +128,18 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                 }
             }
             scroll {
-                col height:min-content gap:0px pad:(left:{px(8.0)}px) role:list
-                    label:"Project agents" {
+                col height:min-content gap:0px pad:0px role:list label:"Project agents" {
                     for (_, project) in {model.snapshot.get().projects.into_iter().map(|p| (p.id.clone(), p))} {
                         col height:min-content {
                             ProjectTree model:(model) project-id:(project.id.clone())
                                 focus:(focus.clone())
                         }
                     }
-                    button #relay.tree-control @click:{model.page.set(Page::NewProject);} width:fill
-                        gap:{px(8.0)}px pad:(horizontal:{px(4.0)}px vertical:0px)
-                        label:"New Project" {
+                    button #relay.tree-control
+                        @click:{model.sidebar_open.set(false); model.page.set(Page::NewProject);}
+                        width:fill gap:{px(8.0)}px pad:(left:{px(12.0)}px right:{px(4.0)}px)
+                        label:"New Project" hover { fill:surface.raised }
+                        pressed { fill:surface.selected } {
                         icon size:{px(13.0)}px plus-icon
                         row #relay.tree-label {
                             text text-wrap:none font-size:{px(12.0)}px "New Project"
@@ -166,7 +186,7 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                             }
                         }
                     }
-                    button #relay.tree-control @click:{model.page.set(Page::Settings);}
+                    button #relay.tree-control @click:{model.sidebar_open.set(false); model.page.set(Page::Settings);}
                         width:{px(52.0)}px height:fill label:"Settings"
                         stroke:(width:{px(1.0)} color:rule.hair edges:left)
                         fill:{if model.page.get() == Page::Settings {color(ink.inverse)} else {Color::TRANSPARENT}}
@@ -176,19 +196,22 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                         icon size:{px(18.0)}px gear-icon
                         tooltip #relay.tooltip summary:"Settings" {text "Settings · Ctrl/Cmd+,"}
                     }
-                    col width:{px(52.0)}px shrink:0 align:center justify:center gap:{px(3.0)}px
-                        stroke:(width:{px(1.0)} color:rule.hair edges:left) pad:0px
-                        label:"Workspace revision"
+                    col width:max-content min-width:{px(52.0)}px shrink:0 align:center
+                        justify:center gap:{px(3.0)}px
+                        stroke:(width:{px(1.0)} color:rule.hair edges:left)
+                        pad:(horizontal:{px(10.0)}px vertical:0px) label:"Workspace revision"
                         description:"Shared workspace state version used to detect stale edits" {
-                        row #relay.eyebrow height:min-content {
-                            text text-transform:uppercase letter-spacing:{px(0.6)}px "Revision"
+                        row #relay.eyebrow width:max-content height:min-content {
+                            text text-wrap:none text-transform:uppercase letter-spacing:{px(0.6)}px
+                                "Revision"
                         }
-                        row #relay.value height:min-content font-size:{px(12.0)}px {
+                        row #relay.value width:max-content height:min-content
+                            font-size:{px(12.0)}px {
                             text text-wrap:none font-family:monospace
                                 {format!("r{:04}", model.snapshot.get().revision)}
                         }
                         tooltip #relay.tooltip summary:"Workspace revision" side:top {
-                            text font-size:{px(12.0)}px "Shared state version used to reject stale edits."
+                            text font-size:{px(12.0)}px "Shared state version. Prevents edits using older data."
                         }
                     }
                 }
@@ -196,18 +219,36 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                     col height:min-content gap:0px fill:surface.panel
                         stroke:(width:{px(1.0)} color:rule.hair edges:top)
                         label:"Server connection details" {
-                        row height:{px(34.0)}px align:center gap:{px(7.0)}px
-                            pad:(horizontal:{px(12.0)}px vertical:0px)
-                            stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
-                            icon size:{px(13.0)}px connections-icon
-                            row #relay.eyebrow width:1fr height:min-content {
-                                text "Connection"
+                        col height:min-content gap:0px
+                            stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
+                            label:"Connection status" description:{model.status.get()} {
+                            row min-height:{px(34.0)}px align:center justify:between gap:{px(7.0)}px
+                                pad:(horizontal:{px(12.0)}px vertical:0px) {
+                                row width:max-content height:min-content align:center
+                                    gap:{px(7.0)}px {
+                                    if !compact_footer.get() {
+                                        icon size:{px(13.0)}px connections-icon
+                                    }
+                                    row #relay.eyebrow width:max-content height:min-content {
+                                        text "Connection"
+                                    }
+                                }
+                                row width:max-content height:min-content shrink:0 align:center
+                                    gap:{px(7.0)}px label:"Connection indicator" {
+                                    el width:{px(6.0)}px height:{px(6.0)}px shrink:0
+                                        fill:if model.connected.get() {status.success} else {status.danger} {}
+                                    row width:max-content height:min-content font-size:{px(11.0)}px
+                                        font-color:{color(if model.connected.get() {status.success} else {status.danger})} {
+                                        text text-wrap:none
+                                            {if model.connected.get() {"Online"} else {"Offline"}}
+                                    }
+                                }
                             }
-                            el width:{px(6.0)}px height:{px(6.0)}px shrink:0
-                                fill:if model.connected.get() {status.success} else {status.danger} {}
-                            row height:min-content font-size:{px(11.0)}px
-                                font-color:{color(if model.connected.get() {status.success} else {status.danger})} {
-                                text {if model.connected.get() {"Online"} else {"Offline"}}
+                            if model.status.get() != "Connected" {
+                                row #relay.caption height:min-content
+                                    pad:(left:{px(12.0)}px right:{px(12.0)}px bottom:{px(10.0)}px) {
+                                    text {model.status.get()}
+                                }
                             }
                         }
                         col height:min-content min-width:0px gap:{px(4.0)}px pad:{px(12.0)}px
@@ -273,26 +314,6 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                                 }
                             }
                         }
-                        col height:min-content gap:{px(4.0)}px pad:{px(12.0)}px
-                            stroke:(width:{px(1.0)} color:rule.hair edges:top)
-                            label:"Connection status" {
-                            row #relay.eyebrow height:min-content {
-                                text "Status"
-                            }
-                            row #relay.caption height:min-content {
-                                text {model.status.get()}
-                            }
-                        }
-                        col height:min-content gap:{px(4.0)}px pad:{px(12.0)}px
-                            stroke:(width:{px(1.0)} color:rule.hair edges:top)
-                            label:"Revision meaning" {
-                            row #relay.eyebrow height:min-content {
-                                text "Workspace revision"
-                            }
-                            row #relay.caption height:min-content {
-                                text "Shared state version. Prevents edits using older data."
-                            }
-                        }
                     }
                 }
             }
@@ -312,7 +333,7 @@ fn bind_sidebar_reset(model: Model, sidebar: &Element) {
             reset.clear_resized_size();
         }
     });
-    let gesture = Rc::new(RefCell::new((0.0f32, None::<std::time::Instant>)));
+    let gesture = Rc::new(RefCell::new((0.0f32, None::<crate::platform::Instant>)));
     sidebar.on_resize(move |event, _| {
         let mut gesture = gesture.borrow_mut();
         match event.phase {
@@ -322,7 +343,7 @@ fn bind_sidebar_reset(model: Model, sidebar: &Element) {
                     gesture.1 = None;
                     return;
                 }
-                let now = std::time::Instant::now();
+                let now = crate::platform::Instant::now();
                 if gesture.1.take().is_some_and(|last| {
                     now.duration_since(last) < std::time::Duration::from_millis(500)
                 }) {
@@ -354,7 +375,7 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
     view! {
         col height:min-content gap:0px {
             row #relay.tree-row height:{px(30.0)}px gap:0px align:center role:list-item
-                label:{format!("Project row {}",name.get())} pad:(left:{px(4.0)}px) {
+                label:{format!("Project row {}",name.get())} pad:(left:{px(12.0)}px) {
                 button #relay.tree-control @click:{toggle(model.expanded_projects, id.get_untracked());}
                     width:1fr shrink:1 gap:{px(8.0)}px pad:(horizontal:{px(4.0)}px vertical:0px)
                     label:{format!("Toggle project {}", name.get())}
@@ -391,7 +412,7 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
             }
             if open.get() {
                 row height:min-content {
-                    el width:{px(14.0)}px shrink:0 {}
+                    el width:{px(22.0)}px shrink:0 {}
                     col height:min-content gap:0px
                         stroke:(width:{px(1.0)} color:rule.hair edges:left) {
                         let focus = focus.clone();
@@ -401,7 +422,10 @@ fn ProjectTree(model: Model, project_id: String, focus: TreeFocus) -> Element {
                                     focus:(focus.clone())
                             }
                         }
-                        row height:{px(30.0)}px align:center gap:0px pad:(left:{px(4.0)}px) {
+                        row #relay.tree-row height:{px(30.0)}px align:center gap:0px
+                            pad:(left:{px(4.0)}px)
+                            label:{format!("New director row {}", name.get())}
+                            pressed { fill:surface.selected } {
                             button #relay.tree-control
                                 @click:{model.select_project(id.get_untracked()); model.open_profile(EditTarget::New);}
                                 width:1fr shrink:1 gap:{px(6.0)}px

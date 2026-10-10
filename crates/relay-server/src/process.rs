@@ -132,6 +132,9 @@ pub(crate) fn capture(
     cancelled()?;
     command
         .env_remove("RELAY_TOKEN")
+        .env_remove("RELAY_TOKEN_FILE")
+        .env_remove("RELAY_SETUP_TOKEN_FILE")
+        .env_remove("CREDENTIALS_DIRECTORY")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());

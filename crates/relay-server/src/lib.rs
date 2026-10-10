@@ -12,6 +12,8 @@ use axum::{
 };
 use relay_core::*;
 mod app_server;
+mod browser;
+pub use browser::{BrowserConfig, initialize_setup_code};
 mod claude;
 mod conversation;
 mod github;
@@ -99,7 +101,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 5 {
+        if version > 6 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -114,7 +116,12 @@ impl Store {
              CREATE TABLE IF NOT EXISTS drafts(session_id TEXT PRIMARY KEY, draft TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS draft_receipts(request_id TEXT PRIMARY KEY, request TEXT NOT NULL, response TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY, metadata TEXT NOT NULL, bytes BLOB NOT NULL);
-             PRAGMA user_version = 5;"
+             CREATE TABLE IF NOT EXISTS browser_owner(id INTEGER PRIMARY KEY CHECK(id=1), username TEXT NOT NULL, password TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS browser_sessions(session_hash TEXT PRIMARY KEY, csrf TEXT NOT NULL, created INTEGER NOT NULL, seen INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
+             CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
+             PRAGMA user_version = 6;"
         ).map_err(Error::internal)?;
         let seed =
             serde_json::to_string(&demo_snapshot(defaults.clone())).map_err(Error::internal)?;
@@ -246,6 +253,50 @@ impl Store {
         }
         let mut action = None;
         match envelope.command {
+            command @ Command::StartDirector { .. } => {
+                let Command::StartDirector {
+                    ref parts,
+                    ref prompt,
+                    approve_implementation,
+                    ..
+                } = command
+                else {
+                    unreachable!()
+                };
+                let parts = parts.clone();
+                if !parts.is_empty() && (!has_content(&parts) || plain_text(&parts) != *prompt) {
+                    return Err(Error::invalid(
+                        "First message content does not match its prompt",
+                    ));
+                }
+                action = projects::apply(
+                    &mut snapshot,
+                    command,
+                    &envelope.request_id,
+                    self.defaults.clone(),
+                    config,
+                )?;
+                if !parts.is_empty() {
+                    let session_id = format!("session-{}", envelope.request_id);
+                    conversation::validate(&transaction, &snapshot, &session_id, &parts)?;
+                    snapshot
+                        .messages
+                        .iter_mut()
+                        .find(|m| m.id == format!("prompt-{}", envelope.request_id))
+                        .unwrap()
+                        .parts = parts.clone();
+                    snapshot.submissions.push(Submission {
+                        id: envelope.request_id.clone(),
+                        session_id,
+                        parts,
+                        state: SubmissionState::Launching,
+                        approve_implementation,
+                        error: None,
+                        interrupts_run: None,
+                        last_edit_request: None,
+                    });
+                }
+            }
             command if projects::handles(&command) => {
                 action = projects::apply(
                     &mut snapshot,
@@ -533,6 +584,7 @@ impl Store {
 
 #[derive(Clone)]
 struct Workspace {
+    browser: Arc<browser::BrowserAuth>,
     harness_status: Arc<Mutex<Vec<HarnessStatus>>>,
     harness_probe: Arc<tokio::sync::Mutex<()>>,
     drafts: watch::Sender<Vec<Draft>>,
@@ -822,6 +874,16 @@ impl Workspace {
         Ok(())
     }
     fn authorize(&self, headers: &HeaderMap) -> Result<(), Error> {
+        if !headers.contains_key("authorization") {
+            return self.browser_session(headers, false).map(|_| ());
+        }
+        if headers.get_all("authorization").iter().count() != 1 {
+            return Err(Error::new(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "Authentication required",
+            ));
+        }
         let supplied = headers
             .get("authorization")
             .and_then(|h| h.to_str().ok())
@@ -933,12 +995,23 @@ pub fn router_with_shutdown(
     defaults: DirectorProfile,
     config: RuntimeConfig,
 ) -> Result<(Router, Shutdown), Error> {
+    router_with_browser(path, token, defaults, config, BrowserConfig::default())
+}
+
+pub fn router_with_browser(
+    path: impl AsRef<Path>,
+    token: String,
+    defaults: DirectorProfile,
+    config: RuntimeConfig,
+    browser_config: BrowserConfig,
+) -> Result<(Router, Shutdown), Error> {
     if token.len() < 16 || token.trim() != token || !token.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(Error::invalid(
             "RELAY_TOKEN must contain at least 16 printable ASCII characters with no spaces",
         ));
     }
     let mut store = Store::open(path.as_ref(), defaults.clone())?;
+    let browser = browser::BrowserAuth::initialize(&mut store, &token, browser_config)?;
     let mut initial = store.snapshot()?;
     let mut changed = false;
     // Reap only a previously owned Linux process whose boot/start identity still matches.
@@ -1121,6 +1194,7 @@ pub fn router_with_shutdown(
     }
     let (snapshots, _) = watch::channel(initial);
     let workspace = Workspace {
+        browser,
         harness_status: Arc::new(Mutex::new(vec![])),
         harness_probe: Arc::new(tokio::sync::Mutex::new(())),
         drafts: watch::channel(conversation::read_drafts(&store.connection)?).0,
@@ -1169,6 +1243,8 @@ pub fn router_with_shutdown(
                 workspace.clone(),
                 authorize,
             ))
+            .merge(browser::routes(workspace.clone()))
+            .layer(axum::middleware::from_fn(browser::response_headers))
             .with_state(workspace),
         shutdown,
     ))
@@ -1179,7 +1255,11 @@ async fn authorize(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<Response, Error> {
-    workspace.authorize(request.headers())?;
+    workspace.browser_request(
+        request.headers(),
+        request.method(),
+        matches!(request.uri().path(), "/v1/events" | "/v1/drafts/events"),
+    )?;
     Ok(next.run(request).await)
 }
 
@@ -1380,7 +1460,7 @@ async fn events(
         .max_message_size(64 * 1024)
         .on_upgrade(move |socket| async move {
             let _transport = transport;
-            stream(socket, receiver, shutdown).await;
+            stream(socket, receiver, shutdown, workspace, headers).await;
         }))
 }
 
@@ -1395,6 +1475,8 @@ async fn stream(
     mut socket: WebSocket,
     mut receiver: watch::Receiver<Snapshot>,
     mut shutdown: watch::Receiver<bool>,
+    workspace: Workspace,
+    headers: HeaderMap,
 ) {
     tokio::select! {
         biased;
@@ -1403,6 +1485,7 @@ async fn stream(
                 if shutdown.changed().await.is_err() { break; }
             }
         } => {},
+        _ = workspace.session_ended(&headers) => {},
         _ = stream_snapshots(&mut socket, &mut receiver) => return,
     }
     // A stalled client must not hold shutdown open indefinitely.

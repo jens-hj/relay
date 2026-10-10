@@ -184,6 +184,10 @@ client:
 build:
     cargo build --locked --workspace
 
+# Build the Mosaic WASM app (use nix develop .#web).
+build-web:
+    cd crates/relay-desktop && CARGO_TARGET_DIR="$PWD/target" mosaic build web
+
 # Run all domain, server, and headless UI tests.
 test:
     cargo test --locked --workspace

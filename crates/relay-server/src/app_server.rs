@@ -102,10 +102,17 @@ pub(super) fn inputs(
     Ok(())
 }
 
+fn belongs_to_thread(value: &Value, thread: &str) -> bool {
+    value["params"]["threadId"]
+        .as_str()
+        .or_else(|| value["params"]["thread"]["id"].as_str())
+        .is_none_or(|id| id == thread)
+}
+
 fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Result<bool, Error> {
     let method = value["method"].as_str().unwrap_or("");
     let params = &value["params"];
-    if let Some(id) = params["threadId"].as_str() {
+    {
         let snapshot = workspace.snapshots.borrow();
         if snapshot
             .sessions
@@ -113,9 +120,11 @@ fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Re
             .find(|s| s.id == session)
             .and_then(|s| s.worker.as_ref())
             .and_then(|w| w.thread_id.as_deref())
-            != Some(id)
+            .is_some_and(|thread| !belongs_to_thread(value, thread))
         {
-            return Err(Error::invalid("Codex event belongs to a different thread"));
+            // App-server also emits lifecycle and turn events for spawned agents.
+            // They must not finish, fail, or write into the parent's Relay session.
+            return Ok(false);
         }
     }
     if method == "error" && !params["willRetry"].as_bool().unwrap_or(false) {
@@ -293,7 +302,7 @@ pub(super) async fn execute(
     };
     let (thread, request_id) =
         tokio::select! { result = setup => result?, _ = stop.changed() => return Ok(()) };
-    let mut turn = None;
+    let mut turn: Option<String> = None;
     loop {
         tokio::select! {
             biased;
@@ -301,7 +310,18 @@ pub(super) async fn execute(
                 if let Some(turn) = &turn {
                     let _ = rpc.send(json!({"id":999999,"method":"turn/interrupt","params":{"threadId":thread,"turnId":turn}})).await;
                     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                        loop { let value = rpc.read().await?; if value["method"] == "turn/completed" { break Ok::<_,Error>(()); } let _ = publish(workspace,session,run,&value); }
+                        loop {
+                            let value = rpc.read().await?;
+                            if !belongs_to_thread(&value, &thread) {
+                                continue;
+                            }
+                            if value["method"] == "turn/completed"
+                                && value["params"]["turn"]["id"].as_str() == Some(turn.as_str())
+                            {
+                                break Ok::<_, Error>(());
+                            }
+                            let _ = publish(workspace, session, run, &value);
+                        }
                     }).await;
                 }
                 return Ok(());
@@ -314,6 +334,11 @@ pub(super) async fn execute(
                     if turn.as_deref().is_some_and(|expected|expected!=id){return Err(Error::invalid("Codex started a different turn"));}
                     turn=Some(id.to_owned());
                 } else if value.get("id").is_some() && value.get("method").is_some() {
+                    if !belongs_to_thread(&value, &thread) {
+                        // A child's approval cannot be granted through its parent's run.
+                        rpc.reject(&value).await?;
+                        continue;
+                    }
                     let method = value["method"].as_str().unwrap_or("");
                     if matches!(method,"item/commandExecution/requestApproval" | "item/fileChange/requestApproval") {
                         let allow = crate::harness::permission(workspace,session,run,method,&value["params"].to_string(),stop).await?;
@@ -321,6 +346,7 @@ pub(super) async fn execute(
                     } else { rpc.reject(&value).await?; }
                 }
                 else {
+                    if !belongs_to_thread(&value, &thread) { continue; }
                     if value["method"]=="turn/started" && let Some(id)=value["params"]["turn"]["id"].as_str() && turn.is_none(){turn=Some(id.to_owned());}
                     if let Some(id)=value["params"]["turnId"].as_str().or_else(||value["params"]["turn"]["id"].as_str()) && turn.as_deref().is_some_and(|expected|expected!=id) { return Err(Error::invalid("Codex event belongs to a different turn")); }
                     if publish(workspace,session,run,&value)? { return Ok(()); }

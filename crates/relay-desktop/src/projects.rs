@@ -81,10 +81,6 @@ pub fn ProjectPage(model: Model) -> Element {
                     for (_, _board) in {model.selected_board().into_iter().map(|b|(b.id.clone(),b)).collect::<Vec<_>>()} {
                         Publish model:(model)
                     }
-                } else {
-                    for (_, director) in {model.snapshot.get().directors.into_iter().filter(|d|d.id==model.worker_director.get()).map(|d|(d.id.clone(),d)).collect::<Vec<_>>()} {
-                        DirectorStart model:(model) director-id:(director.id.clone())
-                    }
                 }
             }
         }
@@ -426,35 +422,6 @@ fn ColumnEditor(model: Model, column: BoardColumn) -> Element {
                 text font-size:{px(12.0)}px font-color:ink.muted
                     "Move the tasks to another column before deleting this column."
             }
-        }
-    }
-}
-
-#[component]
-fn DirectorStart(model: Model, director_id: String) -> Element {
-    let id = State::new(director_id);
-    let prompt = State::new(
-        model
-            .director_prompts
-            .get_untracked()
-            .get(&id.get_untracked())
-            .cloned()
-            .unwrap_or_default(),
-    );
-    Effect::new(move || {
-        let value = prompt.get();
-        model.director_prompts.update(|drafts| {
-            drafts.insert(id.get_untracked(), value);
-        });
-    });
-    view! {
-        col height:min-content max-width:{px(640.0)}px gap:{px(12.0)}px {
-            text font-family:sans-serif "Start the director conversation"
-            input #relay.area multiline label:"First director prompt" height:{px(160.0)}px prompt
-            button #relay.action
-                @click:{let prompt=prompt.get_untracked();model.submit(Command::StartDirector{director_id:id.get_untracked(),prompt:prompt.clone(),approve_implementation:false},model.snapshot.get_untracked().revision,Saved::DirectorStart{director_id:id.get_untracked(),prompt});}
-                disabled:{model.busy.get() || !model.connected.get() || prompt.get().trim().is_empty()}
-                "Send first prompt"
         }
     }
 }

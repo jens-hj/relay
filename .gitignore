@@ -1,4 +1,5 @@
 /target/
+/crates/relay-desktop/target/
 /.direnv/
 /data/
 *.sqlite3

@@ -1,9 +1,13 @@
 use crate::network::Config;
+#[cfg(not(target_arch = "wasm32"))]
 use futures_util::{SinkExt, StreamExt};
 use mosaic::prelude::StateSender;
 use relay_core::*;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::mpsc;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 
 #[derive(Clone)]
@@ -46,6 +50,7 @@ enum Event {
     Connected(bool),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start(config: Config, sender: StateSender<Update>) -> mpsc::UnboundedSender<Request> {
     let (requests, mut receiver) = mpsc::unbounded_channel();
     std::thread::spawn(move || {
@@ -98,6 +103,7 @@ pub fn start(config: Config, sender: StateSender<Update>) -> mpsc::UnboundedSend
     requests
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn fetch_bytes(
     client: &reqwest::Client,
     config: &Config,
@@ -127,6 +133,7 @@ async fn fetch_bytes(
     Ok(bytes)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn watch(config: Config, events: mpsc::UnboundedSender<Event>) {
     loop {
         let result: Result<(), ()> = async {
@@ -155,3 +162,9 @@ async fn watch(config: Config, events: mpsc::UnboundedSender<Event>) {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+#[path = "buffer_network_web.rs"]
+mod web;
+#[cfg(target_arch = "wasm32")]
+pub use web::*;

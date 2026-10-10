@@ -64,7 +64,11 @@ pub(super) fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig)
     let mut store = Store::open(path, DirectorProfile::default()).unwrap();
     store.save(snapshot).unwrap();
     let (snapshots, _) = watch::channel(snapshot.clone());
+    let browser =
+        browser::BrowserAuth::initialize(&mut store, "test-token", BrowserConfig::default())
+            .unwrap();
     Workspace {
+        browser,
         harness_status: Arc::new(Mutex::new(vec![])),
         harness_probe: Arc::new(tokio::sync::Mutex::new(())),
         drafts: watch::channel(vec![]).0,
@@ -1001,7 +1005,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            5
+            6
         );
         drop(store);
         let mut reopened = Store::open(&db, DirectorProfile::default()).unwrap();
@@ -1032,7 +1036,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 6)
+        .pragma_update(None, "user_version", 7)
         .unwrap();
     drop(store);
     let error = Store::open(&db, DirectorProfile::default()).err().unwrap();
@@ -1042,7 +1046,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        6
+        7
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -1715,6 +1719,9 @@ fn token_exclusion_is_verified_in_an_isolated_test_process() {
     let result = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "tests::token_exclusion_child", "--nocapture"])
         .env("RELAY_TOKEN", "test-bearer-must-not-be-inherited")
+        .env("RELAY_TOKEN_FILE", "/private/native-token")
+        .env("RELAY_SETUP_TOKEN_FILE", "/private/setup-token")
+        .env("CREDENTIALS_DIRECTORY", "/private/credentials")
         .env("RELAY_TOKEN_CHILD_TEST", "1")
         .output()
         .unwrap();
@@ -1734,12 +1741,12 @@ async fn token_exclusion_child() {
     let bin = dir.path().join("codex");
     script(
         &bin,
-        "test -z \"$RELAY_TOKEN\" || exit 99\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"t\"}' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}'",
+        "test -z \"$RELAY_TOKEN$RELAY_TOKEN_FILE$RELAY_SETUP_TOKEN_FILE$CREDENTIALS_DIRECTORY\" || exit 99\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"t\"}' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}'",
     );
     let gh = dir.path().join("gh");
     script(
         &gh,
-        "test -z \"$RELAY_TOKEN\" || exit 99\ncase \"$*\" in\n *users/*) echo '{\"type\":\"User\"}';;\n *projectV2*) echo '{\"data\":{\"user\":{\"projectV2\":{\"id\":\"P1\",\"title\":\"Relay\",\"url\":\"board\"}}}}';;\n *fields*) echo '{\"data\":{\"node\":{\"fields\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}';;\n *items*) echo '{\"data\":{\"node\":{\"items\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}';;\n *) exit 1;;\nesac",
+        "test -z \"$RELAY_TOKEN$RELAY_TOKEN_FILE$RELAY_SETUP_TOKEN_FILE$CREDENTIALS_DIRECTORY\" || exit 99\ncase \"$*\" in\n *users/*) echo '{\"type\":\"User\"}';;\n *projectV2*) echo '{\"data\":{\"user\":{\"projectV2\":{\"id\":\"P1\",\"title\":\"Relay\",\"url\":\"board\"}}}}';;\n *fields*) echo '{\"data\":{\"node\":{\"fields\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}';;\n *items*) echo '{\"data\":{\"node\":{\"items\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false}}}}}';;\n *) exit 1;;\nesac",
     );
     let mut c = config();
     c.repository = Some(repo);
@@ -2419,7 +2426,11 @@ while IFS= read -r line; do
     turn/start)
       printf '{"method":"turn/started","params":{"threadId":"%s","turn":{"id":"turn-1"}}}\n' "$thread"
       printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
-      if [ -f hold-first ] && [ ! -f first-started ]; then touch first-started; continue; fi
+      if [ -f hold-first ] && [ ! -f first-started ]; then
+        printf '{"method":"item/completed","params":{"threadId":"%s","turnId":"turn-1","item":{"id":"first-started","type":"agentMessage","text":"First started"}}}\n' "$thread"
+        touch first-started
+        continue
+      fi
       printf '{"method":"item/agentMessage/delta","params":{"threadId":"%s","turnId":"turn-1","itemId":"answer","delta":"Ordered "}}\n' "$thread"
       printf '{"method":"item/completed","params":{"threadId":"%s","turnId":"turn-1","item":{"id":"answer","type":"agentMessage","text":"Ordered response λ"}}}\n' "$thread"
       printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"%s","tokenUsage":{"last":{"inputTokens":31,"cachedInputTokens":7,"outputTokens":4}}}}\n' "$thread"
@@ -2567,7 +2578,16 @@ async fn promoted_queue_interrupts_one_specific_turn_then_resumes_without_duplic
     let (session, run, rx, prompt) = reserve(&w, first);
     let active = tokio::spawn(runtime::run(w.clone(), session, run, prompt, rx));
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !repo.join("first-started").exists() {
+        // The fake's file marker only proves it wrote the turn ID. Wait for
+        // Relay to consume that ID and publish the following item before
+        // expecting a native interrupt with that exact turn identity.
+        while !w
+            .snapshots
+            .borrow()
+            .messages
+            .iter()
+            .any(|message| message.id == format!("codex-{first_id}-first-started"))
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -2853,6 +2873,64 @@ async fn queue_cancel_edit_and_restart_preserve_payload_and_never_replay_deliver
 }
 
 #[tokio::test]
+async fn app_server_child_worker_events_do_not_abort_or_complete_parent_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let child_events = r#"
+      echo '{"method":"thread/started","params":{"thread":{"id":"child-thread"}}}'
+      echo '{"method":"turn/started","params":{"threadId":"child-thread","turn":{"id":"child-turn"}}}'
+      echo '{"method":"item/agentMessage/delta","params":{"threadId":"child-thread","turnId":"child-turn","itemId":"child-answer","delta":"Child output"}}'
+      echo '{"method":"thread/tokenUsage/updated","params":{"threadId":"child-thread","tokenUsage":{"last":{"inputTokens":900,"cachedInputTokens":0,"outputTokens":900}}}}'
+      echo '{"id":"child-approval","method":"item/commandExecution/requestApproval","params":{"threadId":"child-thread","turnId":"child-turn","command":"child command"}}'
+      echo '{"method":"error","params":{"threadId":"child-thread","willRetry":false,"error":{"message":"Child failure"}}}'
+      echo '{"method":"turn/completed","params":{"threadId":"child-thread","turn":{"id":"child-turn","status":"failed"}}}'
+      echo '{"method":"turn/completed","params":{"threadId":"child-thread","turn":{"id":"child-turn","status":"completed"}}}'
+"#;
+    let fake = APP_FAKE.replace(
+        "    turn/start)\n",
+        &format!("    turn/start)\n{child_events}"),
+    );
+    assert_ne!(fake, APP_FAKE);
+    let (w, id, repo) = completed_app_workspace(dir.path(), &fake);
+    let submitted = saved_turn(&w, &id, vec![Part::text("Start a child worker")]).await;
+    let (session, run, rx, prompt) = reserve(&w, submitted);
+    runtime::run(w.clone(), session, run, prompt, rx).await;
+    let snapshot = finished(&w, &id).await;
+    let worker = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap()
+        .worker
+        .as_ref()
+        .unwrap();
+    assert_eq!(worker.status, WorkerStatus::Completed);
+    assert_eq!(
+        worker.thread_id.as_deref(),
+        Some("12345678-1234-4234-8234-123456789abc")
+    );
+    assert_eq!(worker.usage.as_ref().unwrap().input_tokens, 31);
+    assert!(
+        snapshot
+            .messages
+            .iter()
+            .any(|m| m.body == "Ordered response λ")
+    );
+    assert!(
+        !snapshot
+            .messages
+            .iter()
+            .any(|m| m.body.contains("Child output"))
+    );
+    assert!(snapshot.tool_permissions.is_empty());
+    let rpc = std::fs::read_to_string(repo.join("rpc-input.jsonl")).unwrap();
+    assert!(
+        rpc.lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .any(|v| v["id"] == "child-approval" && v["error"]["code"] == -32601)
+    );
+}
+
+#[tokio::test]
 async fn app_server_rejects_foreign_turn_events_and_failure_pauses_unsent_queue() {
     let dir = tempfile::tempdir().unwrap();
     let altered = APP_FAKE.replace(
@@ -2893,5 +2971,128 @@ async fn app_server_rejects_foreign_turn_events_and_failure_pauses_unsent_queue(
         !s.messages
             .iter()
             .any(|m| m.id == format!("prompt-{next_id}"))
+    );
+}
+
+#[tokio::test]
+async fn first_director_message_preserves_images_through_process_input_and_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    let bin = dir.path().join("fake-codex");
+    let fake = APP_FAKE.replace("thread/resume)", "thread/start|thread/resume)");
+    script(&bin, &fake);
+    let mut snapshot = Snapshot::default();
+    projects::apply(
+        &mut snapshot,
+        Command::CreateProject {
+            name: "First message".into(),
+            root: root.display().to_string(),
+            connections: vec![],
+        },
+        "first-project",
+        DirectorProfile::default(),
+        &RuntimeConfig::default(),
+    )
+    .unwrap();
+    let director_id = snapshot.directors[0].id.clone();
+    let w = workspace(
+        &dir.path().join("db"),
+        &snapshot,
+        RuntimeConfig {
+            codex: bin,
+            ..Default::default()
+        },
+    );
+    let mut encoded = std::io::Cursor::new(vec![]);
+    image::RgbaImage::new(2, 2)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+    let asset = conversation::upload_asset(
+        State(w.clone()),
+        RoutePath(uuid::Uuid::new_v4().to_string()),
+        HeaderMap::from_iter([(
+            "content-type".parse().unwrap(),
+            "image/png".parse().unwrap(),
+        )]),
+        Bytes::from(encoded.into_inner()),
+    )
+    .await
+    .unwrap()
+    .0;
+    let parts = vec![
+        Part::text("Before λ"),
+        Part {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: PartKind::Asset { asset },
+        },
+        Part::text("After"),
+    ];
+    let request = env(
+        snapshot.revision,
+        Command::StartDirector {
+            director_id,
+            prompt: plain_text(&parts),
+            parts: parts.clone(),
+            approve_implementation: false,
+        },
+    );
+    // A missing upload must roll back the new task and session.
+    let mut invalid = request.clone();
+    invalid.request_id = uuid::Uuid::new_v4().to_string();
+    if let Command::StartDirector { parts, prompt, .. } = &mut invalid.command {
+        if let PartKind::Asset { asset } = &mut parts[1].kind {
+            asset.id = uuid::Uuid::new_v4().to_string();
+        }
+        *prompt = plain_text(parts);
+    }
+    assert!(w.store.lock().unwrap().apply(invalid, &w.config).is_err());
+    assert!(
+        w.store
+            .lock()
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .sessions
+            .is_empty()
+    );
+    let (id, run, rx, prompt) = reserve(&w, request.clone());
+    runtime::run(w.clone(), id.clone(), run, prompt, rx).await;
+    let s = finished(&w, &id).await;
+    let worker = s
+        .sessions
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap()
+        .worker
+        .as_ref()
+        .unwrap();
+    assert_eq!(worker.status, WorkerStatus::Completed, "{:?}", worker.error);
+    assert_eq!(
+        s.messages
+            .iter()
+            .find(|m| m.id == format!("prompt-{}", request.request_id))
+            .unwrap()
+            .parts,
+        parts
+    );
+    assert_eq!(s.submissions[0].state, SubmissionState::Completed);
+    let rpc = std::fs::read_to_string(root.join("workspace/rpc-input.jsonl")).unwrap();
+    let turn: serde_json::Value = rpc
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|v| v["method"] == "turn/start")
+        .unwrap();
+    let input = turn["params"]["input"].as_array().unwrap();
+    assert_eq!(input[1]["text"], "Before λ");
+    assert_eq!(input[3]["type"], "localImage");
+    assert_eq!(input[4]["text"], "After");
+    assert!(
+        w.store
+            .lock()
+            .unwrap()
+            .apply(request, &w.config)
+            .unwrap()
+            .1
+            .is_none()
     );
 }

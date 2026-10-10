@@ -29,8 +29,7 @@ pub enum Saved {
     Profile,
     Start(String),
     DirectorStart {
-        director_id: String,
-        prompt: String,
+        draft: Draft,
     },
     Send(String),
     Action,
@@ -44,6 +43,8 @@ struct Pending {
 
 #[derive(Clone, Copy)]
 pub struct Model {
+    pub window: State<WindowHandle>,
+    pub window_gesture: State<Option<crate::window_chrome::NativeGesture>>,
     pub harness_refresh: State<Option<UnboundedSender<()>>>,
     pub harnesses: State<Vec<HarnessStatus>>,
     pub harness_error: State<String>,
@@ -51,6 +52,10 @@ pub struct Model {
     pub buffer_requests: State<Option<UnboundedSender<crate::buffer_network::Request>>>,
     pub preferences: State<crate::settings::Preferences>,
     pub sidebar_reset: State<u64>,
+    pub mobile_navigation: State<bool>,
+    pub browser_top_clearance: State<f32>,
+    pub browser_viewport: State<Option<Size>>,
+    pub sidebar_open: State<bool>,
     pub settings_store: State<crate::settings::Store>,
     pub snapshot: State<Snapshot>,
     pub connected: State<bool>,
@@ -94,7 +99,6 @@ pub struct Model {
     pub toml: State<String>,
     pub advanced: State<bool>,
     pub worker_prompt: State<String>,
-    pub director_prompts: State<std::collections::BTreeMap<String, String>>,
     pub worker_director: State<String>,
     pub worker_approval: State<bool>,
     pub review_changes: State<bool>,
@@ -109,6 +113,8 @@ pub struct Model {
 impl Model {
     pub fn new(ui: &Ui, commands: UnboundedSender<CommandEnvelope>) -> Self {
         Self {
+            window: State::new(AppContext::detached().window()),
+            window_gesture: State::new(None),
             harness_refresh: State::new(None),
             harnesses: State::new(vec![]),
             harness_error: State::new(String::new()),
@@ -116,6 +122,10 @@ impl Model {
             buffer_requests: State::new(None),
             preferences: State::new(crate::settings::Preferences::default()),
             sidebar_reset: State::new(0),
+            mobile_navigation: State::new(false),
+            browser_top_clearance: State::new(crate::platform::top_clearance()),
+            browser_viewport: State::new(None),
+            sidebar_open: State::new(false),
             settings_store: State::new(crate::settings::Store::default()),
             snapshot: State::new(Snapshot::default()),
             connected: State::new(false),
@@ -159,7 +169,6 @@ impl Model {
             toml: State::new(String::new()),
             advanced: State::new(false),
             worker_prompt: State::new(String::new()),
-            director_prompts: State::new(Default::default()),
             worker_director: State::new(String::new()),
             worker_approval: State::new(false),
             review_changes: State::new(false),
@@ -244,15 +253,8 @@ impl Model {
                 self.clear_worker_draft(&body);
                 self.open_session(format!("session-{id}"));
             }
-            Saved::DirectorStart {
-                director_id,
-                prompt,
-            } => {
-                self.director_prompts.update(|drafts| {
-                    if drafts.get(&director_id) == Some(&prompt) {
-                        drafts.remove(&director_id);
-                    }
-                });
+            Saved::DirectorStart { draft } => {
+                crate::buffer::acknowledge_first(*self, &draft, &format!("session-{id}"));
                 self.open_session(format!("session-{id}"));
             }
             Saved::Send(body) => self.clear_worker_draft(&body),
@@ -453,6 +455,7 @@ impl Model {
             .set("Latest state loaded. Your draft is retained; review it before saving.".into());
     }
     pub fn open_profile(&self, target: EditTarget) {
+        self.sidebar_open.set(false);
         if self.busy.get_untracked() {
             self.notice
                 .set("Wait for the save to finish before switching profiles.".into());
@@ -486,6 +489,7 @@ impl Model {
         self.page.set(Page::Directors);
     }
     pub fn select_project(&self, id: String) {
+        self.sidebar_open.set(false);
         let snapshot = self.snapshot.get_untracked();
         let id = snapshot
             .bindings
@@ -530,6 +534,7 @@ impl Model {
         self.page.set(Page::Board);
     }
     pub fn open_session(&self, id: String) {
+        self.sidebar_open.set(false);
         if let Some(session) = self
             .snapshot
             .get_untracked()
@@ -563,6 +568,7 @@ impl Model {
         self.focused_message.set(String::new());
     }
     pub fn open_director(&self, id: String) {
+        self.sidebar_open.set(false);
         let snapshot = self.snapshot.get_untracked();
         let Some(director) = snapshot.directors.iter().find(|d| d.id == id) else {
             return;
@@ -575,7 +581,9 @@ impl Model {
             self.open_session(session.id.clone());
         } else {
             self.project.set(director.project_id.clone());
+            self.session.set(format!("director-draft-{id}"));
             self.worker_director.set(id);
+            self.worker_approval.set(false);
             self.page.set(Page::DirectorStart);
         }
     }

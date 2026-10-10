@@ -19,40 +19,52 @@ pub(crate) fn Settings(model: Model) -> Element {
     let root = view! {
         scroll {
             col height:min-content pad:{px(28.0)}px gap:{px(24.0)}px {
+                if cfg!(target_arch = "wasm32") {
+                    row height:min-content max-width:{px(760.0)}px {
+                        button #relay.action @click:{crate::platform::logout(model);}
+                            label:"Sign out of Relay" "Sign out"
+                    }
+                }
                 // Notices carry their own spacing, so none leaves an empty gap.
                 col height:min-content gap:0px {
-                if matches!(model.settings_store.get().persistence, crate::settings::Persistence::Suspended { .. }) {
-                    col height:min-content pad:(bottom:{px(24.0)}px) {
-                    col height:min-content max-width:{px(760.0)}px gap:{px(10.0)}px pad:{px(14.0)}px
-                        fill:attention.fill stroke:(width:{px(4.0)} color:attention.text edges:left)
-                        label:"Display settings not saved" {
-                        row #relay.title height:min-content font-size:{px(15.0)}px
-                            font-color:attention.on {
-                            text "Display settings are not being saved"
+                    if matches!(model.settings_store.get().persistence, crate::settings::Persistence::Suspended { .. }) {
+                        col height:min-content pad:(bottom:{px(24.0)}px) {
+                            col height:min-content max-width:{px(760.0)}px gap:{px(10.0)}px
+                                pad:{px(14.0)}px fill:attention.fill
+                                stroke:(width:{px(4.0)} color:attention.text edges:left)
+                                label:"Display settings not saved" {
+                                row #relay.title height:min-content font-size:{px(15.0)}px
+                                    font-color:attention.on {
+                                    text "Display settings are not being saved"
+                                }
+                                row height:min-content font-size:{px(12.0)}px
+                                    font-color:attention.on {
+                                    text
+                                        {match model.settings_store.get().persistence {crate::settings::Persistence::Suspended { reason } => crate::settings::suspended_notice(&reason), _ => String::new()}}
+                                }
+                                row height:min-content font-size:{px(12.0)}px
+                                    font-color:attention.on {
+                                    text
+                                        {model.settings_store.get().path.map(|p| format!("File: {}", p.display())).unwrap_or_default()}
+                                }
+                                row height:min-content gap:{px(8.0)}px {
+                                    button #relay.action
+                                        @click:{crate::settings::recover_by_backup(model);}
+                                        label:"Back up file and save current settings"
+                                        "Back up and save"
+                                    button #relay.action
+                                        @click:{crate::settings::retry_reading(model);}
+                                        label:"Retry reading settings file" "Retry reading"
+                                }
+                            }
                         }
-                        row height:min-content font-size:{px(12.0)}px font-color:attention.on {
+                    }
+                    if model.settings_store.get().backup.is_some() {
+                        row #relay.caption height:min-content max-width:{px(760.0)}px {
                             text
-                                {match model.settings_store.get().persistence {crate::settings::Persistence::Suspended { reason } => crate::settings::suspended_notice(&reason), _ => String::new()}}
-                        }
-                        row height:min-content font-size:{px(12.0)}px font-color:attention.on {
-                            text
-                                {model.settings_store.get().path.map(|p| format!("File: {}", p.display())).unwrap_or_default()}
-                        }
-                        row height:min-content gap:{px(8.0)}px {
-                            button #relay.action @click:{crate::settings::recover_by_backup(model);}
-                                label:"Back up file and save current settings" "Back up and save"
-                            button #relay.action @click:{crate::settings::retry_reading(model);}
-                                label:"Retry reading settings file" "Retry reading"
+                                {model.settings_store.get().backup.map(|b| format!("Previous settings file kept at {}", b.display())).unwrap_or_default()}
                         }
                     }
-                    }
-                }
-                if model.settings_store.get().backup.is_some() {
-                    row #relay.caption height:min-content max-width:{px(760.0)}px {
-                        text
-                            {model.settings_store.get().backup.map(|b| format!("Previous settings file kept at {}", b.display())).unwrap_or_default()}
-                    }
-                }
                 }
                 col #relay.module max-width:{px(760.0)}px label:"Harnesses" {
                     SettingsHead title:"Harnesses" note:"Installed on the connected server"
@@ -89,12 +101,14 @@ pub(crate) fn Settings(model: Model) -> Element {
                     SettingsHead title:"Interface scale"
                         note:"Display scaling follows the operating system"
                     row height:{px(34.0)}px gap:0px pad:0px align:center {
-                            stepper #relay.scale-stepper min:80 max:200 step:10 label:"Interface scale percent" scale as scale_control
-                            {scale_control.decrement().label("Decrease interface scale");scale_control.increment().label("Increase interface scale");}
-                            row #relay.caption height:fill width:{px(34.0)}px align:center justify:center
-                                stroke:(width:{px(1.0)} color:rule.line edges:left) {text "%"}
-                            ResetSetting model:(model) setting:(crate::settings::Setting::Scale)
-                                name:("interface scale") flush:true
+                        stepper #relay.scale-stepper min:80 max:200 step:10 label:"Interface scale percent" scale as scale_control
+                        {scale_control.decrement().label("Decrease interface scale");scale_control.increment().label("Increase interface scale");}
+                        row #relay.caption height:fill width:{px(34.0)}px align:center
+                            justify:center stroke:(width:{px(1.0)} color:rule.line edges:left) {
+                            text "%"
+                        }
+                        ResetSetting model:(model) setting:(crate::settings::Setting::Scale)
+                            name:("interface scale") flush:true
                     }
                 }
                 col #relay.module max-width:{px(760.0)}px label:"Fonts" {

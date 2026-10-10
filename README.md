@@ -4,6 +4,8 @@ Relay is a shared workspace for small teams to direct coding agents through thei
 
 The foundation is tracked in [issue #1](https://github.com/jens-hj/relay/issues/1), the first live workflow in [issue #2](https://github.com/jens-hj/relay/issues/2), the continuous agent buffer in [issue #6](https://github.com/jens-hj/relay/issues/6), local Claude Code/Codex execution in [issue #7](https://github.com/jens-hj/relay/issues/7), and named projects and board publishing in [issue #8](https://github.com/jens-hj/relay/issues/8). See [development](docs/development.md) for setup and [architecture](docs/architecture.md) for boundaries and next steps.
 
+The existing Mosaic client also builds to WebAssembly for browser access. See [remote access and Nix deployment](docs/remote-access-plan.md), tracked in [issue #12](https://github.com/jens-hj/relay/issues/12), for private owner login, HTTPS hosting, and persistent services.
+
 ## Run
 
 The project declares its local development environment in [flake.nix](flake.nix). Use `nix develop` or `direnv allow` with the included `.envrc`.

@@ -1,6 +1,8 @@
 //! A Relay-owned document interaction controller over Mosaic's native text primitives.
 use crate::panels::{BoundedPanel, BoundedPanelProps};
 use crate::styles::*;
+use crate::ui::{NavigationButton, NavigationButtonProps, Notice, NoticeProps};
+use crate::window_chrome::{WindowControls, WindowControlsProps};
 use crate::{
     buffer,
     controls::{ButtonStyle, button},
@@ -54,6 +56,7 @@ pub struct Controller {
     search_hit: Option<(String, usize)>,
     preedit: Option<StagedPreedit>,
     viewport: Option<Scroll>,
+    resize_follow: bool,
 }
 
 type Shared = Rc<RefCell<Controller>>;
@@ -585,7 +588,13 @@ pub fn Conversation(model: Model) -> Element {
                         _ => "WKR".into(),
                     })
             })
-            .unwrap_or_default()
+            .unwrap_or_else(|| {
+                if model.page.get() == crate::model::Page::DirectorStart {
+                    "DIR".into()
+                } else {
+                    String::new()
+                }
+            })
     });
     // Role, director and project, as recorded for this session.
     let header_context = Derived::new(move || {
@@ -613,7 +622,28 @@ pub fn Conversation(model: Model) -> Element {
                     .collect::<Vec<_>>()
                     .join(" · ")
             })
-            .unwrap_or_default()
+            .unwrap_or_else(|| {
+                if model.page.get() != crate::model::Page::DirectorStart {
+                    return String::new();
+                }
+                let director = snapshot
+                    .directors
+                    .iter()
+                    .find(|d| d.id == model.worker_director.get());
+                let project = snapshot
+                    .projects
+                    .iter()
+                    .find(|p| p.id == model.project.get());
+                [
+                    Some("Director".to_string()),
+                    director.map(|d| d.name.clone()),
+                    project.map(|p| p.name.clone()),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ")
+            })
     });
     let removed = Derived::new(move || {
         let snapshot = model.snapshot.get();
@@ -647,6 +677,28 @@ pub fn Conversation(model: Model) -> Element {
     // change, so transcript and draft surfaces are never rebuilt.
     let doc_width = State::new(1200.0f32);
     let doc_height = State::new(900.0f32);
+    let viewport_size = State::new(Size::ZERO);
+    let resize_controller = controller.get_untracked();
+    Effect::new(move || {
+        let _size = viewport_size.get();
+        mosaic::core::reactive::untracked(|| {
+            let mut state = resize_controller.borrow_mut();
+            let Some(field) = state
+                .surfaces
+                .values()
+                .find(|(field, _)| field.interaction().focused())
+                .map(|(field, _)| field.clone())
+            else {
+                return;
+            };
+            // A keyboard resize needs to reveal the current insertion point even
+            // when no key was pressed. Wait for paint so wrapping and content
+            // extents have settled; do not follow during manual scrolling.
+            state.resize_follow = true;
+            drop(state);
+            field.paint_dirty();
+        });
+    });
     let recovery = Derived::new(move || {
         model
             .buffer
@@ -688,8 +740,10 @@ pub fn Conversation(model: Model) -> Element {
         col width:1fr gap:0px
             @layout:{move |rect: Rect| { doc_width.set(rect.size.width); doc_height.set(rect.size.height); }} {
             row height:{px(74.0)}px shrink:0 stroke:(width:{px(1.0)} color:rule.line edges:bottom)
-                label:"Session header" {
-                stack width:{px(if compact.get() {52.0} else {74.0})}px shrink:0 align:center
+                label:"Session header"
+                @pointer:{move |event, ctx| crate::window_chrome::drag_header(model, event, ctx)} {
+                NavigationButton model:(model)
+                stack width:{px(if compact.get() {36.0} else {74.0})}px shrink:0 align:center
                     justify:center
                     fill:{color(match header_state.get() {RunState::Running => run.fill, RunState::Waiting => attention.fill, _ => ink.inverse})} {
                     row width:max-content height:min-content font-weight:700
@@ -699,7 +753,7 @@ pub fn Conversation(model: Model) -> Element {
                     }
                 }
                 col width:1fr min-width:0px justify:center gap:{px(4.0)}px
-                    pad:(horizontal:{px(16.0)}px vertical:0px) {
+                    pad:(horizontal:{px(if compact.get() {8.0} else {16.0})}px vertical:0px) {
                     row #relay.eyebrow height:min-content clip {
                         text text-wrap:none text-transform:{TextTransform::Uppercase}
                             letter-spacing:{px(0.6)}px {header_context.get()}
@@ -707,45 +761,48 @@ pub fn Conversation(model: Model) -> Element {
                     stack #relay.fade-label #relay.title height:min-content font-size:{px(20.0)}px {
                         row #relay.fade-line {
                             text width:max-content shrink:0 text-wrap:none
-                                {session.get().map(|s|s.title).unwrap_or_else(|| "Agent".into())}
+                                {session.get().map(|s|s.title).unwrap_or_else(|| if model.page.get() == crate::model::Page::DirectorStart { "Director conversation".into() } else { "Agent".into() })}
                         }
                     }
                 }
-                col #relay.cell width:max-content
-                    stroke:(width:{px(1.0)} color:rule.line edges:left) label:"Session status"
-                    description:{if header_state.get() == RunState::Unavailable {"No active agent"} else {header_state.get().label()}} {
-                    if !compact.get() {
-                        row #relay.eyebrow height:min-content {
-                            text text-transform:uppercase letter-spacing:{px(0.6)}px "Status"
-                        }
-                    }
-                    row height:min-content width:max-content align:center gap:{px(6.0)}px {
-                        if header_state.get() != RunState::Unavailable {
-                            StatusGlyph state:(header_state)
-                        }
+                if doc_width.get() >= px(400.0) {
+                    col #relay.cell width:max-content
+                        stroke:(width:{px(1.0)} color:rule.line edges:left) label:"Session status"
+                        description:{if header_state.get() == RunState::Unavailable {"No active agent"} else {header_state.get().label()}} {
                         if !compact.get() {
-                            row height:min-content width:max-content font-size:{px(13.0)}px
-                                font-color:{color(header_state.get().text_color())} {
-                                text text-wrap:none
-                                    {if header_state.get() == RunState::Unavailable {"No active agent"} else {header_state.get().label()}}
+                            row #relay.eyebrow height:min-content {
+                                text text-transform:uppercase letter-spacing:{px(0.6)}px "Status"
+                            }
+                        }
+                        row height:min-content width:max-content align:center gap:{px(6.0)}px {
+                            if header_state.get() != RunState::Unavailable {
+                                StatusGlyph state:(header_state)
+                            }
+                            if !compact.get() {
+                                row height:min-content width:max-content font-size:{px(13.0)}px
+                                    font-color:{color(header_state.get().text_color())} {
+                                    text text-wrap:none
+                                        {if header_state.get() == RunState::Unavailable {"No active agent"} else {header_state.get().label()}}
+                                }
                             }
                         }
                     }
                 }
                 if !compact.get() && session.get().and_then(|s|s.worker).is_some_and(|w|matches!(w.status,WorkerStatus::Running|WorkerStatus::Queued)) {
-                    col #relay.cell width:max-content
-                        stroke:(width:{px(1.0)} color:rule.line edges:left) {
-                        button #relay.action @click:{model.stop_worker();} label:"Stop worker"
-                            disabled:{!model.connected.get() || model.busy.get()} "Stop"
-                    }
+                    button #relay.header-action @click:{model.stop_worker();} label:"Stop worker"
+                        width:{px(74.0)}px height:fill pad:0px
+                        stroke:(width:{px(1.0)} color:rule.line edges:left)
+                        disabled:{!model.connected.get() || model.busy.get()} "Stop"
                 }
                 row width:max-content stroke:(width:{px(1.0)} color:rule.line edges:left) {
                     button #relay.header-action @click:{menu.set(!menu.get_untracked());}
-                        width:{px(56.0)}px pad:0px label:"Session actions" {
+                        width:{px(36.0)}px pad:0px label:"Session actions" {
                         icon size:{px(16.0)}px more-icon
                     }
                 }
+                WindowControls model:(model)
             }
+            Notice model:(model)
             if session.get().is_some_and(|s| s.worker.is_some()) {
                 scroll {
                     row width:max-content height:{px(28.0)}px shrink:0
@@ -774,19 +831,25 @@ pub fn Conversation(model: Model) -> Element {
                         }
                         grid height:min-content gap:{px(8.0)}px
                             cols:{GridTracks::auto_fit(GridTrack::minmax(px(90.0).into(), GridTrack::fr(1.0)))} {
+                            if cfg!(target_arch = "wasm32") {
+                                button #relay.action @click:{crate::platform::pick_files(model);}
+                                    label:"Add files to draft" "Add files"
+                            }
                             button #relay.action @click:{model.open_worker_issue();}
-                                label:"Linked issue" "Issue"
+                                disabled:{session.get().is_none()} label:"Linked issue" "Issue"
                             button #relay.action
-                                @click:{if let Some(s)=session.get_untracked(){model.open_profile(EditTarget::Director(s.director_id));}}
+                                @click:{model.open_profile(EditTarget::Director(session.get_untracked().map(|s|s.director_id).unwrap_or_else(||model.worker_director.get_untracked())));}
                                 label:"Director profile" "Profile"
                             button #relay.action
                                 @click:{details.set(if details.get_untracked()=="changes" {String::new()}else{"changes".into()});}
-                                label:"Toggle change review" "Changes"
+                                disabled:{session.get().is_none()} label:"Toggle change review"
+                                "Changes"
                             button #relay.action
                                 @click:{details.set(if details.get_untracked()=="usage" {String::new()}else{"usage".into()});}
+                                disabled:{session.get().is_none()}
                                 label:"Session usage and provenance" "Details"
                             button #relay.action @click:{model.searching.set(true);menu.set(false);}
-                                label:"Search transcript" "Find"
+                                disabled:{session.get().is_none()} label:"Search transcript" "Find"
                         }
                         if session.get().is_some_and(|s| !s.fixture && s.worker.is_some()) {
                             let current = session.get_untracked().unwrap();
@@ -1079,7 +1142,21 @@ pub fn Conversation(model: Model) -> Element {
                     }
                 }
             } as document_scroll
-            {controller.get_untracked().borrow_mut().viewport=Some(document_scroll.clone());}
+            {
+                document_scroll.root().on_layout(move |rect| viewport_size.set(rect.size));
+                controller.get_untracked().borrow_mut().viewport=Some(document_scroll.clone());
+                let follow_scroll = document_scroll.clone();
+                let previous = Rc::new(Cell::new(None::<(f32, f32)>));
+                document_scroll.content().on_layout(move |rect| {
+                    let height = follow_scroll.root().layout_rect().size.height;
+                    let was_at_bottom = previous.get().is_none_or(|(content, viewport)|
+                        follow_scroll.offset().y >= (content - viewport).max(0.0) - px(4.0));
+                    previous.set(Some((rect.size.height, height)));
+                    if was_at_bottom {
+                        follow_scroll.scroll_to(Vector2::new(0.0, (rect.size.height - height).max(0.0)));
+                    }
+                });
+            }
             if model.buffer.get().approval_needed {
                 BoundedPanel limit:(auxiliary_limit) {
                     grid height:min-content gap:{px(10.0)}px align:center
@@ -1533,6 +1610,16 @@ fn remove_part(parts: &mut Vec<Part>, id: &str) {
     }
 }
 
+fn caret_with_margin(origin: Vector2, caret: Rect) -> Rect {
+    let margin = px(8.0);
+    Rect::from_xywh(
+        origin.x + caret.origin.x,
+        origin.y + caret.origin.y - margin,
+        caret.size.width,
+        caret.size.height + margin * 2.0,
+    )
+}
+
 #[component]
 fn BufferText(
     model: Model,
@@ -1665,7 +1752,7 @@ fn BufferText(
             editor.set_wrap_width(&mut fonts, Some(rect.size.width));
             let caret = editor.caret_rect(&mut fonts);
             if let Some(viewport) = layout_controller.borrow().viewport.as_ref() {
-                viewport.reveal(Rect::new(rect.origin + caret.origin, caret.size));
+                viewport.reveal(caret_with_margin(rect.origin, caret));
             }
         }
     });
@@ -1714,10 +1801,11 @@ fn BufferText(
             .glyphs(buffer.place(&mut fonts, ctx.text_color.clone(), origin, ctx.scale));
         if interaction.focused() {
             let caret = buffer.caret_rect(&mut fonts);
-            if paint_follow.replace(false)
+            let resized = std::mem::take(&mut paint_controller.borrow_mut().resize_follow);
+            if (paint_follow.replace(false) || resized)
                 && let Some(viewport) = paint_controller.borrow().viewport.as_ref()
             {
-                viewport.reveal(Rect::new(origin + caret.origin, caret.size));
+                viewport.reveal(caret_with_margin(origin, caret));
             }
             ctx.scene.shape(
                 Visual::new()

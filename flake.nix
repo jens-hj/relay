@@ -10,6 +10,7 @@
 
   outputs =
     {
+      self,
       mosaic,
       nixpkgs,
       rust-overlay,
@@ -25,6 +26,7 @@
           config.allowUnfreePredicate = pkg: builtins.elem (pkgs.lib.getName pkg) [ "claude-code" ];
         };
         rust = pkgs.rust-bin.stable."1.89.0".default.override {
+          targets = [ "wasm32-unknown-unknown" ];
           extensions = [
             "rust-analyzer"
             "rust-src"
@@ -86,6 +88,19 @@
         devShells = {
           default = mkRelayShell desktopLibraries [ ];
           server = mkRelayShell [ ] [ ];
+          web =
+            mkRelayShell
+              [ ]
+              [
+                pkgs.wasm-bindgen-cli
+                mosaic.packages.${system}.mosaic-cli
+                pkgs.python3
+              ];
+          browser = mkRelayShell desktopLibraries [
+            pkgs.chromium
+            pkgs.nodejs
+            pkgs.python3
+          ];
           ui-test = mkRelayShell desktopLibraries (
             pkgs.lib.optionals pkgs.stdenv.isLinux (
               with pkgs;
@@ -101,8 +116,28 @@
         };
         packages = {
           inherit (mosaic.packages.${system}) mosaic-cli mosaic-fmt mosaic-lsp;
+          relay-server = import ./nix/server-package.nix {
+            inherit pkgs;
+            rust = pkgs.rust-bin.stable."1.89.0".default;
+            src = self;
+          };
+          relay-web = import ./nix/web-package.nix {
+            inherit pkgs rust;
+            src = self;
+            mosaicSource = mosaic;
+            mosaicCli = mosaic.packages.${system}.mosaic-cli;
+          };
+          default = self.packages.${system}.relay-server;
+        };
+        apps.relay-server = {
+          type = "app";
+          program = "${self.packages.${system}.relay-server}/bin/relay-server";
         };
         formatter = pkgs.nixfmt-tree;
       }
-    );
+    )
+    // {
+      homeManagerModules.default = import ./nix/home-manager.nix { inherit self; };
+      nixosModules.default = import ./nix/nixos.nix { inherit self; };
+    };
 }

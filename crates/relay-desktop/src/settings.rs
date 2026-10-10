@@ -1,6 +1,7 @@
 use crate::{model::Model, theme};
 use mosaic::prelude::*;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -188,6 +189,12 @@ impl Preferences {
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {
+        #[cfg(target_arch = "wasm32")]
+        let source = match crate::browser::read(&path.to_string_lossy())? {
+            Some(source) => source,
+            None => return Ok(Self::default()),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
         let source = match std::fs::read_to_string(path) {
             Ok(source) => source,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -210,21 +217,28 @@ impl Preferences {
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
         self.validate()?;
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Cannot create settings directory: {e}"))?;
-        let temporary = parent.join(format!(".relay-settings-{}.tmp", uuid::Uuid::new_v4()));
         let source = toml::to_string_pretty(&Overrides::from_preferences(self))
             .map_err(|e| e.to_string())?;
-        let result =
-            std::fs::write(&temporary, source).and_then(|()| std::fs::rename(&temporary, path));
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::browser::write(&path.to_string_lossy(), &source)
         }
-        result.map_err(|e| format!("Cannot save display settings: {e}"))
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Cannot create settings directory: {e}"))?;
+            let temporary = parent.join(format!(".relay-settings-{}.tmp", uuid::Uuid::new_v4()));
+            let result =
+                std::fs::write(&temporary, source).and_then(|()| std::fs::rename(&temporary, path));
+            if result.is_err() {
+                let _ = std::fs::remove_file(&temporary);
+            }
+            result.map_err(|e| format!("Cannot save display settings: {e}"))
+        }
     }
 }
 
@@ -276,6 +290,7 @@ pub fn suspended_notice(reason: &str) -> String {
 /// Keep a byte-for-byte copy of the existing settings file, then save the
 /// current preferences. A backup never replaces an existing file, and any
 /// failure leaves the original in place.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn backup_and_save(path: &Path, preferences: &Preferences) -> Result<Option<PathBuf>, String> {
     preferences.validate()?;
     let original = match std::fs::read(path) {
@@ -310,6 +325,7 @@ pub fn backup_and_save(path: &Path, preferences: &Preferences) -> Result<Option<
     Ok(backup)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn write_backup(path: &Path, bytes: &[u8], stamp: &str) -> Result<PathBuf, String> {
     let name = path
         .file_name()
@@ -349,6 +365,7 @@ pub fn write_backup(path: &Path, bytes: &[u8], stamp: &str) -> Result<PathBuf, S
 }
 
 /// `YYYYMMDDTHHMMSSZ` for a Unix timestamp (proleptic Gregorian, UTC).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn utc_stamp(seconds: u64) -> String {
     let days = (seconds / 86_400) as i64;
     let rest = seconds % 86_400;
@@ -411,6 +428,7 @@ pub fn retry_reading(model: Model) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn path() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("RELAY_SETTINGS_PATH") {
         return Ok(path.into());
@@ -468,4 +486,22 @@ pub fn bind(model: Model, context: AppContext) {
             previous = preferences;
         }
     });
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn path() -> Result<PathBuf, String> {
+    Ok(PathBuf::from("relay-preferences-v2"))
+}
+#[cfg(target_arch = "wasm32")]
+pub fn backup_and_save(path: &Path, preferences: &Preferences) -> Result<Option<PathBuf>, String> {
+    let original = crate::browser::read(&path.to_string_lossy())?;
+    let backup = if let Some(original) = original {
+        let key = format!("{}-unreadable-{}", path.display(), uuid::Uuid::new_v4());
+        crate::browser::write(&key, &original)?;
+        Some(PathBuf::from(key))
+    } else {
+        None
+    };
+    preferences.save(path)?;
+    Ok(backup)
 }

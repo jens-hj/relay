@@ -797,6 +797,7 @@ pub(super) fn apply(
         Command::StartDirector {
             director_id,
             prompt,
+            parts: _,
             approve_implementation,
         } => {
             return start(
@@ -1127,7 +1128,10 @@ pub(super) fn clone_repository(workspace: &Workspace, id: &str) -> Result<(), Er
                 .arg(&remote)
                 .arg(staging.path())
                 .env("GIT_TERMINAL_PROMPT", "0")
-                .env_remove("RELAY_TOKEN"),
+                .env_remove("RELAY_TOKEN")
+                .env_remove("RELAY_TOKEN_FILE")
+                .env_remove("RELAY_SETUP_TOKEN_FILE")
+                .env_remove("CREDENTIALS_DIRECTORY"),
             1024 * 1024,
             Duration::from_secs(300),
             "Git clone",
@@ -1816,6 +1820,7 @@ mod tests {
             Command::StartDirector {
                 director_id: director,
                 prompt: "Plan this project".into(),
+                parts: vec![],
                 approve_implementation: false,
             },
             "director-start",

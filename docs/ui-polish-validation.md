@@ -23,18 +23,35 @@ This pass implements the 17 screenshot comments following the Labelism design re
 
 ## Connection footer follow-up
 
-The connection footer follow-up keeps Settings and Revision in adjacent square cells,
-with a divider on each side of Settings. At narrow sidebar widths, the Server
+The connection footer keeps Settings and Revision in adjacent cells, with a divider
+on each side of Settings. Revision sizes to its text with internal padding so
+wider platform font metrics fit. Its explanation appears in a hover tooltip. At narrow sidebar widths, the Server
 heading uses a status square; wider sidebars also show the status word. Expanded
 connection details use contiguous sections for the selectable endpoint, round-trip
-latency, transport/protocol, status, and revision explanation. Latency has a large
+latency, and transport/protocol. Status messages sit in the connection header,
+with the Online/Offline indicator aligned to the right. Latency has a large
 numeric reading plus a labelled, coloured three-bar indicator using the existing
 Good/Fair/Slow thresholds. No inner cards or additional control frames are added.
 Desktop layout coverage checks 160, 220, and 360px sidebars with good, fair, slow,
-and missing latency samples, including square footer cells and contained text.
+and missing latency samples, including adjoining footer cells, right-aligned status, and contained text.
 Sidebar project, director, and worker rows also meet the right edge without gaps
 between their backgrounds. Tree indentation stays on the left; row actions fill
 their cells, with aligned director profile and project-default controls.
+Root project rows span both sidebar edges, with spacing inside each row instead
+of around the list. Child rows retain their tree indentation.
+New Project and New Director use the same raised hover surface as navigation
+rows; hovering either the new-director action or its defaults icon fills the row.
+
+## Command palette follow-up
+
+The palette has one outer frame, flush header/search cells, and full-width action
+rows. Icons, short category labels, an inverse active row, and an Enter marker
+make the available actions and keyboard selection visible. The footer reports
+the result count and keyboard controls; results scroll within the viewport at
+200% scale. Empty searches show a clear no-results state. Outside presses dismiss
+the palette without activating covered controls, and dismissal restores the
+previous focus through an element-owned removal callback. Desktop regressions
+cover shared edges, narrow layouts, filtering, keyboard execution, and dismissal.
 
 ## Settings compatibility
 

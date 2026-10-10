@@ -38,7 +38,7 @@ fn store_draft(connection: &Connection, value: &Draft) -> Result<(), Error> {
     Ok(())
 }
 
-fn validate(
+pub(super) fn validate(
     connection: &Connection,
     snapshot: &Snapshot,
     session: &str,
@@ -146,6 +146,7 @@ pub(super) async fn save_draft(
 
 pub(super) async fn draft_events(
     State(workspace): State<Workspace>,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, Error> {
     let store = workspace.store.lock().map_err(Error::internal)?;
@@ -176,7 +177,7 @@ pub(super) async fn draft_events(
                 } }
             }
         };
-        tokio::select! { _ = streaming => {}, _ = async { while !*shutdown.borrow_and_update() { if shutdown.changed().await.is_err() { break; } } } => {} }
+        tokio::select! { _ = workspace.session_ended(&headers) => {}, _ = streaming => {}, _ = async { while !*shutdown.borrow_and_update() { if shutdown.changed().await.is_err() { break; } } } => {} }
         let _ = tokio::time::timeout(std::time::Duration::from_millis(250), socket.send(WsMessage::Close(None))).await;
     }))
 }
@@ -297,6 +298,23 @@ pub(super) async fn get_asset(
         "x-content-type-options",
         axum::http::HeaderValue::from_static("nosniff"),
     );
+    response.headers_mut().insert(
+        "cache-control",
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    if !matches!(
+        metadata.media_type.as_str(),
+        "image/png" | "image/jpeg" | "image/webp" | "text/plain"
+    ) {
+        response.headers_mut().insert(
+            "content-disposition",
+            axum::http::HeaderValue::from_static("attachment"),
+        );
+        response.headers_mut().insert(
+            "content-type",
+            axum::http::HeaderValue::from_static("application/octet-stream"),
+        );
+    }
     Ok(response)
 }
 

@@ -280,6 +280,8 @@ pub enum Command {
     StartDirector {
         director_id: String,
         prompt: String,
+        #[serde(default)]
+        parts: Vec<Part>,
         approve_implementation: bool,
     },
     SetSessionConnections {

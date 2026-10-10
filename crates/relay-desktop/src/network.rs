@@ -1,17 +1,22 @@
+#[cfg(not(target_arch = "wasm32"))]
 use futures_util::{SinkExt, StreamExt};
 use mosaic::prelude::StateSender;
 use relay_core::{ApiError, CommandEnvelope, Snapshot};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use tokio::sync::mpsc;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 
 #[derive(Clone)]
 pub struct Config {
     pub endpoint: reqwest::Url,
+    #[cfg(not(target_arch = "wasm32"))]
     pub token: String,
 }
 
 impl Config {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_env() -> Result<Self, String> {
         let endpoint =
             std::env::var("RELAY_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:7331/".into());
@@ -33,6 +38,18 @@ impl Config {
         HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_| "RELAY_TOKEN is not a valid header value")?;
         Ok(Self { endpoint, token })
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_env() -> Result<Self, String> {
+        let origin = web_sys::window()
+            .ok_or("Browser window unavailable")?
+            .location()
+            .origin()
+            .map_err(|_| "Cannot read server origin")?;
+        Ok(Self {
+            endpoint: reqwest::Url::parse(&format!("{origin}/"))
+                .map_err(|_| "Invalid server origin")?,
+        })
     }
     pub(crate) fn url(&self, path: &str) -> reqwest::Url {
         self.endpoint
@@ -63,6 +80,7 @@ enum Event {
     Outcome(String, Result<Snapshot, String>, bool, bool),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start(
     config: Config,
     ui: StateSender<NetworkState>,
@@ -173,6 +191,7 @@ fn replace_snapshot(state: &mut NetworkState, snapshot: Snapshot) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn read(client: &reqwest::Client, config: &Config) -> Result<Snapshot, String> {
     decode(
         client
@@ -196,6 +215,7 @@ fn validate_protocol(snapshot: &Snapshot) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn decode(response: reqwest::Response) -> Result<Snapshot, String> {
     if response.status().is_success() {
         let snapshot: Snapshot = response
@@ -213,6 +233,7 @@ async fn decode(response: reqwest::Response) -> Result<Snapshot, String> {
         .unwrap_or_else(|_| format!("Server rejected the request ({status})")))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn stream(config: Config, client: reqwest::Client, events: mpsc::UnboundedSender<Event>) {
     let mut delay = 1;
     loop {
@@ -276,6 +297,7 @@ async fn stream(config: Config, client: reqwest::Client, events: mpsc::Unbounded
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn write(
     config: Config,
     client: reqwest::Client,
@@ -319,7 +341,7 @@ async fn write(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -416,7 +438,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod outcome_tests {
     use super::*;
     use std::{
@@ -505,3 +527,9 @@ mod outcome_tests {
         }
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+#[path = "network_web.rs"]
+mod web;
+#[cfg(target_arch = "wasm32")]
+pub use web::*;
