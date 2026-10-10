@@ -1,5 +1,7 @@
 //! Relay's domain and versioned client/server contract. No UI or execution dependencies.
 
+mod harness_commands;
+pub use harness_commands::*;
 mod conversation;
 mod tools;
 pub use tools::*;
@@ -95,6 +97,10 @@ pub struct Session {
     pub connection_ids: Vec<String>,
     #[serde(default)]
     pub workspaces: Vec<SessionWorkspace>,
+    #[serde(default)]
+    pub selection: HarnessSelection,
+    #[serde(default)]
+    pub conversations: Vec<RetainedConversation>,
     pub id: String,
     pub project_id: String,
     pub issue_id: Option<String>,
@@ -228,6 +234,15 @@ pub struct CommandEnvelope {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    SetHarnessSelection {
+        session_id: String,
+        selection: HarnessSelection,
+    },
+    ConversationCommand {
+        session_id: String,
+        name: String,
+        argument: String,
+    },
     CreateProject {
         name: String,
         root: String,
@@ -445,6 +460,8 @@ impl Snapshot {
             | Command::ConfigureHarness { .. }
             | Command::RespondPermission { .. }
             | Command::SetWorkerExecution { .. }
+            | Command::SetHarnessSelection { .. }
+            | Command::ConversationCommand { .. }
             | Command::SyncProject { .. }
             | Command::StartWorker { .. }
             | Command::SendWorker { .. }

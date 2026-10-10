@@ -58,7 +58,7 @@ pub async fn send(
     let session = session(config).await?;
     let request = request
         .fetch_credentials_same_origin()
-        .header("x-relay-protocol", "2")
+        .header("x-relay-protocol", relay_core::PROTOCOL_VERSION.to_string())
         .header("x-relay-csrf", &session.csrf_token);
     let response = tokio::select! {
         response = request.send() => response.map_err(|_| "Request could not be confirmed; exact retry preserves its ID")?,

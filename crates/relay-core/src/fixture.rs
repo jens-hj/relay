@@ -57,6 +57,8 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
     let sessions = vec![
         Session {
             workspaces: vec![],
+            selection: Default::default(),
+            conversations: vec![],
             connection_ids: vec![],
             id: "session-plan".into(),
             project_id: "demo".into(),
@@ -69,6 +71,8 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
         },
         Session {
             workspaces: vec![],
+            selection: Default::default(),
+            conversations: vec![],
             connection_ids: vec![],
             id: "session-worker".into(),
             project_id: "demo".into(),
@@ -81,6 +85,8 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
         },
         Session {
             workspaces: vec![],
+            selection: Default::default(),
+            conversations: vec![],
             connection_ids: vec![],
             id: "session-review".into(),
             project_id: "demo".into(),

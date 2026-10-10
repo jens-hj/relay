@@ -1033,6 +1033,8 @@ fn start(
         fixture: false,
         connection_ids: ids,
         workspaces: vec![],
+        selection: Default::default(),
+        conversations: vec![],
         worker: Some(WorkerRun {
             model: None,
             context_tokens: None,

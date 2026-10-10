@@ -16,6 +16,7 @@ mod browser;
 mod tool_activity;
 pub use browser::{BrowserConfig, initialize_setup_code};
 mod claude;
+mod commands;
 mod conversation;
 mod github;
 mod harness;
@@ -102,7 +103,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 9 {
+        if version > 10 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -122,7 +123,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 9;"
+             PRAGMA user_version = 10;"
         ).map_err(Error::internal)?;
         let seed =
             serde_json::to_string(&demo_snapshot(defaults.clone())).map_err(Error::internal)?;
@@ -164,6 +165,21 @@ impl Store {
                 .map_err(Error::internal)?;
             let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
             snapshot.migrate_projects();
+            connection
+                .execute(
+                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                    [serde_json::to_string(&snapshot).map_err(Error::internal)?],
+                )
+                .map_err(Error::internal)?;
+        }
+        if version < 10 {
+            let json: String = connection
+                .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+                    r.get(0)
+                })
+                .map_err(Error::internal)?;
+            let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
+            snapshot.protocol_version = PROTOCOL_VERSION;
             connection
                 .execute(
                     "UPDATE workspace SET snapshot=?1 WHERE id=1",
@@ -329,6 +345,40 @@ impl Store {
                 });
                 snapshot.revision += 1;
             }
+            Command::SetHarnessSelection {
+                session_id,
+                selection,
+            } => {
+                let session = snapshot
+                    .sessions
+                    .iter_mut()
+                    .find(|s| s.id == session_id && !s.fixture && s.worker.is_some())
+                    .ok_or_else(|| Error::invalid("Live session not found"))?;
+                session.selection = selection;
+                snapshot.revision += 1;
+            }
+            Command::ConversationCommand {
+                session_id,
+                name,
+                argument,
+            } => {
+                if name == "fork" {
+                    commands::reserve_fork(&mut snapshot, &session_id)?;
+                    action = Some(Action::Run {
+                        session_id,
+                        prompt: "/fork".into(),
+                    });
+                } else {
+                    commands::conversation(
+                        &mut snapshot,
+                        &session_id,
+                        &name,
+                        &argument,
+                        &envelope.request_id,
+                    )?;
+                }
+                snapshot.revision += 1;
+            }
             Command::SetWorkerExecution {
                 session_id,
                 execution,
@@ -434,6 +484,8 @@ impl Store {
                 let session_id = format!("session-{}", envelope.request_id);
                 snapshot.sessions.push(Session {
                     workspaces: vec![],
+                    selection: Default::default(),
+                    conversations: vec![],
                     connection_ids: snapshot
                         .connections
                         .iter()
@@ -492,7 +544,9 @@ impl Store {
                 if runtime::active(&worker.status) {
                     return Err(Error::invalid("Worker already has an active turn"));
                 }
-                if worker.thread_id.is_none() || worker.worktree.is_none() {
+                if (worker.thread_id.is_none() && session.conversations.is_empty())
+                    || worker.worktree.is_none()
+                {
                     return Err(Error::invalid(
                         "Worker has no recorded thread/worktree to resume",
                     ));
@@ -595,6 +649,8 @@ struct Workspace {
     browser: Arc<browser::BrowserAuth>,
     harness_status: Arc<Mutex<Vec<HarnessStatus>>>,
     harness_probe: Arc<tokio::sync::Mutex<()>>,
+    catalog_probe: Arc<tokio::sync::Mutex<()>>,
+    catalogs: Arc<Mutex<HashMap<String, (u64, HarnessCatalog)>>>,
     drafts: watch::Sender<Vec<Draft>>,
     transport_shutdown: watch::Sender<bool>,
     transports: Arc<std::sync::atomic::AtomicUsize>,
@@ -1216,6 +1272,8 @@ pub fn router_with_browser(
         browser,
         harness_status: Arc::new(Mutex::new(vec![])),
         harness_probe: Arc::new(tokio::sync::Mutex::new(())),
+        catalog_probe: Arc::new(tokio::sync::Mutex::new(())),
+        catalogs: Arc::new(Mutex::new(HashMap::new())),
         drafts: watch::channel(conversation::read_drafts(&store.connection)?).0,
         transport_shutdown: watch::channel(false).0,
         transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1232,6 +1290,10 @@ pub fn router_with_browser(
         Router::new()
             .route("/v1/boards/discover", post(discover_board))
             .route("/v1/operations/reconcile", post(reconcile_lookup))
+            .route(
+                "/v1/sessions/{session}/catalog",
+                get(commands::catalog).post(commands::refresh),
+            )
             .route("/v1/harnesses", get(harness::statuses))
             .route("/v1/harnesses/refresh", post(harness::refresh))
             .route("/v1/snapshot", get(snapshot))
@@ -1306,12 +1368,12 @@ async fn protocol(
             .headers()
             .get("x-relay-protocol")
             .and_then(|v| v.to_str().ok())
-            != Some("2")
+            != Some("3")
         {
             return Error::new(
                 StatusCode::CONFLICT,
                 "protocol_mismatch",
-                "This server requires Relay protocol 2; update and restart the desktop client",
+                "This server requires Relay protocol 3; update and restart the desktop client",
             )
             .into_response();
         }
@@ -1384,6 +1446,58 @@ async fn command(
     workspace.authorize(&headers)?;
     let Json(envelope) =
         body.map_err(|_| Error::invalid("Expected a valid JSON command envelope"))?;
+    let already_applied = {
+        let store = workspace.store.lock().map_err(Error::internal)?;
+        store
+            .connection
+            .query_row(
+                "SELECT request FROM receipts WHERE request_id=?1",
+                [&envelope.request_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Error::internal)?
+            .is_some_and(|request| {
+                serde_json::to_string(&envelope).is_ok_and(|expected| expected == request)
+            })
+    };
+    if !already_applied {
+        if let Command::SubmitTurn {
+            session_id, parts, ..
+        }
+        | Command::EditQueuedTurn {
+            parts,
+            submission_id: session_id,
+            ..
+        } = &envelope.command
+        {
+            let session_id = if matches!(envelope.command, Command::EditQueuedTurn { .. }) {
+                workspace
+                    .snapshots
+                    .borrow()
+                    .submissions
+                    .iter()
+                    .find(|s| s.id == *session_id)
+                    .map(|s| s.session_id.clone())
+                    .ok_or_else(|| Error::invalid("Queued turn not found"))?
+            } else {
+                session_id.clone()
+            };
+            if has_skill_references(parts) || plain_text(parts).trim_start().starts_with('/') {
+                let catalog = commands::discover(&workspace, &session_id, true).await?;
+                commands::invocation(parts, &catalog)?;
+                resolve_skills(parts, &catalog).map_err(Error::invalid)?;
+            }
+        }
+        if let Command::SetHarnessSelection {
+            session_id,
+            selection,
+        } = &envelope.command
+        {
+            let catalog = commands::discover(&workspace, session_id, true).await?;
+            commands::validate_selection(&catalog, selection)?;
+        }
+    }
     let handle = tokio::runtime::Handle::current();
     let result = tokio::task::spawn_blocking(move || {
         let mut store = workspace.store.lock().map_err(Error::internal)?;

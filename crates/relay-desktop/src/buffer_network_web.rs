@@ -7,8 +7,9 @@ pub fn start(config: Config, sender: StateSender<Update>) -> mpsc::UnboundedSend
     let (requests, mut receiver) = mpsc::unbounded_channel();
     let (events, mut updates) = mpsc::unbounded_channel();
     let watch_config = config.clone();
+    let watch_events = events.clone();
     spawn_local(async move {
-        watch(watch_config, events).await;
+        watch(watch_config, watch_events).await;
     });
     spawn_local(async move {
         let client = reqwest::Client::new();
@@ -19,9 +20,23 @@ pub fn start(config: Config, sender: StateSender<Update>) -> mpsc::UnboundedSend
                 event=updates.recv()=>match event {
                     Some(Event::Drafts(drafts))=>{state.drafts=drafts;state.initialized=true;},
                     Some(Event::Connected(connected))=>state.connected=connected,
+                    Some(Event::Catalog(session,result))=>{state.catalogs.insert(session,result);},
                     None=>break,
                 },
                 request=receiver.recv()=>match request {
+                    Some(Request::Catalog {session,force})=>{
+                        let client=client.clone();let config=config.clone();let events=events.clone();
+                        spawn_local(async move {
+                        let path=format!("v1/sessions/{}/catalog",percent_encoding::utf8_percent_encode(&session,percent_encoding::NON_ALPHANUMERIC));
+                        let request=if force {client.post(config.url(&path))}else{client.get(config.url(&path))};
+                        let result=match browser::send(&config,request).await {
+                            Ok(response) if response.status().is_success()=>response.json::<HarnessCatalog>().await.map_err(|_|"Invalid harness catalog".into()),
+                            Ok(response)=>Err(response.json::<ApiError>().await.map(|e|e.message).unwrap_or_else(|_|"Harness discovery unavailable".into())),
+                            Err(error)=>Err(error),
+                        };
+                        let _=events.send(Event::Catalog(session,result));
+                        });
+                    },
                     Some(Request::Forget(ids))=>{for id in ids {state.outcomes.remove(&id);}},
                     Some(Request::Save{session,request})=>{
                         let path=format!("v1/drafts/{}",percent_encoding::utf8_percent_encode(&session,percent_encoding::NON_ALPHANUMERIC));

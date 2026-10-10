@@ -493,25 +493,30 @@ async fn claude_multimodal_parts_keep_position_and_literal_file_context() {
     let content = messages.last().unwrap()["message"]["content"]
         .as_array()
         .unwrap();
-    assert_eq!(content[1]["text"], "Before");
+    assert_eq!(content[0]["text"], "Before");
+    let argv = std::fs::read_to_string(
+        Path::new(worker(&s, &id).worktree.as_ref().unwrap()).join("claude-argv"),
+    )
+    .unwrap();
+    assert!(argv.contains("--append-system-prompt"));
     assert!(
-        content[2]["text"]
+        content[1]["text"]
             .as_str()
             .unwrap()
             .contains("Inline file: context.png")
     );
-    assert_eq!(content[3]["type"], "image");
-    assert_eq!(content[3]["source"]["media_type"], "image/png");
-    assert!(!content[3]["source"]["data"].as_str().unwrap().is_empty());
-    assert_eq!(content[4]["text"], "Between");
+    assert_eq!(content[2]["type"], "image");
+    assert_eq!(content[2]["source"]["media_type"], "image/png");
+    assert!(!content[2]["source"]["data"].as_str().unwrap().is_empty());
+    assert_eq!(content[3]["text"], "Between");
     assert!(
-        content[5]["text"]
+        content[4]["text"]
             .as_str()
             .unwrap()
             .contains("Inline file: notes.txt")
     );
     assert!(
-        content[6]["text"]
+        content[5]["text"]
             .as_str()
             .unwrap()
             .contains("Read the user-provided file at")
@@ -1266,7 +1271,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        9
+        10
     );
     let worker = snapshot.sessions[0].worker.as_mut().unwrap();
     worker.model = Some("reported-model".into());

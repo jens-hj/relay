@@ -10,6 +10,7 @@ pub(super) fn arguments(
     path: &str,
     inputs: &str,
     roots: &[String],
+    selection: &HarnessSelection,
 ) {
     cmd.args([
         "--print",
@@ -23,10 +24,14 @@ pub(super) fn arguments(
         "stdio",
         "--permission-mode",
     ]);
-    cmd.arg(match mode {
-        ApprovalMode::Automatic => "auto",
-        ApprovalMode::Ask => "default",
-        ApprovalMode::Unrestricted => "bypassPermissions",
+    cmd.arg(if selection.plan {
+        "plan"
+    } else {
+        match mode {
+            ApprovalMode::Automatic => "auto",
+            ApprovalMode::Ask => "default",
+            ApprovalMode::Unrestricted => "bypassPermissions",
+        }
     });
     if let Some(thread) = thread {
         cmd.args(["--resume", thread]);
@@ -38,7 +43,14 @@ pub(super) fn arguments(
         }
     }
     if mode != ApprovalMode::Unrestricted {
-        cmd.arg("--settings").arg(json!({"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"autoAllowBashIfSandboxed":true,"filesystem":{"allowWrite":roots},"network":{"allowAllUnixSockets":false}}}).to_string());
+        let mut settings = json!({"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"autoAllowBashIfSandboxed":true,"filesystem":{"allowWrite":roots},"network":{"allowAllUnixSockets":false}}});
+        if selection.model.is_some() {
+            settings["fastMode"] = json!(selection.fast);
+        }
+        cmd.arg("--settings").arg(settings.to_string());
+    } else if selection.model.is_some() {
+        cmd.arg("--settings")
+            .arg(json!({"fastMode":selection.fast}).to_string());
     }
     // Explicit turns drive resume; an inherited setting must not replay an interrupted turn.
     cmd.env_remove("CLAUDE_CODE_RESUME_INTERRUPTED_TURN")
@@ -91,11 +103,14 @@ fn message(
     }
     value.body.push_str(&body[..end]);
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute(
     workspace: &Workspace,
     session: &str,
     run: &str,
     input: Vec<Value>,
+    fork: Option<&Session>,
+    expected_skills: &[String],
     previous: Option<&str>,
     child: &mut tokio::process::Child,
     stop: &mut watch::Receiver<bool>,
@@ -124,6 +139,7 @@ pub(super) async fn execute(
     let mut stdin = child.stdin.take();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     send(stdin.as_mut().ok_or_else(|| Error::invalid("Claude input already closed"))?, json!({"type":"control_request","request_id":"relay-initialize","request":{"subtype":"initialize","hooks":null}})).await?;
+    let mut invoked_skills = std::collections::HashSet::new();
     let mut sent = false;
     let mut thread = previous.map(str::to_owned);
     let mut current_messages = std::collections::HashMap::new();
@@ -201,6 +217,10 @@ pub(super) async fn execute(
                     .ok_or_else(|| Error::invalid("Claude session identity missing"))?
                     .to_owned();
                 thread = Some(id.clone());
+                if let Some(fork) = fork {
+                    crate::commands::publish_fork(workspace, session, run, fork, &id)?;
+                    continue;
+                }
                 workspace.update_run(session, run, |snapshot| {
                     let worker = snapshot
                         .sessions
@@ -226,6 +246,23 @@ pub(super) async fn execute(
             }
             "system" => {
                 let subtype = value["subtype"].as_str().unwrap_or("");
+                if subtype == "slash_commands_updated" {
+                    workspace.catalogs.lock().map_err(Error::internal)?.clear();
+                }
+                if subtype == "compact_boundary" {
+                    workspace.update_run(session, run, |snapshot| {
+                        message(
+                            snapshot,
+                            session,
+                            run,
+                            "compaction",
+                            "harness_command",
+                            "Compaction completed",
+                            false,
+                        );
+                        Ok(())
+                    })?;
+                }
                 if subtype == "session_state_changed" {
                     state = value["state"].as_str().map(str::to_owned);
                 }
@@ -344,6 +381,15 @@ pub(super) async fn execute(
             "assistant" => {
                 let id = value["message"]["id"].as_str().unwrap_or("response");
                 if let Some(blocks) = value["message"]["content"].as_array() {
+                    for block in blocks {
+                        if block["type"] == "tool_use"
+                            && block["name"] == "Skill"
+                            && let Some(name) = block["input"]["skill"].as_str()
+                        {
+                            invoked_skills.insert(name.to_owned());
+                        }
+                    }
+
                     workspace.update_run(session, run, |s| {
                         for (index, block) in blocks.iter().enumerate() {
                             let key = format!("{id}-{index}");
@@ -403,6 +449,15 @@ pub(super) async fn execute(
                     ));
                 }
                 workspace.update_run(session, run, |s| {
+                    if let Some(result) = value["result"].as_str().filter(|s| !s.is_empty())
+                        && !s.messages.iter().any(|m| {
+                            m.session_id == session
+                                && m.id.starts_with(&format!("claude-{run}-"))
+                                && m.body == result
+                        })
+                    {
+                        message(s, session, run, "result", "harness_command", result, false);
+                    }
                     let usage = &value["usage"];
                     if let (Some(input), Some(output)) = (
                         usage["input_tokens"].as_u64(),
@@ -434,6 +489,14 @@ pub(super) async fn execute(
                     }
                     Ok(())
                 })?;
+                if let Some(missing) = expected_skills
+                    .iter()
+                    .find(|name| !invoked_skills.contains(*name))
+                {
+                    return Err(Error::invalid(format!(
+                        "Claude did not invoke the selected skill ${missing}; review the result before retrying"
+                    )));
+                }
                 completed = true;
             }
             _ => {}

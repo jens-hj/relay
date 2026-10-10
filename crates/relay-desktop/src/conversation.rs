@@ -1,4 +1,5 @@
 //! A Relay-owned document interaction controller over Mosaic's native text primitives.
+use crate::command_ui::{CommandPanel, CommandPanelProps};
 use crate::panels::{BoundedPanel, BoundedPanelProps};
 use crate::styles::*;
 use crate::tool_activity::{ToolActivity, ToolActivityProps};
@@ -139,6 +140,49 @@ fn update_text(model: Model, controller: &Shared, id: &str, text: String) {
         });
     }
     buffer::edit(model, &session, parts);
+}
+
+fn accept_completion(model: Model, controller: &Shared, index: usize, mirror: bool) {
+    let Some(completion) = model.completion.get_untracked() else {
+        return;
+    };
+    let Some(choice) = completion.choices.get(index).cloned() else {
+        return;
+    };
+    model.completion.set(None);
+    if let Some(command) = choice.command {
+        if command.dispatch == CommandDispatch::Unavailable {
+            model.notice.set(command.reason.unwrap_or_default());
+            return;
+        }
+        // Keep command text as a draft until a command flow is submitted.
+        insert_parts(
+            model,
+            controller,
+            &completion.part,
+            (completion.start, completion.end),
+            vec![Part::text(format!("/{} ", command.name))],
+            mirror,
+        );
+        if command.dispatch == CommandDispatch::Flow {
+            crate::command_ui::open(model, &command.name);
+        }
+    } else if let Some(skill) = choice.skill {
+        insert_parts(
+            model,
+            controller,
+            &completion.part,
+            (completion.start, completion.end),
+            vec![
+                Part {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    kind: PartKind::Skill { skill },
+                },
+                Part::text(" "),
+            ],
+            mirror,
+        );
+    }
 }
 
 pub fn begin_reply(
@@ -718,10 +762,13 @@ pub fn Conversation(model: Model) -> Element {
     });
     let warning = Derived::new(move || {
         removed.get()
-            || session.get().and_then(|s| s.worker).is_some_and(|w| {
-                w.error.is_some()
-                    || (!matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running)
-                        && (w.thread_id.is_none() || w.worktree.is_none()))
+            || session.get().is_some_and(|s| {
+                s.worker.as_ref().is_some_and(|w| {
+                    w.error.is_some()
+                        || (!matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running)
+                            && ((w.thread_id.is_none() && s.conversations.is_empty())
+                                || w.worktree.is_none()))
+                })
             })
     });
     // Auxiliary disclosures share a height budget. Even several open panels
@@ -731,7 +778,8 @@ pub fn Conversation(model: Model) -> Element {
             + usize::from(!details.get().is_empty())
             + usize::from(model.buffer.get().approval_needed)
             + usize::from(recovery.get())
-            + usize::from(warning.get());
+            + usize::from(warning.get())
+            + usize::from(!model.command_flow.get().is_empty());
         ((doc_height.get() - px(160.0)).max(0.0) * 0.6 / count.max(1) as f32).min(px(280.0))
     });
     let compact = Derived::new(move || doc_width.get() < px(720.0));
@@ -825,6 +873,11 @@ pub fn Conversation(model: Model) -> Element {
                 } as strip
                 { strip.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(px(28.0)).basis(Dimension::Auto).grow(0.0).shrink(0.0)); }
             }
+            if !model.command_flow.get().is_empty() {
+                BoundedPanel limit:(auxiliary_limit) {
+                    CommandPanel model:(model)
+                }
+            }
             if menu.get() {
                 BoundedPanel limit:(auxiliary_limit) {
                     col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
@@ -844,6 +897,8 @@ pub fn Conversation(model: Model) -> Element {
                                 button #relay.action @click:{crate::platform::pick_files(model);}
                                     label:"Add files to draft" "Add files"
                             }
+                            button #relay.action @click:{crate::command_ui::open(model,"help");}
+                                label:"Harness commands and skills" "Commands"
                             button #relay.action @click:{model.open_worker_issue();}
                                 disabled:{session.get().is_none()} label:"Linked issue" "Issue"
                             button #relay.action
@@ -907,7 +962,7 @@ pub fn Conversation(model: Model) -> Element {
                                 "Issue no longer on this board. New turns require restoration and sync."
                         }
                     }
-                    if session.get().and_then(|s|s.worker).is_some_and(|w|!matches!(w.status,WorkerStatus::Queued|WorkerStatus::Running) && (w.thread_id.is_none() || w.worktree.is_none())) {
+                    if session.get().is_some_and(|s|s.worker.as_ref().is_some_and(|w|!matches!(w.status,WorkerStatus::Queued|WorkerStatus::Running) && ((w.thread_id.is_none() && s.conversations.is_empty()) || w.worktree.is_none()))) {
                         grid height:min-content gap:{px(8.0)}px
                             cols:{if compact.get() {GridTracks::new([GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0), GridTrack::MaxContent])}}
                             pad:(horizontal:{px(24.0)}px vertical:0px) shrink:0 {
@@ -1139,6 +1194,22 @@ pub fn Conversation(model: Model) -> Element {
                         }
                         col width:1fr min-width:0px max-width:{px(760.0)}px height:min-content
                             gap:{px(8.0)}px {
+                            if model.completion.get().is_some() {
+                                scroll height:{px(180.0)}px {
+                                    col height:min-content {
+                                        for (index, choice) in {model.completion.get().map(|c|c.choices.into_iter().enumerate().collect::<Vec<_>>()).unwrap_or_default()} {
+                                            let picked_index=*index;
+                                            let choice=State::new(choice.clone());
+                                            button #relay.action
+                                                @click:{accept_completion(model,&controller.get_untracked(),picked_index,false);}
+                                                width:fill justify:start
+                                                fill:{color(if model.completion.get().is_some_and(|c|c.index==picked_index){surface.selected}else{surface.panel})}
+                                                label:{choice.get().label}
+                                                {format!("{} · {}",choice.get().label,choice.get().description)}
+                                        }
+                                    }
+                                }
+                            }
                             for (_, part) in {
                                 let parts=buffer::parts(model,&model.session.get());
                                 let parts=if parts.is_empty(){vec![Part{id:empty.get(),kind:PartKind::Text{text:String::new()}}]}else{parts};
@@ -1450,6 +1521,13 @@ fn RecordedPart(
                 }
             }
         }
+        PartKind::Skill { skill } => {
+            view! {
+                row height:min-content {
+                    text font-color:{color(accent.focus)} {format!("${}",skill.name)}
+                }
+            }
+        }
         PartKind::Asset { asset } => {
             view! {
                 col height:min-content {
@@ -1489,6 +1567,17 @@ fn DraftPart(model: Model, controller: ControllerState, part: Part, mirror: bool
                 col height:min-content {
                     BufferText model:(model) controller:(controller)
                         location:(Location::Draft(part.id.clone())) mirror:(mirror)
+                }
+            }
+        }
+        PartKind::Skill { skill } => {
+            let id = State::new(part.id.clone());
+            view! {
+                row height:min-content align:center gap:{px(6.0)}px {
+                    text font-color:{color(accent.focus)} {format!("${}",skill.name)}
+                    button #relay.action
+                        @click:{remove_draft_part(model,&controller.get_untracked(),&id.get_untracked(),mirror);}
+                        label:"Remove skill" "×"
                 }
             }
         }
@@ -1952,6 +2041,7 @@ pub(crate) fn BufferText(
         ) && let Location::Draft(id) = &ime_location
         {
             update_text(model, &ime_controller, id, editor.text());
+            crate::command_ui::complete(model, id, &editor.text(), editor.caret_offset());
         }
         ime_follow.set(true);
         ime_field.content_dirty();
@@ -1973,6 +2063,42 @@ pub(crate) fn BufferText(
             }
             ctx.stop_propagation();
             return;
+        }
+        if !command
+            && model.completion.get_untracked().is_some()
+            && !key_editor.borrow().has_preedit()
+        {
+            match event.key {
+                Key::Escape => {
+                    model.completion.set(None);
+                    ctx.stop_propagation();
+                    return;
+                }
+                Key::ArrowDown | Key::ArrowUp => {
+                    model.completion.update(|value| {
+                        if let Some(c) = value {
+                            c.index = if event.key == Key::ArrowDown {
+                                (c.index + 1) % c.choices.len()
+                            } else {
+                                (c.index + c.choices.len() - 1) % c.choices.len()
+                            };
+                        }
+                    });
+                    ctx.stop_propagation();
+                    return;
+                }
+                Key::Enter | Key::Tab => {
+                    let index = model
+                        .completion
+                        .get_untracked()
+                        .map(|c| c.index)
+                        .unwrap_or(0);
+                    accept_completion(model, &key_controller, index, mirror);
+                    ctx.stop_propagation();
+                    return;
+                }
+                _ => {}
+            }
         }
         let mut editor = key_editor.borrow_mut();
         let mut fonts = key_fonts.borrow_mut();
@@ -2277,6 +2403,7 @@ pub(crate) fn BufferText(
         }
         if let Location::Draft(id) = &location {
             update_text(model, &key_controller, id, editor.text());
+            crate::command_ui::complete(model, id, &editor.text(), editor.caret_offset());
         }
         key_field.content_dirty();
         ctx.stop_propagation();

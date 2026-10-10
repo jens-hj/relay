@@ -12,7 +12,7 @@ The server binds only `127.0.0.1:7331`. Tailscale Funnel on gmk supplies public 
 
 There is one owner and one trusted workspace, without public signup or separate team accounts. Log in with the owner username/password. Credentials and recovery codes for this installation are in a protected runtime file outside the repositories and Nix store. Never commit, embed in Nix expressions, or print that file.
 
-Passwords use Argon2id. Browser sessions have a seven-day idle and thirty-day absolute limit, with a `Secure; HttpOnly; SameSite=Lax; Path=/` host-only cookie. SQLite stores session hashes; JavaScript receives only a session-bound CSRF token. Writes require that token, protocol 2, and the exact configured HTTPS Origin. Both event streams validate Origin and close on revocation/expiry.
+Passwords use Argon2id. Browser sessions have a seven-day idle and thirty-day absolute limit, with a `Secure; HttpOnly; SameSite=Lax; Path=/` host-only cookie. SQLite stores session hashes; JavaScript receives only a session-bound CSRF token. Writes require that token, protocol 3, and the exact configured HTTPS Origin. Both event streams validate Origin and close on revocation/expiry.
 
 Sign out revokes the current session. `/recover` consumes one saved recovery code, changes the password, and revokes all prior sessions. Recovery codes are shown once during enrollment. Device-management screens and passkeys are future work.
 

@@ -3,6 +3,7 @@ use axum::{body::Bytes, extract::Path as RoutePath};
 use std::os::unix::fs::PermissionsExt;
 use std::{path::PathBuf, time::Duration};
 
+mod command_tests;
 mod harness_tests;
 fn live() -> Snapshot {
     let mut defaults = DirectorProfile::default();
@@ -71,6 +72,8 @@ pub(super) fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig)
         browser,
         harness_status: Arc::new(Mutex::new(vec![])),
         harness_probe: Arc::new(tokio::sync::Mutex::new(())),
+        catalog_probe: Arc::new(tokio::sync::Mutex::new(())),
+        catalogs: Arc::new(Mutex::new(HashMap::new())),
         drafts: watch::channel(vec![]).0,
         transport_shutdown: watch::channel(false).0,
         transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -825,7 +828,7 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
     let current: Snapshot = client
         .get(format!("http://{addr}/v1/snapshot"))
         .bearer_auth(token)
-        .header("x-relay-protocol", "2")
+        .header("x-relay-protocol", "3")
         .send()
         .await
         .unwrap()
@@ -838,7 +841,7 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
         client
             .post(format!("http://{addr}/v1/commands"))
             .bearer_auth(token)
-            .header("x-relay-protocol", "2")
+            .header("x-relay-protocol", "3")
             .json(e)
             .send()
     };
@@ -849,7 +852,7 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
         client
             .get(format!("http://{addr}/v1/snapshot"))
             .bearer_auth(token)
-            .header("x-relay-protocol", "2")
+            .header("x-relay-protocol", "3")
             .send()
     };
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -1012,7 +1015,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            9
+            10
         );
         drop(store);
         let mut reopened = Store::open(&db, DirectorProfile::default()).unwrap();
@@ -1043,7 +1046,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 10)
+        .pragma_update(None, "user_version", 11)
         .unwrap();
     drop(store);
     let error = Store::open(&db, DirectorProfile::default()).err().unwrap();
@@ -1053,7 +1056,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        10
+        11
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -2906,6 +2909,8 @@ async fn app_server_child_worker_events_do_not_abort_or_complete_parent_turn() {
       echo '{"method":"error","params":{"threadId":"child-thread","willRetry":false,"error":{"message":"Child failure"}}}'
       echo '{"method":"turn/completed","params":{"threadId":"child-thread","turn":{"id":"child-turn","status":"failed"}}}'
       echo '{"method":"turn/completed","params":{"threadId":"child-thread","turn":{"id":"child-turn","status":"completed"}}}'
+      IFS= read -r child_decision
+      printf '%s\n' "$child_decision" >> rpc-input.jsonl
 "#;
     let fake = APP_FAKE.replace(
         "    turn/start)\n",

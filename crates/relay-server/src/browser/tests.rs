@@ -269,8 +269,8 @@ async fn actual_http_enrollment_login_csrf_native_and_static() {
     assert_eq!(session["authenticated"], true);
     let csrf = session["csrf_token"].as_str().unwrap();
     for (origin, csrf_header, protocol, expected) in [
-        (None, Some(csrf), Some("2"), 403),
-        (Some(ORIGIN), None, Some("2"), 403),
+        (None, Some(csrf), Some("3"), 403),
+        (Some(ORIGIN), None, Some("3"), 403),
         (Some(ORIGIN), Some(csrf), None, 409),
     ] {
         let mut request = s
@@ -351,7 +351,7 @@ async fn actual_http_enrollment_login_csrf_native_and_static() {
             .header("cookie", &cookie)
             .header("origin", origin)
             .header("x-relay-csrf", csrf_header)
-            .header("x-relay-protocol", "2")
+            .header("x-relay-protocol", "3")
             .json(&serde_json::json!({}))
             .send()
             .await
@@ -384,7 +384,7 @@ async fn actual_http_enrollment_login_csrf_native_and_static() {
         .header("cookie", &cookie)
         .header("origin", ORIGIN)
         .header("x-relay-csrf", csrf)
-        .header("x-relay-protocol", "2")
+        .header("x-relay-protocol", "3")
         .json(&envelope)
         .send()
         .await
@@ -401,7 +401,7 @@ async fn actual_http_enrollment_login_csrf_native_and_static() {
         .header("cookie", &cookie)
         .header("origin", ORIGIN)
         .header("x-relay-csrf", csrf)
-        .header("x-relay-protocol", "2")
+        .header("x-relay-protocol", "3")
         .header("content-type", "text/html")
         .body("<script>alert(1)</script>")
         .send()
@@ -497,7 +497,7 @@ async fn actual_websockets_close_on_logout_and_recovery_replay_fails() {
         .header("cookie", &cookie)
         .header("origin", ORIGIN)
         .header("x-relay-csrf", value["csrf_token"].as_str().unwrap())
-        .header("x-relay-protocol", "2")
+        .header("x-relay-protocol", "3")
         .send()
         .await
         .unwrap();
@@ -610,7 +610,7 @@ async fn migration_rotation_restart_and_disabled_enrollment() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        9
+        10
     );
     BrowserAuth::initialize(
         &mut store,

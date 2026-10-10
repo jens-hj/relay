@@ -12,6 +12,7 @@ use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::H
 
 #[derive(Clone)]
 pub enum Request {
+    Catalog { session: String, force: bool },
     Save { session: String, request: SaveDraft },
     Upload { asset: Asset, bytes: Arc<Vec<u8>> },
     Fetch(String),
@@ -38,6 +39,7 @@ pub enum Outcome {
 #[derive(Clone, Default)]
 pub struct Update {
     pub drafts: Vec<Draft>,
+    pub catalogs: BTreeMap<String, Result<HarnessCatalog, String>>,
     pub blobs: BTreeMap<String, Arc<Vec<u8>>>,
     pub outcomes: BTreeMap<String, Outcome>,
     pub initialized: bool,
@@ -46,6 +48,7 @@ pub struct Update {
 }
 
 enum Event {
+    Catalog(String, Result<HarnessCatalog, String>),
     Drafts(Vec<Draft>),
     Connected(bool),
 }
@@ -57,7 +60,7 @@ pub fn start(config: Config, sender: StateSender<Update>) -> mpsc::UnboundedSend
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
             let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(5)).timeout(Duration::from_secs(30)).build().unwrap();
             let (events, mut updates) = mpsc::unbounded_channel();
-            let watcher = tokio::spawn(watch(config.clone(), events));
+            let watcher = tokio::spawn(watch(config.clone(), events.clone()));
             let mut state = Update::default();
             let mut tick = tokio::time::interval(Duration::from_millis(100));
             loop {
@@ -66,12 +69,26 @@ pub fn start(config: Config, sender: StateSender<Update>) -> mpsc::UnboundedSend
                     event = updates.recv() => match event {
                         Some(Event::Drafts(drafts)) => { state.drafts = drafts; state.initialized = true; },
                         Some(Event::Connected(connected)) => state.connected = connected,
+                        Some(Event::Catalog(session,result))=>{state.catalogs.insert(session,result);},
                         None => break,
                     },
                     request = receiver.recv() => match request {
+                        Some(Request::Catalog {session,force}) => {
+                            let client=client.clone();let config=config.clone();let events=events.clone();
+                            tokio::spawn(async move {
+                            let path=format!("v1/sessions/{}/catalog",percent_encoding::utf8_percent_encode(&session,percent_encoding::NON_ALPHANUMERIC));
+                            let request=if force {client.post(config.url(&path))}else{client.get(config.url(&path))};
+                            let result=match request.bearer_auth(&config.token).header("X-Relay-Protocol",relay_core::PROTOCOL_VERSION.to_string()).send().await {
+                                Ok(response) if response.status().is_success()=>response.json::<HarnessCatalog>().await.map_err(|_|"Invalid harness catalog".into()),
+                                Ok(response)=>Err(response.json::<ApiError>().await.map(|e|e.message).unwrap_or_else(|_|"Harness discovery unavailable".into())),
+                                Err(_)=>Err("Cannot discover harness commands".into()),
+                            };
+                            let _=events.send(Event::Catalog(session,result));
+                            });
+                        },
                         Some(Request::Forget(ids)) => { for id in ids { state.outcomes.remove(&id); } },
                         Some(Request::Save {session, request}) => {
-                            let result = match client.post(config.url(&format!("v1/drafts/{}", percent_encoding::utf8_percent_encode(&session, percent_encoding::NON_ALPHANUMERIC)))).bearer_auth(&config.token).header("X-Relay-Protocol", "2").json(&request).send().await {
+                            let result = match client.post(config.url(&format!("v1/drafts/{}", percent_encoding::utf8_percent_encode(&session, percent_encoding::NON_ALPHANUMERIC)))).bearer_auth(&config.token).header("X-Relay-Protocol", relay_core::PROTOCOL_VERSION.to_string()).json(&request).send().await {
                                 Ok(response) => { let conflict = response.status() == reqwest::StatusCode::CONFLICT; if response.status().is_success() { response.json::<Draft>().await.map_err(|_| (false,"Draft save could not be confirmed; exact retry is retained".into())) } else { Err((conflict,response.json::<ApiError>().await.map(|e| e.message).unwrap_or_else(|_| "Draft save was rejected".into()))) } },
                                 Err(_) => Err((false,"Cannot confirm draft save; local content is retained".into())),
                             };
@@ -79,7 +96,7 @@ pub fn start(config: Config, sender: StateSender<Update>) -> mpsc::UnboundedSend
                             state.outcomes.insert(request.request_id.clone(), Outcome::Saved {session,request,result});
                         },
                         Some(Request::Upload {asset, bytes}) => {
-                            let result = match client.post(config.url(&format!("v1/assets/{}",asset.id))).bearer_auth(&config.token).header("X-Relay-Protocol", "2").header("content-type", &asset.media_type).header("x-relay-filename",percent_encoding::utf8_percent_encode(&asset.name, percent_encoding::NON_ALPHANUMERIC).to_string()).body(bytes.as_ref().clone()).send().await {
+                            let result = match client.post(config.url(&format!("v1/assets/{}",asset.id))).bearer_auth(&config.token).header("X-Relay-Protocol", relay_core::PROTOCOL_VERSION.to_string()).header("content-type", &asset.media_type).header("x-relay-filename",percent_encoding::utf8_percent_encode(&asset.name, percent_encoding::NON_ALPHANUMERIC).to_string()).body(bytes.as_ref().clone()).send().await {
                                 Ok(response) if response.status().is_success() => response.json::<Asset>().await.map_err(|_| "File upload acknowledgement was invalid".into()).and_then(|saved| if saved == asset { Ok(()) } else { Err("Uploaded file metadata changed".into()) }),
                                 Ok(response) => Err(response.json::<ApiError>().await.map(|e| e.message).unwrap_or_else(|_| "File upload failed".into())),
                                 Err(_) => Err("File upload could not be confirmed; retry retains its ID".into()),

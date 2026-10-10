@@ -344,8 +344,11 @@ fn authorize(
     if session.fixture || session.worker.is_none() {
         return Err(Error::invalid("This session cannot run agent turns"));
     }
+    runtime::check_shared(snapshot, &session.id)?;
     let worker = session.worker.as_ref().unwrap();
-    if !runtime::active(&worker.status) && (worker.thread_id.is_none() || worker.worktree.is_none())
+    if !runtime::active(&worker.status)
+        && ((worker.thread_id.is_none() && session.conversations.is_empty())
+            || worker.worktree.is_none())
     {
         return Err(Error::invalid(
             "This worker has no resumable thread; start a new linked worker",
@@ -401,7 +404,13 @@ pub(super) fn apply(
                 .as_ref()
                 .unwrap();
             if !runtime::active(&worker.status)
-                && (worker.thread_id.is_none() || worker.worktree.is_none())
+                && ((worker.thread_id.is_none()
+                    && snapshot
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == session_id)
+                        .is_none_or(|s| s.conversations.is_empty()))
+                    || worker.worktree.is_none())
             {
                 return Err(Error::invalid(
                     "This worker has no resumable thread; start a new linked worker",

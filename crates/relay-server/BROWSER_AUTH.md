@@ -4,7 +4,7 @@ Set `RELAY_PUBLIC_ORIGIN` to the exact external HTTPS origin, for example
 `https://relay.example.org` (no trailing slash). The trusted reverse proxy must
 preserve the browser Origin header and terminate HTTPS. Forwarded headers are not
 used to decide authentication or the public origin. Without this setting cookie
-authentication fails closed. Native bearer authentication remains protocol 2.
+authentication fails closed. Native bearer authentication remains protocol 3.
 
 Set exactly one of `RELAY_TOKEN` and `RELAY_TOKEN_FILE`; the latter reads a private
 runtime file and trims its surrounding whitespace. Neither the secret nor its

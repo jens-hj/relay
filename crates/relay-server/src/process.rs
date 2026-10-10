@@ -23,7 +23,17 @@ pub(crate) fn with_cancellation<T>(
     let _restore = Restore(CANCELLATION.with(|value| value.replace(Some(stop))));
     run()
 }
-fn cancelled() -> Result<(), Error> {
+pub(crate) fn without_cancellation<T>(run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<tokio::sync::watch::Receiver<bool>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CANCELLATION.with(|value| *value.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(CANCELLATION.with(|value| value.replace(None)));
+    run()
+}
+pub(crate) fn cancelled() -> Result<(), Error> {
     if CANCELLATION.with(|value| value.borrow().as_ref().is_some_and(|stop| *stop.borrow())) {
         Err(Error::invalid("Server stopped the resource operation"))
     } else {

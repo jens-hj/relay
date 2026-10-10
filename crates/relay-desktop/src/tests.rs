@@ -56,6 +56,148 @@ fn mount(light: bool, width: f32) -> Mounted {
 }
 
 #[test]
+fn harness_completion_inserts_durable_skills_and_opens_native_model_flow() {
+    let mut mounted = mount(false, 820.0);
+    mounted.model.open_session("session-plan".into());
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([(
+            "session-plan".into(),
+            Ok(HarnessCatalog {
+                session_id: "session-plan".into(),
+                harness: Harness::ClaudeCode,
+                skills: vec![HarnessSkill {
+                    id: "native-review".into(),
+                    name: "review".into(),
+                    description: "Review changes".into(),
+                    argument_hint: String::new(),
+                    enabled: true,
+                    path: None,
+                }],
+                commands: vec![HarnessCommand {
+                    name: "model".into(),
+                    description: "Choose a model".into(),
+                    argument_hint: String::new(),
+                    dispatch: CommandDispatch::Flow,
+                    reason: None,
+                }],
+                models: vec![HarnessModel {
+                    id: "test-model".into(),
+                    name: "Test model".into(),
+                    efforts: vec!["high".into()],
+                    default_effort: None,
+                    fast: false,
+                }],
+                ..Default::default()
+            }),
+        )]));
+    mounted.settle();
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|s| s.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&draft);
+    mounted.key(Key::Character("$rev".into()), false);
+    assert_eq!(
+        mounted.model.completion.get_untracked().unwrap().choices[0].label,
+        "$review"
+    );
+    mounted.key(Key::Tab, false);
+    let parts = crate::buffer::parts(mounted.model, "session-plan");
+    assert_eq!(selected_skills(&parts)[0].id, "native-review");
+    assert_eq!(plain_text(&parts), "$review ");
+    mounted.key(Key::Character("λ".into()), false);
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "$review λ"
+    );
+    let parts = vec![Part::text("/mod")];
+    let id = parts[0].id.clone();
+    crate::buffer::edit(mounted.model, "session-plan", parts);
+    mounted.settle();
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|s| s.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&draft);
+    crate::command_ui::complete(mounted.model, &id, "/mod", 4);
+    mounted.settle();
+    mounted.key(Key::Enter, false);
+    assert_eq!(mounted.model.command_flow.get_untracked(), "model");
+    mounted.click("Choose model Test model");
+    mounted.click("Choose effort high");
+    let envelope = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(envelope.command,Command::SetHarnessSelection{selection:HarnessSelection{model:Some(ref model),effort:Some(ref effort),..},..} if model=="test-model" && effort=="high")
+    );
+}
+
+#[test]
+fn command_completion_escape_and_ime_keep_normal_editing() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([(
+            "session-plan".into(),
+            Ok(HarnessCatalog {
+                skills: vec![HarnessSkill {
+                    id: "x".into(),
+                    name: "review".into(),
+                    description: String::new(),
+                    argument_hint: String::new(),
+                    enabled: true,
+                    path: None,
+                }],
+                ..Default::default()
+            }),
+        )]));
+    mounted.settle();
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|s| s.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&draft);
+    mounted.key(Key::Character("$".into()), false);
+    assert!(mounted.model.completion.get_untracked().is_some());
+    mounted.key(Key::Escape, false);
+    assert!(mounted.model.completion.get_untracked().is_none());
+    mounted.key(Key::Enter, false);
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "$\n"
+    );
+    mounted.ui.dispatch_ime(ImeEvent::Preedit {
+        text: "確定".into(),
+        cursor: Some((0, 6)),
+    });
+    mounted.settle();
+    mounted.key(Key::Enter, false);
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "$\n"
+    );
+    mounted.ui.dispatch_ime(ImeEvent::Commit("確定".into()));
+    mounted.settle();
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "$\n確定"
+    );
+    assert!(mounted.commands.is_empty());
+}
+
+#[test]
 fn sidebar_tree_disclosure_keyboard_and_secondary_actions_are_independent() {
     let mounted = mount(false, 1380.0);
     mounted

@@ -50,6 +50,7 @@ impl Document {
 
 #[derive(Clone, Default)]
 pub struct BufferState {
+    pub catalog_checked: Option<Instant>,
     pub documents: BTreeMap<String, Document>,
     pub blobs: BTreeMap<String, Arc<Vec<u8>>>,
     pub uploads: BTreeMap<String, Asset>,
@@ -364,7 +365,8 @@ pub fn execution_problem(model: Model) -> Option<String> {
         return Some("No worker slots available".into());
     }
     if !matches!(worker.status, WorkerStatus::Queued | WorkerStatus::Running)
-        && (worker.thread_id.is_none() || worker.worktree.is_none())
+        && ((worker.thread_id.is_none() && session.conversations.is_empty())
+            || worker.worktree.is_none())
     {
         return Some("This worker has no resumable thread; open its linked issue".into());
     }
@@ -480,6 +482,9 @@ pub fn send(model: Model) {
         model.notice.set("This transcript has no running agent. Drafts can be saved; execution requires a linked worker.".into());
         return;
     };
+    if crate::command_ui::intercept(model) {
+        return;
+    }
     if let Some(error) = execution_problem(model) {
         model.notice.set(error);
         return;
@@ -517,6 +522,15 @@ pub fn send(model: Model) {
             .notice
             .set("Resolve the previous request before sending another message".into());
         return;
+    }
+    if let Some(Ok(catalog)) = model.catalogs.get_untracked().get(&session_id) {
+        match resolve_skills(&doc.parts, catalog) {
+            Ok(parts) => doc.parts = parts,
+            Err(error) => {
+                model.notice.set(error);
+                return;
+            }
+        }
     }
     if !has_content(&doc.parts) {
         let Some(id) = state.last_queued.get(&session_id).cloned() else {
@@ -604,6 +618,7 @@ pub fn receive(model: Model, update: Update) {
         return;
     }
     state.serial = update.serial;
+    model.catalogs.set(update.catalogs.clone());
     state.initialized |= update.initialized;
     state.connected = update.connected;
     let mut changed = false;
@@ -729,6 +744,28 @@ pub fn flush(model: Model) {
     let mut state = model.buffer.get_untracked();
     if !state.initialized || !state.connected {
         return;
+    }
+    if state
+        .catalog_checked
+        .is_none_or(|checked| checked.elapsed() >= Duration::from_secs(30))
+        && model.connected.get_untracked()
+    {
+        let id = model.session.get_untracked();
+        if model.catalogs.get_untracked().contains_key(&id)
+            && model
+                .snapshot
+                .get_untracked()
+                .sessions
+                .iter()
+                .any(|s| s.id == id && !s.fixture && s.worker.is_some())
+        {
+            let _ = requests.send(Request::Catalog {
+                session: id,
+                force: false,
+            });
+            state.catalog_checked = Some(Instant::now());
+            model.buffer.set(state.clone());
+        }
     }
     if !model.busy.get_untracked()
         && let Some((session, id)) = state

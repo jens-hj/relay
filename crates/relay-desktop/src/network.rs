@@ -114,7 +114,7 @@ pub fn start(
                     let result = async {
                         let response = if refresh { status_client.post(status_config.url("v1/harnesses/refresh")) } else {status_client.get(status_config.url("v1/harnesses"))}
                             .bearer_auth(&status_config.token)
-                            .header("X-Relay-Protocol", "2")
+                            .header("X-Relay-Protocol", relay_core::PROTOCOL_VERSION.to_string())
                             .send()
                             .await
                             .map_err(|_| "Harness status unavailable".to_owned())?;
@@ -313,7 +313,7 @@ async fn write(
         } else {
             "v1/commands"
         };
-        let (result, conflict, ambiguous) = match client.post(config.url(endpoint)).bearer_auth(&config.token).header("X-Relay-Protocol", "2").json(&command).send().await {
+        let (result, conflict, ambiguous) = match client.post(config.url(endpoint)).bearer_auth(&config.token).header("X-Relay-Protocol", relay_core::PROTOCOL_VERSION.to_string()).json(&command).send().await {
             Ok(response) => {
                 let status = response.status();
                 let result = decode(response).await;
@@ -404,15 +404,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_old_servers_without_rejecting_protocol_two() {
+    fn rejects_old_servers_without_rejecting_current_protocol() {
         assert!(
             validate_protocol(&Snapshot::default())
                 .unwrap_err()
-                .contains("requires protocol 2")
+                .contains("requires protocol 3")
         );
         assert!(
             validate_protocol(&Snapshot {
-                protocol_version: 2,
+                protocol_version: relay_core::PROTOCOL_VERSION,
                 ..Default::default()
             })
             .is_ok()
@@ -474,7 +474,7 @@ mod outcome_tests {
                         assert!(
                             String::from_utf8_lossy(&request)
                                 .to_lowercase()
-                                .contains("x-relay-protocol: 2")
+                                .contains("x-relay-protocol: 3")
                         );
                     }
                     if first && status.is_none() {

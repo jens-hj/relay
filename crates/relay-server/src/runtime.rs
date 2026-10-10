@@ -1,5 +1,6 @@
 use crate::{Error, Workspace};
 use relay_core::*;
+use rusqlite::OptionalExtension;
 use std::{
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
@@ -143,6 +144,30 @@ pub(crate) fn configured_project(project: &Project, config: &RuntimeConfig) -> b
                     board.owner == remote.owner && board.number == remote.number
                 })
         })
+}
+
+pub(super) fn check_shared(snapshot: &Snapshot, id: &str) -> Result<(), Error> {
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| Error::invalid("Session not found"))?;
+    for space in &session.workspaces {
+        let path = std::fs::canonicalize(&space.path)
+            .map_err(|_| Error::invalid("Session workspace unavailable"))?;
+        if snapshot
+            .sessions
+            .iter()
+            .filter(|s| s.id != id && s.worker.as_ref().is_some_and(|w| active(&w.status)))
+            .flat_map(|s| &s.workspaces)
+            .any(|other| std::fs::canonicalize(&other.path).is_ok_and(|p| p == path))
+        {
+            return Err(Error::invalid(
+                "Another agent is using a shared workspace; wait for its turn to finish",
+            ));
+        }
+    }
+    Ok(())
 }
 pub(crate) fn authorize_turn(
     snapshot: &Snapshot,
@@ -997,7 +1022,41 @@ async fn execute(
         session.workspaces = spaces.clone();
         Ok(())
     })?;
-    let roots: Vec<String> = spaces.iter().map(|s| s.path.clone()).collect();
+    let fork_requested = {
+        let store = workspace.store.lock().map_err(Error::internal)?;
+        store.connection.query_row("SELECT request FROM receipts WHERE request_id=?1",[run_id],|r|r.get::<_,String>(0)).optional().map_err(Error::internal)?.and_then(|request|serde_json::from_str::<CommandEnvelope>(&request).ok()).is_some_and(|envelope|matches!(envelope.command,Command::ConversationCommand{name,..} if name=="fork"))
+    };
+    let fork = if fork_requested {
+        let mut source = session.clone();
+        source.workspaces = spaces.clone();
+        let id = run_id.to_owned();
+        let cancellation = stop.clone();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                crate::process::with_cancellation(cancellation, || {
+                    crate::commands::fork_workspaces(&source, &id)
+                })
+            })
+            .await
+            .map_err(Error::internal)??,
+        )
+    } else {
+        None
+    };
+    let _fork_resources = fork.clone().map(|session| crate::commands::ForkResources {
+        workspace: workspace.clone(),
+        session,
+    });
+    let path = fork
+        .as_ref()
+        .and_then(|s| s.worker.as_ref())
+        .and_then(|w| w.worktree.clone())
+        .unwrap_or(path);
+    let execution_spaces = fork
+        .as_ref()
+        .map(|s| s.workspaces.as_slice())
+        .unwrap_or(&spaces);
+    let roots: Vec<String> = execution_spaces.iter().map(|s| s.path.clone()).collect();
     if roots.iter().map(|p| p.len()).sum::<usize>() > 32 * 1024 {
         return Err(Error::invalid(
             "Workspace paths exceed the context budget; select fewer workspaces",
@@ -1063,8 +1122,96 @@ async fn execute(
         .as_ref()
         .map(|s| s.parts.clone())
         .unwrap_or_else(|| vec![Part::text(prompt)]);
-    let (_directory, input) =
+    let needs_catalog = fork.is_none()
+        && (session.selection.model.is_some()
+            || has_skill_references(&parts)
+            || plain_text(&parts).trim_start().starts_with('/'));
+    let catalog = if needs_catalog {
+        Some(crate::commands::discover(workspace, session_id, true).await?)
+    } else {
+        None
+    };
+    let invocation = if fork.is_some() {
+        Some(crate::commands::Invocation {
+            name: "relay-fork".into(),
+            argument: String::new(),
+        })
+    } else {
+        catalog
+            .as_ref()
+            .map(|c| crate::commands::invocation(&parts, c))
+            .transpose()?
+            .flatten()
+    };
+    let parts = if let Some(catalog) = &catalog {
+        resolve_skills(&parts, catalog).map_err(Error::invalid)?
+    } else {
+        parts
+    };
+    let mut effective_selection = session.selection.clone();
+    if let Some(catalog) = &catalog {
+        crate::commands::validate_selection(catalog, &effective_selection)?;
+    }
+    if effective_selection.effort.is_none()
+        && let Some(catalog) = &catalog
+        && let Some(model) = catalog
+            .models
+            .iter()
+            .find(|m| Some(&m.id) == effective_selection.model.as_ref())
+    {
+        effective_selection.effort = model.default_effort.clone();
+    }
+    let (_directory, mut input) =
         crate::app_server::prepare(workspace, &execution_prompt, &parts).await?;
+    if let Some(catalog) = &catalog
+        && worker.harness == Harness::Codex
+    {
+        let mut seen = std::collections::HashSet::new();
+        for reference in selected_skills(&parts) {
+            if !seen.insert(&reference.id) {
+                continue;
+            }
+            let skill = catalog
+                .skills
+                .iter()
+                .find(|s| s.id == reference.id && s.enabled)
+                .ok_or_else(|| Error::invalid("Selected skill is no longer available"))?;
+            input.push(serde_json::json!({"type":"skill","name":skill.name,"path":skill.path}));
+        }
+    }
+    let mut expected_skills: Vec<String> = vec![];
+    if worker.harness == Harness::ClaudeCode {
+        // Native command dispatch must see the slash at the start of the user message.
+        input.remove(0);
+        if let Some(invocation) = &invocation {
+            input = vec![
+                serde_json::json!({"type":"text","text":format!("/{}{}{}",invocation.name,if invocation.argument.is_empty(){""}else{" "},invocation.argument)}),
+            ];
+        } else {
+            let selected = selected_skills(&parts);
+            let leading = parts
+                .iter()
+                .position(|p| !matches!(&p.kind,PartKind::Text{text} if text.trim().is_empty()));
+            if selected.len() == 1
+                && leading.is_some_and(|index| {
+                    matches!(parts[index].kind, PartKind::Skill { .. })
+                        && parts
+                            .iter()
+                            .skip(index + 1)
+                            .all(|p| matches!(p.kind, PartKind::Text { .. }))
+                })
+            {
+                let tail = plain_text(&parts[leading.unwrap() + 1..]);
+                input = vec![
+                    serde_json::json!({"type":"text","text":format!("/{}{}",selected[0].id,tail)}),
+                ];
+            } else if !selected.is_empty() {
+                let names: Vec<_> = selected.iter().map(|s| s.id.as_str()).collect();
+                expected_skills = names.iter().map(|s| (*s).to_owned()).collect();
+                input.insert(0,serde_json::json!({"type":"text","text":format!("The user explicitly selected these native skills: {}. Before performing the requested task, invoke the Skill tool for each exact skill name, in this order, once. If a skill cannot be invoked, report the error instead of silently substituting another skill.\n",serde_json::to_string(&names).map_err(Error::internal)?)}));
+            }
+        }
+    }
     let mode = crate::harness::mode(&snapshot, session_id)?;
     let binary = crate::harness::selected_binary(&snapshot, worker.harness, &workspace.config);
     let mut cmd = tokio::process::Command::new(binary);
@@ -1079,7 +1226,25 @@ async fn execute(
             &path,
             &_directory.path().display().to_string(),
             &roots,
+            &effective_selection,
         ),
+    }
+    if worker.harness == Harness::ClaudeCode {
+        if fork.is_some() {
+            cmd.arg("--fork-session");
+            input = vec![serde_json::json!({"type":"text","text":"/status"})];
+        }
+        let context = execution_prompt
+            .split("\n\nRequested turn:\n")
+            .next()
+            .unwrap_or(&execution_prompt);
+        cmd.args(["--append-system-prompt", context]);
+        if let Some(model) = &session.selection.model {
+            cmd.args(["--model", model]);
+        }
+        if let Some(effort) = &effective_selection.effort {
+            cmd.args(["--effort", effort]);
+        }
     }
     cmd.current_dir(&path)
         .env_remove("RELAY_TOKEN")
@@ -1162,6 +1327,7 @@ async fn execute(
                 approve_implementation,
                 ..
             } => approve_implementation,
+            Command::ConversationCommand { ref name, .. } if name == "fork" => true,
             _ => return Err(Error::invalid("Run receipt does not authorize a turn")),
         };
         let mut current = store.snapshot()?;
@@ -1179,6 +1345,7 @@ async fn execute(
             .find(|submission| submission.id == run_id)
             .map(|submission| submission.approve_implementation)
             .unwrap_or(approved);
+        check_shared(&current, session_id)?;
         let index = current
             .sessions
             .iter()
@@ -1237,6 +1404,9 @@ async fn execute(
                 session_id,
                 run_id,
                 input,
+                invocation,
+                &effective_selection,
+                fork.as_ref(),
                 worker.thread_id.as_deref(),
                 &path,
                 &roots,
@@ -1252,7 +1422,13 @@ async fn execute(
                 session_id,
                 run_id,
                 input,
-                worker.thread_id.as_deref(),
+                fork.as_ref(),
+                &expected_skills,
+                if fork.is_some() {
+                    None
+                } else {
+                    worker.thread_id.as_deref()
+                },
                 &mut child,
                 stop,
             )
@@ -1263,7 +1439,7 @@ async fn execute(
     result
 }
 
-async fn terminate(child: &mut tokio::process::Child) {
+pub(super) async fn terminate(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(id) = child.id() {
         unsafe {
@@ -1273,8 +1449,8 @@ async fn terminate(child: &mut tokio::process::Child) {
     let _ = child.kill().await;
     let _ = child.wait().await;
 }
-struct ProcessGuard {
-    owned: Option<(u32, String)>,
+pub(super) struct ProcessGuard {
+    pub(super) owned: Option<(u32, String)>,
 }
 impl Drop for ProcessGuard {
     fn drop(&mut self) {

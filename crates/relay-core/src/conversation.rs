@@ -32,6 +32,7 @@ pub struct Part {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PartKind {
     Text { text: String },
+    Skill { skill: crate::SkillReference },
     Asset { asset: Asset },
     Reply { anchor: Anchor, parts: Vec<Part> },
 }
@@ -48,7 +49,7 @@ impl Part {
 pub fn has_content(parts: &[Part]) -> bool {
     parts.iter().any(|part| match &part.kind {
         PartKind::Text { text } => !text.trim().is_empty(),
-        PartKind::Asset { .. } => true,
+        PartKind::Asset { .. } | PartKind::Skill { .. } => true,
         PartKind::Reply { parts, .. } => has_content(parts),
     })
 }
@@ -58,6 +59,7 @@ pub fn plain_text(parts: &[Part]) -> String {
         .iter()
         .map(|p| match &p.kind {
             PartKind::Text { text } => text.clone(),
+            PartKind::Skill { skill } => format!("${}", skill.name),
             PartKind::Asset { asset } => format!("[{}]", asset.name),
             PartKind::Reply { anchor, parts } => {
                 format!("Reply to “{}”:\n{}", anchor.quote, plain_text(parts))
@@ -95,6 +97,16 @@ pub fn validate_parts(snapshot: &Snapshot, session: &str, parts: &[Part]) -> Res
             }
             match &part.kind {
                 PartKind::Text { text: value } => *text += value.len(),
+                PartKind::Skill { skill } => {
+                    if skill.id.is_empty()
+                        || skill.id.len() > 4096
+                        || skill.name.is_empty()
+                        || skill.name.len() > 256
+                    {
+                        return Err("Invalid skill reference".into());
+                    }
+                    *text += skill.name.len() + 1;
+                }
                 PartKind::Asset { asset } => {
                     uuid::Uuid::parse_str(&asset.id).map_err(|_| "Asset ID must be a UUID")?;
                     if asset.size > ASSET_LIMIT as u64 {

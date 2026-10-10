@@ -54,7 +54,7 @@ async fn discover(
     let response = client
         .post(config.url("v1/boards/discover"))
         .bearer_auth(&config.token)
-        .header("X-Relay-Protocol", "2")
+        .header("X-Relay-Protocol", relay_core::PROTOCOL_VERSION.to_string())
         .json(source)
         .send()
         .await
@@ -116,7 +116,7 @@ mod tests {
             }
             let request = String::from_utf8_lossy(&bytes).to_lowercase();
             assert!(request.starts_with("post /v1/boards/discover "));
-            assert!(request.contains("x-relay-protocol: 2"));
+            assert!(request.contains("x-relay-protocol: 3"));
             write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         });
         let config = Config {
@@ -186,7 +186,7 @@ async fn recovery(
     let response = client
         .post(config.url("v1/operations/reconcile"))
         .bearer_auth(&config.token)
-        .header("X-Relay-Protocol", "2")
+        .header("X-Relay-Protocol", relay_core::PROTOCOL_VERSION.to_string())
         .json(input)
         .send()
         .await
@@ -246,7 +246,7 @@ mod recovery_tests {
             let request = String::from_utf8_lossy(&bytes).to_lowercase();
             assert!(request.starts_with("post /v1/operations/reconcile "));
             assert!(request.contains("authorization: bearer test"));
-            assert!(request.contains("x-relay-protocol: 2"));
+            assert!(request.contains("x-relay-protocol: 3"));
             write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         });
         let config = Config {
