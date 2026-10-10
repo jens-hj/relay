@@ -705,7 +705,11 @@ pub fn Conversation(model: Model) -> Element {
             .get()
             .documents
             .get(&model.session.get())
-            .is_some_and(|d| !d.error.is_empty() || !d.recovery.is_empty())
+            .is_some_and(|d| {
+                d.conflict
+                    || !d.error.is_empty()
+                    || (!d.recovery_reviewed && !d.recovery.is_empty())
+            })
     });
     let warning = Derived::new(move || {
         removed.get()

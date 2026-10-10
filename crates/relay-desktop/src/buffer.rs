@@ -19,6 +19,7 @@ pub struct Document {
     pub remote: Draft,
     pub parts: Vec<Part>,
     pub recovery: Vec<Vec<Part>>,
+    pub recovery_reviewed: bool,
     pub conflict: bool,
     pub error: String,
     pub saving: Option<SaveDraft>,
@@ -34,6 +35,7 @@ impl Document {
             parts: draft.parts.clone(),
             remote: draft,
             recovery: vec![],
+            recovery_reviewed: false,
             conflict: false,
             error: String::new(),
             saving: None,
@@ -69,6 +71,8 @@ struct JournalDocument {
     remote: Draft,
     parts: Vec<Part>,
     recovery: Vec<Vec<Part>>,
+    #[serde(default)]
+    recovery_reviewed: bool,
     saving: Option<SaveDraft>,
     #[serde(default)]
     editing_queue: Option<String>,
@@ -91,6 +95,7 @@ pub fn load_journal(model: Model, settings: &Path, config: &crate::network::Conf
                         let mut doc = Document::new(record.remote);
                         doc.parts = record.parts;
                         doc.recovery = record.recovery;
+                        doc.recovery_reviewed = record.recovery_reviewed;
                         doc.saving = record.saving;
                         if doc.saving.is_some() {
                             doc.error="Recovered save awaiting confirmation; retry preserves its original ID".into();
@@ -219,6 +224,9 @@ fn journal(state: &BufferState) -> Result<(), String> {
                     remote: doc.remote.clone(),
                     parts: doc.parts.clone(),
                     recovery,
+                    recovery_reviewed: doc.recovery_reviewed
+                        && doc.finalize.is_none()
+                        && !doc.submitting,
                     saving: doc.saving.clone(),
                     editing_queue: doc.editing_queue.clone(),
                 },
@@ -630,6 +638,7 @@ pub fn receive(model: Model, update: Update) {
                             doc.saving = None;
                             if let Some(parts) = doc.finalize.take() {
                                 doc.recovery.push(parts);
+                                doc.recovery_reviewed = false;
                             }
                         }
                     }
@@ -765,6 +774,7 @@ pub fn flush(model: Model) {
     }
     let mut changed = false;
     let mut submit = None;
+    let snapshot = model.snapshot.get_untracked();
     for (session, doc) in &mut state.documents {
         if session.starts_with("director-draft-") {
             continue;
@@ -784,11 +794,13 @@ pub fn flush(model: Model) {
             && !model.busy.get_untracked()
             && !model.can_retry()
         {
+            let parts = target.clone();
+            clear_stale_queue_edit(doc, &snapshot);
             submit = Some((
                 Draft {
                     session_id: session.clone(),
                     revision: doc.remote.revision,
-                    parts: target.clone(),
+                    parts,
                 },
                 doc.editing_queue.clone(),
             ));
@@ -871,6 +883,20 @@ pub fn edit_queued(model: Model, id: &str) {
     commit(model, state);
 }
 
+fn clear_stale_queue_edit(doc: &mut Document, snapshot: &Snapshot) {
+    if doc.editing_queue.as_ref().is_some_and(|id| {
+        !snapshot.submissions.iter().any(|submission| {
+            &submission.id == id
+                && matches!(
+                    submission.state,
+                    SubmissionState::Queued | SubmissionState::Paused
+                )
+        })
+    }) {
+        doc.editing_queue = None;
+    }
+}
+
 pub fn rejected(model: Model, draft: &Draft, error: &str) {
     let snapshot = model.snapshot.get_untracked();
     let mut state = model.buffer.get_untracked();
@@ -879,20 +905,11 @@ pub fn rejected(model: Model, draft: &Draft, error: &str) {
         doc.force_after_submit = false;
         if !has_content(&doc.parts) {
             doc.parts = draft.parts.clone();
-        } else {
+        } else if doc.parts != draft.parts && !doc.recovery.contains(&draft.parts) {
             doc.recovery.push(draft.parts.clone());
+            doc.recovery_reviewed = false;
         }
-        if doc.editing_queue.as_ref().is_some_and(|id| {
-            !snapshot.submissions.iter().any(|submission| {
-                &submission.id == id
-                    && matches!(
-                        submission.state,
-                        SubmissionState::Queued | SubmissionState::Paused
-                    )
-            })
-        }) {
-            doc.editing_queue = None;
-        }
+        clear_stale_queue_edit(doc, &snapshot);
         doc.error = error.into();
     }
     commit(model, state);
@@ -901,28 +918,78 @@ pub fn rejected(model: Model, draft: &Draft, error: &str) {
 pub fn resolve(model: Model, use_local: bool) {
     let mut state = model.buffer.get_untracked();
     if let Some(doc) = state.documents.get_mut(&model.session.get_untracked()) {
+        if doc.submitting {
+            model
+                .notice
+                .set("Wait for the message acknowledgement before resolving the draft".into());
+            return;
+        }
+        if let Some(parts) = doc.finalize.take()
+            && has_content(&parts)
+            && parts != doc.parts
+            && !doc.recovery.contains(&parts)
+        {
+            doc.recovery.push(parts);
+        }
         if use_local {
-            if !doc.recovery.is_empty() && doc.parts.is_empty() {
-                doc.parts = doc.recovery.remove(0);
+            if let Some(recovered) = doc.recovery.pop() {
+                if has_content(&doc.parts)
+                    && doc.parts != recovered
+                    && !doc.recovery.contains(&doc.parts)
+                {
+                    doc.recovery.push(doc.parts.clone());
+                }
+                doc.parts = recovered;
             }
         } else {
-            if doc.parts != doc.remote.parts {
+            if doc.parts != doc.remote.parts && !doc.recovery.contains(&doc.parts) {
                 doc.recovery.push(doc.parts.clone());
             }
             doc.parts = doc.remote.parts.clone();
         }
         doc.conflict = false;
+        doc.recovery_reviewed = true;
         doc.force_after_submit = false;
         doc.error.clear();
         doc.saving = None;
+        clear_stale_queue_edit(doc, &model.snapshot.get_untracked());
         doc.changed = Instant::now() - Duration::from_secs(1);
     }
     commit(model, state);
+    model.notice.set(
+        if use_local {
+            "Local draft restored. Ready to send."
+        } else {
+            "Shared draft loaded."
+        }
+        .into(),
+    );
+    flush(model);
 }
 
 pub fn retry_save(model: Model) {
     let mut state = model.buffer.get_untracked();
+    if state
+        .documents
+        .get(&model.session.get_untracked())
+        .is_some_and(|doc| {
+            !doc.conflict
+                && doc.saving.is_none()
+                && !has_content(&doc.parts)
+                && !doc.recovery.is_empty()
+        })
+    {
+        resolve(model, true);
+        return;
+    }
+    let mut retrying = false;
     if let Some(doc) = state.documents.get_mut(&model.session.get_untracked()) {
+        if doc.conflict {
+            model
+                .notice
+                .set("Choose Load shared or Restore local to resolve the draft conflict".into());
+            return;
+        }
         if let Some(request) = &doc.saving
             && let Some(requests) = model.buffer_requests.get_untracked()
         {
@@ -930,8 +997,11 @@ pub fn retry_save(model: Model) {
                 session: doc.remote.session_id.clone(),
                 request: request.clone(),
             });
+            retrying = true;
         }
         doc.error.clear();
+        doc.recovery_reviewed = true;
+        clear_stale_queue_edit(doc, &model.snapshot.get_untracked());
     }
     for id in &state.failed_uploads {
         if let Some(asset) = state.uploads.get(id)
@@ -942,9 +1012,19 @@ pub fn retry_save(model: Model) {
                 asset: asset.clone(),
                 bytes: bytes.clone(),
             });
+            retrying = true;
         }
     }
     commit(model, state);
+    model.notice.set(
+        if retrying {
+            "Retrying draft save…"
+        } else {
+            "Draft ready to send."
+        }
+        .into(),
+    );
+    flush(model);
 }
 
 pub fn fetch(model: Model, asset: &Asset) {
@@ -1124,6 +1204,7 @@ pub fn load_journal(model: Model, _settings: &Path, _config: &crate::network::Co
                 let mut doc = Document::new(record.remote);
                 doc.parts = record.parts;
                 doc.recovery = record.recovery;
+                doc.recovery_reviewed = record.recovery_reviewed;
                 doc.saving = record.saving;
                 doc.editing_queue = record.editing_queue;
                 if doc.saving.is_some() {
@@ -1193,6 +1274,9 @@ fn persist_browser(model: Model, state: &BufferState) {
                     remote: doc.remote.clone(),
                     parts: doc.parts.clone(),
                     recovery,
+                    recovery_reviewed: doc.recovery_reviewed
+                        && doc.finalize.is_none()
+                        && !doc.submitting,
                     saving: doc.saving.clone(),
                     editing_queue: doc.editing_queue.clone(),
                 },

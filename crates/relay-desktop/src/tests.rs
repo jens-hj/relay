@@ -1939,6 +1939,132 @@ fn buffer_worker(mounted: &Mounted) {
 }
 
 #[test]
+fn retry_restores_recovered_content_when_the_current_draft_is_empty() {
+    use crate::buffer;
+    let mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    buffer::edit(mounted.model, "session-plan", vec![]);
+    mounted.model.buffer.update(|state| {
+        state.documents.get_mut("session-plan").unwrap().recovery =
+            vec![vec![Part::text("Recovered")]];
+    });
+    mounted.settle();
+    mounted.click("Retry draft save");
+    assert_eq!(
+        plain_text(&buffer::parts(mounted.model, "session-plan")),
+        "Recovered"
+    );
+    assert!(mounted.model.buffer.get_untracked().documents["session-plan"].recovery_reviewed);
+    assert_eq!(
+        mounted.model.notice.get_untracked(),
+        "Local draft restored. Ready to send."
+    );
+}
+
+#[test]
+fn resolved_recovery_stays_resolved_after_reloading_the_local_journal() {
+    use crate::buffer;
+    let mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let directory =
+        std::env::temp_dir().join(format!("relay-recovery-choice-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let settings = directory.join("settings.toml");
+    let config = crate::network::Config {
+        endpoint: "http://127.0.0.1:7331/".parse().unwrap(),
+        token: "recovery-choice-test".into(),
+    };
+    buffer::load_journal(mounted.model, &settings, &config);
+    buffer::edit(mounted.model, "session-plan", vec![Part::text("Current")]);
+    mounted.model.buffer.update(|state| {
+        let doc = state.documents.get_mut("session-plan").unwrap();
+        doc.remote.parts = vec![Part::text("Shared")];
+        doc.recovery = vec![vec![Part::text("Recovered")]];
+    });
+    buffer::resolve(mounted.model, false);
+    mounted.model.buffer.set(Default::default());
+    buffer::load_journal(mounted.model, &settings, &config);
+    let state = mounted.model.buffer.get_untracked();
+    let doc = &state.documents["session-plan"];
+    assert_eq!(plain_text(&doc.parts), "Shared");
+    assert!(doc.recovery_reviewed);
+    assert!(
+        doc.recovery
+            .iter()
+            .any(|parts| plain_text(parts) == "Current")
+    );
+    assert!(
+        doc.recovery
+            .iter()
+            .any(|parts| plain_text(parts) == "Recovered")
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn recovery_buttons_apply_choices_hide_the_panel_and_keep_alternative_drafts() {
+    use crate::buffer;
+    for (button, expected, notice) in [
+        ("Load shared draft", "Shared", "Shared draft loaded."),
+        (
+            "Restore local draft",
+            "Recovered",
+            "Local draft restored. Ready to send.",
+        ),
+        ("Retry draft save", "Current", "Draft ready to send."),
+    ] {
+        let mounted = mount(false, 1380.0);
+        buffer_worker(&mounted);
+        buffer::edit(mounted.model, "session-plan", vec![Part::text("Current")]);
+        mounted.model.buffer.update(|state| {
+            let doc = state.documents.get_mut("session-plan").unwrap();
+            doc.remote.parts = vec![Part::text("Shared")];
+            doc.recovery = vec![vec![Part::text("Recovered")]];
+            doc.error = "Message already launching or missing".into();
+            doc.editing_queue = Some("completed-message".into());
+        });
+        mounted.settle();
+        mounted.click(button);
+        let state = mounted.model.buffer.get_untracked();
+        let doc = &state.documents["session-plan"];
+        assert_eq!(plain_text(&doc.parts), expected);
+        assert!(doc.error.is_empty());
+        assert!(doc.recovery_reviewed);
+        assert!(doc.editing_queue.is_none());
+        assert!(!doc.recovery.is_empty());
+        assert_eq!(mounted.model.notice.get_untracked(), notice);
+        assert!(
+            !mounted
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .iter()
+                .any(|n| n.label.as_deref() == Some(button))
+        );
+    }
+}
+
+#[test]
+fn recovered_queue_edit_sends_a_new_turn_without_first_repeating_the_rejection() {
+    use crate::buffer;
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(tx));
+    buffer::edit(mounted.model, "session-plan", vec![Part::text("Recovered")]);
+    mounted.model.buffer.update(|state| {
+        let doc = state.documents.get_mut("session-plan").unwrap();
+        doc.remote.parts = doc.parts.clone();
+        doc.editing_queue = Some("completed-message".into());
+    });
+    buffer::send(mounted.model);
+    let request = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(request.command, Command::SubmitTurn { parts, .. } if plain_text(&parts) == "Recovered")
+    );
+}
+
+#[test]
 fn rejected_queue_edit_retains_draft_and_releases_pending_request() {
     use crate::{buffer, model::Saved};
     let mut mounted = mount(false, 1380.0);
