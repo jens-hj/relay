@@ -1349,7 +1349,10 @@ pub(super) fn review_repo(dir: &Path) -> PathBuf {
 #[tokio::test]
 async fn failure_events_invalid_output_missing_thread_and_spawn_failure_are_terminal() {
     let cases = [
-        ("head -c 1048577 /dev/zero | tr '\\000' x", "exceeds 1 MiB"),
+        (
+            "head -c 1048577 /dev/zero | tr '\\000' x",
+            "Invalid Codex app-server response",
+        ),
         (
             "printf '%s\\n' '{\"type\":\"turn.failed\",\"error\":{\"message\":\"secret\"}}'",
             "turn failed",

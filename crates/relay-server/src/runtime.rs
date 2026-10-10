@@ -779,6 +779,10 @@ pub(crate) fn event(
 pub(super) async fn line(
     reader: &mut BufReader<tokio::process::ChildStdout>,
 ) -> Result<Option<Vec<u8>>, Error> {
+    // Tool output and resumed thread snapshots can exceed transcript limits.
+    // Preserve complete JSON/RPC events; bound presentation separately and
+    // retain a hard ceiling against unbounded harness output.
+    const EVENT_LIMIT: usize = 64 * 1024 * 1024;
     let mut line = Vec::new();
     loop {
         let buf = reader
@@ -797,9 +801,9 @@ pub(super) async fn line(
             .position(|b| *b == b'\n')
             .map(|i| i + 1)
             .unwrap_or(buf.len());
-        if line.len() + size > 1024 * 1024 {
+        if line.len() + size > EVENT_LIMIT {
             return Err(Error::invalid(
-                "Harness streaming event exceeds 1 MiB limit",
+                "Harness streaming event exceeds 64 MiB limit",
             ));
         }
         let done = buf[size - 1] == b'\n';

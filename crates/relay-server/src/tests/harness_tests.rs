@@ -1119,3 +1119,98 @@ async fn claude_completion_cleans_descendants_even_after_native_parent_exits() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn claude_large_streaming_event_preserves_completion_and_bounds_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let large = r#"printf '{"type":"assistant","message":{"id":"response","content":[{"type":"text","text":"'
+      head -c 2097152 /dev/zero | tr '\000' x
+      printf '"}]}}\n'"#;
+    let source = CLAUDE_FAKE.replace(
+        r#"echo '{"type":"assistant","message":{"id":"response","content":[{"type":"text","text":"Complete λ"}]}}'"#,
+        large,
+    );
+    let source = source.replace("content_block_delta", "ignored_delta");
+    let w = claude_workspace(dir.path(), &source);
+    let (id, snapshot) = launch(&w).await;
+    let message = snapshot
+        .messages
+        .iter()
+        .find(|m| m.session_id == id && m.author == "Claude Code")
+        .unwrap();
+    assert!(message.body.starts_with("xxxx"));
+    assert!(message.body.len() < 2097152);
+    assert_eq!(
+        worker(&snapshot, &id).thread_id.as_deref(),
+        Some(CLAUDE_THREAD)
+    );
+}
+
+#[tokio::test]
+async fn harness_streaming_reader_preserves_large_events_and_enforces_ceiling() {
+    for (size, newline) in [
+        (2097152, true),
+        (2097152, false),
+        (64 * 1024 * 1024, false),
+        (64 * 1024 * 1024 + 1, false),
+    ] {
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "head -c {size} /dev/zero{}",
+                if newline {
+                    "; printf '\\n'; printf 'next\\n'"
+                } else {
+                    ""
+                }
+            ))
+            .stdout(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut reader = tokio::io::BufReader::new(child.stdout.take().unwrap());
+        let result = runtime::line(&mut reader).await;
+        if size > 64 * 1024 * 1024 {
+            assert!(result.is_err());
+            child.kill().await.unwrap();
+        } else {
+            assert_eq!(result.unwrap().unwrap().len(), size + usize::from(newline));
+            if newline {
+                assert_eq!(
+                    runtime::line(&mut reader).await.unwrap().unwrap(),
+                    b"next\n"
+                );
+            }
+            assert!(runtime::line(&mut reader).await.unwrap().is_none());
+            assert!(child.wait().await.unwrap().success());
+        }
+    }
+}
+
+#[tokio::test]
+async fn codex_large_streaming_event_preserves_completion_and_bounds_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = review_repo(dir.path());
+    let bin = dir.path().join("fake-codex");
+    let source = MULTI_CODEX.replace(
+        "\"text\":\"Edited selected workspaces\"",
+        "\"text\":\"'\n      head -c 2097152 /dev/zero | tr '\\000' x\n      printf '%s\\n' '\"",
+    ).replace("printf '%s\\n' '{\"method\":\"item/completed\"", "printf '%s' '{\"method\":\"item/completed\"");
+    script(&bin, &source);
+    let mut c = config();
+    c.repository = Some(repo);
+    c.codex = bin;
+    let w = workspace(&dir.path().join("db"), &live(), c);
+    let (id, snapshot) = launch(&w).await;
+    let message = snapshot
+        .messages
+        .iter()
+        .find(|m| m.session_id == id && m.author == "Codex")
+        .unwrap();
+    assert!(message.body.starts_with("xxxx"));
+    assert!(message.body.len() < 2097152);
+    assert_eq!(
+        worker(&snapshot, &id).thread_id.as_deref(),
+        Some("multi-workspace-thread")
+    );
+}
