@@ -2379,8 +2379,9 @@ pub(crate) fn provenance(
 }
 
 /// The worker run's recorded values for the session's metadata strip:
-/// harness, thread and worktree as recorded, and the approval mode that the
-/// next turn will use. Values that were not recorded are left out.
+/// harness, model, context, thread and worktree as recorded, and the approval
+/// mode that the next turn will use. Missing model/context values show a dash;
+/// optional thread/worktree cells are left out when not recorded.
 pub(crate) fn run_cells(snapshot: &Snapshot, session: &Session) -> Vec<(&'static str, String)> {
     let Some(worker) = &session.worker else {
         return Vec::new();
@@ -2393,6 +2394,16 @@ pub(crate) fn run_cells(snapshot: &Snapshot, session: &Session) -> Vec<(&'static
         }
         .to_string(),
     )];
+    cells.push(("Model", worker.model.clone().unwrap_or_else(|| "—".into())));
+    let tokens = worker
+        .context_tokens
+        .map(crate::labels::grouped)
+        .unwrap_or_else(|| "—".into());
+    let window = worker
+        .context_window
+        .map(crate::labels::grouped)
+        .unwrap_or_else(|| "—".into());
+    cells.push(("Context", format!("{tokens} / {window}")));
     if let Some(thread) = &worker.thread_id {
         cells.push(("Thread", thread.clone()));
     }

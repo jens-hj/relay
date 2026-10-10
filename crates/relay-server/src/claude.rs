@@ -201,15 +201,21 @@ pub(super) async fn execute(
                     .to_owned();
                 thread = Some(id.clone());
                 workspace.update_run(session, run, |snapshot| {
-                    snapshot
+                    let worker = snapshot
                         .sessions
                         .iter_mut()
                         .find(|s| s.id == session)
                         .unwrap()
                         .worker
                         .as_mut()
-                        .unwrap()
-                        .thread_id = Some(id);
+                        .unwrap();
+                    worker.thread_id = Some(id);
+                    worker.model = value["model"]
+                        .as_str()
+                        .filter(|model| !model.is_empty())
+                        .map(str::to_owned);
+                    worker.context_tokens = None;
+                    worker.context_window = None;
                     if let Some(submission) = snapshot.submissions.iter_mut().find(|s| s.id == run)
                     {
                         submission.state = SubmissionState::Running;

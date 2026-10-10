@@ -152,6 +152,11 @@ fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Re
                 .worker
                 .as_mut()
                 .unwrap();
+            // Cumulative billing usage is not the latest context occupancy.
+            worker.context_tokens = usage["totalTokens"].as_u64();
+            worker.context_window = params["tokenUsage"]["modelContextWindow"]
+                .as_u64()
+                .filter(|window| *window > 0);
             worker.usage = usage["inputTokens"]
                 .as_u64()
                 .zip(usage["cachedInputTokens"].as_u64())
@@ -282,14 +287,21 @@ pub(super) async fn execute(
             return Err(Error::invalid("Codex resumed a different thread"));
         }
         workspace.update_run(session, run, |s| {
-            s.sessions
+            let worker = s
+                .sessions
                 .iter_mut()
                 .find(|s| s.id == session)
                 .unwrap()
                 .worker
                 .as_mut()
-                .unwrap()
-                .thread_id = Some(thread.clone());
+                .unwrap();
+            worker.thread_id = Some(thread.clone());
+            worker.model = response["model"]
+                .as_str()
+                .filter(|model| !model.is_empty())
+                .map(str::to_owned);
+            worker.context_tokens = None;
+            worker.context_window = None;
             if let Some(submission) = s.submissions.iter_mut().find(|s| s.id == run) {
                 submission.state = SubmissionState::Running;
             }

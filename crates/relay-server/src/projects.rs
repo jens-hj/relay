@@ -1034,6 +1034,9 @@ fn start(
         connection_ids: ids,
         workspaces: vec![],
         worker: Some(WorkerRun {
+            model: None,
+            context_tokens: None,
+            context_window: None,
             harness: profile.harness,
             execution: None,
             status: WorkerStatus::Queued,

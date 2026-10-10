@@ -1257,6 +1257,9 @@ fn worker_running_stop_completed_review_and_continue_use_recorded_session() {
     session.issue_id = Some("issue-2".into());
     session.director_id = snapshot.directors[0].id.clone();
     session.worker = Some(WorkerRun {
+        model: None,
+        context_tokens: None,
+        context_window: None,
         harness: Harness::Codex,
         execution: None,
         status: WorkerStatus::Running,
@@ -1425,6 +1428,9 @@ fn removed_board_items_keep_history_but_block_new_turns_until_restored() {
     session.director_id = director_id;
     session.fixture = false;
     session.worker = Some(WorkerRun {
+        model: None,
+        context_tokens: None,
+        context_window: None,
         harness: Harness::Codex,
         execution: None,
         status: WorkerStatus::Completed,
@@ -1762,6 +1768,9 @@ fn failed_launch_without_thread_offers_new_linked_worker_instead_of_continue() {
     session.issue_id = Some("issue-2".into());
     session.director_id = snapshot.directors[0].id.clone();
     session.worker = Some(WorkerRun {
+        model: None,
+        context_tokens: None,
+        context_window: None,
         harness: Harness::Codex,
         execution: None,
         status: WorkerStatus::Failed,
@@ -1905,6 +1914,9 @@ fn buffer_worker(mounted: &Mounted) {
     s.fixture = false;
     s.role = SessionRole::Worker;
     s.worker = Some(WorkerRun {
+        model: None,
+        context_tokens: None,
+        context_window: None,
         harness: Harness::Codex,
         execution: None,
         status: WorkerStatus::Running,
@@ -3753,6 +3765,9 @@ fn director_execution_does_not_consume_worker_capacity_or_block_director_continu
     session.issue_id = Some("issue-2".into());
     session.role = SessionRole::Director;
     session.worker = Some(WorkerRun {
+        model: None,
+        context_tokens: None,
+        context_window: None,
         harness: Harness::Codex,
         execution: None,
         status: WorkerStatus::Running,
@@ -4389,6 +4404,9 @@ fn sidebar_rows_describe_worker_state_and_director_capacity() {
 
 fn worker_run(status: WorkerStatus) -> WorkerRun {
     WorkerRun {
+        model: None,
+        context_tokens: None,
+        context_window: None,
         harness: Harness::Codex,
         execution: None,
         status,
@@ -5032,10 +5050,18 @@ fn session_header_and_run_strip_show_only_recorded_values() {
     let keys: Vec<_> = cells.iter().map(|c| c.0).collect();
     assert_eq!(
         keys,
-        ["Harness", "Worktree", "Next-turn approval"],
+        [
+            "Harness",
+            "Model",
+            "Context",
+            "Worktree",
+            "Next-turn approval"
+        ],
         "no thread was recorded"
     );
-    assert_eq!(cells[1].1, "…/worktrees/issue-2-a41c");
+    assert_eq!(cells[1].1, "—");
+    assert_eq!(cells[2].1, "— / —");
+    assert_eq!(cells[3].1, "…/worktrees/issue-2-a41c");
     mounted.model.receive(NetworkState {
         snapshot,
         connected: true,
@@ -5054,6 +5080,41 @@ fn session_header_and_run_strip_show_only_recorded_values() {
     let send = mounted.rect("Send message");
     assert!(send.origin.x < draft.origin.x + 92.0);
     assert!(has_label(&mounted, "Stop worker"));
+}
+
+#[test]
+fn session_run_model_and_context_follow_reported_updates() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = live_snapshot();
+    let session = &mut snapshot.sessions[0];
+    session.fixture = false;
+    session.worker = Some(worker_run(WorkerStatus::Running));
+    let id = session.id.clone();
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(id);
+    mounted.settle();
+    assert!(has_label(&mounted, "Model"));
+    assert!(has_label(&mounted, "Context"));
+    let worker = snapshot.sessions[0].worker.as_mut().unwrap();
+    worker.model = Some("reported-model".into());
+    worker.context_tokens = Some(12345);
+    worker.context_window = Some(200000);
+    snapshot.revision += 1;
+    let cells = crate::conversation::run_cells(&snapshot, &snapshot.sessions[0]);
+    assert!(cells.contains(&("Model", "reported-model".into())));
+    assert!(cells.contains(&("Context", "12,345 / 200,000".into())));
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(has_label(&mounted, "reported-model"));
+    assert!(has_label(&mounted, "12,345 / 200,000"));
 }
 
 #[test]

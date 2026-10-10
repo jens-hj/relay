@@ -16,7 +16,7 @@ while IFS= read -r line; do
       fi
       echo '{"type":"control_response","response":{"subtype":"success","request_id":"relay-initialize","response":{}}}' ;;
     user)
-      echo '{"type":"system","subtype":"init","session_id":"11111111-2222-4333-8444-555555555555"}'
+      echo '{"type":"system","subtype":"init","model":"reported-claude-model","session_id":"11111111-2222-4333-8444-555555555555"}'
       echo '{"type":"system","subtype":"session_state_changed","state":"running","sdk_host_only":true}'
       if [ -f hold ]; then continue; fi
       if [ -f permission ]; then
@@ -346,6 +346,9 @@ async fn claude_first_turn_resume_modes_and_bound_harness() {
     let work = worker(&s, &id);
     assert_eq!(work.thread_id.as_deref(), Some(CLAUDE_THREAD));
     assert_eq!(work.harness, Harness::ClaudeCode);
+    assert_eq!(work.model.as_deref(), Some("reported-claude-model"));
+    assert_eq!(work.context_tokens, None);
+    assert_eq!(work.context_window, None);
     assert_eq!(
         work.usage,
         Some(TokenUsage {
@@ -700,6 +703,9 @@ fn schema_four_updates_only_inherited_bundled_defaults_and_keeps_old_threads() {
     let db = dir.path().join("db");
     let mut s = demo_snapshot(DirectorProfile::default());
     s.sessions[0].worker = Some(WorkerRun {
+        model: None,
+        context_tokens: None,
+        context_window: None,
         harness: Harness::Codex,
         execution: None,
         status: WorkerStatus::Completed,
@@ -1212,5 +1218,70 @@ async fn codex_large_streaming_event_preserves_completion_and_bounds_transcript(
     assert_eq!(
         worker(&snapshot, &id).thread_id.as_deref(),
         Some("multi-workspace-thread")
+    );
+}
+
+#[test]
+fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("db");
+    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    snapshot.sessions[0].worker = Some(WorkerRun {
+        model: None,
+        context_tokens: None,
+        context_window: None,
+        harness: Harness::Codex,
+        execution: None,
+        status: WorkerStatus::Completed,
+        thread_id: Some("exact-thread".into()),
+        worktree: Some("/existing/worktree".into()),
+        branch: None,
+        base_commit: None,
+        error: None,
+        usage: None,
+        changes: None,
+    });
+    let mut json = serde_json::to_value(&snapshot).unwrap();
+    let worker = json["sessions"][0]["worker"].as_object_mut().unwrap();
+    for key in ["model", "context_tokens", "context_window"] {
+        worker.remove(key);
+    }
+    let store = Store::open(&db, DirectorProfile::default()).unwrap();
+    store
+        .connection
+        .execute("UPDATE workspace SET snapshot=?1", [json.to_string()])
+        .unwrap();
+    store
+        .connection
+        .pragma_update(None, "user_version", 6)
+        .unwrap();
+    drop(store);
+    let store = Store::open(&db, DirectorProfile::default()).unwrap();
+    assert_eq!(store.snapshot().unwrap(), snapshot);
+    assert_eq!(
+        store
+            .connection
+            .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+            .unwrap(),
+        7
+    );
+    let worker = snapshot.sessions[0].worker.as_mut().unwrap();
+    worker.model = Some("reported-model".into());
+    worker.context_tokens = Some(0);
+    worker.context_window = Some(200000);
+    store
+        .connection
+        .execute(
+            "UPDATE workspace SET snapshot=?1",
+            [serde_json::to_string(&snapshot).unwrap()],
+        )
+        .unwrap();
+    drop(store);
+    assert_eq!(
+        Store::open(&db, DirectorProfile::default())
+            .unwrap()
+            .snapshot()
+            .unwrap(),
+        snapshot
     );
 }

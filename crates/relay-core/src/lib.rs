@@ -131,6 +131,14 @@ pub struct ChangeSet {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerRun {
+    /// Actual model reported by the harness.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Latest context occupancy and capacity reported by the harness.
+    #[serde(default)]
+    pub context_tokens: Option<u64>,
+    #[serde(default)]
+    pub context_window: Option<u64>,
     #[serde(default)]
     pub harness: Harness,
     #[serde(default)]

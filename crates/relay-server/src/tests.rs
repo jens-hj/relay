@@ -1005,7 +1005,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            6
+            7
         );
         drop(store);
         let mut reopened = Store::open(&db, DirectorProfile::default()).unwrap();
@@ -1036,7 +1036,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 7)
+        .pragma_update(None, "user_version", 8)
         .unwrap();
     drop(store);
     let error = Store::open(&db, DirectorProfile::default()).err().unwrap();
@@ -1046,7 +1046,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        7
+        8
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -2422,7 +2422,7 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >> rpc-input.jsonl
   case "$method" in
     initialize) printf '{"id":%s,"result":{}}\n' "$id" ;;
-    thread/resume) printf '{"id":%s,"result":{"thread":{"id":"%s"}}}\n' "$id" "$thread" ;;
+    thread/resume) printf '{"id":%s,"result":{"model":"reported-model","thread":{"id":"%s"}}}\n' "$id" "$thread" ;;
     turn/start)
       printf '{"method":"turn/started","params":{"threadId":"%s","turn":{"id":"turn-1"}}}\n' "$thread"
       printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
@@ -2433,7 +2433,7 @@ while IFS= read -r line; do
       fi
       printf '{"method":"item/agentMessage/delta","params":{"threadId":"%s","turnId":"turn-1","itemId":"answer","delta":"Ordered "}}\n' "$thread"
       printf '{"method":"item/completed","params":{"threadId":"%s","turnId":"turn-1","item":{"id":"answer","type":"agentMessage","text":"Ordered response λ"}}}\n' "$thread"
-      printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"%s","tokenUsage":{"last":{"inputTokens":31,"cachedInputTokens":7,"outputTokens":4}}}}\n' "$thread"
+      printf '{"method":"thread/tokenUsage/updated","params":{"threadId":"%s","tokenUsage":{"modelContextWindow":200000,"total":{"totalTokens":9999},"last":{"inputTokens":31,"cachedInputTokens":7,"outputTokens":4,"totalTokens":35}}}}\n' "$thread"
       printf '{"method":"turn/completed","params":{"threadId":"%s","turn":{"id":"turn-1","status":"completed"}}}\n' "$thread" ;;
     turn/interrupt)
       printf '{"id":%s,"result":{}}\n' "$id"
@@ -2518,6 +2518,21 @@ async fn app_server_preserves_ordered_multimodal_context_and_exact_existing_thre
             cached_input_tokens: 7,
             output_tokens: 4
         })
+    );
+    assert_eq!(worker.model.as_deref(), Some("reported-model"));
+    assert_eq!(worker.context_tokens, Some(35));
+    assert_eq!(worker.context_window, Some(200000));
+    let stored = w.store.lock().unwrap().snapshot().unwrap();
+    assert_eq!(
+        stored
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap(),
+        worker
     );
     let answer = s
         .messages
