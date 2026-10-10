@@ -30,6 +30,7 @@ in
 platform.buildRustPackage {
   pname = "relay-web";
   version = (builtins.fromTOML (builtins.readFile (root + "/Cargo.toml"))).workspace.package.version;
+  RELAY_BUILD_REVISION = src.rev or src.dirtyRev or "unknown";
   src = pkgs.lib.fileset.toSource {
     inherit root;
     fileset = pkgs.lib.fileset.unions [

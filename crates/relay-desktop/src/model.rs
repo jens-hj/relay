@@ -43,6 +43,7 @@ struct Pending {
 
 #[derive(Clone, Copy)]
 pub struct Model {
+    pub server_build: State<Option<BuildInfo>>,
     pub window: State<WindowHandle>,
     pub window_gesture: State<Option<crate::window_chrome::NativeGesture>>,
     pub harness_refresh: State<Option<UnboundedSender<()>>>,
@@ -123,6 +124,7 @@ impl Model {
             harness_refresh: State::new(None),
             harnesses: State::new(vec![]),
             harness_error: State::new(String::new()),
+            server_build: State::new(None),
             catalogs: State::new(Default::default()),
             completion: State::new(None),
             command_flow: State::new(String::new()),
@@ -193,6 +195,7 @@ impl Model {
     pub fn receive(&self, update: NetworkState) {
         self.harnesses.set(update.harnesses.clone());
         self.harness_error.set(update.harness_error.clone());
+        self.server_build.set(update.server_build.clone());
         let select = !update
             .snapshot
             .projects

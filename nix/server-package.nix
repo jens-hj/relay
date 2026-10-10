@@ -26,6 +26,7 @@ platform.buildRustPackage {
   pname = "relay-server";
   version = (builtins.fromTOML (builtins.readFile (root + "/Cargo.toml"))).workspace.package.version;
   src = serverSource;
+  RELAY_BUILD_REVISION = src.rev or src.dirtyRev or "unknown";
   cargoLock.lockFile = ./server-Cargo.lock;
   cargoBuildFlags = [
     "-p"

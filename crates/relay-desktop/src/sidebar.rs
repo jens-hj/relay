@@ -147,6 +147,20 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
                     }
                 }
             }
+            col height:min-content shrink:0 gap:{px(4.0)}px
+                pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px) font-size:{px(10.0)}px
+                font-color:ink.muted {
+                row height:min-content min-width:0px label:"Frontend build"
+                    description:{format!("{} · {}",relay_core::BuildInfo::current().version,relay_core::BuildInfo::current().revision)} {
+                    text selectable font-family:monospace
+                        {format!("Frontend {}",relay_core::BuildInfo::current().short_revision())}
+                }
+                row height:min-content min-width:0px label:"Server build"
+                    description:{model.server_build.get().map(|b|format!("{} · {}",b.version,b.revision)).unwrap_or_else(||"Server version unavailable".into())} {
+                    text selectable font-family:monospace
+                        {format!("Server {}",model.server_build.get().map(|b|b.short_revision()).unwrap_or_else(||"unknown".into()))}
+                }
+            }
             col height:min-content shrink:0 stroke:(width:{px(1.0)} color:rule.line edges:top)
                 label:"Connection" {
                 row height:{px(52.0)}px shrink:0 {

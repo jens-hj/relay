@@ -1,5 +1,7 @@
 //! Relay's domain and versioned client/server contract. No UI or execution dependencies.
 
+mod build_info;
+pub use build_info::*;
 mod harness_commands;
 pub use harness_commands::*;
 mod conversation;

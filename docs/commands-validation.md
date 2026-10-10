@@ -1,6 +1,6 @@
 # Commands and skills validation
 
-Tracked by [issue #22](https://github.com/jens-hj/relay/issues/22).
+Tracked by [issue #22](https://github.com/jens-hj/relay/issues/22), with build identity and discovery diagnostics tracked by [issue #23](https://github.com/jens-hj/relay/issues/23).
 
 The composer completes `/commands` and `$skills`, with pointer selection, arrow keys, Tab/Enter, and Escape. Skill references preserve multipart order and Unicode text, persist in shared drafts and submissions, and are revalidated on the server. Unknown dollar expressions remain text; escaped references, code, and quoted lines do not invoke skills. Claude translates a leading skill into its native slash invocation and embedded skills into explicit Skill tool calls whose invocation is checked. Codex uses native skill input items.
 

@@ -138,6 +138,37 @@ pub fn complete(model: Model, part: &str, text: &str, caret: usize) {
     }
 }
 
+pub fn discovery_feedback(model: Model) -> Option<String> {
+    let id = model.session.get();
+    let text = plain_text(&buffer::parts(model, &id));
+    let prose = if text.ends_with('$') {
+        format!("{text}x")
+    } else {
+        text.clone()
+    };
+    if !text.trim_start().starts_with('/') && skill_tokens(&prose).is_empty() {
+        return None;
+    }
+    let catalog = model.catalogs.get();
+    if catalog.get(&id).is_some_and(Result::is_ok) {
+        return None;
+    }
+    if model
+        .snapshot
+        .get()
+        .sessions
+        .iter()
+        .any(|s| s.id == id && (s.fixture || s.worker.is_none()))
+    {
+        return Some("This transcript has no agent harness. Open a live conversation to use commands and skills.".into());
+    }
+    match catalog.get(&id) {
+        None => Some("Loading commands and skills…".into()),
+        Some(Err(error)) => Some(format!("Cannot load commands and skills: {error}")),
+        Some(Ok(_)) => None,
+    }
+}
+
 pub fn open(model: Model, name: &str) {
     let parts = buffer::parts(model, &model.session.get_untracked());
     let text = plain_text(&parts);

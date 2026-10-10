@@ -35,6 +35,16 @@ pub fn start(
             if status_events.send(Event::Harnesses(result)).is_err() {
                 break;
             }
+            let build =
+                match browser::send(&status_config, client.get(status_config.url("v1/version")))
+                    .await
+                {
+                    Ok(response) if response.status().is_success() => response.json().await.ok(),
+                    _ => None,
+                };
+            if status_events.send(Event::Build(build)).is_err() {
+                break;
+            }
             tokio::select! {
                 _ = browser::sleep(5_000) => {},
                 refresh = refreshes.recv() => {
@@ -91,6 +101,7 @@ pub fn start(
         };
         while let Some(event) = updates.recv().await {
             match event {
+                Event::Build(build) => state.server_build = build,
                 Event::Harnesses(result) => match result {
                     Ok(statuses) => {
                         state.harnesses = statuses;

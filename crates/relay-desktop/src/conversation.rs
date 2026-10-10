@@ -602,6 +602,7 @@ pub fn Conversation(model: Model) -> Element {
     let controller = State::new(Rc::new(RefCell::new(Controller::default())));
     let empty = State::new(uuid::Uuid::new_v4().to_string());
     let menu = State::new(false);
+    let discovery_feedback = Derived::new(move || crate::command_ui::discovery_feedback(model));
     let details = State::new(String::new());
     let session = Derived::new(move || {
         model
@@ -1210,9 +1211,24 @@ pub fn Conversation(model: Model) -> Element {
                             button #relay.action @click:{buffer::send(model);}
                                 pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
                                 label:"Send message" disabled:{model.busy.get()} "Send"
+                            button #relay.action
+                                @click:{crate::command_ui::refresh(model,false);crate::command_ui::open(model,"help");}
+                                label:"Harness commands and skills" "Commands"
                         }
                         col width:1fr min-width:0px max-width:{px(760.0)}px height:min-content
                             gap:{px(8.0)}px {
+                            if discovery_feedback.get().is_some() {
+                                col height:min-content gap:{px(4.0)}px
+                                    label:"Command discovery status" {
+                                    text font-size:{px(12.0)}px
+                                        {discovery_feedback.get().unwrap_or_default()}
+                                    if model.catalogs.get().get(&model.session.get()).is_some_and(|c| c.is_err()) {
+                                        button #relay.action
+                                            @click:{crate::command_ui::refresh(model,true);}
+                                            label:"Retry command discovery" "Retry"
+                                    }
+                                }
+                            }
                             if model.completion.get().is_some() {
                                 scroll height:{px(180.0)}px {
                                     col height:min-content {
@@ -2201,6 +2217,12 @@ pub(crate) fn BufferText(
                                 Location::Draft(id) => {
                                     editor.insert(&mut fonts, &text);
                                     update_text(model, &key_controller, id, editor.text());
+                                    crate::command_ui::complete(
+                                        model,
+                                        id,
+                                        &editor.text(),
+                                        editor.caret_offset(),
+                                    );
                                     key_field.content_dirty();
                                 }
                                 _ => {

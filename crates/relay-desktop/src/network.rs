@@ -60,6 +60,7 @@ impl Config {
 
 #[derive(Clone, Default)]
 pub struct NetworkState {
+    pub server_build: Option<relay_core::BuildInfo>,
     pub harnesses: Vec<relay_core::HarnessStatus>,
     pub harness_error: String,
     pub snapshot: Snapshot,
@@ -73,6 +74,7 @@ pub struct NetworkState {
 }
 
 enum Event {
+    Build(Option<relay_core::BuildInfo>),
     Harnesses(Result<Vec<relay_core::HarnessStatus>, String>),
     Snapshot(Snapshot),
     Status(bool, String),
@@ -130,6 +132,12 @@ pub fn start(
                     if status_events.send(Event::Harnesses(result)).is_err() {
                         break;
                     }
+                    let build = match status_client.get(status_config.url("v1/version"))
+                        .bearer_auth(&status_config.token).send().await {
+                        Ok(response) if response.status().is_success() => response.json().await.ok(),
+                        _ => None,
+                    };
+                    if status_events.send(Event::Build(build)).is_err() { break; }
                 }
             });
             let writer = tokio::spawn(write(config, client, receiver, events));
@@ -139,6 +147,7 @@ pub fn start(
             };
             while let Some(event) = updates.recv().await {
                 match event {
+                    Event::Build(build) => state.server_build = build,
                     Event::Harnesses(result) => match result {
                         Ok(statuses) => {
                             state.harnesses = statuses;

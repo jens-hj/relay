@@ -517,6 +517,27 @@ async fn catalog_and_session_choices_cross_http_and_reconnect_without_replaying_
         axum::serve(listener, app).await.unwrap();
     });
     let client = reqwest::Client::new();
+    assert_eq!(
+        client
+            .get(format!("{endpoint}/v1/version"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let build: BuildInfo = client
+        .get(format!("{endpoint}/v1/version"))
+        .bearer_auth("relay-test-token-command")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(build, BuildInfo::current());
     let catalog: HarnessCatalog = client
         .get(format!("{endpoint}/v1/sessions/{id}/catalog"))
         .bearer_auth("relay-test-token-command")

@@ -1297,6 +1297,7 @@ pub fn router_with_browser(
             .route("/v1/harnesses", get(harness::statuses))
             .route("/v1/harnesses/refresh", post(harness::refresh))
             .route("/v1/snapshot", get(snapshot))
+            .route("/v1/version", get(build_version))
             .route("/v1/commands", post(command))
             .route(
                 "/v1/conversation/commands",
@@ -1342,6 +1343,10 @@ async fn authorize(
         matches!(request.uri().path(), "/v1/events" | "/v1/drafts/events"),
     )?;
     Ok(next.run(request).await)
+}
+
+async fn build_version() -> Json<BuildInfo> {
+    Json(BuildInfo::current())
 }
 
 async fn snapshot(

@@ -56,6 +56,45 @@ fn mount(light: bool, width: f32) -> Mounted {
 }
 
 #[test]
+fn command_discovery_errors_are_visible_and_retryable() {
+    let mounted = mount(false, 820.0);
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot.sessions.clear();
+    snapshot.projects[0].fixture = false;
+    let director_id = snapshot.directors[0].id.clone();
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_director(director_id);
+    let id = mounted.model.session.get_untracked();
+    crate::buffer::edit(mounted.model, &id, vec![Part::text("/")]);
+    mounted.settle();
+    assert_eq!(
+        crate::command_ui::discovery_feedback(mounted.model).as_deref(),
+        Some("Loading commands and skills…")
+    );
+    assert!(mounted.rect("Command discovery status").size.height > 0.0);
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([(
+            id.clone(),
+            Err("Harness discovery timed out".into()),
+        )]));
+    mounted.settle();
+    assert!(
+        crate::command_ui::discovery_feedback(mounted.model)
+            .unwrap()
+            .contains("timed out")
+    );
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(sender));
+    mounted.click("Retry command discovery");
+    assert!(
+        matches!(requests.try_recv().unwrap(), crate::buffer_network::Request::Catalog {session,force:true} if session == id)
+    );
+    assert_eq!(plain_text(&crate::buffer::parts(mounted.model, &id)), "/");
+}
+
+#[test]
 fn first_director_draft_requests_command_discovery_and_completes() {
     let mounted = mount(false, 820.0);
     let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
@@ -189,7 +228,7 @@ fn harness_completion_inserts_durable_skills_and_opens_native_model_flow() {
         plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
         "$review λ"
     );
-    let parts = vec![Part::text("/mod")];
+    let parts = vec![Part::text("")];
     let id = parts[0].id.clone();
     crate::buffer::edit(mounted.model, "session-plan", parts);
     mounted.settle();
@@ -201,7 +240,9 @@ fn harness_completion_inserts_durable_skills_and_opens_native_model_flow() {
         .find_map(|n| n.label.filter(|s| s.starts_with("Draft text")))
         .unwrap();
     mounted.focus(&draft);
-    crate::command_ui::complete(mounted.model, &id, "/mod", 4);
+    mounted.ui.set_clipboard_text("/mod");
+    mounted.key(Key::Character("v".into()), true);
+    assert_eq!(mounted.model.completion.get_untracked().unwrap().part, id);
     mounted.settle();
     mounted.key(Key::Enter, false);
     assert_eq!(mounted.model.command_flow.get_untracked(), "model");
@@ -530,6 +571,23 @@ fn sidebar_connection_details_fit_narrow_widths_and_connection_states() {
             .model
             .server_endpoint
             .set("https://relay.example:7440/".into());
+        mounted.model.server_build.set(Some(BuildInfo {
+            version: "0.1.0".into(),
+            revision: "1234567890123456789012345678901234567890".into(),
+        }));
+        mounted.settle();
+        for label in ["Frontend build", "Server build"] {
+            let rect = mounted.rect(label);
+            assert!(rect.size.height > 0.0 && rect.max_y() <= mounted.size.height);
+            let node = mounted
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .into_iter()
+                .find(|n| n.label.as_deref() == Some(label))
+                .unwrap();
+            assert!(node.description.unwrap().contains("0.1.0"));
+        }
         mounted.click("Server connection details");
         let settings = mounted.rect("Settings");
         let revision = mounted.rect("Workspace revision");
