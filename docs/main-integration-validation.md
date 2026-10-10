@@ -14,3 +14,5 @@ The desktop tests check that the activity indicator's outline and half fill rota
 The queue-promotion fixture now waits for Relay to publish the fake harness's first item before expecting an interrupt with the recorded turn ID. A file written by the fake harness only proved that it emitted its response, allowing promotion to race Relay's read.
 
 These checks do not establish physical-device clipboard or Safari acceptance. Deployment must additionally verify the running executable and served browser assets against packages built from the published main revision; a successful process restart alone is insufficient.
+
+The follow-up for [issue #20](https://github.com/jens-hj/relay/issues/20) releases confirmed command rejections so they cannot block messages in every session. A rejected edit of a message that has already launched retains its draft and clears the obsolete queue target. Uncertain outcomes retain exact-envelope retries, and revision conflicts retain explicit review. The recovery regression verifies that the retained draft can be submitted with a fresh request identity.

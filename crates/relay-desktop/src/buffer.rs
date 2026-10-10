@@ -872,6 +872,7 @@ pub fn edit_queued(model: Model, id: &str) {
 }
 
 pub fn rejected(model: Model, draft: &Draft, error: &str) {
+    let snapshot = model.snapshot.get_untracked();
     let mut state = model.buffer.get_untracked();
     if let Some(doc) = state.documents.get_mut(&draft.session_id) {
         doc.submitting = false;
@@ -880,6 +881,17 @@ pub fn rejected(model: Model, draft: &Draft, error: &str) {
             doc.parts = draft.parts.clone();
         } else {
             doc.recovery.push(draft.parts.clone());
+        }
+        if doc.editing_queue.as_ref().is_some_and(|id| {
+            !snapshot.submissions.iter().any(|submission| {
+                &submission.id == id
+                    && matches!(
+                        submission.state,
+                        SubmissionState::Queued | SubmissionState::Paused
+                    )
+            })
+        }) {
+            doc.editing_queue = None;
         }
         doc.error = error.into();
     }

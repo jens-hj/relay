@@ -234,6 +234,11 @@ impl Model {
                 }
                 self.pending_conflict.set(update.outcome_conflict);
                 self.pending_ambiguous.set(update.outcome_ambiguous);
+                // A confirmed rejection cannot be fixed by replaying its envelope.
+                // Keep conflicts for explicit review and uncertain writes for exact retry.
+                if !update.outcome_conflict && !update.outcome_ambiguous {
+                    self.pending.set(None);
+                }
                 self.notice.set(message);
             }
         }

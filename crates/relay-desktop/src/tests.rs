@@ -1003,6 +1003,7 @@ fn comments_keep_drafts_after_failure_and_clear_only_on_acknowledgment() {
         connected: true,
         outcome: Some((request.request_id.clone(), Err("Network failed".into()))),
         outcome_serial: 1,
+        outcome_ambiguous: true,
         ..Default::default()
     };
     mounted.model.receive(failure.clone());
@@ -1124,6 +1125,7 @@ fn live_worker_approval_failure_retry_and_ack_open_exact_session() {
             Err("Revision conflict; review latest".into()),
         )),
         outcome_serial: 1,
+        outcome_conflict: true,
         ..Default::default()
     });
     assert_eq!(
@@ -1310,8 +1312,12 @@ fn worker_running_stop_completed_review_and_continue_use_recorded_session() {
     mounted.model.receive(NetworkState {
         snapshot: mounted.model.snapshot.get_untracked(),
         connected: true,
-        outcome: Some((send.request_id.clone(), Err("Continuation failed".into()))),
+        outcome: Some((
+            send.request_id.clone(),
+            Err("Continuation response lost".into()),
+        )),
         outcome_serial: 2,
+        outcome_ambiguous: true,
         ..Default::default()
     });
     assert_eq!(mounted.model.worker_prompt.get_untracked(), "Review result");
@@ -1930,6 +1936,62 @@ fn buffer_worker(mounted: &Mounted) {
         b.connected = true;
     });
     mounted.model.worker_approval.set(true);
+}
+
+#[test]
+fn rejected_queue_edit_retains_draft_and_releases_pending_request() {
+    use crate::{buffer, model::Saved};
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(tx));
+    let draft = Draft {
+        session_id: "session-plan".into(),
+        revision: 1,
+        parts: vec![Part::text("Correction")],
+    };
+    buffer::edit(mounted.model, &draft.session_id, draft.parts.clone());
+    mounted.model.buffer.update(|state| {
+        let doc = state.documents.get_mut(&draft.session_id).unwrap();
+        doc.remote = draft.clone();
+        doc.parts.clear();
+        doc.editing_queue = Some("already-launched".into());
+        doc.submitting = true;
+    });
+    mounted.model.submit(
+        Command::EditQueuedTurn {
+            submission_id: "already-launched".into(),
+            draft_revision: draft.revision,
+            parts: draft.parts.clone(),
+            approve_implementation: true,
+        },
+        mounted.model.snapshot.get_untracked().revision,
+        Saved::Buffer(draft.clone()),
+    );
+    let original = mounted.commands.try_recv().unwrap();
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        outcome: Some((
+            original.request_id.clone(),
+            Err("Message already launching or missing".into()),
+        )),
+        outcome_serial: 1,
+        ..Default::default()
+    });
+    assert!(!mounted.model.can_retry());
+    assert!(!mounted.model.busy.get_untracked());
+    let state = mounted.model.buffer.get_untracked();
+    let doc = &state.documents[&draft.session_id];
+    assert_eq!(doc.parts, draft.parts);
+    assert!(doc.editing_queue.is_none());
+    assert!(!doc.submitting);
+    buffer::retry_save(mounted.model);
+    buffer::send(mounted.model);
+    buffer::flush(mounted.model);
+    let fresh = mounted.commands.try_recv().unwrap();
+    assert_ne!(fresh.request_id, original.request_id);
+    assert!(matches!(fresh.command, Command::SubmitTurn { parts, .. } if parts == draft.parts));
 }
 
 #[test]
