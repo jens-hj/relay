@@ -1230,7 +1230,7 @@ pub fn Conversation(model: Model) -> Element {
                                 }
                             }
                             if model.completion.get().is_some() {
-                                scroll height:{px(180.0)}px {
+                                BoundedPanel limit:(Derived::new(|| px(180.0))) {
                                     col height:min-content {
                                         for (index, choice) in {model.completion.get().map(|c|c.choices.into_iter().enumerate().collect::<Vec<_>>()).unwrap_or_default()} {
                                             let picked_index=*index;

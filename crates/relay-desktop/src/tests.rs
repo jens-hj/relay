@@ -160,6 +160,102 @@ fn first_director_draft_requests_command_discovery_and_completes() {
 }
 
 #[test]
+fn inline_suggestions_filter_browser_input_and_remain_clickable() {
+    for width in [600.0, 1440.0] {
+        let mounted = mount(false, width);
+        mounted.model.open_session("session-plan".into());
+        mounted
+            .model
+            .catalogs
+            .set(std::collections::BTreeMap::from([(
+                "session-plan".into(),
+                Ok(HarnessCatalog {
+                    skills: ["review", "build"]
+                        .into_iter()
+                        .map(|name| HarnessSkill {
+                            id: name.into(),
+                            name: name.into(),
+                            description: "Run skill".into(),
+                            argument_hint: String::new(),
+                            enabled: true,
+                            path: None,
+                        })
+                        .collect(),
+                    commands: ["compact", "model"]
+                        .into_iter()
+                        .map(|name| HarnessCommand {
+                            name: name.into(),
+                            description: "Run command".into(),
+                            argument_hint: String::new(),
+                            dispatch: CommandDispatch::Unavailable,
+                            reason: Some("Test command".into()),
+                        })
+                        .collect(),
+                    ..Default::default()
+                }),
+            )]));
+        mounted.settle();
+        for (prefix, query, expected) in [("/", "/com", "/compact"), ("$", "$rev", "$review")] {
+            crate::buffer::edit(mounted.model, "session-plan", vec![Part::text("")]);
+            mounted.settle();
+            let draft = mounted
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .into_iter()
+                .find_map(|n| n.label.filter(|s| s.starts_with("Draft text")))
+                .unwrap();
+            mounted.focus(&draft);
+            let id = mounted.ui.focused().unwrap().id().raw();
+            for text in [prefix, query] {
+                crate::browser_text::update(&mounted.ui, id, text, text.len(), text.len(), false);
+                mounted.settle();
+                let completion = mounted.model.completion.get_untracked().unwrap();
+                assert_eq!(completion.choices.len(), if text == prefix { 2 } else { 1 });
+                let rect = mounted.rect(expected);
+                let target = mounted
+                    .ui
+                    .inspection_snapshot()
+                    .nodes
+                    .into_iter()
+                    .find(|n| n.label.as_deref() == Some(expected))
+                    .unwrap();
+                let tree = mounted.ui.inspection_snapshot();
+                let mut hit = mounted.ui.hit_test(rect.center()).map(|e| e.id());
+                while hit.is_some_and(|id| id != target.id) {
+                    hit = tree
+                        .nodes
+                        .iter()
+                        .find(|n| Some(n.id) == hit)
+                        .and_then(|n| n.parent);
+                }
+                assert_eq!(
+                    hit,
+                    Some(target.id),
+                    "Suggestion clipped at width {width}: {expected}"
+                );
+            }
+            mounted.click(expected);
+            assert!(mounted.model.completion.get_untracked().is_none());
+            if prefix == "$" {
+                assert_eq!(
+                    selected_skills(&crate::buffer::parts(mounted.model, "session-plan"))[0].id,
+                    "review"
+                );
+            } else {
+                assert!(
+                    mounted
+                        .model
+                        .notice
+                        .get_untracked()
+                        .contains("Test command")
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn harness_completion_inserts_durable_skills_and_opens_native_model_flow() {
     let mut mounted = mount(false, 820.0);
     mounted.model.open_session("session-plan".into());
