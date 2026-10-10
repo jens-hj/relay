@@ -32,6 +32,16 @@ Use the [worker review checklist](review-checklist.md) before integrating a comp
 
 Mosaic tools are available separately through `nix run .#mosaic-fmt` and `nix run .#mosaic-cli`, so entering the shell does not build editor or packaging tools. Use `nix fmt` to format the flake.
 
+For native frame-rate diagnostics, enable Mosaic's CPU renderer timings before starting the desktop. This command also works in fish:
+
+```fish
+env MOSAIC_RENDER_TIMINGS=1 RUST_LOG=mosaic_runtime::hud=info relay-desktop
+```
+
+The additional `perf: renderer` line splits flattening, surface acquisition, uploads, compositing planning, command encoding, queue submission, asynchronous readback scheduling, and surface presentation. `redraw_wait` measures the earliest coalesced redraw request to event dispatch; missing requests print `n/a`. Samples cover completed frames over a one-second window. The original summary's `present=` still measures the whole renderer call. GPU timings are asynchronous and must not be added to CPU totals. Profiling is disabled by default.
+
+Capture ten seconds of continuous hovering or animation with the HUD hidden at fullscreen and small-window sizes. Repeat without `MOSAIC_RENDER_TIMINGS`, keeping the workspace and display scale fixed, to check profiling overhead. Share both the original summary and `perf: renderer` lines when investigating frame pacing.
+
 `nix develop .#ui-test` also supplies Linux native-window verification tools: Xvfb, xdotool, ImageMagick, xclip, and Mesa. These stay out of the default shell. The desktop still needs a display; use Xvfb and Mesa software Vulkan when testing without a physical screen.
 
 ```sh

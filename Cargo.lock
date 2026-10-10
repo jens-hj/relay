@@ -2297,8 +2297,8 @@ dependencies = [
 
 [[package]]
 name = "mosaic"
-version = "0.29.1"
-source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=907ae5050baf18ea8a1965b890408b512297ba71#907ae5050baf18ea8a1965b890408b512297ba71"
+version = "0.29.2"
+source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8#98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8"
 dependencies = [
  "mosaic-core",
  "mosaic-layout",
@@ -2312,13 +2312,13 @@ dependencies = [
 
 [[package]]
 name = "mosaic-core"
-version = "0.29.1"
-source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=907ae5050baf18ea8a1965b890408b512297ba71#907ae5050baf18ea8a1965b890408b512297ba71"
+version = "0.29.2"
+source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8#98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8"
 
 [[package]]
 name = "mosaic-interpret"
-version = "0.29.1"
-source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=907ae5050baf18ea8a1965b890408b512297ba71#907ae5050baf18ea8a1965b890408b512297ba71"
+version = "0.29.2"
+source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8#98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8"
 dependencies = [
  "mosaic-core",
  "mosaic-layout",
@@ -2333,16 +2333,16 @@ dependencies = [
 
 [[package]]
 name = "mosaic-layout"
-version = "0.29.1"
-source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=907ae5050baf18ea8a1965b890408b512297ba71#907ae5050baf18ea8a1965b890408b512297ba71"
+version = "0.29.2"
+source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8#98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8"
 dependencies = [
  "mosaic-core",
 ]
 
 [[package]]
 name = "mosaic-macros"
-version = "0.29.1"
-source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=907ae5050baf18ea8a1965b890408b512297ba71#907ae5050baf18ea8a1965b890408b512297ba71"
+version = "0.29.2"
+source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8#98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8"
 dependencies = [
  "mosaic-syntax",
  "proc-macro-crate",
@@ -2353,16 +2353,16 @@ dependencies = [
 
 [[package]]
 name = "mosaic-render"
-version = "0.29.1"
-source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=907ae5050baf18ea8a1965b890408b512297ba71#907ae5050baf18ea8a1965b890408b512297ba71"
+version = "0.29.2"
+source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8#98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8"
 dependencies = [
  "mosaic-core",
 ]
 
 [[package]]
 name = "mosaic-render-wgpu"
-version = "0.29.1"
-source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=907ae5050baf18ea8a1965b890408b512297ba71#907ae5050baf18ea8a1965b890408b512297ba71"
+version = "0.29.2"
+source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8#98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8"
 dependencies = [
  "bytemuck",
  "log",
@@ -2374,8 +2374,8 @@ dependencies = [
 
 [[package]]
 name = "mosaic-runtime"
-version = "0.29.1"
-source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=907ae5050baf18ea8a1965b890408b512297ba71#907ae5050baf18ea8a1965b890408b512297ba71"
+version = "0.29.2"
+source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8#98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8"
 dependencies = [
  "accesskit_winit",
  "android_logger",
@@ -2408,8 +2408,8 @@ dependencies = [
 
 [[package]]
 name = "mosaic-syntax"
-version = "0.29.1"
-source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=907ae5050baf18ea8a1965b890408b512297ba71#907ae5050baf18ea8a1965b890408b512297ba71"
+version = "0.29.2"
+source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8#98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2418,8 +2418,8 @@ dependencies = [
 
 [[package]]
 name = "mosaic-text"
-version = "0.29.1"
-source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=907ae5050baf18ea8a1965b890408b512297ba71#907ae5050baf18ea8a1965b890408b512297ba71"
+version = "0.29.2"
+source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8#98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8"
 dependencies = [
  "cosmic-text",
  "mosaic-core",
@@ -2429,8 +2429,8 @@ dependencies = [
 
 [[package]]
 name = "mosaic-widgets"
-version = "0.29.1"
-source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=907ae5050baf18ea8a1965b890408b512297ba71#907ae5050baf18ea8a1965b890408b512297ba71"
+version = "0.29.2"
+source = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?rev=98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8#98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8"
 dependencies = [
  "accesskit",
  "image",
