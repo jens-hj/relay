@@ -7075,3 +7075,81 @@ fn tool_categories_keep_distinct_status_labels_and_file_changes_render() {
         assert!(has_label(&mounted, &format!("{label}: Completed")));
     }
 }
+
+#[test]
+#[ignore = "manual native GPU performance probe"]
+fn native_fixture_gpu_cost() {
+    use mosaic::render::Renderer;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+    eprintln!("Relay fixture GPU: {:?}", adapter.get_info());
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+        required_limits: adapter.limits(),
+        ..Default::default()
+    }))
+    .unwrap();
+    for [width, height] in [[2560u32, 1440u32], [800, 650]] {
+        let mut mounted = mount(false, width as f32);
+        mounted.size = Size::new(width as f32, height as f32);
+        mounted.settle();
+        let scene = mounted.ui.scene().clone();
+        let mut renderer = mosaic::render_wgpu::WgpuRenderer::from_device(
+            device.clone(),
+            queue.clone(),
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            mounted.size,
+        );
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let mut durations = vec![];
+        for frame in 0..128 {
+            let commands = renderer.encode_into(
+                &scene,
+                &view,
+                mosaic::render_wgpu::TargetLoad::Clear(scene.clear),
+            );
+            queue.submit([commands]);
+            renderer.map_timings();
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .unwrap();
+            if frame >= 64
+                && let Some(gpu) = renderer.stats().gpu
+            {
+                durations.push(f64::from(gpu.total));
+            }
+        }
+        assert_eq!(
+            renderer.stats().render_passes,
+            3,
+            "masked fixture should share one isolation target"
+        );
+        assert!(
+            !durations.is_empty(),
+            "GPU timestamp queries are required for this probe"
+        );
+        durations.sort_by(f64::total_cmp);
+        eprintln!(
+            "Relay fixture {width}x{height}: stats={:?} median_gpu={:.3}ms",
+            renderer.stats(),
+            durations[durations.len() / 2]
+        );
+    }
+}

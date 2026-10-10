@@ -122,6 +122,14 @@ nix develop --command just check
 
 Tests cover server persistence, idempotency, authentication, profile inheritance, validation, conflicts, event synchronization, and headless UI interactions. A native Linux window is also required for graphics, windowing, and clipboard verification. macOS and Windows verification remains separate from Linux validation.
 
+For a repeatable native GPU measurement of the mounted demo UI at large and small viewports, run:
+
+```sh
+nix develop --command cargo test -p relay-desktop native_fixture_gpu_cost -- --ignored --nocapture
+```
+
+This manual probe requires GPU timestamp queries, warms up the renderer, and reports median GPU time and render statistics. It excludes window presentation; use the live client's performance HUD to check frame rate on your display. See [issue #24](https://github.com/jens-hj/relay/issues/24).
+
 The foundation was verified on Linux with Xvfb and Mesa software Vulkan: light/dark rendering, 820/1380-pixel layouts, keyboard navigation, clipboard copying, quoted comment posting, two-client synchronization, and persistence across a server restart. The live GitHub/Codex milestone adds real issue-linked worktree execution, client reconnect, exact-thread continuation, stop, and crash recovery. See the [dogfood validation record](dogfood-validation.md) for evidence and limits. See [local harness validation](harness-validation.md) for Claude Code, execution policies, and persistent local startup. Real desktop window decorations and macOS/Windows behavior still need validation on those environments.
 
 ## Named projects and local work
