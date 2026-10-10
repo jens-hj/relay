@@ -1751,6 +1751,7 @@ fn snapshot_prompt_and_comment_ids_confirm_ambiguous_writes() {
         kind: "prompt".into(),
         body: "Continue exact session".into(),
         parts: vec![],
+        tool: None,
     });
     mounted.model.receive(NetworkState {
         snapshot,
@@ -1940,6 +1941,7 @@ fn buffer_worker(mounted: &Mounted) {
         kind: "prompt".into(),
         body: "Original".into(),
         parts: vec![],
+        tool: None,
     });
     mounted.model.receive(NetworkState {
         snapshot,
@@ -5774,6 +5776,7 @@ fn conversation_tracks_constrain_recorded_text_and_draft_to_the_reading_width() 
         kind: "agent_message".into(),
         body: "A recorded paragraph should wrap inside the reading column. ".repeat(10),
         parts: vec![],
+        tool: None,
     });
     mounted.model.receive(NetworkState {
         snapshot,
@@ -6411,6 +6414,7 @@ fn streamed_messages_keep_the_bottom_visible_and_preserve_manual_reading_positio
             kind: "assistant".into(),
             body: "line\n".repeat(80),
             parts: vec![],
+            tool: None,
         })
     });
     mounted.settle();
@@ -6520,4 +6524,128 @@ fn reopened_session_retains_model_and_measured_context_without_claiming_live_cac
         (last.origin.x + last.size.width - strip.origin.x - strip.size.width).abs() <= 1.0,
         "strip: {strip:?}, last: {last:?}"
     );
+}
+
+#[test]
+fn tool_activity_updates_in_place_and_discloses_input_at_narrow_widths() {
+    for light in [false, true] {
+        let mounted = mount(light, 820.0);
+        mounted.model.open_session("session-plan".into());
+        mounted.model.snapshot.update(|s| {
+            s.messages.retain(|m| m.session_id != "session-plan");
+            s.messages.push(Message {
+                id: "terminal-call".into(),
+                session_id: "session-plan".into(),
+                author: "Codex".into(),
+                kind: "tool_call".into(),
+                body: "first output\n".into(),
+                parts: vec![],
+                tool: Some(ToolCall {
+                    run_id: "turn".into(),
+                    name: "commandExecution".into(),
+                    kind: ToolKind::Terminal,
+                    state: ToolState::Running,
+                    input: "printf hello".into(),
+                    target: "printf hello".into(),
+                    directory: Some("/workspace".into()),
+                    exit_code: None,
+                }),
+            });
+        });
+        mounted.settle();
+        assert!(has_label(&mounted, "Terminal: Running"));
+        mounted.model.snapshot.update(|s| {
+            s.tool_permissions.push(ToolPermission {
+                id: "tool-approval".into(),
+                session_id: "session-plan".into(),
+                run_id: "turn".into(),
+                tool: "commandExecution".into(),
+                description: "printf hello".into(),
+                decision: None,
+                expired: false,
+            })
+        });
+        mounted.settle();
+        assert!(has_label(&mounted, "Terminal: Waiting for approval"));
+        mounted
+            .model
+            .snapshot
+            .update(|s| s.tool_permissions.clear());
+        mounted.settle();
+        let header = mounted.rect("Toggle Terminal activity terminal-call");
+        assert!(header.size.width > 200.0);
+        assert!(header.origin.x + header.size.width <= mounted.size.width);
+        mounted.click("Toggle tool output terminal-call");
+        assert!(has_label(&mounted, "Message terminal-call"));
+        mounted.click("Toggle tool output terminal-call");
+        mounted.click("Toggle tool input terminal-call");
+        mounted.model.snapshot.update(|s| {
+            let m = s
+                .messages
+                .iter_mut()
+                .find(|m| m.id == "terminal-call")
+                .unwrap();
+            m.body.push_str("failed output\n");
+            let t = m.tool.as_mut().unwrap();
+            t.state = ToolState::Failed;
+            t.exit_code = Some(1);
+        });
+        mounted.settle();
+        assert!(has_label(&mounted, "Terminal: Failed"));
+        mounted.click("Toggle Terminal activity terminal-call");
+        assert!(!has_label(&mounted, "Toggle tool input terminal-call"));
+        assert!(has_label(&mounted, "Terminal: Failed"));
+        mounted.click("Toggle Terminal activity terminal-call");
+        assert!(has_label(&mounted, "Toggle tool input terminal-call"));
+    }
+}
+
+#[test]
+fn tool_categories_keep_distinct_status_labels_and_file_changes_render() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.model.snapshot.update(|s| {
+        s.messages.retain(|m| m.session_id != "session-plan");
+        for (i, kind) in [
+            ToolKind::Edit,
+            ToolKind::Read,
+            ToolKind::Search,
+            ToolKind::Web,
+            ToolKind::Agent,
+            ToolKind::Other,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            s.messages.push(Message {
+                id: format!("tool-{i}"),
+                session_id: "session-plan".into(),
+                author: "Agent".into(),
+                kind: "tool_call".into(),
+                body: "result".into(),
+                parts: vec![],
+                tool: Some(ToolCall {
+                    run_id: "run".into(),
+                    name: "tool".into(),
+                    kind,
+                    state: ToolState::Completed,
+                    input: r#"[{"path":"src/main.rs","diff":"@@ -1 +1 @@\n-old\n+new"}]"#.into(),
+                    target: "src/main.rs".into(),
+                    directory: None,
+                    exit_code: None,
+                }),
+            });
+        }
+    });
+    mounted.settle();
+    for label in [
+        "File changes",
+        "Read file",
+        "Search",
+        "Web",
+        "Agent",
+        "Tool",
+    ] {
+        assert!(has_label(&mounted, &format!("{label}: Completed")));
+    }
 }

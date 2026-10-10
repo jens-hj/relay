@@ -1266,7 +1266,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        8
+        9
     );
     let worker = snapshot.sessions[0].worker.as_mut().unwrap();
     worker.model = Some("reported-model".into());
@@ -1286,5 +1286,176 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
             .snapshot()
             .unwrap(),
         snapshot
+    );
+}
+
+#[tokio::test]
+async fn codex_tool_lifecycle_streams_and_survives_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = review_repo(dir.path());
+    let bin = dir.path().join("tool-codex");
+    script(
+        &bin,
+        r#"
+while IFS= read -r line; do
+  method=$(printf '%s' "$line" | jq -r '.method')
+  id=$(printf '%s' "$line" | jq -c '.id')
+  case "$method" in
+    initialize) printf '{"id":%s,"result":{}}\n' "$id";;
+    thread/start) printf '{"id":%s,"result":{"thread":{"id":"tool-thread"}}}\n' "$id";;
+    turn/start)
+      printf '{"id":%s,"result":{"turn":{"id":"tools"}}}\n' "$id"
+      echo '{"method":"item/started","params":{"threadId":"tool-thread","item":{"id":"terminal","type":"commandExecution","command":"printf live; exit 2","cwd":"/workspace","status":"inProgress"}}}'
+      echo '{"method":"item/commandExecution/outputDelta","params":{"threadId":"tool-thread","itemId":"terminal","delta":"live\n"}}'
+      sleep 1
+      echo '{"method":"item/completed","params":{"threadId":"tool-thread","item":{"id":"terminal","type":"commandExecution","command":"printf live; exit 2","cwd":"/workspace","status":"completed","exitCode":2,"aggregatedOutput":"live\n"}}}'
+      echo '{"method":"item/started","params":{"threadId":"tool-thread","item":{"id":"files","type":"fileChange","status":"inProgress","changes":[{"path":"main.rs"}]}}}'
+      echo '{"method":"item/completed","params":{"threadId":"tool-thread","item":{"id":"files","type":"fileChange","status":"completed","changes":[{"path":"main.rs","diff":"-old\n+new"}]}}}'
+      echo '{"method":"item/completed","params":{"threadId":"tool-thread","item":{"id":"web","type":"webSearch","action":{"query":"Rust docs"}}}}'
+      echo '{"method":"item/completed","params":{"threadId":"tool-thread","item":{"id":"remote","type":"mcpToolCall","tool":"read_file","arguments":{"path":"README.md"},"result":{"content":[{"type":"text","text":"Contents"}]}}}}'
+      echo '{"method":"item/completed","params":{"threadId":"tool-thread","item":{"id":"remote-error","type":"mcpToolCall","tool":"read_file","arguments":{"path":"missing.rs"},"result":null,"error":{"message":"File not found"}}}}'
+      echo '{"method":"item/started","params":{"threadId":"tool-thread","item":{"id":"unfinished","type":"commandExecution","command":"sleep 100"}}}'
+      echo '{"method":"turn/completed","params":{"threadId":"tool-thread","turn":{"id":"tools","status":"completed"}}}'
+      ;;
+  esac
+done
+"#,
+    );
+    let mut config = config();
+    config.repository = Some(repo);
+    config.codex = bin;
+    let w = workspace(&dir.path().join("db"), &live(), config);
+    let s = w.snapshots.borrow().clone();
+    let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
+    let mut events = w.snapshots.subscribe();
+    let task = tokio::spawn(runtime::run(w.clone(), id.clone(), run.clone(), prompt, rx));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let s = events.borrow_and_update().clone();
+            if let Some(m) = s.messages.iter().find(|m| {
+                m.tool
+                    .as_ref()
+                    .is_some_and(|t| t.run_id == run && t.kind == ToolKind::Terminal)
+                    && m.body == "live\n"
+            }) {
+                assert_eq!(m.tool.as_ref().unwrap().state, ToolState::Running);
+                break;
+            }
+            events.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap();
+    let snapshot = finished(&w, &id).await;
+    let calls = snapshot
+        .messages
+        .iter()
+        .filter_map(|m| m.tool.as_ref())
+        .filter(|t| t.run_id == run)
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 6);
+    assert_eq!(calls[0].state, ToolState::Failed);
+    assert_eq!(calls[0].exit_code, Some(2));
+    assert_eq!(calls[1].kind, ToolKind::Edit);
+    assert_eq!(calls[1].target, "main.rs");
+    assert_eq!(calls[2].kind, ToolKind::Web);
+    assert_eq!(calls[3].kind, ToolKind::Read);
+    assert_eq!(calls[4].state, ToolState::Failed);
+    assert_eq!(calls[5].state, ToolState::Interrupted);
+    assert!(
+        snapshot
+            .messages
+            .iter()
+            .find(|m| m.id.ends_with("-files"))
+            .unwrap()
+            .body
+            .contains("+new")
+    );
+    assert!(
+        snapshot
+            .messages
+            .iter()
+            .find(|m| m.id.ends_with("-remote-error"))
+            .unwrap()
+            .body
+            .contains("File not found")
+    );
+    let reopened = Store::open(&dir.path().join("db"), DirectorProfile::default()).unwrap();
+    assert_eq!(reopened.snapshot().unwrap(), snapshot);
+}
+
+#[tokio::test]
+async fn claude_tool_requests_and_results_share_one_transcript_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = r#"
+      echo '{"type":"assistant","message":{"id":"tools","content":[{"type":"tool_use","id":"bash-1","name":"Bash","input":{"command":"printf hello"}},{"type":"tool_use","id":"read-1","name":"Read","input":{"file_path":"missing.rs"}}]}}'
+      echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"bash-1","content":"hello"},{"type":"tool_result","tool_use_id":"read-1","is_error":true,"content":[{"type":"text","text":"File not found"}]}]}}'
+      echo '{"type":"assistant","message":{"id":"tools","content":[{"type":"tool_use","id":"bash-1","name":"Bash","input":{"command":"printf hello"}}]}}'
+"#;
+    let source = CLAUDE_FAKE.replace(
+        "      echo '{\"type\":\"stream_event\"",
+        &format!("{events}\n      echo '{{\"type\":\"stream_event\""),
+    );
+    let w = claude_workspace(dir.path(), &source);
+    let (id, snapshot) = launch(&w).await;
+    let messages = snapshot
+        .messages
+        .iter()
+        .filter(|m| m.session_id == id && m.tool.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 2);
+    let terminal = messages[0];
+    assert_eq!(terminal.body, "hello");
+    assert_eq!(terminal.tool.as_ref().unwrap().target, "printf hello");
+    assert_eq!(terminal.tool.as_ref().unwrap().state, ToolState::Completed);
+    assert_eq!(messages[1].tool.as_ref().unwrap().kind, ToolKind::Read);
+    assert_eq!(messages[1].tool.as_ref().unwrap().state, ToolState::Failed);
+}
+
+#[tokio::test]
+async fn restart_interrupts_unfinished_tool_records_without_erasing_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("db");
+    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    snapshot.messages.push(Message {
+        id: "unfinished-tool".into(),
+        session_id: "session-plan".into(),
+        author: "Codex".into(),
+        kind: "tool_call".into(),
+        body: "retained output".into(),
+        parts: vec![],
+        tool: Some(ToolCall {
+            run_id: "previous-run".into(),
+            name: "commandExecution".into(),
+            kind: ToolKind::Terminal,
+            state: ToolState::Running,
+            input: "sleep 100".into(),
+            target: "sleep 100".into(),
+            directory: None,
+            exit_code: None,
+        }),
+    });
+    let mut store = Store::open(&db, DirectorProfile::default()).unwrap();
+    store.save(&snapshot).unwrap();
+    drop(store);
+    let (_, shutdown) = router_with_shutdown(
+        &db,
+        "tool-restart-test-token".into(),
+        DirectorProfile::default(),
+        RuntimeConfig::default(),
+    )
+    .unwrap();
+    let restarted = shutdown.workspace.snapshots.borrow().clone();
+    let message = restarted
+        .messages
+        .iter()
+        .find(|m| m.id == "unfinished-tool")
+        .unwrap();
+    assert_eq!(message.body, "retained output");
+    assert_eq!(message.tool.as_ref().unwrap().state, ToolState::Interrupted);
+    assert_eq!(
+        shutdown.workspace.store.lock().unwrap().snapshot().unwrap(),
+        restarted
     );
 }

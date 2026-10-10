@@ -1,6 +1,7 @@
 //! A Relay-owned document interaction controller over Mosaic's native text primitives.
 use crate::panels::{BoundedPanel, BoundedPanelProps};
 use crate::styles::*;
+use crate::tool_activity::{ToolActivity, ToolActivityProps};
 use crate::ui::{NavigationButton, NavigationButtonProps, Notice, NoticeProps};
 use crate::window_chrome::{WindowControls, WindowControlsProps};
 use crate::{
@@ -60,7 +61,7 @@ pub struct Controller {
 }
 
 type Shared = Rc<RefCell<Controller>>;
-type ControllerState = State<Shared>;
+pub(crate) type ControllerState = State<Shared>;
 
 fn text_part(parts: &[Part], id: &str) -> Option<String> {
     for part in parts {
@@ -1321,6 +1322,7 @@ fn TranscriptMessage(
             .messages
             .into_iter()
             .find(|m| m.id == message_id.get())
+            .map(crate::tool_activity::with_legacy_tool)
     });
     let expanded = State::new(false);
     let detail = message.get_untracked().is_some_and(|m| {
@@ -1339,7 +1341,10 @@ fn TranscriptMessage(
                 pad:(left:{px(if prompt.get() {12.0} else {0.0})}px right:{px(if prompt.get() {12.0} else {0.0})}px)
                 fill:{if prompt.get() {color(accent.soft)} else {Color::TRANSPARENT}}
                 stroke:(width:{px(2.0)} color:{if prompt.get() {color(accent.focus)} else {Color::TRANSPARENT}} edges:left) {
-                if detail {
+                if message.get().is_some_and(|m|m.tool.is_some()) {
+                    ToolActivity model:(model) controller:(controller) message:(message)
+                }
+                if detail && message.get().is_none_or(|m|m.tool.is_none()) {
                     col height:min-content {
                         row height:min-content pad:(bottom:{px(8.0)}px) {
                             button #relay.action @click:{expanded.set(!expanded.get_untracked());}
@@ -1349,7 +1354,7 @@ fn TranscriptMessage(
                         }
                     }
                 }
-                if !detail || expanded.get() {
+                if message.get().is_none_or(|m|m.tool.is_none()) && (!detail || expanded.get()) {
                     col height:min-content {
                         if message.get().is_some_and(|m|m.parts.is_empty()) {
                             col height:min-content {
@@ -1631,7 +1636,7 @@ fn caret_with_margin(origin: Vector2, caret: Rect) -> Rect {
 }
 
 #[component]
-fn BufferText(
+pub(crate) fn BufferText(
     model: Model,
     controller: ControllerState,
     location: Location,

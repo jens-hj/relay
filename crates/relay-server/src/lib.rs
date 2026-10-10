@@ -13,6 +13,7 @@ use axum::{
 use relay_core::*;
 mod app_server;
 mod browser;
+mod tool_activity;
 pub use browser::{BrowserConfig, initialize_setup_code};
 mod claude;
 mod conversation;
@@ -101,7 +102,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 8 {
+        if version > 9 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -121,7 +122,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 8;"
+             PRAGMA user_version = 9;"
         ).map_err(Error::internal)?;
         let seed =
             serde_json::to_string(&demo_snapshot(defaults.clone())).map_err(Error::internal)?;
@@ -652,6 +653,7 @@ fn prompt_message(session: &str, request: &str, prompt: &str) -> Message {
         kind: "prompt".into(),
         body: prompt.into(),
         parts: vec![],
+        tool: None,
     }
 }
 impl Workspace {
@@ -696,6 +698,7 @@ impl Workspace {
             session,
             "Execution interrupted; review and resume explicitly",
         );
+        interrupt_tools(&mut snapshot, session, Some(run));
         harness::expire(&mut snapshot, session, run);
         snapshot.revision = snapshot
             .revision
@@ -743,6 +746,7 @@ impl Workspace {
             .is_some_and(|w| !runtime::active(&w.status))
         {
             store.controls.remove(session);
+            interrupt_tools(&mut snapshot, session, Some(run));
             harness::expire(&mut snapshot, session, run);
         }
         store.save(&snapshot)?;
@@ -1061,6 +1065,14 @@ pub fn router_with_browser(
             w.status = WorkerStatus::Interrupted;
             w.error =
                 Some("Server restarted before the turn ended; continuation is explicit".into());
+            changed = true;
+        }
+    }
+    for message in &mut initial.messages {
+        if let Some(tool) = &mut message.tool
+            && tool.state == ToolState::Running
+        {
+            tool.state = ToolState::Interrupted;
             changed = true;
         }
     }

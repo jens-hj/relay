@@ -172,51 +172,128 @@ fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Re
                 worker.last_usage = worker.usage.clone();
             }
         }
-        if method == "item/completed" || method == "item/agentMessage/delta" {
+        if matches!(
+            method,
+            "item/started" | "item/completed" | "item/commandExecution/outputDelta"
+        ) {
             let item = &params["item"];
             let item_id = item["id"]
                 .as_str()
                 .or_else(|| params["itemId"].as_str())
                 .unwrap_or("unknown");
-            let kind = item["type"].as_str().unwrap_or("agentMessage");
-            let body = if method.ends_with("/delta") {
-                params["delta"].as_str().map(str::to_owned)
-            } else {
-                match kind {
-                    "agentMessage" => item["text"].as_str().map(str::to_owned),
-                    "commandExecution" => Some(format!(
-                        "Command: {}\nExit: {}\n{}",
-                        item["command"].as_str().unwrap_or(""),
-                        item["exitCode"],
-                        item["aggregatedOutput"].as_str().unwrap_or("")
-                    )),
-                    "fileChange" => Some(item["changes"].to_string()),
-                    _ => None,
+            let id = format!("codex-{run}-{item_id}");
+            if method == "item/commandExecution/outputDelta" {
+                if let Some(message) = snapshot.messages.iter_mut().find(|m| m.id == id) {
+                    tool_activity::output(message, params["delta"].as_str().unwrap_or(""), true);
                 }
+            } else {
+                let kind = item["type"].as_str().unwrap_or("");
+                let name = item["tool"].as_str().unwrap_or(kind);
+                let tool_kind = match kind {
+                    "commandExecution" => Some(ToolKind::Terminal),
+                    "fileChange" => Some(ToolKind::Edit),
+                    "webSearch" => Some(ToolKind::Web),
+                    "mcpToolCall" | "dynamicToolCall" => Some(ToolKind::from_name(name)),
+                    "collabAgentToolCall" => Some(ToolKind::Agent),
+                    "imageGeneration" => Some(ToolKind::Other),
+                    _ => None,
+                };
+                if let Some(tool_kind) = tool_kind {
+                    let complete = method == "item/completed";
+                    let input = match kind {
+                        "commandExecution" => item["command"].as_str().unwrap_or("").to_owned(),
+                        "fileChange" => item["changes"].to_string(),
+                        "webSearch" => item["action"].to_string(),
+                        _ => item["arguments"].to_string(),
+                    };
+                    let target = match kind {
+                        "commandExecution" => input.clone(),
+                        "fileChange" => item["changes"]
+                            .as_array()
+                            .map(|changes| {
+                                changes
+                                    .iter()
+                                    .filter_map(|c| c["path"].as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(" · ")
+                            })
+                            .unwrap_or_default(),
+                        "webSearch" => item["action"]["query"].as_str().unwrap_or("").to_owned(),
+                        _ => tool_activity::target(&item["arguments"]),
+                    };
+                    let failed = matches!(item["status"].as_str(), Some("failed" | "declined"))
+                        || item["exitCode"].as_i64().is_some_and(|code| code != 0)
+                        || !item["error"].is_null()
+                        || item["success"].as_bool() == Some(false);
+                    tool_activity::start(
+                        snapshot,
+                        session,
+                        id.clone(),
+                        "Codex",
+                        ToolCall {
+                            run_id: run.into(),
+                            name: name.into(),
+                            kind: tool_kind,
+                            state: ToolState::Running,
+                            input: bounded(input),
+                            target: bounded(target),
+                            directory: item["cwd"].as_str().map(tool_activity::bounded),
+                            exit_code: None,
+                        },
+                    );
+                    let message = snapshot.messages.iter_mut().find(|m| m.id == id).unwrap();
+                    let output = match kind {
+                        "commandExecution" => {
+                            item["aggregatedOutput"].as_str().unwrap_or("").to_owned()
+                        }
+                        "fileChange" => item["changes"].to_string(),
+                        _ => item
+                            .get("result")
+                            .filter(|value| !value.is_null())
+                            .or_else(|| item.get("content").filter(|value| !value.is_null()))
+                            .or_else(|| item.get("error").filter(|value| !value.is_null()))
+                            .map(Value::to_string)
+                            .unwrap_or_default(),
+                    };
+                    if complete || tool_kind == ToolKind::Terminal {
+                        tool_activity::output(message, &output, false);
+                    }
+                    if complete && let Some(tool) = &mut message.tool {
+                        tool.state = if failed {
+                            ToolState::Failed
+                        } else {
+                            ToolState::Completed
+                        };
+                        tool.exit_code = item["exitCode"].as_i64();
+                    }
+                }
+            }
+        }
+        if method == "item/agentMessage/delta"
+            || (method == "item/completed" && params["item"]["type"] == "agentMessage")
+        {
+            let item_id = params["item"]["id"]
+                .as_str()
+                .or_else(|| params["itemId"].as_str())
+                .unwrap_or("unknown");
+            let body = if method.ends_with("/delta") {
+                params["delta"].as_str()
+            } else {
+                params["item"]["text"].as_str()
             };
-            if let Some(mut body) = body {
+            if let Some(body) = body {
                 let id = format!("codex-{run}-{item_id}");
-                let existing = snapshot.messages.iter_mut().find(|m| m.id == id);
-                if let Some(message) = existing {
-                    if method.ends_with("/delta") {
-                        body = format!("{}{body}", message.body);
-                    }
-                    if body.starts_with(&message.body) {
-                        message.body = bounded(body);
-                    }
+                if let Some(message) = snapshot.messages.iter_mut().find(|m| m.id == id) {
+                    tool_activity::output(message, body, method.ends_with("/delta"));
                 } else {
                     snapshot.messages.push(Message {
                         id,
                         session_id: session.into(),
                         author: "Codex".into(),
-                        kind: match kind {
-                            "commandExecution" => "command_execution",
-                            "fileChange" => "file_change",
-                            _ => "agent_message",
-                        }
-                        .into(),
-                        body: bounded(body),
+                        kind: "agent_message".into(),
+                        body: bounded(body.into()),
                         parts: vec![],
+                        tool: None,
                     });
                 }
             }

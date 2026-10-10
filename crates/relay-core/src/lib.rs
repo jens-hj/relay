@@ -1,6 +1,8 @@
 //! Relay's domain and versioned client/server contract. No UI or execution dependencies.
 
 mod conversation;
+mod tools;
+pub use tools::*;
 mod projects;
 pub use projects::*;
 mod execution;
@@ -165,6 +167,8 @@ pub struct Message {
     pub body: String,
     #[serde(default)]
     pub parts: Vec<Part>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<ToolCall>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

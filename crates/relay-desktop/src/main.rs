@@ -20,6 +20,7 @@ mod styles;
 #[cfg(test)]
 mod tests;
 mod theme;
+mod tool_activity;
 mod ui;
 mod window_chrome;
 

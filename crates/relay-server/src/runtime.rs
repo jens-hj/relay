@@ -772,6 +772,7 @@ pub(crate) fn event(
                     kind: kind.into(),
                     body,
                     parts: vec![],
+                    tool: None,
                 });
             }
         }
@@ -926,6 +927,7 @@ pub(crate) async fn run(
                 }
             }
         }
+        interrupt_tools(snapshot, &session_id, Some(&run_id));
         Ok(())
     });
     if let Err(error) = crate::conversation::advance(&workspace, &session_id, &run_id) {
@@ -1047,6 +1049,7 @@ async fn execute(
                 kind: "issue-context".into(),
                 body: context.clone(),
                 parts: vec![],
+                tool: None,
             });
         }
         Ok(())

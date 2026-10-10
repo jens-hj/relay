@@ -651,6 +651,7 @@ fn reserve(snapshot: &mut Snapshot, session: &str, id: &str, parts: &[Part]) {
         kind: "prompt".into(),
         body: plain_text(parts),
         parts: parts.to_vec(),
+        tool: None,
     });
 }
 

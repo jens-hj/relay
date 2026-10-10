@@ -72,6 +72,7 @@ fn message(
             kind: kind.into(),
             body: String::new(),
             parts: vec![],
+            tool: None,
         });
         snapshot.messages.last_mut().unwrap()
     };
@@ -256,18 +257,55 @@ pub(super) async fn execute(
             "user" => {
                 if let Some(blocks) = value["message"]["content"].as_array() {
                     workspace.update_run(session, run, |s| {
-                        for (index, block) in blocks.iter().enumerate() {
+                        for block in blocks {
                             if block["type"] == "tool_result" {
                                 let text = if let Some(text) = block["content"].as_str() {
                                     text.to_owned()
+                                } else if let Some(blocks) = block["content"].as_array() {
+                                    blocks
+                                        .iter()
+                                        .map(|b| {
+                                            b["text"]
+                                                .as_str()
+                                                .map(str::to_owned)
+                                                .unwrap_or_else(|| b.to_string())
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
                                 } else {
                                     block["content"].to_string()
                                 };
                                 let id = format!(
-                                    "tool-{}-{index}",
+                                    "claude-{run}-tool-{}",
                                     block["tool_use_id"].as_str().unwrap_or("result")
                                 );
-                                message(s, session, run, &id, "command_execution", &text, false);
+                                if !s.messages.iter().any(|m| m.id == id) {
+                                    tool_activity::start(
+                                        s,
+                                        session,
+                                        id.clone(),
+                                        "Claude Code",
+                                        ToolCall {
+                                            run_id: run.into(),
+                                            name: "Tool".into(),
+                                            kind: ToolKind::Other,
+                                            state: ToolState::Running,
+                                            input: String::new(),
+                                            target: String::new(),
+                                            directory: None,
+                                            exit_code: None,
+                                        },
+                                    );
+                                }
+                                let message = s.messages.iter_mut().find(|m| m.id == id).unwrap();
+                                tool_activity::output(message, &text, false);
+                                if let Some(tool) = &mut message.tool {
+                                    tool.state = if block["is_error"].as_bool().unwrap_or(false) {
+                                        ToolState::Failed
+                                    } else {
+                                        ToolState::Completed
+                                    };
+                                }
                             }
                         }
                         Ok(())
@@ -319,19 +357,33 @@ pub(super) async fn execute(
                                     block["text"].as_str().unwrap_or(""),
                                     false,
                                 ),
-                                Some("tool_use") => message(
-                                    s,
-                                    session,
-                                    run,
-                                    &key,
-                                    "command_execution",
-                                    &format!(
-                                        "{}\n{}",
-                                        block["name"].as_str().unwrap_or("Tool"),
-                                        block["input"]
-                                    ),
-                                    false,
-                                ),
+                                Some("tool_use") => {
+                                    let name = block["name"].as_str().unwrap_or("Tool");
+                                    let id = format!(
+                                        "claude-{run}-tool-{}",
+                                        block["id"].as_str().unwrap_or(&key)
+                                    );
+                                    tool_activity::start(
+                                        s,
+                                        session,
+                                        id,
+                                        "Claude Code",
+                                        ToolCall {
+                                            run_id: run.into(),
+                                            name: name.into(),
+                                            kind: ToolKind::from_name(name),
+                                            state: ToolState::Running,
+                                            input: tool_activity::bounded(
+                                                &block["input"].to_string(),
+                                            ),
+                                            target: tool_activity::target(&block["input"]),
+                                            directory: block["input"]["cwd"]
+                                                .as_str()
+                                                .map(tool_activity::bounded),
+                                            exit_code: None,
+                                        },
+                                    );
+                                }
                                 _ => {}
                             }
                         }
