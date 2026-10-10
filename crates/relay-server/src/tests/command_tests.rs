@@ -529,6 +529,90 @@ async fn catalog_and_session_choices_cross_http_and_reconnect_without_replaying_
         .await
         .unwrap();
     assert_eq!(catalog.harness, Harness::Codex);
+    let before: Snapshot = client
+        .get(format!("{endpoint}/v1/snapshot"))
+        .bearer_auth("relay-test-token-command")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let director_id = &before
+        .sessions
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap()
+        .director_id;
+    let draft_id = format!("director-draft-{director_id}");
+    let draft_catalog: HarnessCatalog = client
+        .get(format!("{endpoint}/v1/sessions/{draft_id}/catalog"))
+        .bearer_auth("relay-test-token-command")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(draft_catalog.skills.iter().any(|s| s.name == "test-skill"));
+    assert!(
+        draft_catalog
+            .commands
+            .iter()
+            .any(|c| c.name == "help" && c.dispatch == CommandDispatch::Flow)
+    );
+    assert!(draft_catalog.commands.iter().any(|c| c.name == "compact"
+        && c.dispatch == CommandDispatch::Unavailable
+        && c.reason.as_deref().unwrap().contains("first message")));
+    let parts = vec![Part {
+        id: "first-skill".into(),
+        kind: PartKind::Skill {
+            skill: SkillReference {
+                id: "/removed-skill".into(),
+                name: "test-skill".into(),
+            },
+        },
+    }];
+    let rejected = client
+        .post(format!("{endpoint}/v1/commands"))
+        .bearer_auth("relay-test-token-command")
+        .header("x-relay-protocol", "3")
+        .json(&env(
+            before.revision,
+            Command::StartDirector {
+                director_id: director_id.clone(),
+                prompt: plain_text(&parts),
+                parts,
+                approve_implementation: false,
+            },
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        rejected
+            .json::<ApiError>()
+            .await
+            .unwrap()
+            .message
+            .contains("no longer available")
+    );
+    let after: Snapshot = client
+        .get(format!("{endpoint}/v1/snapshot"))
+        .bearer_auth("relay-test-token-command")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "Discovery must not create a session or run a turn"
+    );
     let current: Snapshot = client
         .get(format!("{endpoint}/v1/snapshot"))
         .bearer_auth("relay-test-token-command")

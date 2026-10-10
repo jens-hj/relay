@@ -56,6 +56,71 @@ fn mount(light: bool, width: f32) -> Mounted {
 }
 
 #[test]
+fn first_director_draft_requests_command_discovery_and_completes() {
+    let mounted = mount(false, 820.0);
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(sender));
+    mounted
+        ._scope
+        .run(|| crate::command_ui::bind_discovery(mounted.model));
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot.sessions.clear();
+    snapshot.projects[0].fixture = false;
+    let director_id = snapshot.directors[0].id.clone();
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_director(director_id);
+    mounted.settle();
+    let id = mounted.model.session.get_untracked();
+    assert!(id.starts_with("director-draft-"));
+    assert!(
+        matches!(requests.try_recv().unwrap(), crate::buffer_network::Request::Catalog {session, force:false} if session == id)
+    );
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|s| s.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&draft);
+    mounted.key(Key::Character("/com".into()), false);
+    assert!(mounted.model.completion.get_untracked().is_none());
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([(
+            id.clone(),
+            Ok(HarnessCatalog {
+                commands: vec![HarnessCommand {
+                    name: "compact".into(),
+                    description: "Compact context".into(),
+                    argument_hint: String::new(),
+                    dispatch: CommandDispatch::Unavailable,
+                    reason: Some("Send the first message before using this command".into()),
+                }],
+                ..Default::default()
+            }),
+        )]));
+    mounted.settle();
+    assert_eq!(
+        mounted.model.completion.get_untracked().unwrap().choices[0].label,
+        "/compact"
+    );
+    mounted.key(Key::Tab, false);
+    assert!(
+        mounted
+            .model
+            .notice
+            .get_untracked()
+            .contains("first message")
+    );
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, &id)),
+        "/com"
+    );
+}
+
+#[test]
 fn harness_completion_inserts_durable_skills_and_opens_native_model_flow() {
     let mut mounted = mount(false, 820.0);
     mounted.model.open_session("session-plan".into());
@@ -101,11 +166,20 @@ fn harness_completion_inserts_durable_skills_and_opens_native_model_flow() {
         .find_map(|n| n.label.filter(|s| s.starts_with("Draft text")))
         .unwrap();
     mounted.focus(&draft);
+    let catalog = mounted.model.catalogs.get_untracked();
+    mounted.model.catalogs.set(Default::default());
+    mounted.settle();
     mounted.key(Key::Character("$rev".into()), false);
+    assert!(mounted.model.completion.get_untracked().is_none());
+    mounted.model.catalogs.set(catalog);
+    mounted.settle();
     assert_eq!(
         mounted.model.completion.get_untracked().unwrap().choices[0].label,
         "$review"
     );
+    let suggestion = mounted.rect("$review");
+    assert!(suggestion.size.height > 0.0 && suggestion.size.width > 0.0);
+    assert!(suggestion.origin.y >= 0.0 && suggestion.max_y() <= mounted.size.height);
     mounted.key(Key::Tab, false);
     let parts = crate::buffer::parts(mounted.model, "session-plan");
     assert_eq!(selected_skills(&parts)[0].id, "native-review");

@@ -1462,6 +1462,26 @@ async fn command(
             })
     };
     if !already_applied {
+        if let Command::StartDirector {
+            director_id,
+            parts,
+            prompt,
+            ..
+        } = &envelope.command
+        {
+            let input = if parts.is_empty() {
+                vec![Part::text(prompt.clone())]
+            } else {
+                parts.clone()
+            };
+            if has_skill_references(&input) || prompt.trim_start().starts_with('/') {
+                let catalog =
+                    commands::discover(&workspace, &format!("director-draft-{director_id}"), true)
+                        .await?;
+                commands::invocation(&input, &catalog)?;
+                resolve_skills(&input, &catalog).map_err(Error::invalid)?;
+            }
+        }
         if let Command::SubmitTurn {
             session_id, parts, ..
         }

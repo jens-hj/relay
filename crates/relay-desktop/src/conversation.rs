@@ -714,6 +714,25 @@ pub fn Conversation(model: Model) -> Element {
             documents.selection = None;
         }
     });
+    let completion_controller = controller.get_untracked();
+    Effect::new(move || {
+        let catalogs = model.catalogs.get();
+        let id = model.session.get_untracked();
+        if catalogs.get(&id).is_some_and(Result::is_ok) {
+            mosaic::core::reactive::untracked(|| {
+                let state = completion_controller.borrow();
+                if let Some((key, (_, editor))) = state
+                    .surfaces
+                    .iter()
+                    .find(|(_, (field, _))| field.interaction().focused())
+                    && let Some(part) = key.strip_prefix("draft-")
+                {
+                    let editor = editor.borrow();
+                    crate::command_ui::complete(model, part, &editor.text(), editor.caret_offset());
+                }
+            });
+        }
+    });
     let search_controller = controller.get_untracked();
     Effect::new(move || {
         let _query = model.search.get();

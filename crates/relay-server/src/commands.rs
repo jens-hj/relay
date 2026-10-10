@@ -161,23 +161,6 @@ pub(super) async fn refresh(
     discover(&workspace, &session, true).await.map(Json)
 }
 
-fn key(snapshot: &Snapshot, session: &Session, config: &RuntimeConfig) -> String {
-    format!(
-        "{}:{:?}:{}:{:?}:{:?}",
-        session.id,
-        session.worker.as_ref().map(|w| w.harness),
-        session
-            .worker
-            .as_ref()
-            .map(|w| harness::selected_binary(snapshot, w.harness, config)
-                .display()
-                .to_string())
-            .unwrap_or_default(),
-        session.connection_ids,
-        session.workspaces
-    )
-}
-
 async fn write(child: &mut tokio::process::Child, value: Value) -> Result<(), Error> {
     let input = child
         .stdin
@@ -198,16 +181,47 @@ pub(super) async fn discover(
 ) -> Result<HarnessCatalog, Error> {
     let _probe = workspace.catalog_probe.lock().await;
     let snapshot = workspace.snapshots.borrow().clone();
-    let session = snapshot
-        .sessions
-        .iter()
-        .find(|s| s.id == id && !s.fixture)
-        .ok_or_else(|| Error::invalid("Live session not found"))?;
-    let worker = session
-        .worker
-        .as_ref()
-        .ok_or_else(|| Error::invalid("Session has no harness"))?;
-    let cache_key = key(&snapshot, session, &workspace.config);
+    let session = snapshot.sessions.iter().find(|s| s.id == id && !s.fixture);
+    let draft_director = id
+        .strip_prefix("director-draft-")
+        .and_then(|director_id| snapshot.directors.iter().find(|d| d.id == director_id));
+    let (harness, project_id, worktree, connections, workspaces) = if let Some(session) = session {
+        let worker = session
+            .worker
+            .as_ref()
+            .ok_or_else(|| Error::invalid("Session has no harness"))?;
+        (
+            worker.harness,
+            session.project_id.as_str(),
+            worker.worktree.clone(),
+            session.connection_ids.clone(),
+            session.workspaces.clone(),
+        )
+    } else if let Some(director) = draft_director {
+        let project = snapshot
+            .project(&director.project_id)
+            .map_err(Error::invalid)?;
+        if project.fixture {
+            return Err(Error::invalid("Fixture agents cannot be started"));
+        }
+        let profile = snapshot
+            .effective_profile(director)
+            .map_err(Error::invalid)?;
+        (
+            profile.harness,
+            director.project_id.as_str(),
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+    } else {
+        return Err(Error::invalid("Live session not found"));
+    };
+    let binary = harness::selected_binary(&snapshot, harness, &workspace.config);
+    let cache_key = format!(
+        "{id}:{harness:?}:{}:{connections:?}:{workspaces:?}:{worktree:?}",
+        binary.display()
+    );
     if !force
         && let Some((saved_at, catalog)) = workspace
             .catalogs
@@ -218,14 +232,12 @@ pub(super) async fn discover(
     {
         return Ok(catalog.clone());
     }
-    let path = worker
-        .worktree
-        .clone()
+    let path = worktree
         .or_else(|| {
             snapshot
                 .projects
                 .iter()
-                .find(|p| p.id == session.project_id)
+                .find(|p| p.id == project_id)
                 .and_then(|p| p.root.clone())
         })
         .or_else(|| {
@@ -237,9 +249,8 @@ pub(super) async fn discover(
         })
         .filter(|p| !p.is_empty())
         .ok_or_else(|| Error::invalid("Session working directory unavailable"))?;
-    let binary = harness::selected_binary(&snapshot, worker.harness, &workspace.config);
     let mut command = tokio::process::Command::new(binary);
-    match worker.harness {
+    match harness {
         Harness::Codex => {
             command.args(["app-server", "--stdio"]);
         }
@@ -252,7 +263,7 @@ pub(super) async fn discover(
                 "stream-json",
                 "--verbose",
             ]);
-            for space in &session.workspaces {
+            for space in &workspaces {
                 if space.path != path {
                     command.args(["--add-dir", &space.path]);
                 }
@@ -290,10 +301,10 @@ pub(super) async fn discover(
     let probe = async {
         let mut catalog = HarnessCatalog {
             session_id: id.into(),
-            harness: worker.harness,
+            harness,
             ..Default::default()
         };
-        match worker.harness {
+        match harness {
             Harness::Codex => {
                 write(&mut child,json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"relay","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":false}}})).await?;
                 read_response(&mut output, 1).await?;
@@ -317,7 +328,7 @@ pub(super) async fn discover(
                     .await?;
                     models = read_response(&mut output, 2).await?;
                 }
-                let mut cwds: Vec<_> = session.workspaces.iter().map(|s| s.path.clone()).collect();
+                let mut cwds: Vec<_> = workspaces.iter().map(|s| s.path.clone()).collect();
                 if !cwds.contains(&path) {
                     cwds.push(path.clone());
                 }
@@ -478,7 +489,17 @@ pub(super) async fn discover(
         .await
         .map_err(|_| Error::invalid("Harness discovery timed out"));
     runtime::terminate(&mut child).await;
-    let catalog = result??;
+    let mut catalog = result??;
+    if session.is_none() {
+        for command in &mut catalog.commands {
+            if command.dispatch != CommandDispatch::Unavailable
+                && !matches!(command.name.as_str(), "help" | "skills" | "mcp")
+            {
+                command.dispatch = CommandDispatch::Unavailable;
+                command.reason = Some("Send the first message before using this command".into());
+            }
+        }
+    }
     workspace
         .catalogs
         .lock()

@@ -106,29 +106,7 @@ fn run(config: network::Config) -> Result<(), String> {
             model.notice.set(warning.clone());
             buffer::load_journal(model, &path, &config);
             Effect::new(move || buffer::receive(model, buffer_updates.get()));
-            let catalog_key = State::new(String::new());
-            Effect::new(move || {
-                let snapshot = model.snapshot.get();
-                let id = model.session.get();
-                let connected = model.connected.get();
-                let session = snapshot
-                    .sessions
-                    .iter()
-                    .find(|s| s.id == id && !s.fixture && s.worker.is_some());
-                let key = format!(
-                    "{connected}:{id}:{:?}:{:?}",
-                    session.map(|s| (&s.workspaces, &s.connection_ids)),
-                    snapshot.installations
-                );
-                if catalog_key.get_untracked() != key {
-                    catalog_key.set(key);
-                    model.completion.set(None);
-                    model.command_flow.set(String::new());
-                    if connected && session.is_some() {
-                        crate::command_ui::refresh(model, false);
-                    }
-                }
-            });
+            command_ui::bind_discovery(model);
             model.preferences.set(preferences.clone());
             model.settings_store.set(settings::Store {
                 path: Some(path.clone()),

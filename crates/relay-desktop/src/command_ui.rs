@@ -32,6 +32,35 @@ pub fn refresh(model: Model, force: bool) {
     }
 }
 
+pub fn bind_discovery(model: Model) {
+    let catalog_key = State::new(String::new());
+    Effect::new(move || {
+        let snapshot = model.snapshot.get();
+        let id = model.session.get();
+        let connected = model.connected.get();
+        let session = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == id && !s.fixture && s.worker.is_some());
+        let key = format!(
+            "{connected}:{id}:{:?}:{:?}:{:?}",
+            session.map(|s| (&s.workspaces, &s.connection_ids)),
+            snapshot.installations,
+            id.strip_prefix("director-draft-")
+                .and_then(|id| snapshot.directors.iter().find(|d| d.id == id))
+                .and_then(|d| snapshot.effective_profile(d).ok())
+        );
+        if catalog_key.get_untracked() != key {
+            catalog_key.set(key);
+            model.completion.set(None);
+            model.command_flow.set(String::new());
+            if connected && (session.is_some() || id.starts_with("director-draft-")) {
+                refresh(model, false);
+            }
+        }
+    });
+}
+
 pub fn complete(model: Model, part: &str, text: &str, caret: usize) {
     let catalog = model.catalogs.get_untracked();
     let Some(Ok(catalog)) = catalog.get(&model.session.get_untracked()) else {

@@ -409,6 +409,9 @@ pub fn promote(model: Model, id: &str) {
 }
 
 fn send_first(model: Model) {
+    if crate::command_ui::intercept(model) {
+        return;
+    }
     let session_id = model.session.get_untracked();
     let state = model.buffer.get_untracked();
     let parts = parts(model, &session_id);
@@ -618,7 +621,9 @@ pub fn receive(model: Model, update: Update) {
         return;
     }
     state.serial = update.serial;
-    model.catalogs.set(update.catalogs.clone());
+    if model.catalogs.get_untracked() != update.catalogs {
+        model.catalogs.set(update.catalogs.clone());
+    }
     state.initialized |= update.initialized;
     state.connected = update.connected;
     let mut changed = false;
@@ -752,12 +757,13 @@ pub fn flush(model: Model) {
     {
         let id = model.session.get_untracked();
         if model.catalogs.get_untracked().contains_key(&id)
-            && model
-                .snapshot
-                .get_untracked()
-                .sessions
-                .iter()
-                .any(|s| s.id == id && !s.fixture && s.worker.is_some())
+            && (id.starts_with("director-draft-")
+                || model
+                    .snapshot
+                    .get_untracked()
+                    .sessions
+                    .iter()
+                    .any(|s| s.id == id && !s.fixture && s.worker.is_some()))
         {
             let _ = requests.send(Request::Catalog {
                 session: id,
