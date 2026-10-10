@@ -731,6 +731,9 @@ pub(crate) fn event(
                         output_tokens,
                     },
                 );
+            if worker.usage.is_some() {
+                worker.last_usage = worker.usage.clone();
+            }
             return Ok(true);
         }
         "turn.failed" | "error" => {

@@ -1037,6 +1037,7 @@ fn start(
             model: None,
             context_tokens: None,
             context_window: None,
+            last_usage: None,
             harness: profile.harness,
             execution: None,
             status: WorkerStatus::Queued,

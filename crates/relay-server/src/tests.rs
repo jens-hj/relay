@@ -104,7 +104,7 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | jq -c '.id')
   case "$method" in
     initialize) printf '{{"id":%s,"result":{{}}}}\n' "$id" ;;
-    thread/start|thread/resume) printf '{{"id":%s,"result":{{"thread":{{"id":"%s"}}}}}}\n' "$id" "$thread" ;;
+    thread/start|thread/resume) printf '{{"id":%s,"result":{{"model":"test-model","thread":{{"id":"%s"}}}}}}\n' "$id" "$thread" ;;
     turn/start)
       printf '{{"id":%s,"result":{{"turn":{{"id":"turn"}}}}}}\n' "$id"
       printf '%s' "$line" | jq -jr '.params.input | map(.text // "") | join("\n")' | '{turn}' "$@" | while IFS= read -r event || [ -n "$event" ]; do
@@ -112,7 +112,7 @@ while IFS= read -r line; do
           *'"type":"thread.started"'*) ;;
           *'"type":"item.completed"'*) printf '%s' "$event" | jq -c --arg thread "$thread" '{{method:"item/completed",params:{{threadId:$thread,turnId:"turn",item:{{id:(.item.id // "answer"),type:"agentMessage",text:.item.text}}}}}}' ;;
           *'"type":"turn.completed"'*)
-            printf '%s' "$event" | jq -c --arg thread "$thread" '{{method:"thread/tokenUsage/updated",params:{{threadId:$thread,tokenUsage:{{last:{{inputTokens:.usage.input_tokens,cachedInputTokens:.usage.cached_input_tokens,outputTokens:.usage.output_tokens}}}}}}}}'
+            printf '%s' "$event" | jq -c --arg thread "$thread" '{{method:"thread/tokenUsage/updated",params:{{threadId:$thread,tokenUsage:{{modelContextWindow:200000,last:{{inputTokens:.usage.input_tokens,cachedInputTokens:.usage.cached_input_tokens,outputTokens:.usage.output_tokens}}}}}}}}'
             printf '{{"method":"turn/completed","params":{{"threadId":"%s","turn":{{"id":"turn","status":"completed"}}}}}}\n' "$thread" ;;
           *'"type":"turn.failed"'*|*'"type":"error"'*) printf '{{"method":"turn/completed","params":{{"threadId":"%s","turn":{{"id":"turn","status":"failed"}}}}}}\n' "$thread" ;;
           *) printf '%s\n' "$event" ;;
@@ -469,6 +469,9 @@ async fn subprocess_exact_resume_sandbox_stdin_usage_and_untracked_diff() {
     let worker = s.sessions.last().unwrap().worker.as_ref().unwrap();
     assert_eq!(worker.status, WorkerStatus::Completed);
     assert_eq!(worker.thread_id.as_deref(), Some("exact-thread"));
+    assert_eq!(worker.model.as_deref(), Some("test-model"));
+    assert_eq!(worker.context_window, Some(200_000));
+    assert_eq!(worker.last_usage, worker.usage);
     assert_eq!(worker.usage.as_ref().unwrap().output_tokens, 4);
     assert!(worker.changes.as_ref().unwrap().diff.contains("new file"));
     assert!(
@@ -489,6 +492,10 @@ async fn subprocess_exact_resume_sandbox_stdin_usage_and_untracked_diff() {
         },
     );
     let (id, run, rx, prompt) = reserve(&w, request);
+    let reopened = w.store.lock().unwrap().snapshot().unwrap();
+    let worker = reopened.sessions.last().unwrap().worker.as_ref().unwrap();
+    assert_eq!(worker.model.as_deref(), Some("test-model"));
+    assert_eq!(worker.last_usage.as_ref().unwrap().input_tokens, 12);
     tokio::spawn(runtime::run(w.clone(), id.clone(), run, prompt, rx));
     let s = finished(&w, &id).await;
     assert_eq!(
@@ -1005,7 +1012,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            7
+            8
         );
         drop(store);
         let mut reopened = Store::open(&db, DirectorProfile::default()).unwrap();
@@ -1036,7 +1043,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 8)
+        .pragma_update(None, "user_version", 9)
         .unwrap();
     drop(store);
     let error = Store::open(&db, DirectorProfile::default()).err().unwrap();
@@ -1046,7 +1053,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        8
+        9
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {

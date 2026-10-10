@@ -345,6 +345,7 @@ async fn claude_first_turn_resume_modes_and_bound_harness() {
     let (id, mut s) = launch(&w).await;
     let work = worker(&s, &id);
     assert_eq!(work.thread_id.as_deref(), Some(CLAUDE_THREAD));
+    assert_eq!(work.last_usage, work.usage);
     assert_eq!(work.harness, Harness::ClaudeCode);
     assert_eq!(work.model.as_deref(), Some("reported-claude-model"));
     assert_eq!(work.context_tokens, None);
@@ -706,6 +707,7 @@ fn schema_four_updates_only_inherited_bundled_defaults_and_keeps_old_threads() {
         model: None,
         context_tokens: None,
         context_window: None,
+        last_usage: None,
         harness: Harness::Codex,
         execution: None,
         status: WorkerStatus::Completed,
@@ -1230,6 +1232,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
         model: None,
         context_tokens: None,
         context_window: None,
+        last_usage: None,
         harness: Harness::Codex,
         execution: None,
         status: WorkerStatus::Completed,
@@ -1263,7 +1266,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        7
+        8
     );
     let worker = snapshot.sessions[0].worker.as_mut().unwrap();
     worker.model = Some("reported-model".into());

@@ -640,6 +640,9 @@ fn reserve(snapshot: &mut Snapshot, session: &str, id: &str, parts: &[Part]) {
         .unwrap();
     worker.status = WorkerStatus::Queued;
     worker.error = None;
+    if worker.usage.is_some() {
+        worker.last_usage = worker.usage.clone();
+    }
     worker.usage = None;
     snapshot.messages.push(Message {
         id: format!("prompt-{id}"),

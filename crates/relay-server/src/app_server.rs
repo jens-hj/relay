@@ -168,6 +168,9 @@ fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Re
                         output_tokens,
                     },
                 );
+            if worker.usage.is_some() {
+                worker.last_usage = worker.usage.clone();
+            }
         }
         if method == "item/completed" || method == "item/agentMessage/delta" {
             let item = &params["item"];

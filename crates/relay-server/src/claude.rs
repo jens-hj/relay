@@ -370,6 +370,15 @@ pub(super) async fn execute(
                             cached_input_tokens: cached,
                             output_tokens: output,
                         });
+                        let worker = s
+                            .sessions
+                            .iter_mut()
+                            .find(|s| s.id == session)
+                            .unwrap()
+                            .worker
+                            .as_mut()
+                            .unwrap();
+                        worker.last_usage = worker.usage.clone();
                     }
                     Ok(())
                 })?;

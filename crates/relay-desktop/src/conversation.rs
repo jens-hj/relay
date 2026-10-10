@@ -566,8 +566,12 @@ pub fn Conversation(model: Model) -> Element {
             .into_iter()
             .find(|s| s.id == model.session.get())
     });
-    let session_usage =
-        Derived::new(move || session.get().and_then(|s| s.worker).and_then(|w| w.usage));
+    let session_usage = Derived::new(move || {
+        session
+            .get()
+            .and_then(|s| s.worker)
+            .and_then(|w| w.usage.or(w.last_usage))
+    });
     let header_state = Derived::new(move || {
         session
             .get()
@@ -809,7 +813,7 @@ pub fn Conversation(model: Model) -> Element {
             Notice model:(model)
             if session.get().is_some_and(|s| s.worker.is_some()) {
                 scroll {
-                    row width:max-content height:{px(28.0)}px shrink:0
+                    row height:{px(28.0)}px shrink:0
                         stroke:(width:{px(1.0)} color:rule.line edges:bottom) label:"Session run" {
                         for (_, cell) in {session.get().map(|s| run_cells(&model.snapshot.get(), &s)).unwrap_or_default().into_iter().map(|c| (c.0, c)).collect::<Vec<_>>()} {
                             let key: &'static str = cell.0;
@@ -928,6 +932,8 @@ pub fn Conversation(model: Model) -> Element {
                     col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(10.0)}px)
                         gap:{px(12.0)}px selectable label:"Session details" {
                         if details.get() == "usage" {
+                            text font-size:{px(12.0)}px font-color:ink.muted
+                                "Cache status is unknown: the harness does not report whether the provider still retains this conversation. Last prompt tokens show the most recent measured input, not a prediction for the next message. Re-caching may include replies, tool output, and new input; compaction may reduce it."
                             if session_usage.get().is_some() {
                                 UsageReadout usage:(session_usage)
                             } else {
@@ -2404,6 +2410,15 @@ pub(crate) fn run_cells(snapshot: &Snapshot, session: &Session) -> Vec<(&'static
         .map(crate::labels::grouped)
         .unwrap_or_else(|| "—".into());
     cells.push(("Context", format!("{tokens} / {window}")));
+    let usage = worker.usage.as_ref().or(worker.last_usage.as_ref());
+    cells.push((
+        "Last prompt",
+        usage
+            .map(|u| format!("{} tokens", u.input_tokens))
+            .unwrap_or_else(|| "Not recorded".into()),
+    ));
+    cells.push(("Cache", "Unknown".into()));
+    cells.push(("Re-cache", "Unknown".into()));
     if let Some(thread) = &worker.thread_id {
         cells.push(("Thread", thread.clone()));
     }
@@ -2436,19 +2451,24 @@ pub(crate) fn run_cells(snapshot: &Snapshot, session: &Session) -> Vec<(&'static
     cells
 }
 
-/// One cell of the session metadata strip: a caps key and its value, clipped
-/// at the cell's maximum width.
+/// One cell shares the strip's available width and clips long values.
+/// Narrow windows can scroll the strip without squeezing out its labels.
 #[component]
 fn RunCell(key: &'static str, value: Derived<String>) -> Element {
+    let minimum = match key {
+        "Next-turn approval" => 320.0,
+        "Model" | "Worktree" => 240.0,
+        "Context" | "Last prompt" | "Thread" => 220.0,
+        _ => 160.0,
+    };
     view! {
-        row width:max-content max-width:{px(340.0)}px min-width:0px shrink:0 align:center
-            gap:{px(8.0)}px pad:(horizontal:{px(14.0)}px vertical:0px)
+        row min-width:{px(minimum)}px shrink:0 align:center gap:{px(8.0)}px
+            pad:(horizontal:{px(14.0)}px vertical:0px)
             stroke:(width:{px(1.0)} color:rule.hair edges:right) label:(key.to_string()) {
             row #relay.eyebrow height:min-content width:max-content shrink:0 {
                 text text-wrap:none text-transform:uppercase letter-spacing:{px(0.6)}px (key)
             }
-            row #relay.caption width:max-content max-width:{px(260.0)}px height:min-content clip
-                font-color:ink.fg {
+            row #relay.caption width:fill min-width:0px height:min-content clip font-color:ink.fg {
                 text width:max-content shrink:0 text-wrap:none {value.get()}
             }
         }

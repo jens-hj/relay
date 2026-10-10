@@ -101,7 +101,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 7 {
+        if version > 8 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -121,7 +121,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 7;"
+             PRAGMA user_version = 8;"
         ).map_err(Error::internal)?;
         let seed =
             serde_json::to_string(&demo_snapshot(defaults.clone())).map_err(Error::internal)?;
@@ -455,6 +455,7 @@ impl Store {
                         model: None,
                         context_tokens: None,
                         context_window: None,
+                        last_usage: None,
                         harness: chosen_harness,
                         execution: None,
                         status: WorkerStatus::Queued,
@@ -516,6 +517,9 @@ impl Store {
                     .unwrap();
                 worker.status = WorkerStatus::Queued;
                 worker.error = None;
+                if worker.usage.is_some() {
+                    worker.last_usage = worker.usage.clone();
+                }
                 worker.usage = None;
                 snapshot
                     .messages

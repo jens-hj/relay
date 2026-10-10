@@ -139,6 +139,9 @@ pub struct WorkerRun {
     pub context_tokens: Option<u64>,
     #[serde(default)]
     pub context_window: Option<u64>,
+    /// Most recent measured usage, retained while a new turn is queued.
+    #[serde(default)]
+    pub last_usage: Option<TokenUsage>,
     #[serde(default)]
     pub harness: Harness,
     #[serde(default)]

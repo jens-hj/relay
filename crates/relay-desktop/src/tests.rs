@@ -1260,6 +1260,7 @@ fn worker_running_stop_completed_review_and_continue_use_recorded_session() {
         model: None,
         context_tokens: None,
         context_window: None,
+        last_usage: None,
         harness: Harness::Codex,
         execution: None,
         status: WorkerStatus::Running,
@@ -1431,6 +1432,7 @@ fn removed_board_items_keep_history_but_block_new_turns_until_restored() {
         model: None,
         context_tokens: None,
         context_window: None,
+        last_usage: None,
         harness: Harness::Codex,
         execution: None,
         status: WorkerStatus::Completed,
@@ -1771,6 +1773,7 @@ fn failed_launch_without_thread_offers_new_linked_worker_instead_of_continue() {
         model: None,
         context_tokens: None,
         context_window: None,
+        last_usage: None,
         harness: Harness::Codex,
         execution: None,
         status: WorkerStatus::Failed,
@@ -1917,6 +1920,7 @@ fn buffer_worker(mounted: &Mounted) {
         model: None,
         context_tokens: None,
         context_window: None,
+        last_usage: None,
         harness: Harness::Codex,
         execution: None,
         status: WorkerStatus::Running,
@@ -3768,6 +3772,7 @@ fn director_execution_does_not_consume_worker_capacity_or_block_director_continu
         model: None,
         context_tokens: None,
         context_window: None,
+        last_usage: None,
         harness: Harness::Codex,
         execution: None,
         status: WorkerStatus::Running,
@@ -4407,6 +4412,7 @@ fn worker_run(status: WorkerStatus) -> WorkerRun {
         model: None,
         context_tokens: None,
         context_window: None,
+        last_usage: None,
         harness: Harness::Codex,
         execution: None,
         status,
@@ -5054,6 +5060,9 @@ fn session_header_and_run_strip_show_only_recorded_values() {
             "Harness",
             "Model",
             "Context",
+            "Last prompt",
+            "Cache",
+            "Re-cache",
             "Worktree",
             "Next-turn approval"
         ],
@@ -5061,7 +5070,7 @@ fn session_header_and_run_strip_show_only_recorded_values() {
     );
     assert_eq!(cells[1].1, "—");
     assert_eq!(cells[2].1, "— / —");
-    assert_eq!(cells[3].1, "…/worktrees/issue-2-a41c");
+    assert_eq!(cells[6].1, "…/worktrees/issue-2-a41c");
     mounted.model.receive(NetworkState {
         snapshot,
         connected: true,
@@ -6460,5 +6469,55 @@ fn stop_control_fills_the_session_header_cell() {
     assert!((stop.size.height - header.size.height).abs() < 0.1);
     assert!(
         (stop.origin.x + stop.size.width - mounted.rect("Session actions").origin.x).abs() < 0.1
+    );
+}
+
+#[test]
+fn reopened_session_retains_model_and_measured_context_without_claiming_live_cache() {
+    let mounted = mount(false, 2400.0);
+    let mut snapshot = live_snapshot();
+    let mut run = worker_run(WorkerStatus::Completed);
+    run.model = Some("recorded-model".into());
+    run.context_window = Some(200_000);
+    run.last_usage = Some(TokenUsage {
+        input_tokens: 42_000,
+        cached_input_tokens: 40_000,
+        output_tokens: 1000,
+    });
+    snapshot.sessions[0].worker = Some(run);
+    let snapshot: Snapshot =
+        serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+    let cells = crate::conversation::run_cells(&snapshot, &snapshot.sessions[0]);
+    for expected in [
+        ("Model", "recorded-model"),
+        ("Last prompt", "42000 tokens"),
+        ("Context", "— / 200,000"),
+        ("Cache", "Unknown"),
+        ("Re-cache", "Unknown"),
+    ] {
+        assert!(
+            cells
+                .iter()
+                .any(|(key, value)| *key == expected.0 && value == expected.1)
+        );
+    }
+    let id = snapshot.sessions[0].id.clone();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(id);
+    mounted.settle();
+    let strip = mounted.rect("Session run");
+    let last = mounted.rect("Next-turn approval");
+    let header = mounted.rect("Session header");
+    assert!(
+        (strip.size.width - header.size.width).abs() <= 1.0,
+        "strip: {strip:?}, header: {header:?}"
+    );
+    assert!(
+        (last.origin.x + last.size.width - strip.origin.x - strip.size.width).abs() <= 1.0,
+        "strip: {strip:?}, last: {last:?}"
     );
 }
