@@ -125,6 +125,7 @@ pub fn complete(model: Model, part: &str, text: &str, caret: usize) {
             });
         }
     }
+    choices.truncate(4);
     if choices.is_empty() {
         model.completion.set(None);
     } else {
@@ -226,7 +227,7 @@ pub fn intercept(model: Model) -> bool {
     let Some(Ok(catalog)) = catalogs.get(&model.session.get_untracked()) else {
         model
             .notice
-            .set("Wait for harness discovery, or open Commands and refresh".into());
+            .set("Wait for commands and skills to load, or retry discovery".into());
         return true;
     };
     let Some(command) = catalog.commands.iter().find(|c| c.name == name) else {

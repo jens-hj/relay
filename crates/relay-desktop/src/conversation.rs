@@ -917,8 +917,6 @@ pub fn Conversation(model: Model) -> Element {
                                 button #relay.action @click:{crate::platform::pick_files(model);}
                                     label:"Add files to draft" "Add files"
                             }
-                            button #relay.action @click:{crate::command_ui::open(model,"help");}
-                                label:"Harness commands and skills" "Commands"
                             button #relay.action @click:{model.open_worker_issue();}
                                 disabled:{session.get().is_none()} label:"Linked issue" "Issue"
                             button #relay.action
@@ -1211,9 +1209,6 @@ pub fn Conversation(model: Model) -> Element {
                             button #relay.action @click:{buffer::send(model);}
                                 pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
                                 label:"Send message" disabled:{model.busy.get()} "Send"
-                            button #relay.action
-                                @click:{crate::command_ui::refresh(model,false);crate::command_ui::open(model,"help");}
-                                label:"Harness commands and skills" "Commands"
                         }
                         col width:1fr min-width:0px max-width:{px(760.0)}px height:min-content
                             gap:{px(8.0)}px {
@@ -1230,18 +1225,29 @@ pub fn Conversation(model: Model) -> Element {
                                 }
                             }
                             if model.completion.get().is_some() {
-                                BoundedPanel limit:(Derived::new(|| px(180.0))) {
-                                    col height:min-content {
-                                        for (index, choice) in {model.completion.get().map(|c|c.choices.into_iter().enumerate().collect::<Vec<_>>()).unwrap_or_default()} {
-                                            let picked_index=*index;
-                                            let choice=State::new(choice.clone());
-                                            button #relay.action
-                                                @click:{accept_completion(model,&controller.get_untracked(),picked_index,false);}
-                                                width:fill justify:start
-                                                fill:{color(if model.completion.get().is_some_and(|c|c.index==picked_index){surface.selected}else{surface.panel})}
-                                                label:{choice.get().label}
-                                                {format!("{} · {}",choice.get().label,choice.get().description)}
-                                        }
+                                col height:min-content gap:0px
+                                    stroke:(width:{px(1.0)} color:rule.line offset:{px(-1.0)})
+                                    label:"Inline suggestions" {
+                                    // Key by content, not position: filtering must replace the displayed row.
+                                    for (key, choice) in {model.completion.get().map(|c|c.choices.into_iter().map(|choice|((choice.label.clone(),choice.description.clone()),choice)).collect::<Vec<_>>()).unwrap_or_default()} {
+                                        let picked_label=key.0.clone();
+                                        let choice=State::new(choice.clone());
+                                        button #relay.action
+                                            @click:{
+                                                if let Some(index)=model.completion.get_untracked().and_then(|c|c.choices.iter().position(|c|c.label==picked_label)) {
+                                                    accept_completion(model,&controller.get_untracked(),index,false);
+                                                }
+                                            }
+                                            width:fill min-width:0px height:{px(32.0)}px justify:start
+                                            pad:(horizontal:{px(12.0)}px vertical:0px)
+                                            stroke:(width:{px(1.0)} color:rule.line edges:bottom offset:{px(-1.0)})
+                                            fill:{color(if model.completion.get().is_some_and(|c|c.choices.get(c.index).is_some_and(|c|c.label==choice.get().label)){surface.selected}else{surface.panel})}
+                                            focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+                                            label:{choice.get().label} {
+                                            text width:fill text-wrap:none
+                                                {format!("{} · {}",choice.get().label,choice.get().description.split_whitespace().collect::<Vec<_>>().join(" "))}
+                                        } as suggestion
+                                        { suggestion.clips(true); }
                                     }
                                 }
                             }

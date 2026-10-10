@@ -170,7 +170,7 @@ fn inline_suggestions_filter_browser_input_and_remain_clickable() {
             .set(std::collections::BTreeMap::from([(
                 "session-plan".into(),
                 Ok(HarnessCatalog {
-                    skills: ["review", "build"]
+                    skills: ["build", "review"]
                         .into_iter()
                         .map(|name| HarnessSkill {
                             id: name.into(),
@@ -181,21 +181,33 @@ fn inline_suggestions_filter_browser_input_and_remain_clickable() {
                             path: None,
                         })
                         .collect(),
-                    commands: ["compact", "model"]
+                    commands: ["add-dir", "compact", "model", "resume", "status", "help"]
                         .into_iter()
                         .map(|name| HarnessCommand {
                             name: name.into(),
                             description: "Run command".into(),
                             argument_hint: String::new(),
                             dispatch: CommandDispatch::Unavailable,
-                            reason: Some("Test command".into()),
+                            reason: Some(
+                                [
+                                    "Test command with a long description",
+                                    "that must stay on one line.",
+                                ]
+                                .join("\n")
+                                .repeat(20),
+                            ),
                         })
                         .collect(),
                     ..Default::default()
                 }),
             )]));
         mounted.settle();
-        for (prefix, query, expected) in [("/", "/com", "/compact"), ("$", "$rev", "$review")] {
+        for (prefix, query, expected) in [
+            ("/", "/com", "/compact"),
+            ("/", "/mod", "/model"),
+            ("$", "$rev", "$review"),
+            ("$", "$bui", "$build"),
+        ] {
             crate::buffer::edit(mounted.model, "session-plan", vec![Part::text("")]);
             mounted.settle();
             let draft = mounted
@@ -207,11 +219,55 @@ fn inline_suggestions_filter_browser_input_and_remain_clickable() {
                 .unwrap();
             mounted.focus(&draft);
             let id = mounted.ui.focused().unwrap().id().raw();
-            for text in [prefix, query] {
+            for text in [prefix, query, prefix, query] {
                 crate::browser_text::update(&mounted.ui, id, text, text.len(), text.len(), false);
                 mounted.settle();
                 let completion = mounted.model.completion.get_untracked().unwrap();
-                assert_eq!(completion.choices.len(), if text == prefix { 2 } else { 1 });
+                assert_eq!(
+                    completion.choices.len(),
+                    if text == prefix {
+                        if prefix == "/" { 4 } else { 2 }
+                    } else {
+                        1
+                    }
+                );
+                let mut rendered = mounted
+                    .ui
+                    .inspection_snapshot()
+                    .nodes
+                    .into_iter()
+                    .filter(|n| n.role == Role::Button)
+                    .filter_map(|n| n.label.filter(|s| s.starts_with('/') || s.starts_with('$')))
+                    .collect::<Vec<_>>();
+                let mut labels = completion
+                    .choices
+                    .iter()
+                    .map(|c| c.label.clone())
+                    .collect::<Vec<_>>();
+                rendered.sort();
+                labels.sort();
+                assert_eq!(rendered, labels, "Rendered rows must follow filtering");
+                let list = mounted.rect("Inline suggestions");
+                assert!((list.size.height - completion.choices.len() as f32 * 32.0).abs() < 0.1);
+                let rows = completion
+                    .choices
+                    .iter()
+                    .map(|c| mounted.rect(&c.label))
+                    .collect::<Vec<_>>();
+                for pair in rows.windows(2) {
+                    assert!(
+                        (pair[0].max_y() - pair[1].origin.y).abs() < 0.1,
+                        "Suggestion rows share edges"
+                    );
+                }
+                assert!(
+                    !mounted
+                        .ui
+                        .inspection_snapshot()
+                        .nodes
+                        .iter()
+                        .any(|n| n.label.as_deref() == Some("Harness commands and skills"))
+                );
                 let rect = mounted.rect(expected);
                 let target = mounted
                     .ui
@@ -240,7 +296,7 @@ fn inline_suggestions_filter_browser_input_and_remain_clickable() {
             if prefix == "$" {
                 assert_eq!(
                     selected_skills(&crate::buffer::parts(mounted.model, "session-plan"))[0].id,
-                    "review"
+                    expected.trim_start_matches('$')
                 );
             } else {
                 assert!(
