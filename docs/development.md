@@ -42,6 +42,16 @@ The additional `perf: renderer` line splits flattening, surface acquisition, upl
 
 Capture ten seconds of continuous hovering or animation with the HUD hidden at fullscreen and small-window sizes. Repeat without `MOSAIC_RENDER_TIMINGS`, keeping the workspace and display scale fixed, to check profiling overhead. Share both the original summary and `perf: renderer` lines when investigating frame pacing.
 
+For Wayland/Niri comparisons, Mosaic also exposes presentation controls and per-pass GPU diagnostics:
+
+```fish
+env MOSAIC_RENDER_TIMINGS=1 MOSAIC_GPU_PASS_TIMINGS=1 MOSAIC_HUD=0 RUST_LOG=mosaic_runtime=info,mosaic_render_wgpu=info relay-desktop
+```
+
+Startup logs identify the actual window backend, GPU, physical dimensions, supported presentation modes, and selected settings. The default is `MOSAIC_PRESENT_MODE=fifo MOSAIC_FRAME_LATENCY=2`, with Winit notified immediately before each presentation. Compare against `MOSAIC_PRE_PRESENT_NOTIFY=0`, then FIFO with `MOSAIC_FRAME_LATENCY=1`, and `MOSAIC_PRESENT_MODE=mailbox` if supported. Test `immediate` separately because it can tear. Invalid or unsupported settings warn and fall back to defaults.
+
+Record the active refresh rate and scale with `niri msg outputs`. Keep the scene, activity, and window dimensions fixed; warm up for ten seconds, then alternate baseline and experiment for three 20-second captures each. Repeat the winner without detailed profiling. GPU pass samples identify an earlier encoded frame and report dimensions, actual draws, and freshness. A `composite-and-content` pass may also draw ordinary scene content, so its time is not solely composite-shader cost. Preserve transparent-group and backdrop-filter behavior when choosing further optimizations. See [issue #24](https://github.com/jens-hj/relay/issues/24).
+
 `nix develop .#ui-test` also supplies Linux native-window verification tools: Xvfb, xdotool, ImageMagick, xclip, and Mesa. These stay out of the default shell. The desktop still needs a display; use Xvfb and Mesa software Vulkan when testing without a physical screen.
 
 ```sh

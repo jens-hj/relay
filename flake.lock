@@ -25,17 +25,17 @@
         "rust-overlay": "rust-overlay"
       },
       "locked": {
-        "lastModified": 1791674324,
-        "narHash": "sha256-KzIDgOdiVV/9pg4euytNAjEQkuMOo8/WFLeDeDrAnh8=",
+        "lastModified": 1791677756,
+        "narHash": "sha256-ZmspoU6sXsJ1cXts/CD0ArulYgVnq2VsQfbl2J6fyUg=",
         "ref": "main",
-        "rev": "98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8",
-        "revCount": 625,
+        "rev": "e7c24f0886de369a83f0ed8d97eda4960b54ef76",
+        "revCount": 627,
         "type": "git",
         "url": "ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git"
       },
       "original": {
         "ref": "main",
-        "rev": "98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8",
+        "rev": "e7c24f0886de369a83f0ed8d97eda4960b54ef76",
         "type": "git",
         "url": "ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git"
       }

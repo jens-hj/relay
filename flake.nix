@@ -1,7 +1,7 @@
 {
   description = "Relay — native, issue-centered agent workspace";
   inputs = {
-    mosaic.url = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?ref=main&rev=98e1f838a0b9b925a0d3cfa737d3eb20d299b1b8";
+    mosaic.url = "git+ssh://git@gitlab.com/unincorporated/mosaic/mosaic.git?ref=main&rev=e7c24f0886de369a83f0ed8d97eda4960b54ef76";
     # Share dependency pins with Mosaic while defining Relay's own environment.
     nixpkgs.follows = "mosaic/nixpkgs";
     rust-overlay.follows = "mosaic/rust-overlay";
