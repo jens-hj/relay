@@ -36,6 +36,7 @@ pub mod motion;
 pub mod overlay;
 pub mod session_header;
 pub mod status;
+pub mod surfaces;
 pub mod text;
 pub mod tokens;
 pub mod tree;
@@ -78,6 +79,14 @@ pub mod prelude {
         ControlBlock, ControlBlockProps, SessionHeader, SessionHeaderProps,
     };
     pub use crate::status::{AgentStatus, StatusSquare, StatusSquareProps};
+    pub use crate::surfaces::{
+        BoardColumn, BoardColumnProps, CommandPalette, CommandPaletteProps, ConnectionStatus,
+        ConnectionStatusProps, Field, FieldProps, HarnessCard, HarnessCardProps, HeaderCell,
+        HeaderCellProps, IssueCard, IssueCardProps, IssueInspector, IssueInspectorProps, Module,
+        ModuleProps, Notice, NoticeProps, PageHeader, PageHeaderProps, PermissionMatrix,
+        PermissionMatrixProps, Segments, SegmentsProps, Select, SelectProps, Stepper, StepperProps,
+        Toggle, ToggleProps,
+    };
     pub use crate::text::{
         Ellipsis, EllipsisProps, Label, LabelProps, SerifSize, SerifTitle, SerifTitleProps,
         TextRole, Tone, VerticalLabel, VerticalLabelProps, Weight,

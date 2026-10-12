@@ -43,7 +43,7 @@ pub fn status_cell_label(status: AgentStatus, below: &[AgentStatus]) -> String {
     )
 }
 
-fn header_cell(
+pub(crate) fn header_cell(
     label: String,
     on_press: OnPress,
     wide: bool,
@@ -86,7 +86,7 @@ fn header_cell(
     cell
 }
 
-fn column(children: Vec<Element>) -> Element {
+pub(crate) fn column(children: Vec<Element>) -> Element {
     let host = view! {
         col width:max-content height:min-content gap:{px(8.0)}px align:start {}
     };

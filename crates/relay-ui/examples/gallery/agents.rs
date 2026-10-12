@@ -135,8 +135,12 @@ fn tree_section() -> Element {
             row height:min-content gap:{px(48.0)}px align:start {
                 col width:max-content height:min-content gap:{px(14.0)}px {
                     caption("A · Whole tree")
-                    col width:max-content height:{px(862.0)}px {
-                        AgentSidebar roots:(roots) on-open:(Some(open))
+                    col width:max-content height:{px(1100.0)}px {
+                        AgentSidebar roots:(roots) on-open:(Some(open)) {
+                            UsageFoot harnesses:(board_usage())
+                            ConnectionStatus state:(relay_ui::surfaces::Connection::Connected)
+                                latency:(Some(42u32))
+                        }
                     }
                 }
                 col width:max-content height:min-content gap:{px(14.0)}px {
@@ -157,6 +161,7 @@ pub fn sections() -> Element {
             tree_section()
             usage_section()
             header_section()
+            surfaces_section()
         }
     }
 }
@@ -339,6 +344,176 @@ fn header_section() -> Element {
             caption("Tool usage strip")
             col width:{px(560.0)}px height:min-content {
                 FingerprintStrip tools:(board_tools())
+            }
+        }
+    }
+}
+
+fn surfaces_section() -> Element {
+    use relay_ui::surfaces::{
+        Command, Connection, ConnectionInfo, HarnessAuth, IssueView, NoticeTone, Permission,
+        PermissionRow,
+    };
+    let noop: OnPress = Rc::new(|| {});
+    let theme = State::new(0usize);
+    let pick: Rc<dyn Fn(usize)> = Rc::new(move |index| theme.set(index));
+    let workers = State::new(4i64);
+    let step: Rc<dyn Fn(i64)> = Rc::new(move |value| workers.set(value));
+    let compact = State::new(true);
+    let flip: Rc<dyn Fn(bool)> = Rc::new(move |on| compact.set(on));
+    let model = State::new(1usize);
+    let choose: Rc<dyn Fn(usize)> = Rc::new(move |index| model.set(index));
+    let repository = State::new("jens-hj/relay".to_string());
+    let rows = State::new(vec![
+        PermissionRow {
+            action: "Write to the database".into(),
+            choice: Permission::Ask,
+            pending: true,
+        },
+        PermissionRow {
+            action: "Edit files in the worktree".into(),
+            choice: Permission::Allow,
+            pending: false,
+        },
+        PermissionRow {
+            action: "Push to the remote".into(),
+            choice: Permission::Deny,
+            pending: false,
+        },
+    ]);
+    let change: Rc<dyn Fn(usize, Permission)> = Rc::new(move |index, choice| {
+        rows.update(|rows| rows[index].choice = choice);
+    });
+    let matrix = view! {
+        col height:min-content {}
+    };
+    matrix.switch(
+        move || rows.get(),
+        move |parent, entries| {
+            let change = change.clone();
+            parent.adopt(&view! {
+                PermissionMatrix entries:(entries.clone()) on-change:(change)
+            });
+        },
+    );
+    let query = State::new(String::new());
+    let commands = vec![
+        Command::new("new", "New agent").keys("N"),
+        Command::new("focus", "Focus branch").keys("F"),
+        Command::new("pause", "Pause session").keys("P"),
+        Command::new("stop", "Stop session").keys("⇧S"),
+        Command::new("theme", "Switch theme"),
+    ];
+    let run: Rc<dyn Fn(String)> = Rc::new(|_| {});
+    let issues = [
+        (
+            "#31",
+            "Agent tree, usage, header and surfaces",
+            Some(AgentStatus::Working),
+            vec!["ui", "relay-ui"],
+            true,
+        ),
+        (
+            "#32",
+            "Tool calls and transcript",
+            Some(AgentStatus::Waiting),
+            vec!["ui"],
+            false,
+        ),
+        (
+            "#33",
+            "Desktop wiring",
+            Some(AgentStatus::Queued),
+            vec![],
+            false,
+        ),
+    ];
+    let column = view! {
+        col height:min-content {}
+    };
+    for (identifier, title, status, labels, selected) in issues {
+        let issue = IssueView {
+            identifier: identifier.into(),
+            title: title.into(),
+            status,
+            labels: labels.into_iter().map(String::from).collect(),
+            selected,
+        };
+        column.adopt(&view! {
+            IssueCard issue:(issue)
+        });
+    }
+    let (save, retry, rebase, close) = (noop.clone(), noop.clone(), noop.clone(), noop);
+    view! {
+        col height:min-content gap:{px(14.0)}px {
+            heading("Surfaces in the same language")
+            col width:{px(1172.0)}px height:min-content fill:ground.panel
+                stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {
+                PageHeader title:"Settings" path:(vec!["Relay".to_string()]) {
+                    HeaderCell label:"Save" on-press:(save) keys:(Some("⌘S".to_string()))
+                }
+                Notice text:"Push rejected: the remote has new commits" tone:(NoticeTone::Failure)
+                    actions:(vec![("Retry".to_string(), retry), ("Rebase".to_string(), rebase)])
+                row height:min-content align:start {
+                    col width:1fr height:min-content {
+                        Module title:"Workspace" {
+                            Field label:"Repository" value:(repository) placeholder:"owner/name"
+                            col height:min-content gap:{px(10.0)}px pad:{px(14.0)}px {
+                                Segments
+                                    options:(vec!["Dark".to_string(), "Light".to_string(), "High contrast".to_string()])
+                                    selected:(theme) on-select:(pick)
+                                Stepper value:(workers) on-change:(step) min:1i64 max:12i64
+                                    label:"Workers"
+                                Toggle label:"Compact rows" on:(compact) on-toggle:(flip)
+                                Select label:"Default model"
+                                    options:(vec!["Sol 6.1".to_string(), "Opus 5.5".to_string(), "Sonnet 5.5".to_string()])
+                                    selected:(model) on-select:(choose)
+                            }
+                        }
+                        Module title:"Permissions" caps:true {
+                            {
+                                parent.adopt(&matrix);
+                            }
+                        }
+                    }
+                    col width:{px(400.0)}px height:min-content
+                        stroke:(width:{px(1.0)} color:ground.rule edges:left) {
+                        Module title:"Harnesses" {
+                            HarnessCard harness:(Harness::Codex) version:"0.42.0"
+                                auth:(HarnessAuth::SignedIn)
+                            HarnessCard harness:(Harness::ClaudeCode) version:"2.1.4"
+                                auth:(HarnessAuth::SignedIn)
+                            HarnessCard harness:(Harness::Copilot) auth:(HarnessAuth::SignedOut)
+                        }
+                        ConnectionStatus state:(Connection::Connected) latency:(Some(42u32))
+                            info:(ConnectionInfo {
+                                endpoint: "relay.local:7171".into(),
+                                transport: "WebSocket".into(),
+                                protocol: "5".into(),
+                                revision: "cfaf756".into(),
+                            })
+                        ConnectionStatus state:(Connection::Connecting)
+                        ConnectionStatus state:(Connection::Offline)
+                    }
+                }
+            }
+            col height:min-content gap:{px(32.0)}px {
+                CommandPalette commands:(commands) query:(query) on-run:(run)
+                row width:max-content height:{px(300.0)}px fill:ground.panel
+                    stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {
+                    BoardColumn name:"In progress" count:3usize {
+                        {
+                            parent.adopt(&column);
+                        }
+                    }
+                    IssueInspector identifier:"#31" title:"Agent tree, usage, header and surfaces"
+                        on-close:(Some(close)) {
+                        col height:min-content pad:{px(18.0)}px {
+                            Label text:"Body of the inspector" role:(TextRole::Label)
+                                tone:(Tone::Muted)
+                        }
+                    }
+                }
             }
         }
     }
