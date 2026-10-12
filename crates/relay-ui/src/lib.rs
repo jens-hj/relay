@@ -22,19 +22,29 @@
 extern crate self as relay_ui;
 
 pub mod cells;
+pub mod context;
 pub mod dither;
 pub mod effort;
+pub mod fingerprint;
 pub mod fonts;
 pub mod frame;
 pub mod glyph;
 pub mod icons;
+pub mod marks;
+pub mod model;
 pub mod motion;
 pub mod overlay;
+pub mod session_header;
 pub mod status;
+pub mod surfaces;
 pub mod text;
 pub mod tokens;
+pub mod tree;
+pub mod usage;
 mod value;
 
+#[cfg(test)]
+mod testing;
 #[cfg(test)]
 mod tests;
 
@@ -52,16 +62,44 @@ pub mod prelude {
         PrimaryButton, PrimaryButtonProps, Rule, RuledCol, RuledColProps, RuledRow, RuledRowProps,
         SecondaryButton, SecondaryButtonProps,
     };
+    pub use crate::context::{
+        ContextGauge, ContextGaugeProps, ContextPanel, ContextPanelProps, ContextRing,
+        ContextRingProps, ContextShare, ContextView,
+    };
     pub use crate::dither::{Dither, DitherProps, Gradient, Wash, WashProps, live_reach};
     pub use crate::effort::{EffortTrack, EffortTrackProps, OnEffort, Orientation, TrackSize};
+    pub use crate::fingerprint::{FingerprintStrip, FingerprintStripProps, ToolCount};
     pub use crate::frame::{Corner, Cut, CutCorner, CutCornerProps};
     pub use crate::glyph::{Harness, HarnessGlyph, HarnessGlyphProps};
+    pub use crate::marks::{Mark, PathText, PathTextProps};
+    pub use crate::model::{Effort, ModelHue, ModelIdentity};
     pub use crate::motion::{Breath, breathe};
     pub use crate::overlay::{Popover, PopoverContent, PopoverProps, Tooltip, TooltipProps};
+    pub use crate::session_header::{
+        ControlBlock, ControlBlockProps, SessionHeader, SessionHeaderProps,
+    };
     pub use crate::status::{AgentStatus, StatusSquare, StatusSquareProps};
+    pub use crate::surfaces::{
+        BoardColumn, BoardColumnProps, CommandPalette, CommandPaletteProps, ConnectionStatus,
+        ConnectionStatusProps, Field, FieldProps, HarnessCard, HarnessCardProps, HeaderCell,
+        HeaderCellProps, IssueCard, IssueCardProps, IssueInspector, IssueInspectorProps, Module,
+        ModuleProps, Notice, NoticeProps, PageHeader, PageHeaderProps, PermissionMatrix,
+        PermissionMatrixProps, Segments, SegmentsProps, Select, SelectProps, Stepper, StepperProps,
+        Toggle, ToggleProps,
+    };
     pub use crate::text::{
         Ellipsis, EllipsisProps, Label, LabelProps, SerifSize, SerifTitle, SerifTitleProps,
         TextRole, Tone, VerticalLabel, VerticalLabelProps, Weight,
+    };
+    pub use crate::tree::{
+        AgentNode, AgentSidebar, AgentSidebarProps, AgentTreeRow, AgentTreeRowProps,
+        ChildStatusBar, ChildStatusBarProps, Elbows, ElbowsProps, FocusCrumb, FocusCrumbProps,
+        FoldedBranch, FoldedBranchProps, NeedsYou, NeedsYouCard, NeedsYouCardProps, NeedsYouProps,
+        StatusCounts, StatusCountsProps,
+    };
+    pub use crate::usage::{
+        ForecastBar, ForecastBarProps, UsageBar, UsageBarProps, UsageDetail, UsageDetailProps,
+        UsageFoot, UsageFootProps, UsageRow, UsageRowProps,
     };
     pub use crate::{Live, UiText};
 }

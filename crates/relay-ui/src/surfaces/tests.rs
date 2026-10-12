@@ -1,0 +1,212 @@
+use super::*;
+use crate::prelude::*;
+use crate::testing::mount;
+use mosaic::prelude::*;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+type Log<T> = Rc<RefCell<Vec<T>>>;
+
+fn recorder<T: 'static>() -> (Log<T>, Log<T>) {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    (log.clone(), log)
+}
+
+#[test]
+fn connection_cell_states_and_popover() {
+    assert_eq!(latency_bars(20), 4);
+    assert_eq!(latency_bars(120), 3);
+    assert_eq!(latency_bars(300), 2);
+    assert_eq!(latency_bars(900), 1);
+    let state = State::new(Connection::Connected);
+    let latency = State::new(Some(42u32));
+    let mounted = mount(Size::new(400.0, 400.0), move || {
+        let info = ConnectionInfo {
+            endpoint: "relay.local:7171".into(),
+            transport: "WebSocket".into(),
+            protocol: "5".into(),
+            revision: String::new(),
+        };
+        view! {
+            col justify:end {
+                ConnectionStatus state:(state) latency:(latency) info:(info)
+            }
+        }
+    });
+    assert!(mounted.has("Connected, 42 ms"));
+    assert_eq!(mounted.rect("Connected, 42 ms").size.height, 40.0);
+    mounted.click_label("Connected, 42 ms");
+    assert!(mounted.has("relay.local:7171"));
+    assert!(mounted.has("WebSocket"));
+    assert!(!mounted.has("Revision"), "empty fields are hidden");
+    mounted.key(Key::Escape);
+    state.set(Connection::Offline);
+    latency.set(None);
+    mounted.settle();
+    assert!(mounted.has("Offline"));
+}
+
+#[test]
+fn palette_filters_and_runs_with_keys() {
+    let commands = vec![
+        Command::new("new", "New agent").keys("N"),
+        Command::new("stop", "Stop agent").keys("⇧S"),
+        Command::new("theme", "Switch theme"),
+    ];
+    assert_eq!(filter_commands(&commands, "AGENT").len(), 2);
+    assert_eq!(filter_commands(&commands, "stop ag").len(), 1);
+    assert_eq!(filter_commands(&commands, "").len(), 3);
+    let (ran, log) = recorder::<String>();
+    let query = State::new(String::new());
+    let mounted = mount(Size::new(700.0, 400.0), move || {
+        let run: OnCommand = Rc::new(move |id| log.borrow_mut().push(id));
+        view! {
+            col {
+                CommandPalette commands:(commands) query:(query) on-run:(run)
+            }
+        }
+    });
+    assert!(mounted.has("Switch theme"));
+    query.set("agent".into());
+    mounted.settle();
+    assert!(!mounted.has("Switch theme"));
+    mounted.click_label("Command");
+    mounted.key(Key::ArrowDown);
+    mounted.key(Key::Enter);
+    assert_eq!(ran.borrow().as_slice(), ["stop"]);
+    mounted.click_label("New agent");
+    assert_eq!(ran.borrow().last().map(String::as_str), Some("new"));
+    query.set("zzz".into());
+    mounted.settle();
+    assert!(mounted.has("No matching commands"));
+}
+
+#[test]
+fn form_controls_report_choices() {
+    let (picked, pick_log) = recorder::<usize>();
+    let (numbers, number_log) = recorder::<i64>();
+    let (switches, switch_log) = recorder::<bool>();
+    let (selects, select_log) = recorder::<usize>();
+    let value = State::new(String::new());
+    let mounted = mount(Size::new(800.0, 600.0), move || {
+        let pick: OnIndex = Rc::new(move |i| pick_log.borrow_mut().push(i));
+        let number: OnNumber = Rc::new(move |n| number_log.borrow_mut().push(n));
+        let switch: OnSwitch = Rc::new(move |b| switch_log.borrow_mut().push(b));
+        let select: OnIndex = Rc::new(move |i| select_log.borrow_mut().push(i));
+        let options = vec!["Dark".to_string(), "Light".to_string()];
+        view! {
+            col gap:8px {
+                Field label:"Repository" value:(value) placeholder:"owner/name"
+                Segments options:(options.clone()) selected:1usize on-select:(pick)
+                Stepper value:9i64 on-change:(number) min:0i64 max:10i64 step:2i64 label:"Workers"
+                Toggle label:"Compact rows" on:false on-toggle:(switch)
+                Select label:"Theme" options:(options) selected:0usize on-select:(select)
+            }
+        }
+    });
+    assert!(mounted.has("Repository"));
+    assert_eq!(mounted.rect("Repository").size.height, 40.0);
+    mounted.click_label("Dark");
+    assert_eq!(picked.borrow().as_slice(), [0]);
+    assert!(mounted.has("Workers 9"));
+    mounted.click_label("Increase");
+    mounted.click_label("Decrease");
+    assert_eq!(numbers.borrow().as_slice(), [10, 7], "clamped to max");
+    mounted.click_label("Compact rows");
+    assert_eq!(switches.borrow().as_slice(), [true]);
+    mounted.click_label("Theme");
+    let light = mounted.rects("Light");
+    mounted.click(light.last().unwrap().center());
+    assert_eq!(selects.borrow().as_slice(), [1]);
+}
+
+#[test]
+fn board_surfaces_carry_labels_and_callbacks() {
+    let (changes, change_log) = recorder::<(usize, Permission)>();
+    let (opened, open_log) = recorder::<&'static str>();
+    let mounted = mount(Size::new(1200.0, 700.0), move || {
+        let change: OnPermission =
+            Rc::new(move |row, choice| change_log.borrow_mut().push((row, choice)));
+        let open: OnPress = Rc::new(move || open_log.borrow_mut().push("issue"));
+        let close: OnPress = Rc::new(|| {});
+        let issue = IssueView {
+            identifier: "#31".into(),
+            title: "Agent tree".into(),
+            status: Some(AgentStatus::Working),
+            labels: vec!["ui".into()],
+            selected: false,
+        };
+        let rows = vec![
+            PermissionRow {
+                action: "Write to the database".into(),
+                choice: Permission::Ask,
+                pending: true,
+            },
+            PermissionRow {
+                action: "Run tests".into(),
+                choice: Permission::Allow,
+                pending: false,
+            },
+        ];
+        view! {
+            row {
+                BoardColumn name:"In progress" count:1usize {
+                    IssueCard issue:(issue) on-open:(Some(open))
+                }
+                col width:{400.0}px {
+                    PermissionMatrix entries:(rows) on-change:(change)
+                    HarnessCard harness:(Harness::Codex) version:"0.42.0"
+                        auth:(HarnessAuth::SignedIn)
+                    Notice text:"Push rejected" tone:(NoticeTone::Failure)
+                        actions:(vec![("Retry".to_string(), Rc::new(|| {}) as OnPress)])
+                }
+                IssueInspector identifier:"#31" title:"Agent tree" on-close:(Some(close))
+            }
+        }
+    });
+    assert_eq!(mounted.rect("In progress").size.width, 300.0);
+    assert!(
+        mounted
+            .rects("Agent tree")
+            .iter()
+            .any(|rect| rect.size.width == 392.0),
+        "the inspector is 392px"
+    );
+    mounted.click(mounted.rects("Agent tree")[0].center());
+    assert_eq!(opened.borrow().len(), 1);
+    assert_eq!(mounted.count("deny"), 4, "two rows, button and text each");
+    mounted.click(mounted.rects("deny")[0].center());
+    assert_eq!(changes.borrow().as_slice(), [(0, Permission::Deny)]);
+    for label in [
+        "Codex",
+        "0.42.0",
+        "Signed in",
+        "Push rejected",
+        "Retry",
+        "Close",
+    ] {
+        assert!(mounted.has(label), "{label}");
+    }
+}
+
+#[test]
+fn page_header_cells_sit_flush_right() {
+    let mounted = mount(Size::new(900.0, 200.0), || {
+        let press: OnPress = Rc::new(|| {});
+        view! {
+            col {
+                PageHeader title:"Settings" path:(vec!["Relay".to_string()]) {
+                    HeaderCell label:"Save" on-press:(press) keys:(Some("⌘S".to_string()))
+                }
+                Module title:"Harnesses" caps:true {
+                    Label text:"Body"
+                }
+            }
+        }
+    });
+    let save = mounted.rect("Save");
+    assert_eq!(save.origin.x + save.size.width, 900.0);
+    assert_eq!(save.size.height, 72.0);
+    assert!(mounted.has("Relay /"));
+    assert!(mounted.has("HARNESSES"));
+}
