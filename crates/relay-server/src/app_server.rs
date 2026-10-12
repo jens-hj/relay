@@ -148,6 +148,60 @@ fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Re
         };
     }
     workspace.update_run(session, run, |snapshot| {
+        if method == "account/rateLimits/updated" {
+            rate_limits(snapshot, &params["rateLimits"], crate::now());
+        }
+        if method == "turn/plan/updated"
+            && let Some(steps) = params["plan"].as_array()
+        {
+            let steps = steps
+                .iter()
+                .filter_map(|step| {
+                    Some(PlanStep {
+                        title: step["step"].as_str()?.to_owned(),
+                        done: step["status"] == "completed",
+                        owner_session_id: None,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let body = steps
+                .iter()
+                .map(|s| format!("[{}] {}", if s.done { "x" } else { " " }, s.title))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let id = format!(
+                "codex-{run}-plan-{}",
+                params["turnId"].as_str().unwrap_or("turn")
+            );
+            let detail = Some(ToolDetail::Plan { steps }.bounded());
+            if let Some(message) = snapshot.messages.iter_mut().find(|m| m.id == id) {
+                message.body = bounded(body);
+                if let Some(tool) = &mut message.tool {
+                    tool.detail = detail;
+                }
+            } else {
+                let explanation = params["explanation"].as_str().unwrap_or("").to_owned();
+                tool_activity::start(
+                    snapshot,
+                    session,
+                    id.clone(),
+                    "Codex",
+                    tool_activity::call(
+                        run,
+                        "update_plan",
+                        ToolKind::Plan,
+                        bounded(params["plan"].to_string()),
+                        bounded(explanation),
+                    ),
+                );
+                let message = snapshot.messages.iter_mut().find(|m| m.id == id).unwrap();
+                message.body = bounded(body);
+                tool_activity::finish(message, ToolState::Completed);
+                if let Some(tool) = &mut message.tool {
+                    tool.detail = detail;
+                }
+            }
+        }
         if method == "thread/tokenUsage/updated" {
             let usage = &params["tokenUsage"]["last"];
             let worker = snapshot
@@ -194,6 +248,21 @@ fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Re
                 }
             } else {
                 let kind = item["type"].as_str().unwrap_or("");
+                if kind == "contextCompaction"
+                    && method == "item/completed"
+                    && !snapshot
+                        .messages
+                        .iter()
+                        .any(|m| m.id == id && m.body == "Compaction completed")
+                {
+                    let session = snapshot
+                        .sessions
+                        .iter_mut()
+                        .find(|s| s.id == session)
+                        .unwrap();
+                    let at_tokens = session.worker.as_ref().and_then(|w| w.context_tokens);
+                    session.compactions.push(Compaction { at_tokens });
+                }
                 if kind == "contextCompaction" {
                     let body = if method == "item/completed" {
                         "Compaction completed"
@@ -216,11 +285,14 @@ fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Re
                 }
                 let name = item["tool"].as_str().unwrap_or(kind);
                 let tool_kind = match kind {
-                    "commandExecution" => Some(ToolKind::Terminal),
-                    "fileChange" => Some(ToolKind::Edit),
-                    "webSearch" => Some(ToolKind::Web),
+                    "commandExecution" if item["command"].as_str().is_some_and(is_test_command) => {
+                        Some(ToolKind::Test)
+                    }
+                    "commandExecution" => Some(ToolKind::Run),
+                    "fileChange" => Some(file_change(&item["changes"]).0),
+                    "webSearch" => Some(ToolKind::Fetch),
                     "mcpToolCall" | "dynamicToolCall" => Some(ToolKind::from_name(name)),
-                    "collabAgentToolCall" => Some(ToolKind::Agent),
+                    "collabAgentToolCall" => Some(ToolKind::Spawn),
                     "imageGeneration" => Some(ToolKind::Other),
                     _ => None,
                 };
@@ -257,14 +329,14 @@ fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Re
                         id.clone(),
                         "Codex",
                         ToolCall {
-                            run_id: run.into(),
-                            name: name.into(),
-                            kind: tool_kind,
-                            state: ToolState::Running,
-                            input: bounded(input),
-                            target: bounded(target),
                             directory: item["cwd"].as_str().map(tool_activity::bounded),
-                            exit_code: None,
+                            ..tool_activity::call(
+                                run,
+                                name,
+                                tool_kind,
+                                bounded(input),
+                                bounded(target),
+                            )
                         },
                     );
                     let message = snapshot.messages.iter_mut().find(|m| m.id == id).unwrap();
@@ -281,16 +353,40 @@ fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Re
                             .map(Value::to_string)
                             .unwrap_or_default(),
                     };
-                    if complete || tool_kind == ToolKind::Terminal {
+                    let command = kind == "commandExecution";
+                    if complete || command {
                         tool_activity::output(message, &output, false);
                     }
-                    if complete && let Some(tool) = &mut message.tool {
-                        tool.state = if failed {
-                            ToolState::Failed
-                        } else {
-                            ToolState::Completed
+                    if complete
+                        && message
+                            .tool
+                            .as_ref()
+                            .is_some_and(|t| t.finished_ms.is_none())
+                    {
+                        let exit_code = item["exitCode"].as_i64();
+                        let detail = match tool_kind {
+                            ToolKind::Test => parse_test_summary(&output),
+                            ToolKind::Run if command => Some(ToolDetail::Run {
+                                exit_code,
+                                duration_ms: item["durationMs"].as_u64(),
+                            }),
+                            ToolKind::Create | ToolKind::Edit if kind == "fileChange" => {
+                                file_change(&item["changes"]).1
+                            }
+                            _ => None,
                         };
-                        tool.exit_code = item["exitCode"].as_i64();
+                        tool_activity::finish(
+                            message,
+                            if failed {
+                                ToolState::Failed
+                            } else {
+                                ToolState::Completed
+                            },
+                        );
+                        if let Some(tool) = &mut message.tool {
+                            tool.exit_code = exit_code;
+                            tool.detail = detail.map(ToolDetail::bounded);
+                        }
                     }
                 }
             }
@@ -327,6 +423,93 @@ fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Re
         Ok(())
     })?;
     Ok(false)
+}
+
+/// Merge a sparse `account/rateLimits/updated` snapshot. Missing windows keep their
+/// previous value, and a window without a reported length is not classified.
+pub(super) fn rate_limits(snapshot: &mut Snapshot, limits: &Value, now: u64) {
+    if limits["limitId"].as_str().is_some_and(|id| id != "codex") {
+        return;
+    }
+    for slot in ["primary", "secondary"] {
+        let window = &limits[slot];
+        let (Some(used), Some(minutes)) = (
+            window["usedPercent"].as_f64(),
+            window["windowDurationMins"]
+                .as_u64()
+                .and_then(|m| u32::try_from(m).ok())
+                .filter(|m| *m > 0),
+        ) else {
+            continue;
+        };
+        // Codex reports seconds; tolerate milliseconds.
+        let resets_at = window["resetsAt"]
+            .as_u64()
+            .map(|t| if t > 100_000_000_000 { t / 1000 } else { t });
+        snapshot.record_usage_limit(UsageLimit::new(
+            Harness::Codex,
+            UsageWindow::from_minutes(minutes),
+            used,
+            minutes,
+            resets_at,
+            now,
+        ));
+    }
+}
+
+/// Classify a Codex `fileChange` item and measure its lines.
+fn file_change(changes: &Value) -> (ToolKind, Option<ToolDetail>) {
+    let Some(changes) = changes.as_array().filter(|c| !c.is_empty()) else {
+        return (ToolKind::Edit, None);
+    };
+    let unified = |diff: &str| diff.starts_with("@@") || diff.contains("\n@@");
+    let all_added = changes.iter().all(|c| c["kind"]["type"] == "add");
+    if all_added {
+        let lines = changes
+            .iter()
+            .map(|c| {
+                let diff = c["diff"].as_str()?;
+                Some(match diff_stats(diff) {
+                    ToolDetail::Edit { added, .. } if unified(diff) => added,
+                    _ => line_count(diff),
+                })
+            })
+            .sum::<Option<u64>>();
+        return (
+            ToolKind::Create,
+            lines.map(|lines| ToolDetail::Create { lines }),
+        );
+    }
+    let (mut added, mut removed, mut hunks) = (0, 0, Vec::new());
+    for change in changes {
+        let Some(diff) = change["diff"].as_str() else {
+            return (ToolKind::Edit, None);
+        };
+        // Added and deleted files carry their content; updates carry a unified diff.
+        let content = !unified(diff) && change["kind"]["type"] != "update";
+        if content && change["kind"]["type"] == "add" {
+            added += line_count(diff);
+        } else if content && change["kind"]["type"] == "delete" {
+            removed += line_count(diff);
+        } else if let ToolDetail::Edit {
+            hunks: h,
+            added: a,
+            removed: r,
+        } = diff_stats(diff)
+        {
+            added += a;
+            removed += r;
+            hunks.extend(h);
+        }
+    }
+    (
+        ToolKind::Edit,
+        Some(ToolDetail::Edit {
+            hunks,
+            added,
+            removed,
+        }),
+    )
 }
 
 fn bounded(mut body: String) -> String {

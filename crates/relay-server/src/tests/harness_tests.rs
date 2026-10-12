@@ -1271,7 +1271,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        11
+        12
     );
     let worker = snapshot.sessions[0].worker.as_mut().unwrap();
     worker.model = Some("reported-model".into());
@@ -1340,7 +1340,7 @@ done
             if let Some(m) = s.messages.iter().find(|m| {
                 m.tool
                     .as_ref()
-                    .is_some_and(|t| t.run_id == run && t.kind == ToolKind::Terminal)
+                    .is_some_and(|t| t.run_id == run && t.kind == ToolKind::Run)
                     && m.body == "live\n"
             }) {
                 assert_eq!(m.tool.as_ref().unwrap().state, ToolState::Running);
@@ -1364,7 +1364,7 @@ done
     assert_eq!(calls[0].exit_code, Some(2));
     assert_eq!(calls[1].kind, ToolKind::Edit);
     assert_eq!(calls[1].target, "main.rs");
-    assert_eq!(calls[2].kind, ToolKind::Web);
+    assert_eq!(calls[2].kind, ToolKind::Fetch);
     assert_eq!(calls[3].kind, ToolKind::Read);
     assert_eq!(calls[4].state, ToolState::Failed);
     assert_eq!(calls[5].state, ToolState::Interrupted);
@@ -1433,12 +1433,15 @@ async fn restart_interrupts_unfinished_tool_records_without_erasing_output() {
         tool: Some(ToolCall {
             run_id: "previous-run".into(),
             name: "commandExecution".into(),
-            kind: ToolKind::Terminal,
+            kind: ToolKind::Run,
             state: ToolState::Running,
             input: "sleep 100".into(),
             target: "sleep 100".into(),
             directory: None,
             exit_code: None,
+            started_ms: None,
+            finished_ms: None,
+            detail: None,
         }),
     });
     let mut store = Store::open(&db, DirectorProfile::default()).unwrap();
@@ -1464,3 +1467,298 @@ async fn restart_interrupts_unfinished_tool_records_without_erasing_output() {
         restarted
     );
 }
+
+#[tokio::test]
+async fn codex_reports_compactions_rate_limits_plans_and_tool_details() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = review_repo(dir.path());
+    let bin = dir.path().join("detail-codex");
+    script(
+        &bin,
+        r#"
+while IFS= read -r line; do
+  method=$(printf '%s' "$line" | jq -r '.method')
+  id=$(printf '%s' "$line" | jq -c '.id')
+  case "$method" in
+    initialize) printf '{"id":%s,"result":{}}\n' "$id";;
+    thread/start) printf '{"id":%s,"result":{"model":"gpt-test","thread":{"id":"t"}}}\n' "$id";;
+    turn/start)
+      printf '{"id":%s,"result":{"turn":{"id":"turn"}}}\n' "$id"
+      echo '{"method":"thread/tokenUsage/updated","params":{"threadId":"t","tokenUsage":{"modelContextWindow":1000,"last":{"totalTokens":900,"inputTokens":800,"cachedInputTokens":100,"outputTokens":50}}}}'
+      echo '{"method":"item/started","params":{"threadId":"t","item":{"id":"c1","type":"contextCompaction"}}}'
+      echo '{"method":"item/completed","params":{"threadId":"t","item":{"id":"c1","type":"contextCompaction"}}}'
+      echo '{"method":"item/completed","params":{"threadId":"t","item":{"id":"c1","type":"contextCompaction"}}}'
+      echo '{"method":"thread/tokenUsage/updated","params":{"threadId":"t","tokenUsage":{"modelContextWindow":1000,"last":{"totalTokens":300,"inputTokens":250,"cachedInputTokens":100,"outputTokens":50}}}}'
+      echo '{"method":"item/completed","params":{"threadId":"t","item":{"id":"c2","type":"contextCompaction"}}}'
+      echo '{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":42.5,"windowDurationMins":300,"resetsAt":1900000000},"secondary":{"usedPercent":10,"windowDurationMins":10080,"resetsAt":null}}}}'
+      echo '{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"other","primary":{"usedPercent":99,"windowDurationMins":300,"resetsAt":1}}}}'
+      echo '{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":null,"primary":null,"secondary":{"usedPercent":11,"windowDurationMins":10080,"resetsAt":1900500000}}}}'
+      echo '{"method":"turn/plan/updated","params":{"threadId":"t","turnId":"turn","explanation":null,"plan":[{"step":"Read code","status":"completed"},{"step":"Fix bug","status":"inProgress"}]}}'
+      echo '{"method":"turn/plan/updated","params":{"threadId":"t","turnId":"turn","explanation":null,"plan":[{"step":"Read code","status":"completed"},{"step":"Fix bug","status":"completed"}]}}'
+      echo '{"method":"item/completed","params":{"threadId":"t","item":{"id":"add","type":"fileChange","status":"completed","changes":[{"path":"new.rs","kind":{"type":"add"},"diff":"a\nb\nc\n"}]}}}'
+      echo '{"method":"item/completed","params":{"threadId":"t","item":{"id":"update","type":"fileChange","status":"completed","changes":[{"path":"main.rs","kind":{"type":"update","move_path":null},"diff":"@@ -1,2 +1,3 @@ fn main\n-old\n+new\n+more\n keep\n"}]}}}'
+      echo '{"method":"item/started","params":{"threadId":"t","item":{"id":"test","type":"commandExecution","command":"/bin/bash -lc \"cargo test -p x\"","status":"inProgress"}}}'
+      echo '{"method":"item/completed","params":{"threadId":"t","item":{"id":"test","type":"commandExecution","command":"/bin/bash -lc \"cargo test -p x\"","status":"failed","exitCode":101,"durationMs":900,"aggregatedOutput":"test a::b ... FAILED\ntest result: FAILED. 3 passed; 1 failed; 0 ignored\n"}}}'
+      echo '{"method":"item/completed","params":{"threadId":"t","item":{"id":"ls","type":"commandExecution","command":"ls","status":"completed","exitCode":0,"durationMs":12,"aggregatedOutput":"x\n"}}}'
+      echo '{"method":"item/completed","params":{"threadId":"t","item":{"id":"spawn","type":"mcpToolCall","server":"relay","tool":"spawn_agent","arguments":{"task":"x"},"result":{"content":[]}}}}'
+      echo '{"method":"turn/completed","params":{"threadId":"t","turn":{"id":"turn","status":"completed"}}}'
+      ;;
+  esac
+done
+"#,
+    );
+    let mut config = config();
+    config.repository = Some(repo);
+    config.codex = bin;
+    let w = workspace(&dir.path().join("db"), &live(), config);
+    let s = w.snapshots.borrow().clone();
+    let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
+    runtime::run(w.clone(), id.clone(), run.clone(), prompt, rx).await;
+    let snapshot = finished(&w, &id).await;
+    let session = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
+    assert_eq!(
+        session.compactions,
+        [
+            Compaction {
+                at_tokens: Some(900)
+            },
+            Compaction {
+                at_tokens: Some(300)
+            }
+        ]
+    );
+    assert_eq!(snapshot.usage_limits.len(), 2);
+    let five = &snapshot.usage_limits[0];
+    assert_eq!(five.id, "codex-five_hour");
+    assert_eq!(
+        (five.used_percent, five.window_minutes, five.resets_at),
+        (42.5, 300, Some(1_900_000_000))
+    );
+    let weekly = &snapshot.usage_limits[1];
+    assert_eq!(weekly.window, UsageWindow::Weekly);
+    assert_eq!(
+        (weekly.used_percent, weekly.resets_at),
+        (11.0, Some(1_900_500_000))
+    );
+    let tool = |suffix: &str| {
+        snapshot
+            .messages
+            .iter()
+            .find(|m| m.id == format!("codex-{run}-{suffix}"))
+            .and_then(|m| m.tool.clone())
+            .unwrap()
+    };
+    let plan = tool("plan-turn");
+    assert_eq!(plan.kind, ToolKind::Plan);
+    assert!(
+        matches!(plan.detail, Some(ToolDetail::Plan { ref steps }) if steps.len() == 2 && steps.iter().all(|s| s.done))
+    );
+    let add = tool("add");
+    assert_eq!(add.kind, ToolKind::Create);
+    assert_eq!(add.detail, Some(ToolDetail::Create { lines: 3 }));
+    assert!(add.started_ms.is_some() && add.finished_ms >= add.started_ms);
+    assert_eq!(
+        tool("update").detail,
+        Some(ToolDetail::Edit {
+            hunks: vec![Hunk {
+                line: 1,
+                label: Some("fn main".into()),
+                added: 2,
+                removed: 1
+            }],
+            added: 2,
+            removed: 1
+        })
+    );
+    let test = tool("test");
+    assert_eq!(test.kind, ToolKind::Test);
+    assert_eq!(test.state, ToolState::Failed);
+    assert_eq!(test.exit_code, Some(101));
+    assert_eq!(
+        test.detail,
+        Some(ToolDetail::Test {
+            passed: Some(3),
+            failed: Some(1),
+            failures: vec!["a::b".into()]
+        })
+    );
+    assert_eq!(
+        tool("ls").detail,
+        Some(ToolDetail::Run {
+            exit_code: Some(0),
+            duration_ms: Some(12)
+        })
+    );
+    assert_eq!(tool("spawn").kind, ToolKind::Spawn);
+    assert_eq!(snapshot.usage_ledger.len(), 1);
+    let entry = &snapshot.usage_ledger[0];
+    assert_eq!(entry.id, run);
+    assert_eq!(entry.session_id, id);
+    assert_eq!(entry.harness, Harness::Codex);
+    assert_eq!(entry.model.as_deref(), Some("gpt-test"));
+    assert_eq!(
+        (
+            entry.input_tokens,
+            entry.cached_input_tokens,
+            entry.output_tokens
+        ),
+        (250, 100, 50)
+    );
+    let reopened = Store::open(&dir.path().join("db"), DirectorProfile::default()).unwrap();
+    assert_eq!(reopened.snapshot().unwrap(), snapshot);
+}
+
+#[tokio::test]
+async fn claude_reports_compactions_context_rate_limits_and_tool_details() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = dir.path().join("events.jsonl");
+    std::fs::write(&events, CLAUDE_DETAIL_EVENTS).unwrap();
+    let source = CLAUDE_FAKE.replacen(
+        "      echo '{\"type\":\"stream_event\"",
+        &format!(
+            "      cat '{}'\n      echo '{{\"type\":\"stream_event\"",
+            events.display()
+        ),
+        1,
+    );
+    let source = source.replace(
+        r#"echo '{"type":"result","subtype":"success","usage":"#,
+        r#"echo '{"type":"result","subtype":"success","modelUsage":{"reported-claude-model":{"contextWindow":200000}},"usage":"#,
+    );
+    let w = claude_workspace(dir.path(), &source);
+    let (id, snapshot) = launch(&w).await;
+    let session = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
+    let work = session.worker.as_ref().unwrap();
+    assert_eq!(work.context_tokens, Some(1000 + 200 + 30));
+    assert_eq!(work.context_window, Some(200_000));
+    assert_eq!(
+        session.compactions,
+        [
+            Compaction {
+                at_tokens: Some(150_000)
+            },
+            Compaction {
+                at_tokens: Some(160_000)
+            }
+        ]
+    );
+    assert_eq!(
+        snapshot
+            .messages
+            .iter()
+            .filter(|m| m.session_id == id && m.body == "Compaction completed")
+            .count(),
+        2
+    );
+    let limits = &snapshot.usage_limits;
+    assert_eq!(limits.len(), 2);
+    assert_eq!(limits[0].id, "claude_code-five_hour");
+    assert_eq!(
+        (
+            limits[0].used_percent,
+            limits[0].window_minutes,
+            limits[0].resets_at
+        ),
+        (25.0, 300, Some(1_900_000_000))
+    );
+    assert_eq!(limits[1].window, UsageWindow::Weekly);
+    assert_eq!(limits[1].window_minutes, 10080);
+    let tool = |key: &str| {
+        snapshot
+            .messages
+            .iter()
+            .find(|m| m.session_id == id && m.id.ends_with(&format!("-tool-{key}")))
+            .and_then(|m| m.tool.clone())
+            .unwrap()
+    };
+    let created = tool("write-new");
+    assert_eq!(created.kind, ToolKind::Create);
+    assert_eq!(created.detail, Some(ToolDetail::Create { lines: 2 }));
+    assert!(created.finished_ms.is_some());
+    let overwritten = tool("write-old");
+    assert_eq!(overwritten.kind, ToolKind::Edit);
+    assert_eq!(overwritten.detail, None);
+    assert_eq!(
+        tool("edit").detail,
+        Some(ToolDetail::Edit {
+            hunks: vec![],
+            added: 2,
+            removed: 1
+        })
+    );
+    assert_eq!(
+        tool("read").detail,
+        Some(ToolDetail::Read {
+            start_line: Some(10),
+            end_line: Some(12),
+            total_lines: None
+        })
+    );
+    assert_eq!(
+        tool("grep").detail,
+        Some(ToolDetail::Search {
+            query: "fn".into(),
+            files: vec![
+                SearchFile {
+                    path: "a.rs".into(),
+                    hits: 3
+                },
+                SearchFile {
+                    path: "b.rs".into(),
+                    hits: 1
+                }
+            ]
+        })
+    );
+    let test = tool("test");
+    assert_eq!(test.kind, ToolKind::Test);
+    assert_eq!(
+        test.detail,
+        Some(ToolDetail::Test {
+            passed: Some(2),
+            failed: Some(0),
+            failures: vec![]
+        })
+    );
+    assert_eq!(tool("bash").kind, ToolKind::Run);
+    assert_eq!(tool("bash").detail, None);
+    assert!(
+        matches!(tool("todo").detail, Some(ToolDetail::Plan { ref steps }) if steps.len() == 2 && steps[0].done && !steps[1].done)
+    );
+    assert_eq!(tool("task").kind, ToolKind::Spawn);
+    assert_eq!(
+        tool("fetch").detail,
+        Some(ToolDetail::Fetch {
+            status: Some(200),
+            title: None
+        })
+    );
+    let entry = snapshot.usage_ledger.last().unwrap();
+    assert_eq!(entry.session_id, id);
+    assert_eq!(entry.harness, Harness::ClaudeCode);
+    assert_eq!(
+        (
+            entry.input_tokens,
+            entry.cached_input_tokens,
+            entry.output_tokens
+        ),
+        (19, 11, 7)
+    );
+}
+
+const CLAUDE_DETAIL_EVENTS: &str = r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Working"}],"usage":{"input_tokens":900,"cache_read_input_tokens":100,"cache_creation_input_tokens":10,"output_tokens":5}}}
+{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":150000}}
+{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":160000}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"utilization":0.25,"resetsAt":1900000000},"seven_day":{"utilization":0.5,"resetsAt":1900500000}}},"uuid":"u","session_id":"11111111-2222-4333-8444-555555555555"}
+{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"write-new","name":"Write","input":{"file_path":"new.txt","content":"a\nb\n"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"write-new","content":"File created successfully at: new.txt"}]},"tool_use_result":{"type":"create","filePath":"new.txt","content":"a\nb\n","structuredPatch":[]}}
+{"type":"assistant","message":{"id":"m3","content":[{"type":"tool_use","id":"write-old","name":"Write","input":{"file_path":"old.txt","content":"x"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"write-old","content":"The file old.txt has been updated."}]},"tool_use_result":{"type":"update","filePath":"old.txt","content":"x","structuredPatch":[]}}
+{"type":"assistant","message":{"id":"m4","content":[{"type":"tool_use","id":"edit","name":"Edit","input":{"file_path":"a.rs","old_string":"keep\nold\nkeep","new_string":"keep\nnew\nnewer\nkeep"}},{"type":"tool_use","id":"read","name":"Read","input":{"file_path":"a.rs","offset":10,"limit":3}},{"type":"tool_use","id":"grep","name":"Grep","input":{"pattern":"fn","output_mode":"count"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"edit","content":"ok"},{"type":"tool_result","tool_use_id":"read","content":"    10\tone\n    11\ttwo\n    12\tthree\n"},{"type":"tool_result","tool_use_id":"grep","content":"a.rs:3\nb.rs:1\n\nFound 4 total occurrences across 2 files."}]}}
+{"type":"assistant","message":{"id":"m5","content":[{"type":"tool_use","id":"test","name":"Bash","input":{"command":"cargo test"}},{"type":"tool_use","id":"bash","name":"Bash","input":{"command":"ls"}},{"type":"tool_use","id":"todo","name":"TodoWrite","input":{"todos":[{"content":"One","status":"completed","activeForm":"Doing one"},{"content":"Two","status":"in_progress","activeForm":"Doing two"}]}},{"type":"tool_use","id":"task","name":"Task","input":{"description":"Explore","prompt":"look"}},{"type":"tool_use","id":"fetch","name":"WebFetch","input":{"url":"https://example.com","prompt":"x"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"test","content":"test result: ok. 2 passed; 0 failed; 0 ignored"},{"type":"tool_result","tool_use_id":"bash","content":"x"},{"type":"tool_result","tool_use_id":"todo","content":"Todos have been modified successfully."},{"type":"tool_result","tool_use_id":"task","content":"done"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"fetch","content":"Example"}]},"tool_use_result":{"bytes":10,"code":200,"codeText":"OK","result":"Example","durationMs":5,"url":"https://example.com"}}
+{"type":"assistant","message":{"id":"m6","content":[{"type":"text","text":"Done"}],"usage":{"input_tokens":1000,"cache_read_input_tokens":200,"cache_creation_input_tokens":30,"output_tokens":5}}}
+{"type":"assistant","parent_tool_use_id":"task","message":{"id":"m7","content":[{"type":"text","text":"sub"}],"usage":{"input_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":5}}}
+"#;

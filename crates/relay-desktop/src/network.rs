@@ -435,7 +435,7 @@ mod tests {
         assert!(
             validate_protocol(&Snapshot::default())
                 .unwrap_err()
-                .contains("requires protocol 4")
+                .contains("requires protocol 5")
         );
         assert!(
             validate_protocol(&Snapshot {
@@ -534,7 +534,7 @@ mod outcome_tests {
                 assert!(
                     String::from_utf8_lossy(&request)
                         .to_lowercase()
-                        .contains("x-relay-protocol: 4")
+                        .contains("x-relay-protocol: 5")
                 );
                 if let Some(code) = status {
                     let body = "invalid or rejected response";

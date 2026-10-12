@@ -15,7 +15,11 @@ mod execution;
 pub use execution::*;
 mod fixture;
 mod profile;
+mod tree;
+pub use tree::*;
+mod usage;
 pub use conversation::*;
+pub use usage::*;
 
 pub use fixture::demo_snapshot;
 pub use profile::*;
@@ -114,6 +118,33 @@ pub struct Session {
     pub fixture: bool,
     #[serde(default)]
     pub worker: Option<WorkerRun>,
+    /// The session that requested this one, when it was started as a sub-agent.
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+    #[serde(default)]
+    pub spawn: Option<SpawnGrant>,
+    /// Every context compaction reported by the harness, across runs.
+    #[serde(default)]
+    pub compactions: Vec<Compaction>,
+}
+
+/// What a parent session asked a sub-agent to do, and the permissions it granted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnGrant {
+    pub task: String,
+    #[serde(default)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub permissions: std::collections::BTreeMap<Task, Permission>,
+    #[serde(default)]
+    pub requested_by_run: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Compaction {
+    /// Context occupancy when the harness compacted, if it was measured.
+    #[serde(default)]
+    pub at_tokens: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +256,10 @@ pub struct Snapshot {
     pub comments: Vec<Comment>,
     #[serde(default)]
     pub submissions: Vec<Submission>,
+    #[serde(default)]
+    pub usage_limits: Vec<UsageLimit>,
+    #[serde(default)]
+    pub usage_ledger: Vec<UsageEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

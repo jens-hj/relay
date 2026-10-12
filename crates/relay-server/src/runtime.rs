@@ -952,7 +952,20 @@ pub(crate) async fn run(
                 }
             }
         }
+        let entry = w.usage.as_ref().map(|usage| UsageEntry {
+            id: run_id.to_string(),
+            session_id: session_id.to_string(),
+            harness: w.harness,
+            model: w.model.clone(),
+            input_tokens: usage.input_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
+            output_tokens: usage.output_tokens,
+            completed_at: crate::now(),
+        });
         interrupt_tools(snapshot, &session_id, Some(&run_id));
+        if let Some(entry) = entry {
+            snapshot.record_usage(entry, crate::now());
+        }
         Ok(())
     });
     if let Err(error) = crate::conversation::advance(&workspace, &session_id, &run_id) {

@@ -12,22 +12,33 @@ use relay_core::{Message, ToolKind, ToolState};
 
 fn category(kind: ToolKind) -> &'static str {
     match kind {
-        ToolKind::Terminal => "Terminal",
+        ToolKind::Run | ToolKind::Test => "Terminal",
         ToolKind::Read => "Read file",
-        ToolKind::Edit => "File changes",
+        ToolKind::Edit | ToolKind::Create => "File changes",
         ToolKind::Search => "Search",
-        ToolKind::Web => "Web",
-        ToolKind::Agent => "Agent",
-        ToolKind::Other => "Tool",
+        ToolKind::Fetch => "Web",
+        ToolKind::Spawn | ToolKind::Message | ToolKind::Wait | ToolKind::Result => "Agent",
+        ToolKind::Plan | ToolKind::Other => "Tool",
+    }
+}
+
+/// Protocol 5 kinds share the presentation of their closest earlier category.
+fn presentation(kind: ToolKind) -> ToolKind {
+    match kind {
+        ToolKind::Test => ToolKind::Run,
+        ToolKind::Create => ToolKind::Edit,
+        ToolKind::Message | ToolKind::Wait | ToolKind::Result => ToolKind::Spawn,
+        ToolKind::Plan => ToolKind::Other,
+        kind => kind,
     }
 }
 
 fn swatch(kind: ToolKind) -> ColorToken {
-    match kind {
-        ToolKind::Terminal | ToolKind::Agent => tint.lilac,
-        ToolKind::Read | ToolKind::Web => tint.sky,
+    match presentation(kind) {
+        ToolKind::Run | ToolKind::Spawn => tint.lilac,
+        ToolKind::Read | ToolKind::Fetch => tint.sky,
         ToolKind::Edit => tint.mint,
-        ToolKind::Search | ToolKind::Other => tint.sand,
+        _ => tint.sand,
     }
 }
 
@@ -74,7 +85,7 @@ pub(crate) fn ToolActivity(
     let tool = Derived::new(move || message.get().and_then(|m| m.tool));
     let kind = tool
         .get_untracked()
-        .map(|t| t.kind)
+        .map(|t| presentation(t.kind))
         .unwrap_or(ToolKind::Other);
     let open = State::new(true);
     let raw = State::new(false);
@@ -92,7 +103,7 @@ pub(crate) fn ToolActivity(
                         fill:{color(swatch(kind))} font-color:ink.fg
                         stroke:(width:{px(1.0)} color:rule.line edges:right) {
                         icon size:{px(18.0)}px
-                            {match kind {ToolKind::Terminal=>tool_terminal,ToolKind::Read=>tool_read,ToolKind::Edit=>tool_edit,ToolKind::Search=>tool_search,ToolKind::Web=>tool_web,ToolKind::Agent=>tool_agent,ToolKind::Other=>tool_other}}
+                            {match kind {ToolKind::Run=>tool_terminal,ToolKind::Read=>tool_read,ToolKind::Edit=>tool_edit,ToolKind::Search=>tool_search,ToolKind::Fetch=>tool_web,ToolKind::Spawn=>tool_agent,_=>tool_other}}
                     }
                     row #relay.eyebrow min-width:0px width:1fr height:fill align:center
                         font-color:ink.fg {
@@ -112,7 +123,7 @@ pub(crate) fn ToolActivity(
             }
             row height:min-content min-width:0px pad:{px(10.0)}px gap:{px(8.0)}px
                 stroke:(width:{px(1.0)} color:rule.hair edges:top) selectable {
-                if kind == ToolKind::Terminal {
+                if kind == ToolKind::Run {
                     text font-color:{color(accent.focus)} {"$"}
                 }
                 text font-size:{px(13.0)}px
@@ -120,7 +131,7 @@ pub(crate) fn ToolActivity(
             }
             if open.get() {
                 col height:min-content min-width:0px gap:0px {
-                    if kind == ToolKind::Terminal {
+                    if kind == ToolKind::Run {
                         TerminalOutput output:(output)
                             running:(Derived::new(move || activity_state.get()==RunState::Running))
                     } else if kind == ToolKind::Edit {
@@ -194,8 +205,8 @@ fn ResultOutput(output: Derived<String>, kind: ToolKind) -> Element {
     let label = match kind {
         ToolKind::Read => "Contents",
         ToolKind::Search => "Matches",
-        ToolKind::Web => "Response",
-        ToolKind::Agent => "Result",
+        ToolKind::Fetch => "Response",
+        ToolKind::Spawn => "Result",
         _ => "Output",
     };
     view! {
@@ -390,7 +401,7 @@ pub(crate) fn with_legacy_tool(mut message: Message) -> Message {
                 .and_then(|s| s.parse::<i64>().ok());
             (
                 "commandExecution".into(),
-                ToolKind::Terminal,
+                ToolKind::Run,
                 command.clone(),
                 command,
                 lines.next().unwrap_or("").into(),
@@ -448,6 +459,9 @@ pub(crate) fn with_legacy_tool(mut message: Message) -> Message {
         target,
         directory: None,
         exit_code: code,
+        started_ms: None,
+        finished_ms: None,
+        detail: None,
     });
     message.body = output;
     message
@@ -469,7 +483,7 @@ mod tests {
             tool: None,
         };
         let shown = with_legacy_tool(message.clone());
-        assert_eq!(shown.tool.as_ref().unwrap().kind, ToolKind::Terminal);
+        assert_eq!(shown.tool.as_ref().unwrap().kind, ToolKind::Run);
         assert_eq!(shown.tool.as_ref().unwrap().state, ToolState::Unknown);
         assert_eq!(shown.tool.as_ref().unwrap().target, "cargo test");
         assert_eq!(shown.body, "tests passed");

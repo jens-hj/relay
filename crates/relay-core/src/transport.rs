@@ -329,6 +329,12 @@ pub fn preview(message: &crate::Message) -> (crate::Message, bool) {
         shorten(&mut tool.input);
         shorten(&mut tool.target);
     }
+    // Large details load with the full message.
+    if serde_json::to_vec(&result).map_or(true, |v| v.len() > MESSAGE_PREVIEW_BYTES)
+        && let Some(tool) = &mut result.tool
+    {
+        tool.detail = None;
+    }
     (result, true)
 }
 
@@ -354,6 +360,44 @@ mod tests {
         let new = json!({"id":"a","body":format!("{}tail","x".repeat(100_000))});
         let delta = Delta::between(&old, &new);
         assert!(serde_json::to_vec(&delta).unwrap().len() < 200);
+    }
+
+    #[test]
+    fn previews_keep_small_details_and_drop_large_ones() {
+        let message = |steps: usize| crate::Message {
+            id: "m".into(),
+            session_id: "s".into(),
+            author: "a".into(),
+            kind: "tool_call".into(),
+            body: "x".repeat(20_000),
+            parts: vec![],
+            tool: Some(crate::ToolCall {
+                run_id: "r".into(),
+                name: "TodoWrite".into(),
+                kind: crate::ToolKind::Plan,
+                state: crate::ToolState::Completed,
+                input: String::new(),
+                target: String::new(),
+                directory: None,
+                exit_code: None,
+                started_ms: Some(1),
+                finished_ms: Some(2),
+                detail: Some(crate::ToolDetail::Plan {
+                    steps: (0..steps)
+                        .map(|i| crate::PlanStep {
+                            title: format!("{i}{}", "s".repeat(400)),
+                            done: false,
+                            owner_session_id: None,
+                        })
+                        .collect(),
+                }),
+            }),
+        };
+        let (small, truncated) = preview(&message(2));
+        assert!(truncated && small.tool.unwrap().detail.is_some());
+        let (large, truncated) = preview(&message(200));
+        assert!(truncated && large.tool.as_ref().unwrap().detail.is_none());
+        assert!(serde_json::to_vec(&large).unwrap().len() <= MESSAGE_PREVIEW_BYTES);
     }
 
     #[test]

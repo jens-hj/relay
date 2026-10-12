@@ -68,6 +68,9 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
             role: SessionRole::Director,
             fixture: true,
             worker: None,
+            parent_session_id: None,
+            spawn: None,
+            compactions: vec![],
         },
         Session {
             workspaces: vec![],
@@ -82,6 +85,9 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
             role: SessionRole::Worker,
             fixture: true,
             worker: None,
+            parent_session_id: None,
+            spawn: None,
+            compactions: vec![],
         },
         Session {
             workspaces: vec![],
@@ -96,6 +102,9 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
             role: SessionRole::Director,
             fixture: true,
             worker: None,
+            parent_session_id: None,
+            spawn: None,
+            compactions: vec![],
         },
     ];
     let messages = [
@@ -126,5 +135,7 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
         messages,
         comments: vec![],
         submissions: vec![],
+        usage_limits: vec![],
+        usage_ledger: vec![],
     }
 }

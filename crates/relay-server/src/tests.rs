@@ -1019,7 +1019,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            11
+            12
         );
         drop(store);
         let mut reopened = Store::open(&db, DirectorProfile::default()).unwrap();
@@ -1050,7 +1050,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 12)
+        .pragma_update(None, "user_version", 13)
         .unwrap();
     drop(store);
     let error = Store::open(&db, DirectorProfile::default()).err().unwrap();
@@ -1060,7 +1060,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        12
+        13
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {

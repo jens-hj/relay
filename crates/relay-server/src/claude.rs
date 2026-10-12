@@ -146,6 +146,9 @@ pub(super) async fn execute(
     let mut completed = false;
     let mut state: Option<String> = None;
     let mut tasks = std::collections::HashSet::new();
+    let mut compactions = 0usize;
+    // Full tool inputs by tool_use_id; persisted inputs are truncated.
+    let mut tool_inputs = std::collections::HashMap::<String, (String, Value)>::new();
     let mut deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(30));
     loop {
         let bytes = tokio::select! { biased; _ = stop.changed() => {
@@ -250,16 +253,31 @@ pub(super) async fn execute(
                     workspace.catalogs.lock().map_err(Error::internal)?.clear();
                 }
                 if subtype == "compact_boundary" {
+                    compactions += 1;
                     workspace.update_run(session, run, |snapshot| {
+                        let key = if compactions == 1 {
+                            "compaction".to_owned()
+                        } else {
+                            format!("compaction-{compactions}")
+                        };
                         message(
                             snapshot,
                             session,
                             run,
-                            "compaction",
+                            &key,
                             "harness_command",
                             "Compaction completed",
                             false,
                         );
+                        let session = snapshot
+                            .sessions
+                            .iter_mut()
+                            .find(|s| s.id == session)
+                            .unwrap();
+                        let at_tokens = value["compact_metadata"]["pre_tokens"]
+                            .as_u64()
+                            .or_else(|| session.worker.as_ref().and_then(|w| w.context_tokens));
+                        session.compactions.push(Compaction { at_tokens });
                         Ok(())
                     })?;
                 }
@@ -293,6 +311,13 @@ pub(super) async fn execute(
             }
             "user" => {
                 if let Some(blocks) = value["message"]["content"].as_array() {
+                    // The structured result describes the event's only tool result.
+                    let structured =
+                        if blocks.iter().filter(|b| b["type"] == "tool_result").count() == 1 {
+                            &value["tool_use_result"]
+                        } else {
+                            &Value::Null
+                        };
                     workspace.update_run(session, run, |s| {
                         for block in blocks {
                             if block["type"] == "tool_result" {
@@ -322,32 +347,56 @@ pub(super) async fn execute(
                                         session,
                                         id.clone(),
                                         "Claude Code",
-                                        ToolCall {
-                                            run_id: run.into(),
-                                            name: "Tool".into(),
-                                            kind: ToolKind::Other,
-                                            state: ToolState::Running,
-                                            input: String::new(),
-                                            target: String::new(),
-                                            directory: None,
-                                            exit_code: None,
-                                        },
+                                        tool_activity::call(
+                                            run,
+                                            "Tool",
+                                            ToolKind::Other,
+                                            String::new(),
+                                            String::new(),
+                                        ),
                                     );
                                 }
                                 let message = s.messages.iter_mut().find(|m| m.id == id).unwrap();
                                 tool_activity::output(message, &text, false);
-                                if let Some(tool) = &mut message.tool {
-                                    tool.state = if block["is_error"].as_bool().unwrap_or(false) {
+                                let failed = block["is_error"].as_bool().unwrap_or(false);
+                                let finished = message
+                                    .tool
+                                    .as_ref()
+                                    .is_some_and(|t| t.finished_ms.is_some());
+                                tool_activity::finish(
+                                    message,
+                                    if failed {
                                         ToolState::Failed
                                     } else {
                                         ToolState::Completed
-                                    };
+                                    },
+                                );
+                                if !finished
+                                    && let Some((name, input)) = block["tool_use_id"]
+                                        .as_str()
+                                        .and_then(|id| tool_inputs.get(id))
+                                    && let Some(tool) = &mut message.tool
+                                {
+                                    let (kind, detail) =
+                                        result_detail(name, input, &text, structured, failed);
+                                    if let Some(kind) = kind {
+                                        tool.kind = kind;
+                                    }
+                                    if let Some(detail) = detail {
+                                        tool.detail = Some(detail.bounded());
+                                    }
                                 }
                             }
                         }
                         Ok(())
                     })?;
                 }
+            }
+            "rate_limit_event" => {
+                workspace.update_run(session, run, |s| {
+                    rate_limits(s, &value["rate_limit_info"], crate::now());
+                    Ok(())
+                })?;
             }
             "stream_event" => {
                 let event = &value["event"];
@@ -383,6 +432,17 @@ pub(super) async fn execute(
                 if let Some(blocks) = value["message"]["content"].as_array() {
                     for block in blocks {
                         if block["type"] == "tool_use"
+                            && let Some(id) = block["id"].as_str()
+                        {
+                            tool_inputs.insert(
+                                id.to_owned(),
+                                (
+                                    block["name"].as_str().unwrap_or("Tool").to_owned(),
+                                    block["input"].clone(),
+                                ),
+                            );
+                        }
+                        if block["type"] == "tool_use"
                             && block["name"] == "Skill"
                             && let Some(name) = block["input"]["skill"].as_str()
                         {
@@ -391,6 +451,7 @@ pub(super) async fn execute(
                     }
 
                     workspace.update_run(session, run, |s| {
+                        context(s, session, &value);
                         for (index, block) in blocks.iter().enumerate() {
                             let key = format!("{id}-{index}");
                             match block["type"].as_str() {
@@ -409,24 +470,25 @@ pub(super) async fn execute(
                                         "claude-{run}-tool-{}",
                                         block["id"].as_str().unwrap_or(&key)
                                     );
+                                    let input = &block["input"];
+                                    let (kind, detail) = use_detail(name, input);
                                     tool_activity::start(
                                         s,
                                         session,
                                         id,
                                         "Claude Code",
                                         ToolCall {
-                                            run_id: run.into(),
-                                            name: name.into(),
-                                            kind: ToolKind::from_name(name),
-                                            state: ToolState::Running,
-                                            input: tool_activity::bounded(
-                                                &block["input"].to_string(),
-                                            ),
-                                            target: tool_activity::target(&block["input"]),
-                                            directory: block["input"]["cwd"]
+                                            directory: input["cwd"]
                                                 .as_str()
                                                 .map(tool_activity::bounded),
-                                            exit_code: None,
+                                            detail: detail.map(ToolDetail::bounded),
+                                            ..tool_activity::call(
+                                                run,
+                                                name,
+                                                kind,
+                                                tool_activity::bounded(&input.to_string()),
+                                                tool_activity::target(input),
+                                            )
                                         },
                                     );
                                 }
@@ -487,6 +549,7 @@ pub(super) async fn execute(
                             .unwrap();
                         worker.last_usage = worker.usage.clone();
                     }
+                    context_window(s, session, &value["modelUsage"]);
                     Ok(())
                 })?;
                 if let Some(missing) = expected_skills
@@ -516,4 +579,338 @@ pub(super) async fn execute(
     // unreaped so the runtime can terminate its owned process group before
     // waiting; reaping here would lose the group identity and leak children.
     Ok(())
+}
+
+/// Claude reports subscription windows as fractions; API-key sessions omit them.
+pub(super) fn rate_limits(snapshot: &mut Snapshot, info: &Value, now: u64) {
+    let mut record = |kind: &str, window: &Value| {
+        let (kind, minutes) = match kind {
+            "five_hour" => (UsageWindow::FiveHour, 5 * 60),
+            "seven_day" => (UsageWindow::Weekly, 7 * 24 * 60),
+            _ => return,
+        };
+        let Some(utilization) = window["utilization"].as_f64() else {
+            return;
+        };
+        snapshot.record_usage_limit(UsageLimit::new(
+            Harness::ClaudeCode,
+            kind,
+            utilization * 100.0,
+            minutes,
+            window["resetsAt"].as_u64(),
+            now,
+        ));
+    };
+    if let Some(windows) = info["unifiedWindows"].as_object() {
+        for (kind, window) in windows {
+            record(kind, window);
+        }
+    } else if let Some(kind) = info["rateLimitType"].as_str() {
+        record(kind, info);
+    }
+}
+
+/// Kind and detail known when a tool is requested.
+fn use_detail(name: &str, input: &Value) -> (ToolKind, Option<ToolDetail>) {
+    let kind = ToolKind::from_name(name);
+    match name {
+        "Bash" if input["command"].as_str().is_some_and(is_test_command) => (ToolKind::Test, None),
+        "TodoWrite" => (
+            kind,
+            input["todos"].as_array().map(|todos| ToolDetail::Plan {
+                steps: todos
+                    .iter()
+                    .filter_map(|todo| {
+                        Some(PlanStep {
+                            title: todo["content"].as_str()?.to_owned(),
+                            done: todo["status"] == "completed",
+                            owner_session_id: None,
+                        })
+                    })
+                    .collect(),
+            }),
+        ),
+        "Edit" | "MultiEdit" => {
+            let edits = if name == "Edit" {
+                vec![input]
+            } else {
+                input["edits"]
+                    .as_array()
+                    .map(|e| e.iter().collect())
+                    .unwrap_or_default()
+            };
+            let (mut added, mut removed) = (0, 0);
+            for edit in edits {
+                let (a, r) = line_changes(
+                    edit["old_string"].as_str().unwrap_or(""),
+                    edit["new_string"].as_str().unwrap_or(""),
+                );
+                added += a;
+                removed += r;
+            }
+            (
+                kind,
+                Some(ToolDetail::Edit {
+                    hunks: vec![],
+                    added,
+                    removed,
+                }),
+            )
+        }
+        "Grep" | "Glob" => (
+            kind,
+            Some(ToolDetail::Search {
+                query: input["pattern"].as_str().unwrap_or("").to_owned(),
+                files: vec![],
+            }),
+        ),
+        _ => (kind, None),
+    }
+}
+
+/// Lines removed and added between two replaced passages, ignoring a shared prefix and suffix.
+fn line_changes(old: &str, new: &str) -> (u64, u64) {
+    let old = old.lines().collect::<Vec<_>>();
+    let new = new.lines().collect::<Vec<_>>();
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (
+        (new.len() - prefix - suffix) as u64,
+        (old.len() - prefix - suffix) as u64,
+    )
+}
+
+/// Hunks from Claude's `structuredPatch`, when it reported one.
+fn patch_detail(patch: &Value) -> Option<ToolDetail> {
+    let patch = patch.as_array().filter(|p| !p.is_empty())?;
+    let (mut added, mut removed) = (0, 0);
+    let hunks = patch
+        .iter()
+        .map(|hunk| {
+            let lines = hunk["lines"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+            let count = |prefix| {
+                lines
+                    .iter()
+                    .filter(|l| l.as_str().is_some_and(|l| l.starts_with(prefix)))
+                    .count() as u64
+            };
+            let (a, r) = (count('+'), count('-'));
+            added += a;
+            removed += r;
+            Hunk {
+                line: hunk["newStart"].as_u64().unwrap_or(0),
+                label: None,
+                added: a,
+                removed: r,
+            }
+        })
+        .collect();
+    Some(ToolDetail::Edit {
+        hunks,
+        added,
+        removed,
+    })
+}
+
+/// Kind and detail known once a tool reports its result. `structured` is the
+/// event's `tool_use_result`, or null when it cannot be attributed to this call.
+fn result_detail(
+    name: &str,
+    input: &Value,
+    text: &str,
+    structured: &Value,
+    failed: bool,
+) -> (Option<ToolKind>, Option<ToolDetail>) {
+    if failed && name != "Bash" {
+        return (None, None);
+    }
+    match name {
+        "Write" => {
+            let created = structured["type"] == "create"
+                || (structured.is_null() && text.starts_with("File created"));
+            if created {
+                let content = input["content"]
+                    .as_str()
+                    .or_else(|| structured["content"].as_str())
+                    .unwrap_or("");
+                (
+                    Some(ToolKind::Create),
+                    Some(ToolDetail::Create {
+                        lines: line_count(content),
+                    }),
+                )
+            } else {
+                (None, patch_detail(&structured["structuredPatch"]))
+            }
+        }
+        "Edit" | "MultiEdit" => (None, patch_detail(&structured["structuredPatch"])),
+        "Read" => {
+            let file = &structured["file"];
+            let start = file["startLine"]
+                .as_u64()
+                .or_else(|| input["offset"].as_u64())
+                .unwrap_or(1)
+                .max(1);
+            let lines = file["numLines"].as_u64().or_else(|| {
+                structured
+                    .is_null()
+                    .then(|| text.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+            });
+            (
+                None,
+                Some(ToolDetail::Read {
+                    start_line: Some(start),
+                    end_line: lines.filter(|n| *n > 0).map(|n| start + n - 1),
+                    total_lines: file["totalLines"].as_u64(),
+                }),
+            )
+        }
+        "Glob" => {
+            let files = structured["filenames"]
+                .as_array()
+                .map(|f| {
+                    f.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_else(|| {
+                    if text == "No files found" {
+                        vec![]
+                    } else {
+                        text.lines()
+                            .filter(|l| !l.is_empty() && !l.starts_with('('))
+                            .map(str::to_owned)
+                            .collect()
+                    }
+                });
+            (
+                None,
+                Some(ToolDetail::Search {
+                    query: input["pattern"].as_str().unwrap_or("").to_owned(),
+                    files: files
+                        .into_iter()
+                        .take(TOOL_DETAIL_LIMIT)
+                        .map(|path| SearchFile { path, hits: 1 })
+                        .collect(),
+                }),
+            )
+        }
+        "Grep" => {
+            let mut files: Vec<SearchFile> = Vec::new();
+            let mode = input["output_mode"]
+                .as_str()
+                .unwrap_or("files_with_matches");
+            let content = structured["content"].as_str().unwrap_or(text);
+            let known = structured["filenames"]
+                .as_array()
+                .map(|f| f.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+            for line in content.lines() {
+                let (path, hits) = match mode {
+                    // "path:count"
+                    "count" => match line.rsplit_once(':') {
+                        Some((path, n)) => match n.trim().parse() {
+                            Ok(n) => (path, n),
+                            Err(_) => continue,
+                        },
+                        None => continue,
+                    },
+                    // "path:line:text"; attributed only to files the tool reported.
+                    "content" => match line.split_once(':') {
+                        Some((path, _)) if known.contains(&path) => (path, 1),
+                        _ => continue,
+                    },
+                    _ => continue,
+                };
+                if let Some(file) = files.iter_mut().find(|f| f.path == path) {
+                    file.hits += hits;
+                } else if files.len() < TOOL_DETAIL_LIMIT {
+                    files.push(SearchFile {
+                        path: path.to_owned(),
+                        hits,
+                    });
+                }
+            }
+            (
+                None,
+                Some(ToolDetail::Search {
+                    query: input["pattern"].as_str().unwrap_or("").to_owned(),
+                    files,
+                }),
+            )
+        }
+        "Bash" if input["command"].as_str().is_some_and(is_test_command) => (
+            None,
+            parse_test_summary(structured["stdout"].as_str().unwrap_or(text)),
+        ),
+        "WebFetch" => (
+            None,
+            structured["code"]
+                .as_u64()
+                .and_then(|c| u16::try_from(c).ok())
+                .map(|status| ToolDetail::Fetch {
+                    status: Some(status),
+                    title: None,
+                }),
+        ),
+        _ => (None, None),
+    }
+}
+
+/// Context occupancy of the latest top-level request. Subagent messages have their own context.
+fn context(snapshot: &mut Snapshot, session: &str, value: &Value) {
+    let usage = &value["message"]["usage"];
+    if !value["parent_tool_use_id"].is_null() {
+        return;
+    }
+    let Some(input) = usage["input_tokens"].as_u64() else {
+        return;
+    };
+    let tokens = input
+        .saturating_add(usage["cache_read_input_tokens"].as_u64().unwrap_or(0))
+        .saturating_add(usage["cache_creation_input_tokens"].as_u64().unwrap_or(0));
+    if let Some(worker) = snapshot
+        .sessions
+        .iter_mut()
+        .find(|s| s.id == session)
+        .and_then(|s| s.worker.as_mut())
+    {
+        worker.context_tokens = Some(tokens);
+    }
+}
+
+/// The reporting model's window; ambiguous multi-model results are left unset.
+fn context_window(snapshot: &mut Snapshot, session: &str, usage: &Value) {
+    let Some(models) = usage.as_object() else {
+        return;
+    };
+    let Some(worker) = snapshot
+        .sessions
+        .iter_mut()
+        .find(|s| s.id == session)
+        .and_then(|s| s.worker.as_mut())
+    else {
+        return;
+    };
+    let entry = worker
+        .model
+        .as_deref()
+        .and_then(|model| {
+            models
+                .iter()
+                .find(|(name, _)| name.as_str() == model || name.starts_with(model))
+        })
+        .or_else(|| (models.len() == 1).then(|| models.iter().next()).flatten());
+    if let Some(window) = entry
+        .and_then(|(_, usage)| usage["contextWindow"].as_u64())
+        .filter(|w| *w > 0)
+    {
+        worker.context_window = Some(window);
+    }
 }

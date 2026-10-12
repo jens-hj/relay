@@ -7004,12 +7004,15 @@ fn tool_activity_updates_in_place_and_discloses_input_at_narrow_widths() {
                 tool: Some(ToolCall {
                     run_id: "turn".into(),
                     name: "commandExecution".into(),
-                    kind: ToolKind::Terminal,
+                    kind: ToolKind::Run,
                     state: ToolState::Running,
                     input: "printf hello".into(),
                     target: "printf hello".into(),
                     directory: Some("/workspace".into()),
                     exit_code: None,
+                    started_ms: None,
+                    finished_ms: None,
+                    detail: None,
                 }),
             });
         });
@@ -7071,8 +7074,8 @@ fn tool_categories_keep_distinct_status_labels_and_file_changes_render() {
             ToolKind::Edit,
             ToolKind::Read,
             ToolKind::Search,
-            ToolKind::Web,
-            ToolKind::Agent,
+            ToolKind::Fetch,
+            ToolKind::Spawn,
             ToolKind::Other,
         ]
         .into_iter()
@@ -7094,6 +7097,9 @@ fn tool_categories_keep_distinct_status_labels_and_file_changes_render() {
                     target: "src/main.rs".into(),
                     directory: None,
                     exit_code: None,
+                    started_ms: None,
+                    finished_ms: None,
+                    detail: None,
                 }),
             });
         }
@@ -7355,12 +7361,15 @@ fn scrolling_loads_one_older_page_and_preserves_the_visible_message() {
                 tool: tools.then(|| ToolCall {
                     run_id: "run".into(),
                     name: "exec_command".into(),
-                    kind: ToolKind::Terminal,
+                    kind: ToolKind::Run,
                     state: ToolState::Completed,
                     input: "pwd".into(),
                     target: "pwd".into(),
                     directory: None,
                     exit_code: Some(0),
+                    started_ms: None,
+                    finished_ms: None,
+                    detail: None,
                 }),
             })
             .collect();
@@ -7409,12 +7418,15 @@ fn scrolling_loads_one_older_page_and_preserves_the_visible_message() {
                 tool: tools.then(|| ToolCall {
                     run_id: "run".into(),
                     name: "exec_command".into(),
-                    kind: ToolKind::Terminal,
+                    kind: ToolKind::Run,
                     state: ToolState::Completed,
                     input: "pwd".into(),
                     target: "pwd".into(),
                     directory: None,
                     exit_code: Some(0),
+                    started_ms: None,
+                    finished_ms: None,
+                    detail: None,
                 }),
             })
             .collect::<Vec<_>>();

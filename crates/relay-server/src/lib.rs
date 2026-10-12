@@ -104,7 +104,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 11 {
+        if version > 12 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -124,7 +124,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 11;"
+             PRAGMA user_version = 12;"
         ).map_err(Error::internal)?;
         let seed =
             serde_json::to_string(&demo_snapshot(defaults.clone())).map_err(Error::internal)?;
@@ -174,6 +174,23 @@ impl Store {
                 .map_err(Error::internal)?;
         }
         if version < 11 {
+            let json: String = connection
+                .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+                    r.get(0)
+                })
+                .map_err(Error::internal)?;
+            let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
+            snapshot.protocol_version = PROTOCOL_VERSION;
+            connection
+                .execute(
+                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                    [serde_json::to_string(&snapshot).map_err(Error::internal)?],
+                )
+                .map_err(Error::internal)?;
+        }
+        if version < 12 {
+            // Protocol 5: sub-agent links, compactions, tool details, and usage records
+            // default to empty. Rewriting normalizes legacy tool kinds.
             let json: String = connection
                 .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
                     r.get(0)
@@ -484,6 +501,9 @@ impl Store {
                     .harness;
                 let session_id = format!("session-{}", envelope.request_id);
                 snapshot.sessions.push(Session {
+                    parent_session_id: None,
+                    spawn: None,
+                    compactions: vec![],
                     workspaces: vec![],
                     selection: Default::default(),
                     conversations: vec![],
