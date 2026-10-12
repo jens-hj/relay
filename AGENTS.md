@@ -17,6 +17,14 @@ Use this repository's `flake.nix` for development tools. Enter `nix develop` (or
 
 Mosaic is private and uses the user's SSH configuration. Keep Cargo and Nix pinned to the same published Mosaic commit. Never commit credentials, replace the SSH URLs with local paths, or silently change dependency pins to work around missing access.
 
+## Credentials and secure handoffs
+
+Never disclose Relay tokens, passwords, private keys, or other credentials in chat, tool output, logs, issue/PR text, screenshots, command examples, or Git. This applies even when the user owns the server or asks how to authenticate. Never use `cat`, `print`, `echo`, shell tracing, or command interpolation that exposes a credential to tool output. A program may read a credential internally for an authorized authentication or rotation task, but its output must contain only non-secret results.
+
+Transfer credentials to the user only as a protected file through an authenticated secure file-transfer channel. Keep the file outside Git, set its permissions to `0600` and its directory to `0700`, and never include its contents in a message or a publicly accessible download URL. Launch examples must load a credentials file without printing its contents. If a secure file-transfer channel is unavailable, explain the limitation; do not fall back to plaintext chat.
+
+If a credential is exposed, treat it as compromised. Rotate it without printing either value, reload or restart the consuming service as required, and verify the replacement works and the old credential is rejected. Preserve unrelated credentials and persistent server data.
+
 ## Architecture and verification
 
 Keep product UI copy plain, functional, and concise. Do not add marketing slogans, taglines, promotional filler, or decorative copy such as "your team, in motion". Use clear names for actions, settings, and state.

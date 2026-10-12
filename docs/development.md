@@ -91,6 +91,16 @@ The default server address is `127.0.0.1:7331`. Both processes require the token
 
 Keep tokens in your shell/session environment or an external secret manager. `just` also loads an optional `.env` file, allowing separate terminals to share your local configuration. `.env` and database files are ignored by Git; the binaries do not load `.env` themselves. The bundled reusable template is [profiles/default.toml](../profiles/default.toml); set `RELAY_DEFAULT_PROFILE` to your own complete template when starting a new workspace.
 
+For a remote native client, transfer the administrator credentials only as a private file over an authenticated secure file-transfer channel. Never paste tokens into chat, command examples, issue text, or logs. Save the supplied `relay-desktop.env` outside the repository, for example at `~/.config/relay/relay-desktop.env`, with directory permissions `0700` and file permissions `0600`. The file contains `RELAY_ENDPOINT` and `RELAY_TOKEN`; keep its contents private.
+
+From the Relay checkout, this command loads the supplied file inside Bash and runs the release desktop with performance diagnostics. It also works when the calling shell is fish:
+
+```sh
+nix develop --command env MOSAIC_RENDER_TIMINGS=1 MOSAIC_GPU_PASS_TIMINGS=1 MOSAIC_HUD=0 RUST_LOG=mosaic_runtime=info,mosaic_render_wgpu=info bash -c 'set +x; set -a; source "$1" || exit; set +a; exec cargo run --locked --release -p relay-desktop' _ ~/.config/relay/relay-desktop.env
+```
+
+After a credential exposure, rotate the server's administrator token, restart the service to load it, and verify that the old credential returns `401` while the replacement authenticates. Existing clients must load the replacement. Do not print either token during verification. See [issue #25](https://github.com/jens-hj/relay/issues/25).
+
 The sidebar groups directors under projects and worker sessions under their director. Click a project row or a director’s chevron to expand or collapse its group; opening a worker elsewhere reveals its ancestors. A project's board icon opens its board. A director's name opens its conversation or starts a task-linked planning conversation; its sliders icon always opens the profile. Expanded projects also offer director creation and project defaults. Arrow keys navigate the visible rows: Up/Down, Home/End, Right to expand or enter a group, and Left to collapse or return to its parent. Enter or Space activates the focused row; Tab reaches its secondary actions. Expansion stays intact during snapshot updates.
 
 The bottom-left connection footer shows the running **Frontend** and **Server** build commits separately from the workspace revision. Production Nix packages embed their source commit at build time; local Cargo builds append `-local`. The authenticated `GET /v1/version` endpoint reports the running server build, without storing build metadata in the database. Unknown server versions are shown explicitly. This makes it possible to identify a browser tab still running an older frontend after a deployment.
@@ -145,10 +155,49 @@ Tests cover server persistence, idempotency, authentication, profile inheritance
 For a repeatable native GPU measurement of the mounted demo UI at large and small viewports, run:
 
 ```sh
-nix develop --command cargo test -p relay-desktop native_fixture_gpu_cost -- --ignored --nocapture
+nix develop --command cargo test --release -p relay-desktop native_fixture_gpu_cost -- --ignored --nocapture
 ```
 
-This manual probe requires GPU timestamp queries, warms up the renderer, and reports median GPU time and render statistics. It excludes window presentation; use the live client's performance HUD to check frame rate on your display. See [issue #24](https://github.com/jens-hj/relay/issues/24).
+The probe uses physical sizes 3771×2141 and 1123×848 with logical layout at scale 1.25 and embedded fonts. It compares clear, solid rectangle, and mounted synthetic Relay content after warmup, including fixture variants with glyph or shape commands removed. These variants retain clip/layer structure but may shrink isolation bounds; compare raster statistics and do not interpret duration differences as additive pipeline costs. Depth 1 waits after each submission and reports available GPU median/p95; depth 3 measures throughput with bounded submissions in flight. GPU timestamps are optional. These offscreen measurements exclude window presentation. See [issue #24](https://github.com/jens-hj/relay/issues/24).
+
+For shape attribution, set `RELAY_GPU_PROBE_WORKLOAD=fixture` and run separately
+with `MOSAIC_SHAPE_PROBE=all`, `solid-box-only`, `general-only`, and `none`.
+These renderer selections omit draws after planning, preserving attachment sizes
+and other commands; they differ from removing shape commands from the scene.
+General instances include circular boxes that do not qualify for the square-box
+path. The first multi-instance upload reports geometry and classification, using
+stderr when no logger is installed. Bounds are potential coverage, not measured
+fragment counts. The `circular_candidate` field records eligibility for the
+rounded-box experiment; it does not select a pipeline. Evaluate shape changes
+in three alternating release runs at each size, using 64 warmup frames and
+192 measured frames with no builds or other tests running concurrently. Require
+at least 10% improvement for the affected shape workload and no repeatable
+full-fixture GPU regression over 5%. Keep throughput runs with
+`MOSAIC_GPU_TIMINGS=0` separate from GPU timestamp runs. Local results do not
+establish live Relay or LG/Niri performance.
+
+The 2026-10-11 local Intel ADL-N/Mesa 26.1.3 comparison rejected the rounded-box
+prototype: neither fixture contained a visible eligible instance, the small
+general-shape workload did not improve, and full-fixture GPU medians remained
+about 10.65 ms large and 2.515 ms small across three alternating release runs.
+The speculative shader was removed; post-planning attribution probes and
+regression coverage remain. These results do not establish UHD 770 performance.
+
+For native presentation comparisons, launch synthetic continuous workloads without a server or credential file:
+
+```sh
+nix develop --command env RELAY_RENDER_PROBE=fixture MOSAIC_HUD=0 \
+  MOSAIC_PRE_PRESENT_NOTIFY=0 MOSAIC_PRESENT_MODE=mailbox \
+  MOSAIC_RENDER_TIMINGS=1 MOSAIC_GPU_TIMINGS=0 \
+  RUST_LOG=mosaic_runtime=info,mosaic_render_wgpu=info \
+  cargo run --locked --release -p relay-desktop
+```
+
+Repeat with `RELAY_RENDER_PROBE=clear` and `solid`, at both physical window sizes. The probe uses synthetic data and does not read settings or start networking. With the accompanying Mosaic diagnostics revision, `MOSAIC_GPU_TIMINGS=0` disables timestamp queries and dominates `MOSAIC_GPU_PASS_TIMINGS=1`; earlier Mosaic releases ignore this variable. Check the effective startup log. Enable `MOSAIC_FRAME_TRACE=1` for short request/dispatch/presentation traces, separately from throughput measurements.
+
+On the LG display at 240.084 Hz, keep scale 1.25, output configuration and workload fixed. Warm up for 10 seconds and alternate three 20-second baseline/experiment runs. Compare notification on/off first, then FIFO/mailbox with latency 2. The existing latency 3 runs showed no clear gain. Record physical dimensions, adapter, effective settings, FPS and p95/p99. A mixed `composite-and-content` pass includes ordinary UI draws; its duration does not isolate compositing. CPU and GPU timing overlap and must not be added. Desktop validation precedes a Mosaic release and coordinated Relay Cargo/Nix pin update.
+
+The diagnostics were checked locally on Intel ADL-N with Mesa 26.1.3/Vulkan. At 3771×2141, the synthetic fixture's serialized median GPU time was 10.72 ms, compared with 0.89 ms after removing shape commands while retaining the same attachment-area statistics. Removing glyphs left 9.82 ms, although that variant collapsed from three passes to one. Clear-only measured 0.05 ms. Bounded fixture throughput was about 91 FPS with GPU queries enabled and disabled. These results identify shape rendering as the main local fixture cost; they exclude presentation, use different hardware/content from the UHD 770 live-client capture, and do not establish target-desktop FPS or a per-pipeline additive breakdown.
 
 The foundation was verified on Linux with Xvfb and Mesa software Vulkan: light/dark rendering, 820/1380-pixel layouts, keyboard navigation, clipboard copying, quoted comment posting, two-client synchronization, and persistence across a server restart. The live GitHub/Codex milestone adds real issue-linked worktree execution, client reconnect, exact-thread continuation, stop, and crash recovery. See the [dogfood validation record](dogfood-validation.md) for evidence and limits. See [local harness validation](harness-validation.md) for Claude Code, execution policies, and persistent local startup. Real desktop window decorations and macOS/Windows behavior still need validation on those environments.
 
@@ -165,6 +214,7 @@ Settings use sliding selectors for Dark / Light / System and the separate light 
 See [project workflows validation](projects-validation.md) for the named-project, publication, native UI and multi-workspace checks.
 
 Tool-call presentation and persisted lifecycle metadata are tracked in [issue #21](https://github.com/jens-hj/relay/issues/21). Database schema 9 introduced persisted tool metadata; schema 10 also retains session commands and conversation history, preserving old transcript bodies while rejecting older servers that would discard new state.
+
 
 External-network transport is tracked in [issue #26](https://github.com/jens-hj/relay/issues/26). Protocol 4/schema 11 require coordinated server, browser, and native-client updates. Command responses are small durable acknowledgements; clients obtain metadata and bounded history through revisioned WebSocket projections. Conversation history loads automatically near the top, retains scroll position, and supports search into unloaded history. Large messages are explicitly previews until loaded; Changes fetches review diffs on demand. The complete authenticated `/v1/snapshot` remains available for diagnostics and is not used by normal client traffic. Browser latency probes use `/v1/ping`, independently of transcript streaming.
 
