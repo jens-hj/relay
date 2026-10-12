@@ -1,0 +1,19 @@
+[package]
+name = "relay-ui"
+description = "Relay's Mosaic component library: tokens, fonts and primitives for the orchestrator design."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mosaic.workspace = true
+
+[[example]]
+name = "gallery"
+path = "examples/gallery/main.rs"
+
+[dev-dependencies]
+wgpu = "29.0.3"
+pollster = "0.4.0"
+image = { version = "0.25", default-features = false, features = ["png"] }

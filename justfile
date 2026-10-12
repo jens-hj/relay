@@ -200,14 +200,14 @@ lint:
 fmt:
     just --fmt
     cargo fmt --all
-    nix run .#mosaic-fmt -- crates/relay-desktop/src
+    nix run .#mosaic-fmt -- crates/relay-desktop/src crates/relay-ui/src crates/relay-ui/examples
     nix fmt
 
 # Verify formatting without changing files.
 fmt-check:
     just --fmt --check
     cargo fmt --all -- --check
-    nix run .#mosaic-fmt -- --check crates/relay-desktop/src
+    nix run .#mosaic-fmt -- --check crates/relay-desktop/src crates/relay-ui/src crates/relay-ui/examples
     nix fmt -- --fail-on-change
 
 # Evaluate the pinned flake.
