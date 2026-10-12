@@ -55,8 +55,8 @@ pub struct TrackMark {
 /// Inset of the first and last step centres from the track ends.
 const END_INSET: f32 = 12.0;
 /// The smallest step's side, and how much each level adds.
-const FIRST_SIDE: f32 = 4.5;
-const SIDE_STEP: f32 = 1.4;
+const FIRST_SIDE: f32 = 3.0;
+const SIDE_STEP: f32 = 2.0;
 /// Half-diagonal of the max diamond.
 const DIAMOND_HALF: f32 = 6.8;
 /// How far the frame sits outside the current step.

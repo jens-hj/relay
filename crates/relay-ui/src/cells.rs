@@ -157,6 +157,9 @@ pub fn CellButton(
     /// An explicit rule edge; by default the ruled container decides.
     #[prop(default = Rule::None)]
     rule: Rule,
+    /// Horizontal content inset. Narrow ledger controls use zero.
+    #[prop(default = 14.0)]
+    horizontal_inset: f32,
     /// The visible contents.
     #[prop(optional)]
     children: Children,
@@ -165,7 +168,8 @@ pub fn CellButton(
     with_ruling(None, || {
         view! {
             button @click:{on_press()} width:fill height:fill min-width:0px align:center
-                justify:center gap:{px(8.0)}px pad:(horizontal:{px(14.0)}px vertical:0px) radius:0px
+                justify:center gap:{px(8.0)}px
+                pad:(horizontal:{px(horizontal_inset)}px vertical:0px) radius:0px
                 fill:(Color::TRANSPARENT) font-color:ground.ink stroke:{rule_visual(edges)}
                 label:{label.get()} disabled:{disabled.get()} hover { fill:ground.hover }
                 pressed { fill:ground.pressed }
