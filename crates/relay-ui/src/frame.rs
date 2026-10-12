@@ -38,15 +38,18 @@ pub enum Corner {
     TopRight,
     BottomRight,
     BottomLeft,
+    /// Two opposing cuts for the ledger effort label.
+    TopRightBottomLeft,
 }
 
-/// Per-corner radii with only `corner` cut by `leg`.
+/// Per-corner radii for the selected corner or opposing ledger corners.
 pub fn cut_radii(corner: Corner, leg: f32) -> CornerRadii {
     match corner {
         Corner::TopLeft => CornerRadii::new(leg, 0.0, 0.0, 0.0),
         Corner::TopRight => CornerRadii::new(0.0, leg, 0.0, 0.0),
         Corner::BottomRight => CornerRadii::new(0.0, 0.0, leg, 0.0),
         Corner::BottomLeft => CornerRadii::new(0.0, 0.0, 0.0, leg),
+        Corner::TopRightBottomLeft => CornerRadii::new(0.0, leg, 0.0, leg),
     }
 }
 
@@ -56,7 +59,7 @@ pub fn inset_leg(leg: f32, inset: f32) -> f32 {
     (leg - (2.0 - std::f32::consts::SQRT_2) * inset).max(0.0)
 }
 
-/// A frame with one 45° cut corner, drawn as an outer shape in the edge
+/// A frame with 45° cut corners, drawn as an outer shape in the edge
 /// colour and an inner panel inset 1px, so the edge stays even along the
 /// cut. Children sit in the inner panel.
 #[component]
@@ -64,7 +67,7 @@ pub fn CutCorner(
     /// Cut size: small 10, card 12 (default), block 14.
     #[prop(default = Cut::Card)]
     cut: Cut,
-    /// The cut corner; top-right by default.
+    /// The cut corner or opposing pair; top-right by default.
     #[prop(default = Corner::TopRight)]
     corner: Corner,
     /// Edge colour.
