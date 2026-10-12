@@ -47,6 +47,19 @@ pub struct Model {
     pub window: State<WindowHandle>,
     pub window_gesture: State<Option<crate::window_chrome::NativeGesture>>,
     pub harness_refresh: State<Option<UnboundedSender<()>>>,
+    pub transport_requests: State<Option<UnboundedSender<StreamRequest>>>,
+    pub history: State<HistoryState>,
+    pub history_loading: State<bool>,
+    pub history_error: State<String>,
+    pub history_generation: State<u64>,
+    pub history_session: State<String>,
+    pub history_before: State<Option<String>>,
+    pub syncing: State<bool>,
+    pub active_run_ids: State<std::collections::BTreeMap<String, String>>,
+    pub remote_search: State<Option<String>>,
+    pub search_snippet: State<String>,
+    pub search_query: State<String>,
+    pub source_anchor: State<Option<relay_core::Anchor>>,
     pub harnesses: State<Vec<HarnessStatus>>,
     pub harness_error: State<String>,
     pub catalogs: State<std::collections::BTreeMap<String, Result<HarnessCatalog, String>>>,
@@ -113,6 +126,7 @@ pub struct Model {
     pending: State<Option<Pending>>,
     pending_conflict: State<bool>,
     pending_ambiguous: State<bool>,
+    search_serial: State<u64>,
     outcome_serial: State<u64>,
 }
 
@@ -122,6 +136,19 @@ impl Model {
             window: State::new(AppContext::detached().window()),
             window_gesture: State::new(None),
             harness_refresh: State::new(None),
+            transport_requests: State::new(None),
+            history: State::new(Default::default()),
+            history_loading: State::new(false),
+            history_error: State::new(String::new()),
+            history_generation: State::new(0),
+            history_session: State::new(String::new()),
+            history_before: State::new(None),
+            syncing: State::new(false),
+            active_run_ids: State::new(Default::default()),
+            remote_search: State::new(None),
+            search_snippet: State::new(String::new()),
+            search_query: State::new(String::new()),
+            source_anchor: State::new(None),
             harnesses: State::new(vec![]),
             harness_error: State::new(String::new()),
             server_build: State::new(None),
@@ -189,6 +216,7 @@ impl Model {
             pending: State::new(None),
             pending_conflict: State::new(false),
             pending_ambiguous: State::new(false),
+            search_serial: State::new(0),
             outcome_serial: State::new(0),
         }
     }
@@ -201,7 +229,49 @@ impl Model {
             .projects
             .iter()
             .any(|p| p.id == self.project.get_untracked());
-        self.snapshot.set(update.snapshot);
+        self.active_run_ids
+            .set(update.history.active_run_ids.clone());
+        let mut snapshot = update.snapshot;
+        let current = update.history.generation == self.history_generation.get_untracked()
+            && update.history.session_id == self.history_session.get_untracked();
+        if current {
+            let before = self.history.get_untracked();
+            let page_arrived = if let Some(cursor) = self.history_before.get_untracked() {
+                update.history.oldest_message_id.as_ref() != Some(&cursor)
+            } else {
+                before.newest_message_id != update.history.newest_message_id
+                    || before.session_id != update.history.session_id
+            };
+            if page_arrived || !update.history_error.is_empty() {
+                self.history_loading.set(false);
+                self.history_before.set(None);
+            }
+            self.history.set(update.history.clone());
+            self.history_error.set(update.history_error.clone());
+        } else if self.transport_requests.get_untracked().is_some() {
+            let previous = self.snapshot.get_untracked();
+            snapshot.messages = previous.messages;
+            snapshot.comments = previous.comments;
+        }
+        self.syncing
+            .set(snapshot.revision < update.acknowledged_revision);
+        self.snapshot.set(snapshot);
+        let new_search = update.search_serial > self.search_serial.get_untracked();
+        if new_search {
+            self.search_serial.set(update.search_serial);
+        }
+        if new_search
+            && let Some((session, generation, query, message, snippet)) = update.search_result
+            && session == self.session.get_untracked()
+            && generation == self.history_generation.get_untracked()
+            && query == self.search.get_untracked()
+        {
+            self.search_snippet.set(snippet);
+            self.remote_search.set(message.clone());
+            if let Some(id) = message {
+                self.focused_message.set(id);
+            }
+        }
 
         if select {
             let snapshot = self.snapshot.get_untracked();
@@ -215,7 +285,15 @@ impl Model {
             }
         }
         self.connected.set(update.connected);
-        self.status.set(update.status);
+        if !update.connected {
+            self.history_loading.set(false);
+            self.history_before.set(None);
+        }
+        self.status.set(if self.syncing.get_untracked() {
+            "Syncing…".into()
+        } else {
+            update.status
+        });
         self.round_trip_ms.set(update.round_trip_ms);
         self.reconcile_pending();
         if update.outcome_serial <= self.outcome_serial.get_untracked() {
@@ -334,6 +412,10 @@ impl Model {
     }
     pub fn submit(&self, command: Command, revision: u64, saved: Saved) {
         if self.busy.get_untracked() {
+            return;
+        }
+        if self.syncing.get_untracked() {
+            self.notice.set("Syncing workspace changes…".into());
             return;
         }
         if !self.connected.get_untracked() {
@@ -550,6 +632,107 @@ impl Model {
                 .unwrap_or_default(),
         );
         self.page.set(Page::Board);
+    }
+    pub fn request_history(&self, request: StreamRequest) -> bool {
+        self.transport_requests
+            .get_untracked()
+            .is_some_and(|sender| sender.send(request).is_ok())
+    }
+    pub fn subscribe_history(&self, session: String) {
+        if self.history_session.get_untracked() == session {
+            return;
+        }
+        let generation = self.history_generation.get_untracked() + 1;
+        self.history_generation.set(generation);
+        self.history_session.set(session.clone());
+        self.history.set(HistoryState::default());
+        self.history_loading.set(!session.is_empty());
+        self.history_before.set(None);
+        self.history_error.set(String::new());
+        self.remote_search.set(None);
+        self.search_snippet.set(String::new());
+        self.search_query.set(String::new());
+        self.request_history(StreamRequest::Subscribe {
+            session_id: session,
+            generation,
+        });
+    }
+    pub fn load_older(&self) -> bool {
+        let history = self.history.get_untracked();
+        if self.history_loading.get_untracked()
+            || !history.has_more
+            || history.session_id != self.session.get_untracked()
+        {
+            return false;
+        }
+        let Some(before) = history.oldest_message_id else {
+            return false;
+        };
+        if !self.request_history(StreamRequest::Older {
+            session_id: history.session_id,
+            generation: history.generation,
+            before: before.clone(),
+        }) {
+            return false;
+        }
+        self.history_loading.set(true);
+        self.history_before.set(Some(before));
+        self.history_error.set(String::new());
+        true
+    }
+    pub fn retry_history(&self) {
+        self.history_loading.set(false);
+        self.history_error.set(String::new());
+        if !self.load_older() {
+            self.request_history(StreamRequest::Subscribe {
+                session_id: self.history_session.get_untracked(),
+                generation: self.history_generation.get_untracked(),
+            });
+            self.history_loading.set(true);
+        }
+    }
+    pub fn load_newer(&self) -> bool {
+        let history = self.history.get_untracked();
+        if self.history_loading.get_untracked()
+            || !history.has_newer
+            || history.session_id != self.session.get_untracked()
+        {
+            return false;
+        }
+        let Some(after) = history.newest_message_id else {
+            return false;
+        };
+        if !self.request_history(StreamRequest::Newer {
+            session_id: history.session_id,
+            generation: history.generation,
+            after,
+        }) {
+            return false;
+        }
+        self.history_loading.set(true);
+        true
+    }
+    pub fn load_message(&self, id: String) {
+        self.request_history(StreamRequest::Detail {
+            session_id: self.session.get_untracked(),
+            generation: self.history_generation.get_untracked(),
+            message_id: id,
+        });
+    }
+    pub fn search_history(&self, backwards: bool) {
+        let query = self.search.get_untracked();
+        if self.search_query.get_untracked() != query {
+            self.remote_search.set(None);
+            self.search_snippet.set(String::new());
+            self.search_query.set(query.clone());
+        }
+        self.request_history(StreamRequest::Search {
+            session_id: self.session.get_untracked(),
+            generation: self.history_generation.get_untracked(),
+            query,
+            after: self.remote_search.get_untracked(),
+            backwards,
+        });
     }
     pub fn open_session(&self, id: String) {
         self.sidebar_open.set(false);

@@ -1,7 +1,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 use futures_util::{SinkExt, StreamExt};
 use mosaic::prelude::StateSender;
-use relay_core::{ApiError, CommandEnvelope, Snapshot};
+use relay_core::{
+    ApiError, CommandAck, CommandEnvelope, HistoryState, Snapshot, StreamEvent, StreamRequest,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -67,6 +69,11 @@ pub struct NetworkState {
     pub connected: bool,
     pub status: String,
     pub round_trip_ms: Option<u64>,
+    pub history: HistoryState,
+    pub history_error: String,
+    pub search_result: Option<(String, u64, String, Option<String>, String)>,
+    pub search_serial: u64,
+    pub acknowledged_revision: u64,
     pub outcome: Option<(String, Result<(), String>)>,
     pub outcome_serial: u64,
     pub outcome_conflict: bool,
@@ -76,10 +83,10 @@ pub struct NetworkState {
 enum Event {
     Build(Option<relay_core::BuildInfo>),
     Harnesses(Result<Vec<relay_core::HarnessStatus>, String>),
-    Snapshot(Snapshot),
+    Stream(StreamEvent),
     Status(bool, String),
     RoundTrip(u64),
-    Outcome(String, Result<Snapshot, String>, bool, bool),
+    Outcome(String, Result<CommandAck, String>, bool, bool),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -89,8 +96,10 @@ pub fn start(
 ) -> (
     mpsc::UnboundedSender<CommandEnvelope>,
     mpsc::UnboundedSender<()>,
+    mpsc::UnboundedSender<StreamRequest>,
 ) {
     let (commands, receiver) = mpsc::unbounded_channel();
+    let (requests, subscriptions) = mpsc::unbounded_channel();
     let (refresh, mut refreshes) = mpsc::unbounded_channel();
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -105,7 +114,7 @@ pub fn start(
                 .build()
                 .expect("HTTP client");
             let (events, mut updates) = mpsc::unbounded_channel();
-            let stream = tokio::spawn(stream(config.clone(), client.clone(), events.clone()));
+            let stream = tokio::spawn(stream(config.clone(), events.clone(), subscriptions));
             let status_config = config.clone();
             let status_client = client.clone();
             let status_events = events.clone();
@@ -146,42 +155,7 @@ pub fn start(
                 ..Default::default()
             };
             while let Some(event) = updates.recv().await {
-                match event {
-                    Event::Build(build) => state.server_build = build,
-                    Event::Harnesses(result) => match result {
-                        Ok(statuses) => {
-                            state.harnesses = statuses;
-                            state.harness_error.clear();
-                        }
-                        Err(error) => state.harness_error = error,
-                    },
-                    Event::Snapshot(snapshot) => replace_snapshot(&mut state, snapshot),
-                    Event::Status(connected, status) => {
-                        state.connected = connected;
-                        state.status = status;
-                        if !connected {
-                            state.round_trip_ms = None;
-                        }
-                    }
-                    Event::RoundTrip(round_trip_ms) => {
-                        state.round_trip_ms = Some(round_trip_ms);
-                    }
-                    Event::Outcome(id, result, conflict, ambiguous) => {
-                        state.outcome_conflict = conflict;
-                        state.outcome_ambiguous = ambiguous;
-                        state.outcome_serial += 1;
-                        state.outcome = Some((
-                            id,
-                            match result {
-                                Ok(snapshot) => {
-                                    replace_snapshot(&mut state, snapshot);
-                                    Ok(())
-                                }
-                                Err(error) => Err(error),
-                            },
-                        ));
-                    }
-                }
+                receive_event(&mut state, event);
                 if ui.send(state.clone()).is_err() {
                     break;
                 }
@@ -191,26 +165,81 @@ pub fn start(
             status_task.abort();
         });
     });
-    (commands, refresh)
+    (commands, refresh, requests)
 }
 
-fn replace_snapshot(state: &mut NetworkState, snapshot: Snapshot) {
-    if snapshot.revision >= state.snapshot.revision {
-        state.snapshot = snapshot;
+fn receive_event(state: &mut NetworkState, event: Event) {
+    match event {
+        Event::Build(build) => state.server_build = build,
+        Event::Harnesses(result) => match result {
+            Ok(statuses) => {
+                state.harnesses = statuses;
+                state.harness_error.clear();
+            }
+            Err(error) => state.harness_error = error,
+        },
+        Event::Stream(event) => match &event {
+            StreamEvent::SearchResult {
+                session_id,
+                generation,
+                query,
+                message_id,
+                snippet,
+            } => {
+                state.search_serial += 1;
+                state.search_result = Some((
+                    session_id.clone(),
+                    *generation,
+                    query.clone(),
+                    message_id.clone(),
+                    snippet.clone(),
+                ))
+            }
+            StreamEvent::Error {
+                message,
+                generation,
+            } => {
+                if *generation == state.history.generation {
+                    state.history_error = message.clone();
+                }
+            }
+            _ => match event.apply(&mut state.snapshot) {
+                Ok(Some(history)) => {
+                    state.history = history;
+                    state.history_error.clear();
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    state.connected = false;
+                    state.status = error;
+                }
+            },
+        },
+        Event::Status(connected, status) => {
+            state.connected = connected;
+            state.status = status;
+            if !connected {
+                state.round_trip_ms = None;
+            }
+        }
+        Event::RoundTrip(ms) => state.round_trip_ms = Some(ms),
+        Event::Outcome(id, result, conflict, ambiguous) => {
+            state.outcome_serial += 1;
+            state.outcome_conflict = conflict;
+            state.outcome_ambiguous = ambiguous;
+            state.outcome = Some((
+                id.clone(),
+                result.and_then(|ack| {
+                    if ack.request_id != id {
+                        return Err("Invalid command acknowledgement".into());
+                    }
+                    state.acknowledged_revision =
+                        state.acknowledged_revision.max(ack.committed_revision);
+                    Ok(())
+                }),
+            ));
+        }
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn read(client: &reqwest::Client, config: &Config) -> Result<Snapshot, String> {
-    decode(
-        client
-            .get(config.url("v1/snapshot"))
-            .bearer_auth(&config.token)
-            .send()
-            .await
-            .map_err(|_| "Cannot reach the Relay server".to_string())?,
-    )
-    .await
 }
 
 fn validate_protocol(snapshot: &Snapshot) -> Result<(), String> {
@@ -225,14 +254,13 @@ fn validate_protocol(snapshot: &Snapshot) -> Result<(), String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn decode(response: reqwest::Response) -> Result<Snapshot, String> {
+async fn decode_ack(response: reqwest::Response) -> Result<CommandAck, String> {
     if response.status().is_success() {
-        let snapshot: Snapshot = response
+        let ack: CommandAck = response
             .json()
             .await
-            .map_err(|_| "Server returned an incompatible snapshot".to_owned())?;
-        validate_protocol(&snapshot)?;
-        return Ok(snapshot);
+            .map_err(|_| "Server returned an incompatible acknowledgement".to_owned())?;
+        return Ok(ack);
     }
     let status = response.status();
     Err(response
@@ -243,53 +271,60 @@ async fn decode(response: reqwest::Response) -> Result<Snapshot, String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn stream(config: Config, client: reqwest::Client, events: mpsc::UnboundedSender<Event>) {
+async fn stream(
+    config: Config,
+    events: mpsc::UnboundedSender<Event>,
+    mut requests: mpsc::UnboundedReceiver<StreamRequest>,
+) {
     let mut delay = 1;
+    let mut selected = None;
     loop {
-        let result = async {
-            let snapshot = read(&client, &config).await?;
-            events.send(Event::Snapshot(snapshot)).map_err(|_| "Client closed")?;
-            let mut url = config.url("v1/events");
-            let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
-            url.set_scheme(scheme).map_err(|_| "Invalid event endpoint")?;
-            let mut request = url.as_str().into_client_request().map_err(|_| "Invalid event request")?;
-            request.headers_mut().insert("authorization", HeaderValue::from_str(&format!("Bearer {}", config.token)).map_err(|_| "Invalid token")?);
-            let (mut socket, _) = tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::connect_async(request)).await.map_err(|_| "Event connection timed out")?.map_err(|_| "Event connection failed")?;
-            delay = 1;
-            events.send(Event::Status(true, "Connected".into())).map_err(|_| "Client closed")?;
-            let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
-            let mut last_response = tokio::time::Instant::now();
-            let mut ping_sent = None;
-            loop {
-                tokio::select! {
-                    incoming = socket.next() => match incoming {
-                        Some(Ok(Message::Text(json))) => {
-                            last_response = tokio::time::Instant::now();
-                            let snapshot = serde_json::from_str(&json).map_err(|_| "Invalid server event")?;
-                            validate_protocol(&snapshot)?;
-                            events.send(Event::Snapshot(snapshot)).map_err(|_| "Client closed")?;
-                        },
-                        Some(Ok(Message::Ping(data))) => { last_response = tokio::time::Instant::now(); socket.send(Message::Pong(data)).await.map_err(|_| "Event connection lost")?; },
-                        Some(Ok(Message::Pong(_))) => {
-                            let received = tokio::time::Instant::now();
-                            last_response = received;
-                            if let Some(sent) = ping_sent.take() {
-                                let round_trip_ms = received.duration_since(sent).as_millis() as u64;
-                                events.send(Event::RoundTrip(round_trip_ms)).map_err(|_| "Client closed")?;
-                            }
-                        },
-                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return Err::<(), String>("Connection lost".into()),
-                        _ => {},
+        let result: Result<(),String>=async {
+            let mut url=config.url("v1/events");
+            let scheme=if url.scheme()=="https" {"wss"} else {"ws"};
+            url.set_scheme(scheme).map_err(|_|"Invalid event endpoint")?;
+            let mut request=url.as_str().into_client_request().map_err(|_|"Invalid event request")?;
+            request.headers_mut().insert("authorization",HeaderValue::from_str(&format!("Bearer {}",config.token)).map_err(|_|"Invalid token")?);
+            let (mut socket, _)=tokio::time::timeout(Duration::from_secs(10),tokio_tungstenite::connect_async(request)).await.map_err(|_|"Event connection timed out")?.map_err(|_|"Event connection failed")?;
+            let mut baseline=Snapshot::default();
+            let initial=tokio::time::timeout(Duration::from_secs(10),socket.next()).await.map_err(|_|"Workspace handshake timed out")?.ok_or("Connection lost")?.map_err(|_|"Connection lost")?;
+            let Message::Text(json)=initial else {return Err("Invalid workspace handshake".to_owned());};
+            let event:StreamEvent=serde_json::from_str(&json).map_err(|_|"Invalid server event")?;
+            if !matches!(event,StreamEvent::Reset{..}) {return Err("Invalid workspace handshake".into());}
+            event.apply(&mut baseline)?;
+            validate_protocol(&baseline)?;
+            events.send(Event::Stream(event)).map_err(|_|"Client closed")?;
+            events.send(Event::Status(true,"Connected".into())).map_err(|_|"Client closed")?;
+            delay=1;
+            // Discard obsolete paging requests after reconnect; restore the selected recent page.
+            while let Ok(request)=requests.try_recv() {if matches!(request,StreamRequest::Subscribe{..}) {selected=Some(request);}}
+            if let Some(request)=&selected {socket.send(Message::Text(serde_json::to_string(request).map_err(|_|"Invalid subscription")?.into())).await.map_err(|_|"Connection lost")?;}
+            let mut heartbeat=tokio::time::interval(Duration::from_secs(20));
+            let mut ping_sent:Option<tokio::time::Instant>=None;
+            loop {tokio::select! {
+                request=requests.recv()=>if let Some(request)=request {
+                    if matches!(request,StreamRequest::Subscribe{..}) {selected=Some(request.clone());}
+                    socket.send(Message::Text(serde_json::to_string(&request).map_err(|_|"Invalid conversation request")?.into())).await.map_err(|_|"Connection lost")?;
+                },
+                incoming=socket.next()=>match incoming {
+                    Some(Ok(Message::Text(json)))=>{
+                        let event:StreamEvent=serde_json::from_str(&json).map_err(|_|"Invalid server event")?;
+                        event.apply(&mut baseline)?;
+                        events.send(Event::Stream(event)).map_err(|_|"Client closed")?;
                     },
-                    _ = heartbeat.tick() => {
-                        if last_response.elapsed() > Duration::from_secs(45) { return Err("Event connection stopped responding".into()); }
-                        if ping_sent.is_none() {
-                            socket.send(Message::Ping(Vec::new().into())).await.map_err(|_| "Event connection lost")?;
-                            ping_sent = Some(tokio::time::Instant::now());
-                        }
-                    },
-                }
-            }
+                    Some(Ok(Message::Ping(data)))=>{socket.send(Message::Pong(data)).await.map_err(|_|"Connection lost")?;},
+                    Some(Ok(Message::Pong(_)))=>{if let Some(sent)=ping_sent.take() {events.send(Event::RoundTrip(sent.elapsed().as_millis() as u64)).map_err(|_|"Client closed")?;}},
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None=>return Err("Connection lost".into()),
+                    _=>{},
+                },
+                _=heartbeat.tick()=>{
+                    if ping_sent.is_some_and(|sent|sent.elapsed()>Duration::from_secs(30)) {return Err("Event connection stopped responding".into());}
+                    if ping_sent.is_none() {
+                        socket.send(Message::Ping(Vec::new().into())).await.map_err(|_|"Connection lost")?;
+                        ping_sent=Some(tokio::time::Instant::now());
+                    }
+                },
+            }}
         }.await;
         if let Err(message) = result
             && events
@@ -325,17 +360,12 @@ async fn write(
         let (result, conflict, ambiguous) = match client.post(config.url(endpoint)).bearer_auth(&config.token).header("X-Relay-Protocol", relay_core::PROTOCOL_VERSION.to_string()).json(&command).send().await {
             Ok(response) => {
                 let status = response.status();
-                let result = decode(response).await;
+                let result = decode_ack(response).await.and_then(|ack|if ack.request_id==command.request_id {Ok(ack)} else {Err("Invalid command acknowledgement".into())});
                 let ambiguous = result.is_err() && (status.is_success() || status.is_server_error());
                 (result, status == reqwest::StatusCode::CONFLICT, ambiguous)
             }
             Err(_) => (Err("Request could not be confirmed. Your draft is retained; exact retry preserves the original request ID and revision.".into()), false, true),
         };
-        if result.is_err()
-            && let Ok(snapshot) = read(&client, &config).await
-        {
-            let _ = events.send(Event::Snapshot(snapshot));
-        }
         if events
             .send(Event::Outcome(
                 command.request_id,
@@ -353,38 +383,26 @@ async fn write(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn websocket_heartbeat_publishes_round_trip_time() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (mut http, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                let mut buffer = [0; 1024];
-                let length = http.read(&mut buffer).await.unwrap();
-                assert_ne!(length, 0);
-                request.extend_from_slice(&buffer[..length]);
-            }
-            let body = serde_json::to_string(&Snapshot {
-                protocol_version: relay_core::PROTOCOL_VERSION,
-                ..Default::default()
-            })
-            .unwrap();
-            http.write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-
             let (socket, _) = listener.accept().await.unwrap();
             let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let reset = StreamEvent::Reset {
+                protocol_version: relay_core::PROTOCOL_VERSION,
+                snapshot: Box::new(Snapshot {
+                    protocol_version: relay_core::PROTOCOL_VERSION,
+                    ..Default::default()
+                }),
+                history: HistoryState::default(),
+            };
+            socket
+                .send(Message::Text(serde_json::to_string(&reset).unwrap().into()))
+                .await
+                .unwrap();
             let Some(Ok(Message::Ping(data))) = socket.next().await else {
                 panic!("expected client heartbeat ping");
             };
@@ -395,9 +413,9 @@ mod tests {
             endpoint: reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
             token: "test-only".into(),
         };
-        let client = reqwest::Client::new();
+        let (_requests, receiver) = mpsc::unbounded_channel();
         let (events, mut updates) = mpsc::unbounded_channel();
-        let task = tokio::spawn(stream(config, client, events));
+        let task = tokio::spawn(stream(config, events, receiver));
         let round_trip = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if let Some(Event::RoundTrip(round_trip)) = updates.recv().await {
@@ -417,7 +435,7 @@ mod tests {
         assert!(
             validate_protocol(&Snapshot::default())
                 .unwrap_err()
-                .contains("requires protocol 3")
+                .contains("requires protocol 4")
         );
         assert!(
             validate_protocol(&Snapshot {
@@ -436,14 +454,49 @@ mod tests {
             },
             ..Default::default()
         };
-        replace_snapshot(
+        receive_event(
             &mut state,
-            Snapshot {
+            Event::Stream(StreamEvent::Update {
+                base_revision: 6,
                 revision: 7,
-                ..Default::default()
-            },
+                delta: relay_core::Delta::Replace {
+                    value: serde_json::json!({}),
+                },
+                history: HistoryState::default(),
+            }),
         );
         assert_eq!(state.snapshot.revision, 8);
+    }
+
+    #[test]
+    fn acknowledgement_does_not_advance_state_before_the_stream() {
+        let mut state = NetworkState::default();
+        receive_event(
+            &mut state,
+            Event::Stream(StreamEvent::Reset {
+                protocol_version: relay_core::PROTOCOL_VERSION,
+                snapshot: Box::new(relay_core::demo_snapshot(
+                    relay_core::DirectorProfile::default(),
+                )),
+                history: HistoryState::default(),
+            }),
+        );
+        let before = state.snapshot.clone();
+        receive_event(
+            &mut state,
+            Event::Outcome(
+                "request".into(),
+                Ok(CommandAck {
+                    request_id: "request".into(),
+                    committed_revision: 1,
+                }),
+                false,
+                false,
+            ),
+        );
+        assert_eq!(state.snapshot, before);
+        assert_eq!(state.acknowledged_revision, 1);
+        assert!(state.outcome.unwrap().1.is_ok());
     }
 }
 
@@ -467,39 +520,25 @@ mod outcome_tests {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             let server = std::thread::spawn(move || {
-                for first in [true, false] {
-                    let (mut socket, _) = listener.accept().unwrap();
-                    socket
-                        .set_read_timeout(Some(Duration::from_secs(2)))
-                        .unwrap();
-                    let mut request = Vec::new();
-                    while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                        let mut buffer = [0; 1024];
-                        let length = socket.read(&mut buffer).unwrap();
-                        assert_ne!(length, 0);
-                        request.extend_from_slice(&buffer[..length]);
-                    }
-                    if first {
-                        assert!(
-                            String::from_utf8_lossy(&request)
-                                .to_lowercase()
-                                .contains("x-relay-protocol: 3")
-                        );
-                    }
-                    if first && status.is_none() {
-                        continue;
-                    }
-                    let code = if first { status.unwrap() } else { 200 };
-                    let body = if first {
-                        "invalid or rejected response".into()
-                    } else {
-                        serde_json::to_string(&Snapshot {
-                            protocol_version: relay_core::PROTOCOL_VERSION,
-                            ..Default::default()
-                        })
-                        .unwrap()
-                    };
-                    write!(socket, "HTTP/1.1 {code} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let mut buffer = [0; 1024];
+                    let length = socket.read(&mut buffer).unwrap();
+                    assert_ne!(length, 0);
+                    request.extend_from_slice(&buffer[..length]);
+                }
+                assert!(
+                    String::from_utf8_lossy(&request)
+                        .to_lowercase()
+                        .contains("x-relay-protocol: 4")
+                );
+                if let Some(code) = status {
+                    let body = "invalid or rejected response";
+                    write!(socket,"HTTP/1.1 {code} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
                 }
             });
             let config = Config {
@@ -523,7 +562,6 @@ mod outcome_tests {
             drop(commands);
             let (events, mut updates) = mpsc::unbounded_channel();
             write(config, client, receiver, events).await;
-            assert!(matches!(updates.recv().await, Some(Event::Snapshot(_))));
             let Some(Event::Outcome(id, result, actual_conflict, actual_ambiguous)) =
                 updates.recv().await
             else {

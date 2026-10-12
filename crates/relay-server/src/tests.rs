@@ -828,7 +828,7 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
     let current: Snapshot = client
         .get(format!("http://{addr}/v1/snapshot"))
         .bearer_auth(token)
-        .header("x-relay-protocol", "3")
+        .header("x-relay-protocol", relay_core::PROTOCOL_VERSION.to_string())
         .send()
         .await
         .unwrap()
@@ -841,7 +841,7 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
         client
             .post(format!("http://{addr}/v1/commands"))
             .bearer_auth(token)
-            .header("x-relay-protocol", "3")
+            .header("x-relay-protocol", relay_core::PROTOCOL_VERSION.to_string())
             .json(e)
             .send()
     };
@@ -852,7 +852,7 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
         client
             .get(format!("http://{addr}/v1/snapshot"))
             .bearer_auth(token)
-            .header("x-relay-protocol", "3")
+            .header("x-relay-protocol", relay_core::PROTOCOL_VERSION.to_string())
             .send()
     };
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -885,8 +885,10 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
     let (mut socket, _) = tokio_tungstenite::connect_async(upgrade.clone())
         .await
         .unwrap();
-    let first: Snapshot =
+    let event: StreamEvent =
         serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    let mut first = Snapshot::default();
+    event.apply(&mut first).unwrap();
     assert_eq!(
         first
             .sessions
@@ -900,8 +902,10 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
     );
     drop(socket);
     let (mut socket, _) = tokio_tungstenite::connect_async(upgrade).await.unwrap();
-    let latest: Snapshot =
+    let event: StreamEvent =
         serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+    let mut latest = Snapshot::default();
+    event.apply(&mut latest).unwrap();
     assert_eq!(
         latest
             .sessions
@@ -1015,7 +1019,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            10
+            11
         );
         drop(store);
         let mut reopened = Store::open(&db, DirectorProfile::default()).unwrap();
@@ -1046,7 +1050,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 11)
+        .pragma_update(None, "user_version", 12)
         .unwrap();
     drop(store);
     let error = Store::open(&db, DirectorProfile::default()).err().unwrap();
@@ -1056,7 +1060,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        11
+        12
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {

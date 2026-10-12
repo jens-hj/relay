@@ -1,6 +1,6 @@
 use super::*;
 use crate::browser;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use gloo_net::websocket::Message;
 use wasm_bindgen_futures::spawn_local;
 
@@ -10,14 +10,16 @@ pub fn start(
 ) -> (
     mpsc::UnboundedSender<CommandEnvelope>,
     mpsc::UnboundedSender<()>,
+    mpsc::UnboundedSender<StreamRequest>,
 ) {
     let (commands, mut receiver) = mpsc::unbounded_channel::<CommandEnvelope>();
+    let (requests, subscriptions) = mpsc::unbounded_channel();
     let (refresh, mut refreshes) = mpsc::unbounded_channel();
     let (events, mut updates) = mpsc::unbounded_channel();
     let stream_events = events.clone();
     let stream_config = config.clone();
     spawn_local(async move {
-        stream(stream_config, stream_events).await;
+        stream(stream_config, stream_events, subscriptions).await;
     });
     let status_events = events.clone();
     let status_config = config.clone();
@@ -65,22 +67,27 @@ pub fn start(
             } else {
                 "v1/commands"
             };
-            let (result, conflict, ambiguous) =
+            let (result, conflict, ambiguous) = tokio::select! {
+                result=async {
                 match browser::send(&config, client.post(config.url(path)).json(&command)).await {
                     Ok(response) => {
                         let status = response.status();
-                        let result = decode(response).await;
+                        let result = decode_ack(response).await.and_then(|ack| {
+                            if ack.request_id == command.request_id {
+                                Ok(ack)
+                            } else {
+                                Err("Invalid command acknowledgement".into())
+                            }
+                        });
                         let ambiguous =
                             result.is_err() && (status.is_success() || status.is_server_error());
                         (result, status == reqwest::StatusCode::CONFLICT, ambiguous)
                     }
                     Err(error) => (Err(error), false, true),
-                };
-            if result.is_err()
-                && let Ok(snapshot) = read(&config).await
-            {
-                let _ = events.send(Event::Snapshot(snapshot));
-            }
+                }
+                }=>result,
+                _=browser::sleep(30_000)=>(Err("Acknowledgement timed out; exact retry preserves its ID".into()),false,true),
+            };
             if events
                 .send(Event::Outcome(
                     command.request_id,
@@ -100,49 +107,21 @@ pub fn start(
             ..Default::default()
         };
         while let Some(event) = updates.recv().await {
-            match event {
-                Event::Build(build) => state.server_build = build,
-                Event::Harnesses(result) => match result {
-                    Ok(statuses) => {
-                        state.harnesses = statuses;
-                        state.harness_error.clear();
-                    }
-                    Err(error) => state.harness_error = error,
-                },
-                Event::Snapshot(snapshot) => replace_snapshot(&mut state, snapshot),
-                Event::Status(connected, status) => {
-                    state.connected = connected;
-                    state.status = status;
-                    if !connected {
-                        state.round_trip_ms = None;
-                    }
-                }
-                Event::RoundTrip(ms) => state.round_trip_ms = Some(ms),
-                Event::Outcome(id, result, conflict, ambiguous) => {
-                    state.outcome_serial += 1;
-                    state.outcome_conflict = conflict;
-                    state.outcome_ambiguous = ambiguous;
-                    state.outcome = Some((
-                        id,
-                        result.map(|snapshot| replace_snapshot(&mut state, snapshot)),
-                    ));
-                }
-            }
+            receive_event(&mut state, event);
             if ui.send(state.clone()).is_err() {
                 break;
             }
         }
     });
-    (commands, refresh)
+    (commands, refresh, requests)
 }
-async fn decode(response: reqwest::Response) -> Result<Snapshot, String> {
+async fn decode_ack(response: reqwest::Response) -> Result<CommandAck, String> {
     if response.status().is_success() {
-        let snapshot = response
+        let ack = response
             .json()
             .await
-            .map_err(|_| "Server returned an incompatible snapshot")?;
-        validate_protocol(&snapshot)?;
-        Ok(snapshot)
+            .map_err(|_| "Server returned an incompatible acknowledgement")?;
+        Ok(ack)
     } else {
         Err(response
             .json::<ApiError>()
@@ -151,43 +130,71 @@ async fn decode(response: reqwest::Response) -> Result<Snapshot, String> {
             .unwrap_or_else(|_| "Server rejected the request".into()))
     }
 }
-async fn read(config: &Config) -> Result<Snapshot, String> {
-    decode(
-        browser::send(
-            config,
-            reqwest::Client::new().get(config.url("v1/snapshot")),
-        )
-        .await?,
-    )
-    .await
-}
-async fn stream(config: Config, events: mpsc::UnboundedSender<Event>) {
+async fn stream(
+    config: Config,
+    events: mpsc::UnboundedSender<Event>,
+    mut requests: mpsc::UnboundedReceiver<StreamRequest>,
+) {
+    let probe_config = config.clone();
+    let probe_events = events.clone();
+    spawn_local(async move {
+        let client = reqwest::Client::new();
+        loop {
+            let sent = crate::platform::Instant::now();
+            let result = tokio::select! {
+                result=async {
+                    let response=browser::send(&probe_config,client.get(probe_config.url("v1/ping"))).await?;
+                    if !response.status().is_success() {return Err("Probe failed".to_owned());}
+                    response.bytes().await.map_err(|_|"Probe failed".to_owned())?;
+                    Ok::<_,String>(())
+                }=>result,
+                _=browser::sleep(10_000)=>Err("Probe timed out".into()),
+            };
+            if result.is_ok()
+                && probe_events
+                    .send(Event::RoundTrip(sent.elapsed().as_millis() as u64))
+                    .is_err()
+            {
+                break;
+            }
+            browser::sleep(20_000).await;
+        }
+    });
+    let mut selected = None;
     let mut delay = 1;
     loop {
-        let result: Result<(),String> = async {
-            let snapshot=read(&config).await?;
-            events.send(Event::Snapshot(snapshot)).map_err(|_| "Client closed")?;
+        let result:Result<(),String>=async {
             let mut socket=browser::connect(&config,"v1/events").await?;
+            let initial=tokio::select! {
+                initial=socket.next()=>initial.ok_or("Connection lost")?.map_err(|_|"Connection lost")?,
+                _=browser::sleep(10_000)=>return Err("Workspace handshake timed out".into()),
+            };
+            let Message::Text(json)=initial else {return Err("Invalid workspace handshake".into());};
+            let event:StreamEvent=serde_json::from_str(&json).map_err(|_|"Invalid server event")?;
+            if !matches!(event,StreamEvent::Reset{..}) {return Err("Invalid workspace handshake".into());}
+            let mut baseline=Snapshot::default();
+            event.apply(&mut baseline)?;
+            validate_protocol(&baseline)?;
+            events.send(Event::Stream(event)).map_err(|_|"Client closed")?;
+            events.send(Event::Status(true,"Connected".into())).map_err(|_|"Client closed")?;
             delay=1;
-            events.send(Event::Status(true,"Connected".into())).map_err(|_| "Client closed")?;
-            loop { tokio::select! {
+            while let Ok(request)=requests.try_recv() {if matches!(request,StreamRequest::Subscribe{..}) {selected=Some(request);}}
+            if let Some(request)=&selected {socket.send(Message::Text(serde_json::to_string(request).map_err(|_|"Invalid subscription")?)).await.map_err(|_|"Connection lost")?;}
+            loop {tokio::select! {
+                request=requests.recv()=>if let Some(request)=request {
+                    if matches!(request,StreamRequest::Subscribe{..}) {selected=Some(request.clone());}
+                    socket.send(Message::Text(serde_json::to_string(&request).map_err(|_|"Invalid conversation request")?)).await.map_err(|_|"Connection lost")?;
+                },
                 message=socket.next()=>match message {
                     Some(Ok(Message::Text(json)))=> {
-                        let snapshot=serde_json::from_str(&json).map_err(|_| "Incompatible event snapshot")?;
-                        validate_protocol(&snapshot)?;
-                        events.send(Event::Snapshot(snapshot)).map_err(|_| "Client closed")?;
+                        let event:StreamEvent=serde_json::from_str(&json).map_err(|_|"Invalid server event")?;
+                        event.apply(&mut baseline)?;
+                        events.send(Event::Stream(event)).map_err(|_|"Client closed")?;
                     },
                     Some(Ok(_))=>{},
                     _=>return Err("Connection lost".into()),
                 },
-                // Browsers cannot send WebSocket control pings. Probe authenticated HTTP instead.
-                _=browser::sleep(20_000)=> {
-                    let sent=crate::platform::Instant::now();
-                    let snapshot=read(&config).await?;
-                    events.send(Event::RoundTrip(sent.elapsed().as_millis() as u64)).map_err(|_| "Client closed")?;
-                    events.send(Event::Snapshot(snapshot)).map_err(|_| "Client closed")?;
-                }
-            } }
+            }}
         }.await;
         if let Err(error) = result
             && events

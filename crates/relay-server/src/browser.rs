@@ -598,12 +598,12 @@ async fn logout(State(w): State<Workspace>, headers: HeaderMap) -> Result<Respon
     if headers
         .get("x-relay-protocol")
         .and_then(|v| v.to_str().ok())
-        != Some("3")
+        != Some(PROTOCOL_VERSION.to_string().as_str())
     {
         return Err(Error::new(
             StatusCode::CONFLICT,
             "protocol_mismatch",
-            "Relay protocol 3 is required",
+            "Relay protocol 4 is required",
         ));
     }
     if let Some(raw) = cookie(&headers, COOKIE) {

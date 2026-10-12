@@ -48,6 +48,7 @@ struct History {
 #[derive(Default)]
 pub struct Controller {
     surfaces: BTreeMap<String, (Element, Rc<RefCell<EditBuffer>>)>,
+    messages: BTreeMap<String, Element>,
     undo: Vec<History>,
     redo: Vec<History>,
     caret: Option<(String, usize)>,
@@ -59,6 +60,8 @@ pub struct Controller {
     preedit: Option<StagedPreedit>,
     viewport: Option<Scroll>,
     resize_follow: bool,
+    history_anchor: Option<(String, f32)>,
+    history_scroll_seen: bool,
 }
 
 type Shared = Rc<RefCell<Controller>>;
@@ -195,6 +198,13 @@ pub fn begin_reply(
     let Location::Source { message, start, .. } = location else {
         return;
     };
+    if model.history.get_untracked().preview_ids.contains(message) {
+        model.load_message(message.clone());
+        model
+            .notice
+            .set("Loading the full message. Select the passage again when it is ready.".into());
+        return;
+    }
     let snapshot = model.snapshot.get_untracked();
     let Some(source) = snapshot.messages.iter().find(|m| &m.id == message) else {
         return;
@@ -493,6 +503,10 @@ fn find_next(model: Model, controller: &Shared, direction: i32) {
         controller.borrow_mut().search_hit = None;
         return;
     }
+    if model.transport_requests.get_untracked().is_some() {
+        model.search_history(direction < 0);
+        return;
+    }
     let mut entries = controller
         .borrow()
         .surfaces
@@ -533,6 +547,28 @@ fn find_next(model: Model, controller: &Shared, direction: i32) {
 }
 
 fn go_to_source(model: Model, controller: &Shared, anchor: &relay_core::Anchor) {
+    controller.borrow_mut().history_anchor = None;
+    if model.transport_requests.get_untracked().is_some()
+        && (model
+            .history
+            .get_untracked()
+            .preview_ids
+            .contains(&anchor.message_id)
+            || !model
+                .snapshot
+                .get_untracked()
+                .messages
+                .iter()
+                .any(|m| m.id == anchor.message_id))
+    {
+        model.source_anchor.set(Some(anchor.clone()));
+        model.request_history(relay_core::StreamRequest::Around {
+            session_id: model.session.get_untracked(),
+            generation: model.history_generation.get_untracked(),
+            message_id: anchor.message_id.clone(),
+        });
+        return;
+    }
     let prefix = format!("source-{}-", anchor.message_id);
     let selected = controller
         .borrow()
@@ -713,6 +749,8 @@ pub fn Conversation(model: Model) -> Element {
             documents.redo.clear();
             documents.requested = None;
             documents.selection = None;
+            documents.history_anchor = None;
+            documents.history_scroll_seen = false;
         }
     });
     let completion_controller = controller.get_untracked();
@@ -923,7 +961,7 @@ pub fn Conversation(model: Model) -> Element {
                                 @click:{model.open_profile(EditTarget::Director(session.get_untracked().map(|s|s.director_id).unwrap_or_else(||model.worker_director.get_untracked())));}
                                 label:"Director profile" "Profile"
                             button #relay.action
-                                @click:{details.set(if details.get_untracked()=="changes" {String::new()}else{"changes".into()});}
+                                @click:{if details.get_untracked()!="changes" {model.request_history(relay_core::StreamRequest::Review{session_id:model.session.get_untracked()});}details.set(if details.get_untracked()=="changes" {String::new()}else{"changes".into()});}
                                 disabled:{session.get().is_none()} label:"Toggle change review"
                                 "Changes"
                             button #relay.action
@@ -1065,6 +1103,21 @@ pub fn Conversation(model: Model) -> Element {
                 col height:min-content
                     pad:(left:{px(if compact.get() {12.0} else {28.0})}px right:{px(if compact.get() {12.0} else {36.0})}px top:{px(22.0)}px bottom:{px(14.0)}px)
                     gap:{px(16.0)}px {
+                    if model.searching.get() && !model.search.get().is_empty() && !model.search_snippet.get().is_empty() {
+                        row height:min-content {
+                            text font-size:{px(12.0)}px font-color:ink.muted {model.search_snippet.get()}
+                        }
+                    }
+                    if model.transport_requests.get().is_some() {
+                        row height:{px(22.0)}px align:center {
+                            text font-size:{px(12.0)}px font-color:ink.muted
+                                {if !model.history_error.get().is_empty() {model.history_error.get()} else if model.history_loading.get() {"Loading conversation…".into()} else {String::new()}}
+                            if !model.history_error.get().is_empty() {
+                                button #relay.action @click:{model.retry_history();}
+                                    label:"Retry loading history" "Retry"
+                            }
+                        }
+                    }
                     for (_, message) in {model.snapshot.get().messages.into_iter().filter(|m|m.session_id==model.session.get()).map(|m|(m.id.clone(),m)).collect::<Vec<_>>()} {
                         col height:min-content {
                             TranscriptMessage model:(model) message-id:(message.id.clone())
@@ -1268,6 +1321,28 @@ pub fn Conversation(model: Model) -> Element {
             {
                 document_scroll.root().on_layout(move |rect| viewport_size.set(rect.size));
                 controller.get_untracked().borrow_mut().viewport=Some(document_scroll.clone());
+                let gesture_controller=controller.get_untracked();
+                document_scroll.root().on_pointer(move |event,_| {
+                    if matches!(event.kind,PointerEventKind::Wheel{..}|PointerEventKind::Down(_)) || (event.pointer_type==PointerType::Touch && matches!(event.kind,PointerEventKind::Move)) {let mut state=gesture_controller.borrow_mut();state.history_scroll_seen=true;state.history_anchor=None;}
+                });
+                let paging_scroll=document_scroll.clone();
+                let paging_controller=controller.get_untracked();
+                Effect::new(move || {
+                    let offset=paging_scroll.offset();
+                    mosaic::core::reactive::untracked(|| {
+                        if !paging_controller.borrow().history_scroll_seen || model.transport_requests.get_untracked().is_none() || model.history_loading.get_untracked() {return;}
+                        let root=paging_scroll.root().layout_rect();
+                        if offset.y<px(200.0) {
+                            if !model.history.get_untracked().has_more {return;}
+                            let ui=model.ui.get_untracked();
+                            let anchor=paging_controller.borrow().messages.iter().filter_map(|(key,field)|ui.inspection_rect(field.id()).map(|rect|(key.clone(),rect))).filter(|(_,rect)|rect.origin.y+rect.size.height>=root.origin.y).min_by(|(_,a),(_,b)|a.origin.y.total_cmp(&b.origin.y)).map(|(key,rect)|(key,rect.origin.y));
+                            if model.load_older() {paging_controller.borrow_mut().history_anchor=anchor;}
+                        } else if offset.y+root.size.height>=paging_scroll.content().layout_rect().size.height-px(200.0) {
+                            model.load_newer();
+                        }
+                    });
+                });
+                let layout_controller=controller.get_untracked();
                 let follow_scroll = document_scroll.clone();
                 let previous = Rc::new(Cell::new(None::<(f32, f32)>));
                 document_scroll.content().on_layout(move |rect| {
@@ -1275,8 +1350,23 @@ pub fn Conversation(model: Model) -> Element {
                     let was_at_bottom = previous.get().is_none_or(|(content, viewport)|
                         follow_scroll.offset().y >= (content - viewport).max(0.0) - px(4.0));
                     previous.set(Some((rect.size.height, height)));
-                    if was_at_bottom {
+                    let anchor=if !model.history_loading.get_untracked() {layout_controller.borrow().history_anchor.clone()} else {None};
+                    if let Some((key,y))=anchor {
+                        if let Some(field)=layout_controller.borrow().messages.get(&key) && let Some(rect)=model.ui.get_untracked().inspection_rect(field.id()) {
+                            follow_scroll.scroll_to(Vector2::new(0.0,follow_scroll.offset().y+rect.origin.y-y));
+                        }
+                    } else if was_at_bottom && !model.history.get_untracked().has_newer {
                         follow_scroll.scroll_to(Vector2::new(0.0, (rect.size.height - height).max(0.0)));
+                    }
+                    if let Some(anchor)=model.source_anchor.get_untracked()
+                        && !model.history.get_untracked().preview_ids.contains(&anchor.message_id)
+                        && model.snapshot.get_untracked().messages.iter().any(|m|m.id==anchor.message_id)
+                    {
+                        go_to_source(model,&layout_controller,&anchor);
+                        model.source_anchor.set(None);
+                    } else if let Some(id)=model.remote_search.get_untracked() {
+                        let target=layout_controller.borrow().messages.get(&id).filter(|field|model.ui.get_untracked().inspection_rect(field.id()).is_some()).cloned();
+                        if let Some(field)=target && model.focused_message.get_untracked()==id {layout_controller.borrow_mut().history_anchor=None;field.reveal();model.focused_message.set(String::new());}
                     }
                 });
             }
@@ -1328,9 +1418,17 @@ pub fn Conversation(model: Model) -> Element {
     mosaic::core::reactive::on_cleanup(move || {
         cleanup_controller.borrow_mut().viewport = None;
     });
+    let keys_controller = controller.get_untracked();
+    root.on_key(move |_, _| {
+        keys_controller.borrow_mut().history_anchor = None;
+    });
     let drag_controller = controller.get_untracked();
     root.on_pointer(move |event, _| match event.kind {
+        PointerEventKind::Wheel { .. } => {
+            drag_controller.borrow_mut().history_scroll_seen = true;
+        }
         PointerEventKind::Down(PointerButton::Primary) => {
+            drag_controller.borrow_mut().history_scroll_seen = true;
             let state = drag_controller.borrow();
             if !state
                 .viewport
@@ -1444,7 +1542,7 @@ fn TranscriptMessage(
         )
     });
     let prompt = Derived::new(move || message.get().is_some_and(|m| m.kind == "prompt"));
-    view! {
+    let root = view! {
         grid height:min-content cols:{entry_cols(compact.get(), content_width.get())} {
             Gutter
                 author:(Derived::new(move || message.get().map(|m|if m.kind=="prompt" {"You".to_string()} else {m.author}).unwrap_or_default()))
@@ -1453,6 +1551,14 @@ fn TranscriptMessage(
                 pad:(left:{px(if prompt.get() {12.0} else {0.0})}px right:{px(if prompt.get() {12.0} else {0.0})}px)
                 fill:{if prompt.get() {color(accent.soft)} else {Color::TRANSPARENT}}
                 stroke:(width:{px(2.0)} color:{if prompt.get() {color(accent.focus)} else {Color::TRANSPARENT}} edges:left) {
+                if model.history.get().preview_ids.contains(&message_id.get()) {
+                    row height:min-content align:center {
+                        text font-size:{px(12.0)}px font-color:ink.muted "Message preview"
+                        button #relay.action
+                            @click:{model.load_message(message_id.get_untracked());}
+                            label:"Load full message" "Load full message"
+                    }
+                }
                 if message.get().is_some_and(|m|m.tool.is_some()) {
                     ToolActivity model:(model) controller:(controller) message:(message)
                 }
@@ -1506,7 +1612,17 @@ fn TranscriptMessage(
                 }
             }
         }
-    }
+    };
+    let shared = controller.get_untracked();
+    let id = message_id.get_untracked();
+    shared
+        .borrow_mut()
+        .messages
+        .insert(id.clone(), root.clone());
+    mosaic::core::reactive::on_cleanup(move || {
+        shared.borrow_mut().messages.remove(&id);
+    });
+    root
 }
 
 /// Transcript entry tracks: the 92px author column beside the content, or

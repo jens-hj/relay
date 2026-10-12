@@ -76,13 +76,27 @@ fn run(config: network::Config) -> Result<(), String> {
         .run(move |ui, context| {
             fonts::configure(&mut ui.fonts().borrow_mut());
             let (updates, sender) = state_channel(network::NetworkState::default());
-            let (commands, harness_refresh) = network::start(config.clone(), sender);
+            let (commands, harness_refresh, transport_requests) =
+                network::start(config.clone(), sender);
             let model = model::Model::new(ui, commands);
             #[cfg(target_arch = "wasm32")]
             browser::install_input(model);
             model.window.set(context.window());
             model.server_endpoint.set(config.endpoint.to_string());
             model.harness_refresh.set(Some(harness_refresh));
+            model.transport_requests.set(Some(transport_requests));
+            Effect::new(move || {
+                let session = model.session.get();
+                let exists = model
+                    .snapshot
+                    .get()
+                    .sessions
+                    .iter()
+                    .any(|s| s.id == session);
+                mosaic::core::reactive::untracked(|| {
+                    model.subscribe_history(if exists { session } else { String::new() })
+                });
+            });
             let (discovery_updates, discovery_sender) =
                 state_channel(project_network::DiscoveryUpdate::default());
             model.discovery_requests.set(Some(project_network::start(

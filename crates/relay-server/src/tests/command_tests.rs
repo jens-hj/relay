@@ -599,7 +599,7 @@ async fn catalog_and_session_choices_cross_http_and_reconnect_without_replaying_
     let rejected = client
         .post(format!("{endpoint}/v1/commands"))
         .bearer_auth("relay-test-token-command")
-        .header("x-relay-protocol", "3")
+        .header("x-relay-protocol", relay_core::PROTOCOL_VERSION.to_string())
         .json(&env(
             before.revision,
             Command::StartDirector {
@@ -655,15 +655,25 @@ async fn catalog_and_session_choices_cross_http_and_reconnect_without_replaying_
         },
     );
     for _ in 0..2 {
-        let snapshot: Snapshot = client
+        let acknowledgement: CommandAck = client
             .post(format!("{endpoint}/v1/commands"))
             .bearer_auth("relay-test-token-command")
-            .header("x-relay-protocol", "3")
+            .header("x-relay-protocol", relay_core::PROTOCOL_VERSION.to_string())
             .json(&envelope)
             .send()
             .await
             .unwrap()
             .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(acknowledgement.request_id, envelope.request_id);
+        let snapshot: Snapshot = client
+            .get(format!("{endpoint}/v1/snapshot"))
+            .bearer_auth("relay-test-token-command")
+            .send()
+            .await
             .unwrap()
             .json()
             .await
@@ -723,7 +733,7 @@ async fn catalog_and_session_choices_cross_http_and_reconnect_without_replaying_
     let saved: Draft = client
         .post(format!("{endpoint}/v1/drafts/{id}"))
         .bearer_auth("relay-test-token-command")
-        .header("x-relay-protocol", "3")
+        .header("x-relay-protocol", relay_core::PROTOCOL_VERSION.to_string())
         .json(&SaveDraft {
             request_id: uuid::Uuid::new_v4().to_string(),
             expected_revision: 0,
@@ -740,7 +750,7 @@ async fn catalog_and_session_choices_cross_http_and_reconnect_without_replaying_
     let rejected = client
         .post(format!("{endpoint}/v1/conversation/commands"))
         .bearer_auth("relay-test-token-command")
-        .header("x-relay-protocol", "3")
+        .header("x-relay-protocol", relay_core::PROTOCOL_VERSION.to_string())
         .json(&env(
             snapshot.revision,
             Command::SubmitTurn {

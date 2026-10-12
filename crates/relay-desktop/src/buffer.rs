@@ -373,6 +373,23 @@ pub fn execution_problem(model: Model) -> Option<String> {
     None
 }
 
+fn active_run_id(model: Model, snapshot: &Snapshot, session: &str) -> Option<String> {
+    model
+        .active_run_ids
+        .get_untracked()
+        .get(session)
+        .cloned()
+        .or_else(|| {
+            snapshot
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.session_id == session && message.kind == "prompt")
+                .and_then(|message| message.id.strip_prefix("prompt-"))
+                .map(str::to_owned)
+        })
+}
+
 pub fn promote(model: Model, id: &str) {
     let snapshot = model.snapshot.get_untracked();
     let Some(submission) = snapshot.submissions.iter().find(|s| {
@@ -388,15 +405,7 @@ pub fn promote(model: Model, id: &str) {
         .and_then(|s| s.worker.as_ref())
         .is_some_and(|w| matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running));
     let active_run_id = active
-        .then(|| {
-            snapshot
-                .messages
-                .iter()
-                .rev()
-                .find(|m| &m.session_id == session && m.kind == "prompt")
-                .and_then(|m| m.id.strip_prefix("prompt-"))
-                .map(str::to_owned)
-        })
+        .then(|| active_run_id(model, &snapshot, session))
         .flatten();
     model.submit(
         Command::PromoteTurn {
@@ -774,6 +783,7 @@ pub fn flush(model: Model) {
         }
     }
     if !model.busy.get_untracked()
+        && !model.syncing.get_untracked()
         && let Some((session, id)) = state
             .promote_after_ack
             .iter()
@@ -794,15 +804,7 @@ pub fn flush(model: Model) {
                 .and_then(|s| s.worker.as_ref())
                 .is_some_and(|w| matches!(w.status, WorkerStatus::Running | WorkerStatus::Queued));
             let active_run_id = active
-                .then(|| {
-                    snapshot
-                        .messages
-                        .iter()
-                        .rev()
-                        .find(|m| m.session_id == session && m.kind == "prompt")
-                        .and_then(|m| m.id.strip_prefix("prompt-"))
-                        .map(str::to_owned)
-                })
+                .then(|| active_run_id(model, &snapshot, &session))
                 .flatten();
             model.submit(
                 Command::PromoteTurn {
@@ -835,6 +837,7 @@ pub fn flush(model: Model) {
         if doc.finalize.is_some()
             && *target == doc.remote.parts
             && !model.busy.get_untracked()
+            && !model.syncing.get_untracked()
             && !model.can_retry()
         {
             let parts = target.clone();

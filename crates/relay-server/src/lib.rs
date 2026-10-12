@@ -14,6 +14,7 @@ use relay_core::*;
 mod app_server;
 mod browser;
 mod tool_activity;
+mod transport;
 pub use browser::{BrowserConfig, initialize_setup_code};
 mod claude;
 mod commands;
@@ -103,7 +104,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 10 {
+        if version > 11 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -123,7 +124,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 10;"
+             PRAGMA user_version = 11;"
         ).map_err(Error::internal)?;
         let seed =
             serde_json::to_string(&demo_snapshot(defaults.clone())).map_err(Error::internal)?;
@@ -172,7 +173,7 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
-        if version < 10 {
+        if version < 11 {
             let json: String = connection
                 .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
                     r.get(0)
@@ -1297,6 +1298,14 @@ pub fn router_with_browser(
             .route("/v1/harnesses", get(harness::statuses))
             .route("/v1/harnesses/refresh", post(harness::refresh))
             .route("/v1/snapshot", get(snapshot))
+            .route("/v1/workspace", get(transport::workspace))
+            .route("/v1/ping", get(transport::ping))
+            .route("/v1/sessions/{session}/search", get(transport::search))
+            .route("/v1/sessions/{session}/history", get(transport::history))
+            .route(
+                "/v1/sessions/{session}/messages/{message}",
+                get(transport::detail),
+            )
             .route("/v1/version", get(build_version))
             .route("/v1/commands", post(command))
             .route(
@@ -1373,12 +1382,12 @@ async fn protocol(
             .headers()
             .get("x-relay-protocol")
             .and_then(|v| v.to_str().ok())
-            != Some("3")
+            != Some(PROTOCOL_VERSION.to_string().as_str())
         {
             return Error::new(
                 StatusCode::CONFLICT,
                 "protocol_mismatch",
-                "This server requires Relay protocol 3; update and restart the desktop client",
+                format!("This server requires Relay protocol {PROTOCOL_VERSION}; update and restart the client"),
             )
             .into_response();
         }
@@ -1447,7 +1456,7 @@ async fn command(
     State(workspace): State<Workspace>,
     headers: HeaderMap,
     body: Result<Json<CommandEnvelope>, axum::extract::rejection::JsonRejection>,
-) -> Result<Json<Snapshot>, Error> {
+) -> Result<Json<CommandAck>, Error> {
     workspace.authorize(&headers)?;
     let Json(envelope) =
         body.map_err(|_| Error::invalid("Expected a valid JSON command envelope"))?;
@@ -1534,6 +1543,7 @@ async fn command(
             ));
         }
         let run_id = envelope.request_id.clone();
+        let request_id = run_id.clone();
         let reset_status = matches!(envelope.command, Command::ConfigureHarness { .. });
         let (snapshot, action) = store.apply(envelope, &workspace.config)?;
         if reset_status {
@@ -1586,7 +1596,10 @@ async fn command(
             }
             None => {}
         }
-        Ok::<_, Error>(snapshot)
+        Ok::<_, Error>(CommandAck {
+            request_id,
+            committed_revision: snapshot.revision,
+        })
     })
     .await
     .map_err(Error::internal)??;
@@ -1655,30 +1668,75 @@ async fn stream(
 }
 
 async fn stream_snapshots(socket: &mut WebSocket, receiver: &mut watch::Receiver<Snapshot>) {
+    let mut projection = transport::Projection::default();
+    let (mut delivered, history) = projection.view(&receiver.borrow_and_update());
+    let reset = StreamEvent::Reset {
+        protocol_version: PROTOCOL_VERSION,
+        snapshot: Box::new(delivered.clone()),
+        history,
+    };
+    if !send_stream_event(socket, &reset).await {
+        return;
+    }
     loop {
-        let snapshot = receiver.borrow_and_update().clone();
-        let Ok(json) = serde_json::to_string(&snapshot) else {
-            break;
-        };
-        if socket.send(WsMessage::Text(json.into())).await.is_err() {
-            break;
-        }
-        loop {
-            tokio::select! {
-                changed = receiver.changed() => {
-                    if changed.is_err() { return; }
-                    break;
-                }
-                incoming = socket.recv() => match incoming {
-                    Some(Ok(WsMessage::Ping(data))) => {
-                        if socket.send(WsMessage::Pong(data)).await.is_err() { return; }
-                    }
-                    Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => return,
-                    _ => {},
+        let response = tokio::select! {
+            changed = receiver.changed() => {
+                if changed.is_err() { return; }
+                None
+            },
+            incoming = socket.recv() => match incoming {
+                Some(Ok(WsMessage::Ping(data))) => {
+                    if socket.send(WsMessage::Pong(data)).await.is_err() {return;}
+                    continue;
                 },
-            }
+                Some(Ok(WsMessage::Text(json))) => {
+                    let Ok(request) = serde_json::from_str::<StreamRequest>(&json) else { return; };
+                    let snapshot=receiver.borrow_and_update().clone();
+                    match projection.request(&snapshot,request) {
+                        Ok(response)=>response,
+                        Err(_)=>Some(StreamEvent::Error {message:"Conversation request could not be completed".into(),generation:projection.view(&snapshot).1.generation}),
+                    }
+                },
+                Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => return,
+                _ => continue,
+            },
+        };
+        let snapshot = receiver.borrow_and_update().clone();
+        let (view, history) = projection.view(&snapshot);
+        let (Ok(old), Ok(new)) = (
+            serde_json::to_value(&delivered),
+            serde_json::to_value(&view),
+        ) else {
+            return;
+        };
+        let event = StreamEvent::Update {
+            base_revision: delivered.revision,
+            revision: view.revision,
+            delta: Delta::between(&old, &new),
+            history,
+        };
+        if !send_stream_event(socket, &event).await {
+            return;
+        }
+        delivered = view;
+        if let Some(response) = response
+            && !send_stream_event(socket, &response).await
+        {
+            return;
         }
     }
+}
+
+async fn send_stream_event(socket: &mut WebSocket, event: &StreamEvent) -> bool {
+    let Ok(json) = serde_json::to_string(event) else {
+        return false;
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        socket.send(WsMessage::Text(json.into())),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok())
 }
 
 #[cfg(test)]

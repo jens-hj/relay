@@ -116,7 +116,7 @@ mod tests {
             }
             let request = String::from_utf8_lossy(&bytes).to_lowercase();
             assert!(request.starts_with("post /v1/boards/discover "));
-            assert!(request.contains("x-relay-protocol: 3"));
+            assert!(request.contains("x-relay-protocol: 4"));
             write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         });
         let config = Config {
@@ -246,7 +246,7 @@ mod recovery_tests {
             let request = String::from_utf8_lossy(&bytes).to_lowercase();
             assert!(request.starts_with("post /v1/operations/reconcile "));
             assert!(request.contains("authorization: bearer test"));
-            assert!(request.contains("x-relay-protocol: 3"));
+            assert!(request.contains("x-relay-protocol: 4"));
             write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         });
         let config = Config {

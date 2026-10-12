@@ -2589,6 +2589,7 @@ fn rapid_second_send_waits_for_ack_then_promotes_exact_queue_and_keeps_newer_dra
         revision: 1,
         parts: request.parts.clone(),
     };
+    mounted.model.syncing.set(true);
     buffer::receive(
         mounted.model,
         Update {
@@ -2607,6 +2608,12 @@ fn rapid_second_send_waits_for_ack_then_promotes_exact_queue_and_keeps_newer_dra
             ..Default::default()
         },
     );
+    assert!(mounted.commands.try_recv().is_err());
+    let document = mounted.model.buffer.get_untracked().documents["session-plan"].clone();
+    assert!(document.finalize.is_some());
+    assert!(!document.submitting);
+    mounted.model.syncing.set(false);
+    buffer::flush(mounted.model);
     let submitted = mounted.commands.try_recv().unwrap();
     let Command::SubmitTurn { parts, .. } = &submitted.command else {
         panic!()
@@ -2618,6 +2625,26 @@ fn rapid_second_send_waits_for_ack_then_promotes_exact_queue_and_keeps_newer_dra
         vec![Part::text("Newer next message")],
     );
     let mut snapshot = mounted.model.snapshot.get_untracked();
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        acknowledged_revision: snapshot.revision + 1,
+        outcome_serial: 1,
+        outcome: Some((submitted.request_id.clone(), Ok(()))),
+        ..Default::default()
+    });
+    buffer::flush(mounted.model);
+    assert!(mounted.commands.try_recv().is_err());
+    assert_eq!(
+        mounted
+            .model
+            .buffer
+            .get_untracked()
+            .promote_after_ack
+            .get("session-plan"),
+        Some(&submitted.request_id)
+    );
+    snapshot.messages.retain(|message| message.kind != "prompt");
     snapshot.revision += 1;
     snapshot.submissions.push(Submission {
         id: submitted.request_id.clone(),
@@ -2630,8 +2657,16 @@ fn rapid_second_send_waits_for_ack_then_promotes_exact_queue_and_keeps_newer_dra
         last_edit_request: None,
     });
     mounted.model.receive(NetworkState {
+        acknowledged_revision: snapshot.revision,
         snapshot,
         connected: true,
+        history: HistoryState {
+            active_run_ids: std::collections::BTreeMap::from([(
+                "session-plan".into(),
+                "active-run".into(),
+            )]),
+            ..Default::default()
+        },
         ..Default::default()
     });
     buffer::flush(mounted.model);
@@ -7152,4 +7187,219 @@ fn native_fixture_gpu_cost() {
             durations[durations.len() / 2]
         );
     }
+}
+
+#[test]
+fn small_acknowledgement_preserves_newer_edits_until_state_catches_up() {
+    let mut mounted = mount(false, 1380.0);
+    let initial = mounted.model.snapshot.get_untracked();
+    mounted.model.comment_body.set("submitted".into());
+    mounted.model.submit(
+        Command::AddComment {
+            message_id: "m2".into(),
+            quote: None,
+            author: "Reviewer".into(),
+            body: "submitted".into(),
+        },
+        initial.revision,
+        crate::model::Saved::Comment("submitted".into()),
+    );
+    let request = mounted.commands.try_recv().unwrap();
+    mounted.model.comment_body.set("newer edit".into());
+    mounted.model.receive(NetworkState {
+        snapshot: initial.clone(),
+        connected: true,
+        acknowledged_revision: initial.revision + 1,
+        outcome_serial: 1,
+        outcome: Some((request.request_id, Ok(()))),
+        ..Default::default()
+    });
+    assert!(!mounted.model.busy.get_untracked());
+    assert!(mounted.model.syncing.get_untracked());
+    assert_eq!(mounted.model.comment_body.get_untracked(), "newer edit");
+    mounted.model.submit(
+        Command::SyncProject {
+            project_id: "demo".into(),
+        },
+        initial.revision,
+        crate::model::Saved::Action,
+    );
+    assert!(mounted.commands.try_recv().is_err());
+    let mut updated = initial;
+    updated.revision += 1;
+    mounted.model.receive(NetworkState {
+        acknowledged_revision: updated.revision,
+        snapshot: updated,
+        connected: true,
+        ..Default::default()
+    });
+    assert!(!mounted.model.syncing.get_untracked());
+}
+
+#[test]
+fn late_history_response_cannot_replace_a_new_session_and_reconnect_releases_paging() {
+    let mounted = mount(false, 1380.0);
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.transport_requests.set(Some(sender));
+    mounted.model.subscribe_history("session-plan".into());
+    assert!(matches!(
+        requests.try_recv().unwrap(),
+        StreamRequest::Subscribe { generation: 1, .. }
+    ));
+    mounted.model.subscribe_history("session-review".into());
+    let previous = mounted.model.snapshot.get_untracked();
+    let mut stale = previous.clone();
+    stale.messages.clear();
+    mounted.model.receive(NetworkState {
+        snapshot: stale,
+        connected: true,
+        history: HistoryState {
+            session_id: "session-plan".into(),
+            generation: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    assert_eq!(
+        mounted.model.snapshot.get_untracked().messages,
+        previous.messages
+    );
+    mounted.model.history_loading.set(true);
+    mounted.model.receive(NetworkState {
+        snapshot: previous,
+        connected: false,
+        ..Default::default()
+    });
+    assert!(!mounted.model.history_loading.get_untracked());
+}
+
+#[test]
+fn scrolling_loads_one_older_page_and_preserves_the_visible_message() {
+    for tools in [false, true] {
+        let mounted = mount(false, 1380.0);
+        mounted.model.open_session("session-plan".into());
+        let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        mounted.model.transport_requests.set(Some(sender));
+        mounted.model.subscribe_history("session-plan".into());
+        requests.try_recv().unwrap();
+        let mut snapshot = mounted.model.snapshot.get_untracked();
+        snapshot.messages = (50..100)
+            .map(|i| Message {
+                id: format!("paged-{i}"),
+                session_id: "session-plan".into(),
+                author: "Agent".into(),
+                kind: "assistant".into(),
+                body: format!("Message {i}\n{}", "line\n".repeat(5)),
+                parts: vec![],
+                tool: tools.then(|| ToolCall {
+                    run_id: "run".into(),
+                    name: "exec_command".into(),
+                    kind: ToolKind::Terminal,
+                    state: ToolState::Completed,
+                    input: "pwd".into(),
+                    target: "pwd".into(),
+                    directory: None,
+                    exit_code: Some(0),
+                }),
+            })
+            .collect();
+        let history = HistoryState {
+            session_id: "session-plan".into(),
+            generation: 1,
+            oldest_message_id: Some("paged-50".into()),
+            newest_message_id: Some("paged-99".into()),
+            has_more: true,
+            ..Default::default()
+        };
+        mounted.model.receive(NetworkState {
+            snapshot: snapshot.clone(),
+            connected: true,
+            history: history.clone(),
+            ..Default::default()
+        });
+        mounted.settle();
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Wheel {
+                delta: Vector2::new(0.0, 100000.0),
+            },
+            position: Vector2::new(800.0, 400.0),
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+        mounted.settle();
+        let request = requests.try_recv().unwrap();
+        assert!(matches!(request,StreamRequest::Older{before,..} if before=="paged-50"));
+        assert!(requests.try_recv().is_err());
+        let label = if tools {
+            "Toggle Terminal activity paged-50"
+        } else {
+            "Message paged-50"
+        };
+        let before = mounted.rect(label);
+        let mut older = (0..50)
+            .map(|i| Message {
+                id: format!("paged-{i}"),
+                session_id: "session-plan".into(),
+                author: "Agent".into(),
+                kind: "assistant".into(),
+                body: format!("Earlier {i}\n{}", "line\n".repeat(5)),
+                parts: vec![],
+                tool: tools.then(|| ToolCall {
+                    run_id: "run".into(),
+                    name: "exec_command".into(),
+                    kind: ToolKind::Terminal,
+                    state: ToolState::Completed,
+                    input: "pwd".into(),
+                    target: "pwd".into(),
+                    directory: None,
+                    exit_code: Some(0),
+                }),
+            })
+            .collect::<Vec<_>>();
+        older.extend(snapshot.messages);
+        snapshot.messages = older;
+        mounted.model.receive(NetworkState {
+            snapshot,
+            connected: true,
+            history: HistoryState {
+                oldest_message_id: Some("paged-0".into()),
+                has_more: false,
+                ..history
+            },
+            ..Default::default()
+        });
+        mounted.settle();
+        let after = mounted.rect(label);
+        assert!(
+            (after.origin.y - before.origin.y).abs() < 2.0,
+            "history insertion moved the reading position by {} (tools={tools})",
+            after.origin.y - before.origin.y
+        );
+    }
+}
+
+#[test]
+fn retained_search_result_does_not_repeatedly_move_the_reader() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.search.set("needle".into());
+    let snapshot = mounted.model.snapshot.get_untracked();
+    let update = NetworkState {
+        snapshot,
+        connected: true,
+        search_serial: 1,
+        search_result: Some((
+            "session-plan".into(),
+            0,
+            "needle".into(),
+            Some("m2".into()),
+            "needle".into(),
+        )),
+        ..Default::default()
+    };
+    mounted.model.receive(update.clone());
+    assert_eq!(mounted.model.focused_message.get_untracked(), "m2");
+    mounted.model.focused_message.set(String::new());
+    mounted.model.receive(update);
+    assert!(mounted.model.focused_message.get_untracked().is_empty());
 }

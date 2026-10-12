@@ -34,16 +34,21 @@ All routes require `Authorization: Bearer <token>`, including WebSocket upgrade.
 
 | Endpoint | Behavior |
 | --- | --- |
-| `GET /v1/snapshot` | Current authoritative snapshot, including monotonic revision |
-| `POST /v1/commands` | Typed command envelope; returns committed snapshot |
+| `GET /v1/workspace` | Workspace metadata without archived transcripts or review diffs |
+| `GET /v1/ping` | Authenticated empty response; no history or caching |
+| `GET /v1/sessions/{session}/history` | Bounded recent, before, after, or around-ID page |
+| `GET /v1/sessions/{session}/messages/{message}` | Complete source content on demand |
+| `GET /v1/sessions/{session}/search` | Bounded matches and snippets across unloaded history |
+| `GET /v1/snapshot` | Complete authoritative snapshot for diagnostics; clients use workspace projections |
+| `POST /v1/commands` | Typed command envelope; returns request ID and committed revision |
 | `POST /v1/boards/discover` | Read destination metadata and named columns before publication |
 | `POST /v1/operations/reconcile` | Validate a known remote result URL and preview recovery without writing |
 | `GET /v1/harnesses` | Cached, bounded executable/version/authentication probes on the server |
 | `POST /v1/harnesses/refresh` | Refresh read-only harness probes |
 | `GET /v1/sessions/{session}/catalog` | Cached server-owned command, model, skill, and MCP metadata |
 | `POST /v1/sessions/{session}/catalog` | Refresh metadata without starting a model turn |
-| `GET /v1/events` | WebSocket: initial snapshot followed by committed snapshots |
-| `POST /v1/conversation/commands` | Structured turn/queue commands; returns committed snapshot |
+| `GET /v1/events` | WebSocket: metadata reset, selected conversation subscription, and revisioned incremental updates |
+| `POST /v1/conversation/commands` | Structured turn/queue commands; returns request ID and committed revision |
 | `GET /v1/drafts` | Shared draft documents with independent per-session revisions |
 | `POST /v1/drafts/{session}` | Compare-and-swap draft save, with an immutable request receipt |
 | `GET /v1/drafts/events` | WebSocket: full draft state, independent of transcript streaming |
@@ -52,7 +57,9 @@ All routes require `Authorization: Bearer <token>`, including WebSocket upgrade.
 
 Command envelopes carry `request_id` (UUID), `expected_revision`, and a tagged command. Supported commands register GitHub project/checkout bindings, configure harness executables and execution modes, answer native tool requests, update profiles/comments, synchronize saved projects, and start/send/stop workers. Stale revisions return HTTP 409. Invalid references/configuration return 422; invalid credentials return 401. Unexpected storage failures return a sanitized 500 response. Reusing an ID for a different command is rejected. Execution and provider commands are server runtime operations, not pure domain mutations; durable command receipts prevent duplicate launch on deliberate retry.
 
-Event delivery uses a watch channel: intermediate snapshots may coalesce, but each event is complete state. Client revision checks prevent late responses from replacing newer snapshots. Reconnection reads authoritative state and resubscribes. Writes are not retried automatically. Durable receipts make deliberate retries idempotent.
+Event delivery uses a watch channel: intermediate revisions may coalesce. Each connection diffs its projected state against the last delivered state. Updates identify base and resulting revisions, key records by stable ID, preserve collection order, and send suffixes for appended text. Clients apply updates atomically and reconnect on revision gaps. Reconnection restores workspace metadata and the selected conversation’s recent page, retaining drafts and uncertain request IDs. Writes are not retried automatically; exact receipt retries remain idempotent. A command acknowledgement clears only its submitted draft version, independently of stream delivery; revision-dependent actions and automatic queue promotion wait while state catches up. Stream control metadata includes active-run IDs even when the corresponding prompts are outside loaded history. See [issue #26](https://github.com/jens-hj/relay/issues/26).
+
+Conversation pages contain at most 50 messages within a 256 KiB budget. Oversized messages and comment collections use explicit preview references; full source is fetched on demand before quoting. Scrolling near the top loads earlier messages and preserves the visible reading position. Search jumps load a bounded surrounding page; scrolling to its bottom loads newer history. Review diffs are requested when opening Changes. Browser round trip uses an independent empty HTTP probe, while native clients use bounded WebSocket ping/pong.
 
 Legacy comments retain their message IDs and optional quotes. Buffer replies carry a message ID, exact UTF-8 byte range, and source quote, so repeated passages remain distinguishable. Recorded source text is immutable; typing there creates a reply in the shared next-message draft. Every inline and bottom-draft view edits the same ordered parts. Text, assets, and anchored replies survive serialization without flattening their positions.
 
@@ -78,6 +85,6 @@ Profiles configure Codex or Claude Code, whole-project or selected-issue scope, 
 
 ## Protocol compatibility
 
-Snapshots declare `protocol_version: 2`. Every mutation requires `X-Relay-Protocol: 2`; older clients receive `protocol_mismatch` before changing state. Update server and desktop together. New commands cover project creation, connection management, board/task changes, publication, recovery and task-linked session launch. `POST /v1/boards/discover` reads provider destination metadata for named column choices. Remote credentials stay on the server; the desktop supplies project and provider identifiers only.
+Snapshots and stream resets declare `protocol_version: 4`. Every mutation requires `X-Relay-Protocol: 4`; older clients receive `protocol_mismatch` before changing state. Update server and desktop together. New commands cover project creation, connection management, board/task changes, publication, recovery and task-linked session launch. `POST /v1/boards/discover` reads provider destination metadata for named column choices. Remote credentials stay on the server; the desktop supplies project and provider identifiers only.
 
-Harness command contracts use protocol version 3 and database schema 10. Migration retains existing transcripts, drafts, receipts, profiles, and workspaces. Skills are durable multipart references with server-validated native identities; clients cannot choose executable skill paths or arbitrary RPC methods. Catalogs expire after 30 seconds and are invalidated by native skill changes. Execution revalidates selected capabilities before starting a turn. Terminal-only commands remain visible with an explanation rather than becoming model prompts.
+Harness commands and transport contracts use protocol version 4 and database schema 11. Schema 11 updates the stored snapshot protocol version and prevents older servers opening the database. Migration retains existing transcripts, drafts, receipts, profiles, and workspaces. Skills are durable multipart references with server-validated native identities; clients cannot choose executable skill paths or arbitrary RPC methods. Catalogs expire after 30 seconds and are invalidated by native skill changes. Execution revalidates selected capabilities before starting a turn. Terminal-only commands remain visible with an explanation rather than becoming model prompts.
