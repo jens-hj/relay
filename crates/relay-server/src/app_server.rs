@@ -385,7 +385,9 @@ fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Re
                         );
                         if let Some(tool) = &mut message.tool {
                             tool.exit_code = exit_code;
-                            tool.detail = detail.map(ToolDetail::bounded);
+                            tool.detail = detail
+                                .map(ToolDetail::bounded)
+                                .or_else(|| tool.detail.clone());
                         }
                     }
                 }
@@ -694,6 +696,7 @@ pub(super) async fn execute(
                     if let Some(id)=value["result"]["turn"]["id"].as_str().or_else(||value["result"]["turnId"].as_str()) {
                         if turn.as_deref().is_some_and(|expected|expected!=id){return Err(Error::invalid("Codex started a different turn"));}
                         turn=Some(id.to_owned());
+                        workspace.update_run(session, run, |s| { crate::agent_tools::mark_read(s, run); Ok(()) })?;
                     }else if command.as_ref().is_none_or(|c|c.name!="compact"){return Err(Error::invalid("Codex turn ID missing"));}
                 } else if value.get("id").is_some() && value.get("method").is_some() {
                     if !belongs_to_thread(&value, &thread) {
@@ -709,7 +712,7 @@ pub(super) async fn execute(
                 }
                 else {
                     if !belongs_to_thread(&value, &thread) { continue; }
-                    if value["method"]=="turn/started" && let Some(id)=value["params"]["turn"]["id"].as_str() && turn.is_none(){turn=Some(id.to_owned());}
+                    if value["method"]=="turn/started" && let Some(id)=value["params"]["turn"]["id"].as_str() && turn.is_none(){turn=Some(id.to_owned()); workspace.update_run(session, run, |s| { crate::agent_tools::mark_read(s, run); Ok(()) })?;}
                     if let Some(id)=value["params"]["turnId"].as_str().or_else(||value["params"]["turn"]["id"].as_str()) && turn.as_deref().is_some_and(|expected|expected!=id) { return Err(Error::invalid("Codex event belongs to a different turn")); }
                     if publish(workspace,session,run,&value)? { return Ok(()); }
                 }

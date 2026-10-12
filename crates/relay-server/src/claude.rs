@@ -188,6 +188,10 @@ pub(super) async fn execute(
                 if !sent {
                     send(stdin.as_mut().ok_or_else(|| Error::invalid("Claude input already closed"))?, json!({"type":"user","session_id":previous.unwrap_or(""),"uuid":run,"parent_tool_use_id":null,"message":{"role":"user","content":content}})).await?;
                     sent = true;
+                    workspace.update_run(session, run, |snapshot| {
+                        crate::agent_tools::mark_read(snapshot, run);
+                        Ok(())
+                    })?;
                     deadline = None;
                 }
             }
