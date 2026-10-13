@@ -209,21 +209,14 @@ fn status_section() -> Element {
     }
 }
 
-fn ledger(family: ModelFamily, levels: u8, current: u8, has_max: bool) -> Element {
-    let name = if has_max && current >= levels {
-        "max".to_string()
-    } else {
-        ["minimal", "low", "medium", "high", "xhigh"][current as usize].to_string()
-    };
-    let total = levels + u8::from(has_max);
-    let step = format!("{:02}/{:02}", current + 1, total);
-    let title = format!(
-        "{} · {}",
-        family.name(),
-        if has_max { "max-capable" } else { "5-step" }
-    );
-    let value = State::new(current);
+fn ledger(family: ModelFamily, effort: Effort, title: &str) -> Element {
+    let title = format!("{} · {title}", family.name());
+    let value = State::new(effort.track_step());
     let select: relay_ui::effort::OnEffort = Rc::new(move |index| value.set(index));
+    let at = move || Effort {
+        current: value.get(),
+        ..effort
+    };
     view! {
         col width:max-content height:min-content gap:{px(8.0)}px {
             caption(&title)
@@ -234,12 +227,14 @@ fn ledger(family: ModelFamily, levels: u8, current: u8, has_max: bool) -> Elemen
                     stroke:(width:{px(1.0)} color:ground.rule-strong offset:{px(-1.0)}) {
                     Label text:"EFFORT" role:(TextRole::Micro) tone:(Tone::Muted) weight:500
                     row width:max-content height:min-content gap:{px(6.0)}px align:end {
-                        Label text:(name) role:(TextRole::Label) weight:600
-                        Label text:(step) role:(TextRole::Caption) tone:(Tone::Muted)
+                        Label text:{at().name().to_string()} role:(TextRole::Label) weight:600
+                        Label
+                            text:{format!("{:02}/{:02}", at().selected() + 1, effort.levels + effort.tiers)}
+                            role:(TextRole::Caption) tone:(Tone::Muted)
                     }
                 }
-                EffortTrack levels:(levels) current:(value) has-max:(has_max)
-                    colour:(family.token()) on-select:(Some(select))
+                EffortTrack levels:(effort.levels) current:(value) tiers:(effort.tiers)
+                    colour:(family.token()) names:(effort.step_names()) on-select:(Some(select))
             }
         }
     }
@@ -247,10 +242,32 @@ fn ledger(family: ModelFamily, levels: u8, current: u8, has_max: bool) -> Elemen
 
 fn effort_section() -> Element {
     let ledgers = vec![
-        ledger(ModelFamily::Sol, 5, 4, false),
-        ledger(ModelFamily::Opus, 5, 3, true),
-        ledger(ModelFamily::Opus, 5, 4, true),
-        ledger(ModelFamily::Opus, 5, 5, true),
+        ledger(ModelFamily::Sol, Effort::new(5, 4), "5-step"),
+        ledger(
+            ModelFamily::Opus,
+            Effort::new(5, 3).with_max(false),
+            "max-capable",
+        ),
+        ledger(
+            ModelFamily::Opus,
+            Effort::new(5, 4).with_max(false),
+            "max-capable",
+        ),
+        ledger(
+            ModelFamily::Opus,
+            Effort::new(5, 4).with_max(true),
+            "max-capable",
+        ),
+        ledger(
+            ModelFamily::Sol,
+            Effort::new(4, 0).starting_at(1).with_tiers(2, 0),
+            "max and ultra",
+        ),
+        ledger(
+            ModelFamily::Sol,
+            Effort::new(4, 0).starting_at(1).with_tiers(2, 5),
+            "at ultra",
+        ),
     ];
     let compact = ModelFamily::ALL
         .into_iter()
@@ -261,7 +278,7 @@ fn effort_section() -> Element {
                 row width:max-content height:min-content gap:{px(8.0)}px align:center {
                     Label text:(format!("{} 5.5", family.name())) role:(TextRole::Label)
                         tone:(Tone::Muted)
-                    EffortTrack levels:5u8 current:(index as u8 + 1) has-max:(has_max)
+                    EffortTrack levels:5u8 current:(index as u8 + 1) tiers:(u8::from(has_max))
                         colour:(family.token()) size:(TrackSize::Compact)
                 }
             }
@@ -280,7 +297,7 @@ fn effort_section() -> Element {
                                 orientation:(Orientation::Vertical)
                         }
                         col width:max-content height:{px(170.0)}px {
-                            EffortTrack levels:5u8 current:5u8 has-max:true
+                            EffortTrack levels:5u8 current:5u8 tiers:1u8
                                 colour:(ModelFamily::Opus.token())
                                 orientation:(Orientation::Vertical)
                         }

@@ -209,12 +209,37 @@ fn catalog_model(efforts: &[&str]) -> HarnessModel {
 }
 
 #[test]
+fn effort_draws_max_and_ultra_as_top_steps_in_catalog_order() {
+    // As codex-cli 0.161 reports gpt-6.1-sol: no effort selected, default low.
+    let mut model = catalog_model(&["low", "medium", "high", "xhigh", "max", "ultra"]);
+    model.default_effort = Some("low".into());
+    let mut selection = HarnessSelection::default();
+    let default = effort(&selection, &model).expect("the default effort is shown");
+    assert_eq!(
+        (default.levels, default.tiers, default.track_step()),
+        (4, 2, 0)
+    );
+    assert_eq!(default.caption(), "effort · low · 01/06");
+    selection.effort = Some("ultra".into());
+    let ultra = effort(&selection, &model).unwrap();
+    assert!(ultra.at_max());
+    assert_eq!(ultra.caption(), "effort · ultra · 06/06");
+    for (step, name) in model.efforts.iter().enumerate() {
+        assert_eq!(effort_choice(&model, step as u8).as_ref(), Some(name));
+    }
+    assert_eq!(effort_choice(&model, 6), None);
+    // Top steps the track cannot name, or out of order, hide the track.
+    assert!(effort(&selection, &catalog_model(&["low", "max", "high"])).is_none());
+    assert!(effort(&selection, &catalog_model(&["high", "ultra", "max"])).is_none());
+}
+
+#[test]
 fn effort_tracks_offered_steps_and_max_only_when_offered() {
     let mut selection = HarnessSelection::default();
     let model = catalog_model(&["low", "medium", "high"]);
     let default = effort(&selection, &model).unwrap();
     assert_eq!(
-        (default.levels, default.current, default.has_max),
+        (default.levels, default.current, default.has_max()),
         (3, 1, false)
     );
     assert_eq!(default.name(), "medium");
@@ -224,7 +249,7 @@ fn effort_tracks_offered_steps_and_max_only_when_offered() {
     let with_max = catalog_model(&["minimal", "low", "medium", "high", "xhigh", "max"]);
     selection.effort = Some("max".into());
     let max = effort(&selection, &with_max).unwrap();
-    assert!(max.has_max && max.at_max);
+    assert!(max.has_max() && max.at_max());
     assert_eq!(max.levels, 5);
     assert_eq!(max.name(), "max");
     assert_eq!(effort_choice(&with_max, 5).as_deref(), Some("max"));
@@ -389,7 +414,7 @@ fn session_model_reads_reported_model_and_catalog_effort() {
     let (_, effort) = session_model(&plan, &catalogs);
     let effort = effort.unwrap();
     assert_eq!(
-        (effort.levels, effort.current, effort.has_max),
+        (effort.levels, effort.current, effort.has_max()),
         (3, 2, true)
     );
     assert_eq!(subtree_statuses(&snapshot, "session-backfill").len(), 2);
@@ -435,7 +460,7 @@ fn rows_borrow_a_loaded_catalog_of_the_same_harness_for_their_effort() {
     assert_eq!(effort.name(), "medium");
     let (_, effort) = session_model(&plan, &catalogs);
     let effort = effort.unwrap();
-    assert!(effort.has_max && !effort.at_max);
+    assert!(effort.has_max() && !effort.at_max());
     assert_eq!(effort.name(), "high");
     // A Claude catalog never describes a Codex model.
     assert!(session_model(&backfill, &catalogs).1.is_none());

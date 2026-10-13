@@ -320,7 +320,7 @@ pub fn AgentTreeRow(
         if let Some(effort) = line.effort {
             content.adopt(&view! {
                 EffortTrack levels:(effort.levels) current:(effort.track_step())
-                    has-max:(effort.has_max) colour:(model.hue.token()) size:(TrackSize::Compact)
+                    tiers:(effort.tiers) colour:(model.hue.token()) size:(TrackSize::Compact)
             });
         }
     }

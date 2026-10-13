@@ -13,28 +13,17 @@ impl ModelIdentity {
 }
 impl Effort {
     pub fn name(self) -> &'static str {
-        if self.has_max && self.at_max {
-            "max"
-        } else {
-            crate::effort::EFFORT_NAMES
-                .get(usize::from(self.first) + self.selected() as usize)
-                .copied()
-                .unwrap_or("level")
-        }
+        self.step_name(self.selected())
     }
     pub fn selected(self) -> u8 {
-        if self.has_max && self.at_max {
-            self.levels
-        } else {
-            self.current.min(self.levels.saturating_sub(1))
-        }
+        self.track_step()
     }
     pub fn caption(self) -> String {
         format!(
             "effort · {} · {:02}/{:02}",
             self.name(),
             self.selected() as u16 + 1,
-            self.levels as u16 + u16::from(self.has_max)
+            self.levels as u16 + self.tiers as u16
         )
     }
 }

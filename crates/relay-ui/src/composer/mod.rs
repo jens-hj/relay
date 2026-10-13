@@ -39,7 +39,7 @@ pub fn Ledger(data: Live<LedgerView>, actions: LedgerActions) -> Element {
 fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
     let colour = vm.model.hue.token();
     let e = vm.effort;
-    let track = e.levels > 0 || e.has_max;
+    let track = e.levels > 0 || e.has_max();
     let named = (!track).then(|| vm.effort_label.clone()).flatten();
     let tall = !track && named.is_none();
     let named_cell = named.map(|name| {
@@ -81,7 +81,7 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
                     }
                     col width:{px(22.0)}px align:center justify:center
                         stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
-                        { if e.levels > 0 || e.has_max { let track = view! { EffortTrack levels:(e.levels) current:(e.selected()) has-max:(e.has_max) colour:(colour) orientation:(Orientation::Vertical) names:(e.step_names()) on-select:(Some(actions.set_effort)) }; track.style_dyn(|| Style::default().size(px(12.0), px(78.0)).shrink(0.0)); parent.adopt(&track); } }
+                        { if e.levels > 0 || e.has_max() { let track = view! { EffortTrack levels:(e.levels) current:(e.selected()) tiers:(e.tiers) colour:(colour) orientation:(Orientation::Vertical) names:(e.step_names()) on-select:(Some(actions.set_effort)) }; track.style_dyn(|| Style::default().size(px(12.0), px(78.0)).shrink(0.0)); parent.adopt(&track); } }
                     }
                 }
                 col height:{px(22.0)}px {
@@ -143,7 +143,7 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
                     col height:1fr justify:between gap:{px(8.0)}px
                         pad:(horizontal:{px(10.0)}px vertical:{px(9.0)}px) {
                         CutCorner cut:(Cut::Small) corner:(Corner::TopRightBottomLeft)
-                            edge:(if e.has_max && e.at_max { colour } else { ground.rule_strong }) {
+                            edge:(if e.at_max() { colour } else { ground.rule_strong }) {
                             row height:{px(20.0)}px justify:between align:center
                                 pad:(horizontal:{px(8.0)}px vertical:0px) {
                                 Label text:"EFFORT" role:(TextRole::Micro) weight:500
@@ -151,14 +151,14 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
                                 row width:max-content height:min-content align:center
                                     gap:{px(5.0)}px {
                                     Label text:(e.name()) role:(TextRole::BodyLarge) weight:600
-                                        tone:(if e.has_max && e.at_max { Tone::Colour(colour) } else { Tone::Ink })
+                                        tone:(if e.at_max() { Tone::Colour(colour) } else { Tone::Ink })
                                     Label
-                                        text:(format!("{:02}/{:02}", e.selected() as u16 + 1, e.levels as u16 + u16::from(e.has_max)))
+                                        text:(format!("{:02}/{:02}", e.selected() as u16 + 1, e.levels as u16 + e.tiers as u16))
                                         role:(TextRole::Micro) tone:(Tone::Muted)
                                 }
                             }
                         }
-                        EffortTrack levels:(e.levels) current:(e.selected()) has-max:(e.has_max)
+                        EffortTrack levels:(e.levels) current:(e.selected()) tiers:(e.tiers)
                             colour:(colour) names:(e.step_names())
                             on-select:(Some(actions.set_effort.clone()))
                     }
