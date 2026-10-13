@@ -560,7 +560,6 @@ fn card_button(face: CardFace, press: OnPress) -> Element {
     };
     let about = face.description.clone();
     let selected = face.selected.clone();
-    let glyph_selected = face.selected.clone();
     let harness = face.harness;
     view! {
         button @click:{press()} width:fill height:fill min-height:{px(56.0)}px radius:0px
@@ -569,10 +568,7 @@ fn card_button(face: CardFace, press: OnPress) -> Element {
             label:(face.label) description:{about.as_ref().map(|d| d.get()).unwrap_or_default()}
             hover { fill:ground.hover } pressed { fill:ground.pressed }
             focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
-            row width:max-content height:min-content shrink:0
-                font-color:{mosaic::core::theme::color(if glyph_selected.get() { ground.ink } else { ground.muted })} {
-                HarnessGlyph harness:(harness) size:20.0
-            }
+            HarnessGlyph harness:(harness) size:20.0
             {
                 parent.adopt(&details);
                 if let Some(state) = &state {

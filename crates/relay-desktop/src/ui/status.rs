@@ -176,13 +176,18 @@ pub(crate) fn UsageReadout(usage: Derived<Option<relay_core::TokenUsage>>) -> El
     }
 }
 
-/// A harness check as a status mark: ready is done, a sign-in or version
-/// problem needs you, a failed check failed, and anything else is pending.
+/// A harness check as a status mark, in the form colours: ready is done
+/// (full-steam green); a sign-in, a version problem or a retryable failed
+/// check or refresh ("stale") needs you (amber); a missing harness failed
+/// (red); checking and disconnected are pending (a muted hollow square,
+/// never violet).
 pub(crate) fn harness_state(state: &str) -> Option<AgentStatus> {
     Some(match state {
         "ready" => AgentStatus::Done,
-        "signed_out" | "incompatible" => AgentStatus::Waiting,
-        "unknown" | "error" | "failed" => AgentStatus::Failed,
+        "signed_out" | "incompatible" | "unknown" | "error" | "failed" | "stale" => {
+            AgentStatus::Waiting
+        }
+        "missing" => AgentStatus::Failed,
         _ => AgentStatus::Queued,
     })
 }

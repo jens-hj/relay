@@ -62,6 +62,7 @@ pub fn ContrastToggle(model: Model) -> Element {
         Rc::new(move |on| model.preferences.update(|p| p.high_contrast = on));
     view! {
         Toggle label:("High contrast".to_string()) on:(relay_ui::Live::from(on)) on-toggle:(flip)
+            fill:true
     }
 }
 

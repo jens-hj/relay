@@ -53,7 +53,9 @@ pub struct ConnectionInfo {
 fn paint_state(scene: &mut mosaic::render::Scene, rect: Rect, state: Connection) {
     let unit = rect.size.width / 12.0;
     match state {
-        Connection::Connected => paint_mark(scene, rect, Mark::Check, color(ground.ink)),
+        Connection::Connected => {
+            paint_mark(scene, rect, Mark::Check, color(Signal::FullSteam.token()))
+        }
         Connection::Connecting => {
             let square = Rect::from_xywh(
                 rect.origin.x + 1.5 * unit,
@@ -199,10 +201,10 @@ pub fn ConnectionStatus(
                 row width:1fr min-width:0px height:min-content {
                     text font-family:monospace font-size:{px(11.5)}px font-weight:500
                         font-color:{
-                            color(if tone.get() == Connection::Offline {
-                                Signal::Failed.token()
-                            } else {
-                                ground.ink
+                            color(match tone.get() {
+                                Connection::Offline => Signal::Failed.token(),
+                                Connection::Connected => Signal::FullSteam.token(),
+                                Connection::Connecting => ground.muted,
                             })
                         }
                         {word.get().word()}

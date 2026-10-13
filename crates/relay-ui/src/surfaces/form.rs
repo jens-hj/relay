@@ -313,7 +313,15 @@ pub fn Stepper(
 
 /// An on/off switch: a square track with a square knob, ink when on.
 #[component]
-pub fn Toggle(label: String, on: Live<bool>, on_toggle: OnSwitch) -> Element {
+pub fn Toggle(
+    label: String,
+    on: Live<bool>,
+    on_toggle: OnSwitch,
+    /// Fills its parent cell (full width and height, 14px inset) instead of
+    /// hugging its text.
+    #[prop(default = false)]
+    fill: bool,
+) -> Element {
     let flip = on.clone();
     let painted = on.clone();
     let track = view! {
@@ -347,9 +355,11 @@ pub fn Toggle(label: String, on: Live<bool>, on_toggle: OnSwitch) -> Element {
     });
     let text = label.clone();
     let host = view! {
-        button @click:{on_toggle(!flip.get_untracked())} width:max-content height:{px(32.0)}px
-            radius:0px pad:(horizontal:{px(4.0)}px vertical:0px) gap:{px(10.0)}px align:center
-            fill:(Color::TRANSPARENT) label:(label) hover { fill:ground.hover }
+        button @click:{on_toggle(!flip.get_untracked())}
+            width:{if fill { Dimension::Fill } else { Dimension::MaxContent }}
+            height:{if fill { Dimension::Fill } else { Dimension::Px(px(32.0)) }} radius:0px
+            pad:(horizontal:{px(if fill { 14.0 } else { 4.0 })}px vertical:0px) gap:{px(10.0)}px
+            align:center fill:(Color::TRANSPARENT) label:(label) hover { fill:ground.hover }
             focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
             {
                 parent.adopt(&track);
