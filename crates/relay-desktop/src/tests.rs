@@ -152,7 +152,7 @@ fn first_director_draft_requests_command_discovery_and_completes() {
     assert!(
         mounted
             .model
-            .notice
+            .command_feedback
             .get_untracked()
             .contains("first message")
     );
@@ -305,7 +305,7 @@ fn inline_suggestions_filter_browser_input_and_remain_clickable() {
                 assert!(
                     mounted
                         .model
-                        .notice
+                        .command_feedback
                         .get_untracked()
                         .contains("Test command")
                 );
@@ -586,6 +586,203 @@ fn draft_reply_strip_removes_only_the_reply_and_keeps_shared_edges() {
         vec![other]
     );
     assert_eq!(mounted.model.snapshot.get_untracked().messages, original);
+}
+
+#[test]
+fn command_feedback_is_attached_and_clears_on_edit_escape_and_panel_open() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([(
+            "session-plan".into(),
+            Ok(HarnessCatalog {
+                commands: vec![HarnessCommand {
+                    name: "config".into(),
+                    description: "Configure".into(),
+                    argument_hint: String::new(),
+                    dispatch: CommandDispatch::Unavailable,
+                    reason: Some("Configure this feature on the server".into()),
+                }],
+                ..Default::default()
+            }),
+        )]));
+    mounted.settle();
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|s| s.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&draft);
+    mounted.key(Key::Character("/config".into()), false);
+    mounted.key(Key::Enter, false);
+    assert_eq!(
+        mounted.model.command_feedback.get_untracked(),
+        "Configure this feature on the server"
+    );
+    assert!(mounted.model.notice.get_untracked().is_empty());
+    let feedback = mounted.rect("Command feedback");
+    let composer = mounted.rect("Message composer");
+    assert!((feedback.max_y() - composer.origin.y).abs() < 0.1);
+    assert_eq!(feedback.size.width, composer.size.width);
+    mounted.key(Key::Character("x".into()), false);
+    assert!(mounted.model.command_feedback.get_untracked().is_empty());
+    mounted.model.command_feedback.set("Unknown command".into());
+    mounted.settle();
+    mounted.key(Key::Escape, false);
+    assert!(mounted.model.command_feedback.get_untracked().is_empty());
+    mounted.model.command_feedback.set("Unknown command".into());
+    crate::command_ui::open(mounted.model, "model");
+    assert!(mounted.model.command_feedback.get_untracked().is_empty());
+    crate::command_ui::run(mounted.model, "review", "");
+    mounted.settle();
+    assert!(!mounted.model.command_feedback.get_untracked().is_empty());
+    assert!(
+        (mounted.rect("Command feedback").max_y() - mounted.rect("Message composer").origin.y)
+            .abs()
+            < 0.1
+    );
+}
+
+#[test]
+fn page_banner_escape_dismisses_settings_failure_without_changing_its_draft() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.page.set(Page::Settings);
+    mounted
+        .model
+        .notice
+        .set("Settings could not be saved".into());
+    let preferences = mounted.model.preferences.get_untracked();
+    mounted.settle();
+    assert!(mounted.rect("Dismiss").size.width > 0.0);
+    mounted.key(Key::Escape, false);
+    assert!(mounted.model.notice.get_untracked().is_empty());
+    assert_eq!(mounted.model.preferences.get_untracked(), preferences);
+}
+
+#[test]
+fn request_sending_and_send_pending_clear_on_ack_and_conflicts_keep_actions() {
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(sender));
+    let model = mounted.model;
+    let mut send = |text: &str, serial| {
+        model.worker_approval.set(true);
+        crate::buffer::edit(model, "session-plan", vec![Part::text(text)]);
+        crate::buffer::send(model);
+        assert!(
+            model.submission_pending(),
+            "pending includes the draft-save acknowledgement stage"
+        );
+        let (session, request) = loop {
+            match requests.try_recv().unwrap() {
+                crate::buffer_network::Request::Save { session, request } => {
+                    break (session, request);
+                }
+                crate::buffer_network::Request::Forget(_) => {}
+                _ => panic!("Expected draft save"),
+            }
+        };
+        let saved = Draft {
+            session_id: session.clone(),
+            revision: serial * 2 - 1,
+            parts: request.parts.clone(),
+        };
+        crate::buffer::receive(
+            model,
+            crate::buffer_network::Update {
+                serial,
+                initialized: true,
+                connected: true,
+                drafts: vec![saved.clone()],
+                outcomes: std::collections::BTreeMap::from([(
+                    request.request_id.clone(),
+                    crate::buffer_network::Outcome::Saved {
+                        session,
+                        request,
+                        result: Ok(saved),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+    };
+    send("Queue this turn", 1);
+    let request = mounted.commands.try_recv().unwrap();
+    mounted.settle();
+    assert!(mounted.model.sending() && mounted.model.submission_pending());
+    assert!(mounted.model.notice.get_untracked().is_empty());
+    assert!(
+        mounted
+            .rect("Submission awaiting acknowledgement")
+            .size
+            .width
+            > 0.0
+    );
+    assert!(
+        mounted
+            .rect("Connection: Connected, sending…. Show details")
+            .size
+            .height
+            > 0.0
+    );
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        outcome: Some((request.request_id, Ok(()))),
+        outcome_serial: 1,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(!mounted.model.sending() && !mounted.model.submission_pending());
+    assert!(!mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+        n.label
+            .as_deref()
+            .is_some_and(|label| label.starts_with("Connection:") && label.contains("sending"))
+    }));
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Submission awaiting acknowledgement"))
+    );
+    // Another conversation must not show this draft's Send pending state.
+    send("Another turn", 2);
+    let request = mounted.commands.try_recv().unwrap();
+    mounted.model.open_session("session-worker".into());
+    assert!(mounted.model.sending() && !mounted.model.submission_pending());
+    mounted.model.open_session("session-plan".into());
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        outcome: Some((
+            request.request_id,
+            Err("Revision conflict; review latest".into()),
+        )),
+        outcome_serial: 2,
+        outcome_conflict: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(!mounted.model.sending() && !mounted.model.submission_pending());
+    for label in [
+        "Review latest state",
+        "Review conflict for new request",
+        "Retry original request",
+    ] {
+        assert!(mounted.rect(label).size.width > 0.0);
+    }
+    mounted.key(Key::Escape, false);
+    assert!(mounted.model.notice.get_untracked().is_empty());
+    assert!(mounted.model.can_retry());
+    mounted.model.retry_pending();
+    assert!(mounted.model.sending() && mounted.model.submission_pending());
 }
 
 #[test]

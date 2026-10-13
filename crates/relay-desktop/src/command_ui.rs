@@ -215,6 +215,7 @@ pub fn discovery_feedback(model: Model) -> Option<String> {
 }
 
 pub fn open(model: Model, name: &str) {
+    model.command_feedback.set(String::new());
     let parts = buffer::parts(model, &model.session.get_untracked());
     let text = plain_text(&parts);
     if parts
@@ -270,16 +271,20 @@ pub fn intercept(model: Model) -> bool {
     let catalogs = model.catalogs.get_untracked();
     let Some(Ok(catalog)) = catalogs.get(&model.session.get_untracked()) else {
         model
-            .notice
+            .command_feedback
             .set("Wait for commands and skills to load, or retry discovery".into());
         return true;
     };
     let Some(command) = catalog.commands.iter().find(|c| c.name == name) else {
-        model.notice.set(format!("Unknown command /{name}"));
+        model
+            .command_feedback
+            .set(format!("Unknown command /{name}"));
         return true;
     };
     if command.dispatch == CommandDispatch::Unavailable {
-        model.notice.set(command.reason.clone().unwrap_or_default());
+        model
+            .command_feedback
+            .set(command.reason.clone().unwrap_or_default());
         return true;
     }
     if command.dispatch == CommandDispatch::Flow && !matches!(name, "compact" | "review") {
@@ -288,13 +293,13 @@ pub fn intercept(model: Model) -> bool {
             .any(|p| !matches!(p.kind, PartKind::Text { .. }))
         {
             model
-                .notice
+                .command_feedback
                 .set("Send this command separately from skills, replies, and attachments".into());
             return true;
         }
         let native = canonical_command(name);
         if !arg.trim().is_empty() && !matches!(native, "model" | "effort" | "fast" | "resume") {
-            model.notice.set(format!(
+            model.command_feedback.set(format!(
                 "Open /{name} without arguments to use its controls"
             ));
             return true;
@@ -304,7 +309,7 @@ pub fn intercept(model: Model) -> bool {
             && !catalog.models.iter().any(|m| m.id == arg.trim())
         {
             model
-                .notice
+                .command_feedback
                 .set("Choose an available model from /model".into());
             return true;
         }
@@ -321,7 +326,9 @@ pub fn intercept(model: Model) -> bool {
                     .and_then(|w| w.model.as_ref())
             });
             let Some(chosen) = catalog.models.iter().find(|m| Some(&m.id) == id) else {
-                model.notice.set("Choose a session model first".into());
+                model
+                    .command_feedback
+                    .set("Choose a session model first".into());
                 return true;
             };
             let effort = if native == "effort" {
@@ -331,7 +338,7 @@ pub fn intercept(model: Model) -> bool {
                     Some(arg.trim().into())
                 } else {
                     model
-                        .notice
+                        .command_feedback
                         .set("Effort is not supported by this model".into());
                     return true;
                 }
@@ -346,7 +353,7 @@ pub fn intercept(model: Model) -> bool {
                     "on" if chosen.fast => true,
                     "off" => false,
                     _ => {
-                        model.notice.set(
+                        model.command_feedback.set(
                             "Use /fast on or /fast off with a model that supports fast mode".into(),
                         );
                         return true;
@@ -368,7 +375,7 @@ pub fn intercept(model: Model) -> bool {
                 .and_then(|s| s.conversations.iter().find(|c| c.id == arg.trim()));
             if target.is_none() {
                 model
-                    .notice
+                    .command_feedback
                     .set("Choose a retained conversation from /resume".into());
                 return true;
             }
@@ -428,7 +435,7 @@ fn selection(model: Model, model_id: String, effort: Option<String>, fast: bool)
 pub(crate) fn run(model: Model, name: &str, arg: &str) {
     if has_content(&buffer::parts(model, &model.session.get_untracked())) {
         model
-            .notice
+            .command_feedback
             .set("Send or clear the current draft before running this command".into());
         return;
     }
@@ -500,7 +507,7 @@ pub fn CommandPanel(model: Model) -> Element {
                             let command=State::new(command.clone());
                             ActionCell label:(format!("Command /{}", command.get_untracked().name))
                                 text:(some(format!("/{} {} · {}", command.get_untracked().name, command.get_untracked().argument_hint, command.get_untracked().reason.unwrap_or(command.get_untracked().description))))
-                                on-press:(press(move || { let c = command.get_untracked(); if c.dispatch == CommandDispatch::Unavailable { model.notice.set(c.reason.unwrap_or_default()); } else { open(model, &c.name); } }))
+                                on-press:(press(move || { let c = command.get_untracked(); if c.dispatch == CommandDispatch::Unavailable { model.command_feedback.set(c.reason.unwrap_or_default()); } else { open(model, &c.name); } }))
                         }
                     }
                     for (_, skill) in {current.get().skills.clone().into_iter().map(|s|(format!("{}:{}",s.id,s.name),s)).collect::<Vec<_>>()} {

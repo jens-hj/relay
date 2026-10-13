@@ -285,6 +285,15 @@ fn journal(state: &BufferState) -> Result<(), String> {
 }
 
 fn commit(model: Model, state: BufferState) {
+    if !model.command_feedback.get_untracked().is_empty() {
+        let before = model.buffer.get_untracked();
+        let session = model.session.get_untracked();
+        if before.documents.get(&session).map(|doc| &doc.parts)
+            != state.documents.get(&session).map(|doc| &doc.parts)
+        {
+            model.command_feedback.set(String::new());
+        }
+    }
     #[cfg(target_arch = "wasm32")]
     persist_browser(model, &state);
     #[cfg(not(target_arch = "wasm32"))]
@@ -305,6 +314,7 @@ pub fn parts(model: Model, session: &str) -> Vec<Part> {
 }
 
 pub fn edit(model: Model, session: &str, parts: Vec<Part>) {
+    model.command_feedback.set(String::new());
     let mut state = model.buffer.get_untracked();
     let doc = state.documents.entry(session.into()).or_insert_with(|| {
         Document::new(Draft {

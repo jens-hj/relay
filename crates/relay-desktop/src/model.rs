@@ -84,6 +84,7 @@ pub struct Model {
     pub round_trip_ms: State<Option<u64>>,
     pub connection_telemetry: State<(Vec<u64>, Option<u64>, Option<u64>)>,
     pub notice: State<String>,
+    pub command_feedback: State<String>,
     pub busy: State<bool>,
     pub page: State<Page>,
     pub project: State<String>,
@@ -176,6 +177,7 @@ impl Model {
             round_trip_ms: State::new(None),
             connection_telemetry: State::new((Vec::new(), None, None)),
             notice: State::new(String::new()),
+            command_feedback: State::new(String::new()),
             busy: State::new(false),
             page: State::new(Page::Board),
             project: State::new(String::new()),
@@ -424,7 +426,6 @@ impl Model {
             return;
         }
         if self.syncing.get_untracked() {
-            self.notice.set("Syncing workspace changes…".into());
             return;
         }
         if !self.connected.get_untracked() {
@@ -452,6 +453,10 @@ impl Model {
                 command,
             },
         };
+        // A submitted retry replaces the decision notice with acknowledgement state.
+        if self.pending.get_untracked().is_some() {
+            self.notice.set(String::new());
+        }
         self.pending_conflict.set(false);
         self.pending_ambiguous.set(false);
         self.pending.set(Some(Pending {
@@ -459,7 +464,6 @@ impl Model {
             saved,
         }));
         self.busy.set(true);
-        self.notice.set("Awaiting server acknowledgement…".into());
         if self.commands.get_untracked().send(envelope).is_err() {
             self.busy.set(false);
             self.notice
@@ -468,6 +472,40 @@ impl Model {
     }
     pub fn can_retry(&self) -> bool {
         self.pending.get().is_some() && !self.busy.get()
+    }
+    /// Envelopes and submitted drafts awaiting persistence/turn acknowledgements.
+    /// Retained conflicts and ambiguous outcomes require a decision, not a spinner.
+    pub fn sending(&self) -> bool {
+        (self.busy.get() && self.pending.get().is_some())
+            || (!self.can_retry()
+                && self.buffer.get().documents.values().any(|doc| {
+                    !doc.conflict
+                        && doc.error.is_empty()
+                        && (doc.finalize.is_some() || doc.submitting)
+                }))
+    }
+    pub fn submission_pending(&self) -> bool {
+        (self.busy.get()
+            && self
+                .pending
+                .get()
+                .is_some_and(|pending| match pending.saved {
+                    Saved::Buffer(draft) | Saved::DirectorStart { draft } => {
+                        draft.session_id == self.session.get()
+                    }
+                    _ => false,
+                }))
+            || (!self.can_retry()
+                && self
+                    .buffer
+                    .get()
+                    .documents
+                    .get(&self.session.get())
+                    .is_some_and(|doc| {
+                        !doc.conflict
+                            && doc.error.is_empty()
+                            && (doc.finalize.is_some() || doc.submitting)
+                    }))
     }
     pub fn retry_summary(&self) -> String {
         self.pending
@@ -744,6 +782,7 @@ impl Model {
         });
     }
     pub fn open_session(&self, id: String) {
+        self.command_feedback.set(String::new());
         self.sidebar_open.set(false);
         if let Some(session) = self
             .snapshot
@@ -778,6 +817,7 @@ impl Model {
         self.focused_message.set(String::new());
     }
     pub fn open_director(&self, id: String) {
+        self.command_feedback.set(String::new());
         self.sidebar_open.set(false);
         let snapshot = self.snapshot.get_untracked();
         let Some(director) = snapshot.directors.iter().find(|d| d.id == id) else {

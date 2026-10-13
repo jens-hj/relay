@@ -214,11 +214,13 @@ pub fn Composer(
     /// Rich editors can report attachments or other content independently of plain text.
     #[prop(optional)]
     has_content: Option<Live<bool>>,
+    #[prop(default = Live::fixed(false))] pending: Live<bool>,
     #[prop(default = UiText::fixed(String::new()))] placeholder: UiText,
     /// The key hint under the message; injected editors describe their own keys.
     #[prop(default = UiText::fixed("↵ send · ⇧↵ new line".to_owned()))]
     hint: UiText,
 ) -> Element {
+    let pending = Derived::new(move || pending.get());
     let content = Derived::new(move || {
         has_content
             .as_ref()
@@ -289,18 +291,55 @@ pub fn Composer(
                         Label text:"+" role:(TextRole::BodyLarge)
                     }
                 }
-                button @click:{if content.get_untracked() { send(); }} width:fill height:1fr
-                    align:center justify:center pad:0px radius:0px label:"Send message"
-                    disabled:{!content.get()}
+                button @click:{if content.get_untracked() && !pending.get_untracked() { send(); }}
+                    width:fill height:1fr align:center justify:center pad:0px radius:0px
+                    label:"Send message" disabled:{!content.get() || pending.get()}
+                    description:{if pending.get() {"Awaiting server acknowledgement"} else {""}}
                     fill:{if content.get() { mosaic::core::theme::color(ground.ink) } else { quiet_send(true) }}
                     font-color:{if content.get() { mosaic::core::theme::color(ground.inverse) } else { quiet_send(false) }}
                     stroke:(width:{px(1.0)} color:ground.rule edges:top)
                     focused { stroke:+(width:1px color:ground.ink offset:-2px) } {
-                    text font-size:{px(22.0)}px {"↑"}
+                    if pending.get() {
+                        { parent.adopt(&pending_mark()); }
+                    } else {
+                        text font-size:{px(22.0)}px {"↑"}
+                    }
                 }
             }
         }
     }
+}
+fn pending_mark() -> Element {
+    let mark = view! {
+        el width:{px(14.0)}px height:{px(4.0)}px nohit
+            label:"Submission awaiting acknowledgement" {}
+    };
+    let step = Rc::new(std::cell::Cell::new(0usize));
+    let next = step.clone();
+    let repaint = mark.clone();
+    mark.animate(move |_| {
+        next.set((next.get() + 1) % 3);
+        repaint.paint_dirty();
+        mosaic::widgets::Tick::Sleep(std::time::Duration::from_millis(200))
+    });
+    mark.paint(move |ctx| {
+        let tint = ctx.text_color.clone();
+        for i in 0..3 {
+            ctx.scene
+                .push_layer(if i == step.get() { 1.0 } else { 0.3 });
+            ctx.scene.shape(
+                mosaic::render::Shape::new(Rect::from_xywh(
+                    ctx.rect.origin.x + px(i as f32 * 5.0),
+                    ctx.rect.origin.y,
+                    px(4.0),
+                    px(4.0),
+                ))
+                .fill(tint.clone()),
+            );
+            ctx.scene.pop_layer();
+        }
+    });
+    mark
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Choice {

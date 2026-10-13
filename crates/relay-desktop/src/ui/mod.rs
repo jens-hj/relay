@@ -178,6 +178,8 @@ pub fn shell(model: Model) -> Element {
                 ctx.stop_propagation();
             }
             Key::Escape => {
+                model.notice.set(String::new());
+                model.command_feedback.set(String::new());
                 model.sidebar_open.set(false);
                 model.palette.set(false);
                 model.searching.set(false);

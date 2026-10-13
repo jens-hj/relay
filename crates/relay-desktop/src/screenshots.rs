@@ -123,7 +123,10 @@ fn shell_screenshots() {
     relay_ui::fonts::install(&mut fonts);
     ui.set_fonts(fonts);
     relay_ui::attach(&ui);
-    let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
+    let (sender, commands) = tokio::sync::mpsc::unbounded_channel();
+    let commands = std::cell::RefCell::new(commands);
+    let receipt = std::cell::RefCell::new(None::<String>);
+    let outcome_serial = std::cell::Cell::new(0u64);
     let model = scope.run(|| crate::model::Model::new(&ui, sender));
     let mut snapshot = demo_snapshot(DirectorProfile::default());
     demo_orchestration(&mut snapshot);
@@ -181,7 +184,51 @@ fn shell_screenshots() {
             ui.frame(logical, 1.0);
         }
     };
-    let shots: [(&str, &dyn Fn()); 17] = [
+    let submit_shot = || {
+        model.open_session("session-plan".into());
+        let parts = vec![Part::text("Please check the next turn.")];
+        crate::buffer::edit(model, "session-plan", parts.clone());
+        model.submit(
+            Command::SubmitTurn {
+                session_id: "session-plan".into(),
+                draft_revision: 0,
+                parts: parts.clone(),
+                approve_implementation: true,
+            },
+            model.snapshot.get_untracked().revision,
+            crate::model::Saved::Buffer(Draft {
+                session_id: "session-plan".into(),
+                revision: 0,
+                parts,
+            }),
+        );
+        let request = commands.borrow_mut().try_recv().unwrap();
+        *receipt.borrow_mut() = Some(request.request_id.clone());
+        request.request_id
+    };
+    let shots: [(&str, &dyn Fn()); 20] = [
+        ("notice-command-feedback", &|| {
+            model.open_session("session-plan".into());
+            model.command_feedback.set("Configure this feature on the server; the harness does not expose its interactive editor here".into());
+        }),
+        ("notice-sending", &|| {
+            submit_shot();
+        }),
+        ("notice-conflict", &|| {
+            let id = submit_shot();
+            outcome_serial.set(outcome_serial.get() + 1);
+            model.receive(NetworkState {
+                snapshot: model.snapshot.get_untracked(),
+                connected: true,
+                outcome: Some((
+                    id,
+                    Err("Revision conflict; review latest state before retrying.".into()),
+                )),
+                outcome_serial: outcome_serial.get(),
+                outcome_conflict: true,
+                ..Default::default()
+            });
+        }),
         ("composer-reply", &|| {
             composer_reply_shot(model, &ui, false, &settle)
         }),
@@ -306,6 +353,25 @@ fn shell_screenshots() {
         scope.run(open);
         settle();
         render(&ui, logical, 1.0, &format!("{directory}/{name}.png"));
+        if name.starts_with("notice-") {
+            scope.run(|| {
+                if model.busy.get_untracked() {
+                    outcome_serial.set(outcome_serial.get() + 1);
+                    model.receive(NetworkState {
+                        snapshot: model.snapshot.get_untracked(),
+                        connected: true,
+                        outcome: receipt.borrow_mut().take().map(|id| (id, Ok(()))),
+                        outcome_serial: outcome_serial.get(),
+                        ..Default::default()
+                    });
+                } else if model.can_rebase() {
+                    model.rebase_conflict();
+                }
+                model.command_feedback.set(String::new());
+                model.notice.set(String::new());
+                crate::buffer::edit(model, "session-plan", vec![]);
+            });
+        }
         if name.starts_with("composer-reply") {
             let snapshot = ui.inspection_snapshot();
             let source = image::open(format!("{directory}/{name}.png")).unwrap();

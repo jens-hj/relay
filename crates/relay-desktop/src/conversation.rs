@@ -164,7 +164,9 @@ fn accept_completion(model: Model, controller: &Shared, index: usize, mirror: bo
     model.completion.set(None);
     if let Some(command) = choice.command {
         if command.dispatch == CommandDispatch::Unavailable {
-            model.notice.set(command.reason.unwrap_or_default());
+            model
+                .command_feedback
+                .set(command.reason.unwrap_or_default());
             return;
         }
         // Keep command text as a draft until a command flow is submitted.
@@ -784,7 +786,7 @@ pub fn Conversation(model: Model) -> Element {
     let draft_extent = State::new(0.0f32);
     let editor = view! {
         col height:min-content min-height:{px(48.0)}px gap:{px(8.0)}px label:"Next message" {
-            if discovery_feedback.get().is_some() {
+            if discovery_feedback.get().is_some() && model.command_feedback.get().is_empty() {
                 col height:min-content gap:{px(4.0)}px label:"Command discovery status" {
                     text font-size:{px(12.0)}px {discovery_feedback.get().unwrap_or_default()}
                     if model.catalogs.get().get(&model.session.get()).is_some_and(|c| c.is_err()) {
@@ -1282,7 +1284,16 @@ pub fn Conversation(model: Model) -> Element {
                             }
                         }
                     }
+                    if !model.command_feedback.get().is_empty() {
+                        row height:{px(32.0)}px min-width:0px shrink:0
+                            fill:ground.panel pad:(horizontal:{px(12.0)}px vertical:0px) align:center
+                            stroke:(width:{px(1.0)} color:ground.rule edges:(top left right))
+                            label:"Command feedback" {
+                            Ellipsis text:(model.command_feedback) role:(TextRole::Caption) tone:(Tone::Muted)
+                        }
+                    }
                     Composer settings:(relay_ui::Live::from(ledger)) ledger-actions:(ledger_actions)
+                        pending:(relay_ui::Live::from(Derived::new(move || model.submission_pending())))
                         on-send:(send) on-attach:(attach) editor:(Some(editor))
                         has-content:(Some(relay_ui::Live::from(has_content)))
                         hint:(relay_ui::Live::from(hint)) as composer
@@ -1314,6 +1325,10 @@ pub fn Conversation(model: Model) -> Element {
     });
     root.on_key(move |event, ctx| {
         keys_controller.borrow_mut().history_anchor = None;
+        if matches!(event.kind, KeyEventKind::Down { .. }) && event.key == Key::Escape {
+            model.command_feedback.set(String::new());
+            model.notice.set(String::new());
+        }
         if matches!(event.kind, KeyEventKind::Down { .. })
             && event.key == Key::Escape
             && !model.command_flow.get_untracked().is_empty()
@@ -2169,6 +2184,10 @@ pub(crate) fn BufferText(
             return;
         }
         key_follow.set(true);
+        if event.key == Key::Escape {
+            model.command_feedback.set(String::new());
+            model.notice.set(String::new());
+        }
         let command = event.modifiers.command();
         if command && event.key == Key::Enter {
             if !matches!(event.kind, KeyEventKind::Down { repeat: true }) {
