@@ -156,6 +156,18 @@ pub fn shell(model: Model) -> Element {
                 model.searching.set(true);
                 ctx.stop_propagation();
             }
+            // P pauses or resumes the open session's queue, as its header
+            // cell shows, unless a text field takes the key.
+            Key::Character(key)
+                if !command
+                    && !event.modifiers.alt
+                    && key.eq_ignore_ascii_case("p")
+                    && model.page.get_untracked() == Page::Sessions
+                    && !typing(model) =>
+            {
+                model.toggle_queue();
+                ctx.stop_propagation();
+            }
             Key::Character(key) if command && key == "," => {
                 model.page.set(Page::Settings);
                 ctx.stop_propagation();
@@ -421,4 +433,14 @@ fn page_label(page: Page) -> &'static str {
         Page::Publish => "Publish board",
         Page::DirectorStart => "Director conversation",
     }
+}
+
+/// Whether keyboard focus is in a text field.
+fn typing(model: Model) -> bool {
+    let ui = model.ui.get_untracked();
+    ui.focused().is_some_and(|focused| {
+        ui.inspection_snapshot()
+            .node(focused.id())
+            .is_some_and(|node| node.role == mosaic::widgets::Role::TextInput)
+    })
 }

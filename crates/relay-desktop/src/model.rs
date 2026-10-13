@@ -1170,6 +1170,27 @@ impl Model {
             Saved::Action,
         );
     }
+    /// Holds the open session's queued turns, or resumes held ones.
+    pub fn toggle_queue(&self) {
+        let snapshot = self.snapshot.get_untracked();
+        let session_id = self.session.get_untracked();
+        let held = snapshot
+            .submissions
+            .iter()
+            .any(|s| s.session_id == session_id && s.state == SubmissionState::Paused);
+        let queued = snapshot
+            .submissions
+            .iter()
+            .any(|s| s.session_id == session_id && s.state == SubmissionState::Queued);
+        let command = if held {
+            Command::ResumeQueue { session_id }
+        } else if queued {
+            Command::PauseQueue { session_id }
+        } else {
+            return;
+        };
+        self.submit(command, snapshot.revision, Saved::Action);
+    }
     pub fn stop_worker(&self) {
         if !self.snapshot.get_untracked().sessions.iter().any(|s| {
             s.id == self.session.get_untracked()

@@ -3128,3 +3128,113 @@ async fn first_director_message_preserves_images_through_process_input_and_retry
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn paused_queue_holds_turns_after_the_current_one_until_resumed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, id, _repo) = completed_app_workspace(dir.path(), APP_FAKE);
+    let first = saved_turn(&w, &id, vec![Part::text("First")]).await;
+    let (_, first_run, _rx, _) = reserve(&w, first);
+    let queued = saved_turn(&w, &id, vec![Part::text("Second")]).await;
+    let queued_id = queued.request_id.clone();
+    let apply = |envelope: CommandEnvelope| {
+        let mut store = w.store.lock().unwrap();
+        let result = store.apply(envelope, &w.config);
+        if let Ok((s, _)) = &result {
+            w.snapshots.send_replace(s.clone());
+        }
+        result.map(|(s, action)| (s, action.is_some()))
+    };
+    apply(queued).unwrap();
+    let state = |w: &Workspace| {
+        w.snapshots
+            .borrow()
+            .submissions
+            .iter()
+            .find(|s| s.id == queued_id)
+            .unwrap()
+            .state
+            .clone()
+    };
+    assert_eq!(state(&w), SubmissionState::Queued);
+    let pause = env(
+        revision(&w),
+        Command::PauseQueue {
+            session_id: id.clone(),
+        },
+    );
+    let (paused, launched) = apply(pause.clone()).unwrap();
+    assert!(!launched);
+    assert_eq!(state(&w), SubmissionState::Paused);
+    // The same envelope is answered from its receipt, not applied twice.
+    let (again, _) = apply(pause).unwrap();
+    assert_eq!(again.revision, paused.revision);
+    // Nothing left to pause.
+    let empty = env(
+        revision(&w),
+        Command::PauseQueue {
+            session_id: id.clone(),
+        },
+    );
+    assert!(apply(empty).is_err());
+    // Resuming while the first turn runs only releases the held turn.
+    let (_, launched) = apply(env(
+        revision(&w),
+        Command::ResumeQueue {
+            session_id: id.clone(),
+        },
+    ))
+    .unwrap();
+    assert!(!launched);
+    assert_eq!(state(&w), SubmissionState::Queued);
+    apply(env(
+        revision(&w),
+        Command::PauseQueue {
+            session_id: id.clone(),
+        },
+    ))
+    .unwrap();
+    // The first turn completes: the held turn does not launch.
+    {
+        let mut store = w.store.lock().unwrap();
+        let mut s = store.snapshot().unwrap();
+        s.sessions
+            .iter_mut()
+            .find(|s| s.id == id)
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .status = WorkerStatus::Completed;
+        store.save(&s).unwrap();
+    }
+    conversation::advance(&w, &id, &first_run).unwrap();
+    let s = w.store.lock().unwrap().snapshot().unwrap();
+    w.snapshots.send_replace(s.clone());
+    assert_eq!(state(&w), SubmissionState::Paused);
+    assert_eq!(
+        s.sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .status,
+        WorkerStatus::Completed
+    );
+    // Resuming once idle launches it.
+    let (_, launched) = apply(env(
+        s.revision,
+        Command::ResumeQueue {
+            session_id: id.clone(),
+        },
+    ))
+    .unwrap();
+    assert!(launched);
+    assert_eq!(state(&w), SubmissionState::Launching);
+}
+
+fn revision(w: &Workspace) -> u64 {
+    w.snapshots.borrow().revision
+}

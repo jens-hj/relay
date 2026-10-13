@@ -7417,3 +7417,66 @@ fn the_ledger_names_a_selected_effort_without_its_steps() {
     assert!(!has_label(&mounted, "Selected effort"));
     assert!(has_label(&mounted, "Effort max"));
 }
+
+#[test]
+fn the_header_pause_cell_and_p_hold_and_resume_the_queue() {
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let session = mounted.model.session.get_untracked();
+    let submission = |state: SubmissionState| Submission {
+        id: "queued-turn".into(),
+        session_id: session.clone(),
+        parts: vec![Part::text("Next")],
+        state,
+        approve_implementation: false,
+        error: None,
+        interrupts_run: None,
+        last_edit_request: None,
+    };
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.submissions.push(submission(SubmissionState::Queued)));
+    mounted.settle();
+    mounted.click("Pause");
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::PauseQueue { ref session_id } if *session_id == session
+    ));
+    mounted.model.busy.set(false);
+    mounted.model.snapshot.update(|s| {
+        s.submissions[0].state = SubmissionState::Paused;
+        s.revision += 1;
+    });
+    mounted.settle();
+    assert!(!has_label(&mounted, "Pause"));
+    mounted.click("Resume");
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::ResumeQueue { ref session_id } if *session_id == session
+    ));
+    mounted.model.busy.set(false);
+    // P toggles outside text fields, and types into the draft inside one.
+    mounted.focus("Session actions");
+    mounted.key(Key::Character("p".into()), false);
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::ResumeQueue { .. }
+    ));
+    mounted.model.busy.set(false);
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|l| l.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&draft);
+    mounted.key(Key::Character("p".into()), false);
+    assert!(mounted.commands.try_recv().is_err());
+    // Without queued or held turns there is no pause cell.
+    mounted.model.snapshot.update(|s| s.submissions.clear());
+    mounted.settle();
+    assert!(!has_label(&mounted, "Pause") && !has_label(&mounted, "Resume"));
+    let _ = &mut mounted;
+}

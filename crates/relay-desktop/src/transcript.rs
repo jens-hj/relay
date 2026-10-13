@@ -25,6 +25,10 @@ struct HeaderView {
     context: Option<relay_ui::prelude::ContextView>,
     below: Vec<AgentStatus>,
     stoppable: bool,
+    /// Turns wait to follow the current one.
+    queued: bool,
+    /// Turns are held until resumed.
+    paused: bool,
 }
 
 fn header_view(model: Model) -> HeaderView {
@@ -44,6 +48,8 @@ fn header_view(model: Model) -> HeaderView {
             context: None,
             below: Vec::new(),
             stoppable: false,
+            queued: false,
+            paused: false,
         };
     };
     HeaderView {
@@ -57,6 +63,14 @@ fn header_view(model: Model) -> HeaderView {
             .worker
             .as_ref()
             .is_some_and(|w| matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running)),
+        queued: snapshot
+            .submissions
+            .iter()
+            .any(|s| s.session_id == id && s.state == SubmissionState::Queued),
+        paused: snapshot
+            .submissions
+            .iter()
+            .any(|s| s.session_id == id && s.state == SubmissionState::Paused),
     }
 }
 
@@ -84,6 +98,8 @@ pub(crate) fn SessionHead(model: Model, menu: State<bool>) -> Element {
                     model.agent_focus.set(Some(id));
                 }) as OnPress
             });
+            let pause: Option<OnPress> = (view.queued || view.paused)
+                .then(|| Rc::new(move || model.toggle_queue()) as OnPress);
             let compact: Option<OnPress> = view
                 .context
                 .is_some()
@@ -93,7 +109,7 @@ pub(crate) fn SessionHead(model: Model, menu: State<bool>) -> Element {
                     SessionHeader path:(view.path.clone()) title:(view.title.clone())
                         status:(view.status) effort:(view.effort) context:(view.context.clone())
                         on-compact:(compact) below:(view.below.clone()) on-below:(below)
-                        on-stop:(stop)
+                        on-pause:(pause) paused:(view.paused) on-stop:(stop)
                 }
             });
         },
