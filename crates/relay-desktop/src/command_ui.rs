@@ -8,6 +8,7 @@ use crate::{
 };
 use mosaic::prelude::*;
 use relay_core::*;
+use relay_ui::cells::CellButtonHandle;
 use relay_ui::prelude::{
     CellButton, CellButtonProps, Label, LabelProps, Rule, TextRole, Tone, UiText,
 };
@@ -458,8 +459,9 @@ pub fn CommandPanel(model: Model) -> Element {
     let argument = model.command_argument;
     let some = |text: String| Some(UiText::from(text));
     let disconnected = Derived::new(move || !model.connected.get());
+    let entry = State::new(None::<Element>);
     let head = view! {
-        row height:{px(40.0)}px align:center gap:0px
+        row height:{px(40.0)}px shrink:0 align:center gap:0px
             stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
             row width:1fr min-width:0px height:min-content
                 pad:(horizontal:{px(18.0)}px vertical:0px) {
@@ -476,12 +478,13 @@ pub fn CommandPanel(model: Model) -> Element {
                 CellButton label:"Close commands" rule:(Rule::Left)
                     on-press:(press(move || model.command_flow.set(String::new()))) {
                     Label text:"Close" role:(TextRole::Label) weight:500
-                }
+                } as close
+                { entry.set(Some(close.root().clone())); }
             }
         }
     };
-    view! {
-        col height:min-content stroke:(width:{px(1.0)} color:ground.rule edges:bottom) {
+    let panel = view! {
+        col height:min-content gap:0px {
             { parent.adopt(&head); }
             if catalog.get().is_some_and(|c|c.is_err()) {
                 Caption
@@ -610,5 +613,45 @@ pub fn CommandPanel(model: Model) -> Element {
                 }
             }
         }
-    }
+    };
+    let entry = entry.get_untracked().unwrap();
+    let initial = std::cell::Cell::new(true);
+    let layout_panel = panel.clone();
+    panel.on_layout(move |_| {
+        if initial.replace(false) {
+            let ui = model.ui.get_untracked();
+            entry.focus();
+            // The first command choice follows the header cells. Information-only
+            // commands keep focus on Close rather than stepping into the composer.
+            ui.focus_next();
+            if !layout_panel.interaction().focus_within() {
+                entry.focus();
+            }
+        }
+    });
+    let keys_panel = panel.clone();
+    panel.on_key(move |event, ctx| {
+        let ui = model.ui.get_untracked();
+        if !matches!(event.kind, KeyEventKind::Down { .. }) || ui.wants_text_input() {
+            return;
+        }
+        if matches!(event.key, Key::ArrowDown | Key::ArrowUp) {
+            let previous = ui.focused();
+            if event.key == Key::ArrowDown {
+                ui.focus_next();
+            } else {
+                ui.focus_prev();
+            }
+            if !keys_panel.interaction().focus_within()
+                && let Some(previous) = previous
+            {
+                previous.focus();
+            }
+            if let Some(field) = ui.focused() {
+                field.reveal();
+            }
+            ctx.stop_propagation();
+        }
+    });
+    panel
 }

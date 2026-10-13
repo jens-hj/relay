@@ -18,6 +18,7 @@ use mosaic::{
     widgets::input::TextInputContents,
 };
 use relay_core::*;
+use relay_ui::composer::ComposerHandle;
 use relay_ui::prelude::{
     AgentText, AgentTextProps, Composer, ComposerProps, FingerprintStrip, FingerprintStripProps,
     LedgerActions, MessageRow, MessageRowProps, Segments, SegmentsProps, ThinkingLine,
@@ -782,65 +783,37 @@ pub fn Conversation(model: Model) -> Element {
     let compact = Derived::new(move || doc_width.get() < px(720.0));
     let draft_extent = State::new(0.0f32);
     let editor = view! {
-        col width:fill height:min-content min-height:{px(48.0)}px gap:{px(8.0)}px label:"Next message" {
-        if discovery_feedback.get().is_some() {
-            col height:min-content gap:{px(4.0)}px
-                label:"Command discovery status" {
-                text font-size:{px(12.0)}px
-                    {discovery_feedback.get().unwrap_or_default()}
-                if model.catalogs.get().get(&model.session.get()).is_some_and(|c| c.is_err()) {
-                    row width:{px(120.0)}px height:min-content {
-                        { parent.adopt(&action_cell("Retry command discovery", "Retry", || false, move || crate::command_ui::refresh(model, true))); }
-                    }
-                }
-            }
-        }
-        if model.completion.get().is_some() {
-            col height:min-content shrink:0 gap:0px
-                stroke:(width:{px(1.0)} color:ground.rule offset:{px(-1.0)})
-                label:"Inline suggestions" {
-                // Key by content, not position: filtering must replace the displayed row.
-                for (key, choice) in {model.completion.get().map(|c|c.choices.into_iter().map(|choice|((choice.label.clone(),choice.description.clone()),choice)).collect::<Vec<_>>()).unwrap_or_default()} {
-                    let picked_label=key.0.clone();
-                    let choice=State::new(choice.clone());
-                    row height:{px(32.0)}px min-width:0px shrink:0
-                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                        {
-                            let picked = picked_label.clone();
-                            let current = Derived::new(move || model.completion.get().is_some_and(|c| c.choices.get(c.index).is_some_and(|c| c.label == choice.get().label)));
-                            parent.adopt(&view! {
-                                CellButton label:(Derived::new(move || choice.get().label)) start:true selected:(current)
-                                    horizontal-inset:(12.0)
-                                    on-press:(press(move || if let Some(index) = model.completion.get_untracked().and_then(|c| c.choices.iter().position(|c| c.label == picked)) { accept_completion(model, &controller.get_untracked(), index, false); })) {
-                                    Ellipsis text:(Derived::new(move || format!("{} · {}", choice.get().label, choice.get().description.split_whitespace().collect::<Vec<_>>().join(" "))))
-                                        role:(TextRole::Label)
-                                }
-                            });
+        col height:min-content min-height:{px(48.0)}px gap:{px(8.0)}px label:"Next message" {
+            if discovery_feedback.get().is_some() {
+                col height:min-content gap:{px(4.0)}px label:"Command discovery status" {
+                    text font-size:{px(12.0)}px {discovery_feedback.get().unwrap_or_default()}
+                    if model.catalogs.get().get(&model.session.get()).is_some_and(|c| c.is_err()) {
+                        row width:{px(120.0)}px height:min-content {
+                            { parent.adopt(&action_cell("Retry command discovery", "Retry", || false, move || crate::command_ui::refresh(model, true))); }
                         }
                     }
                 }
             }
-        }
-        scroll {
-            col height:min-content min-width:0px gap:{px(6.0)}px
-                @layout:{move |rect:Rect| draft_extent.set(rect.size.height)} {
-                for (_, part) in {
+            scroll {
+                col height:min-content min-width:0px gap:{px(6.0)}px
+                    @layout:{move |rect:Rect| draft_extent.set(rect.size.height)} {
+                    for (_, part) in {
                     let parts=buffer::parts(model,&model.session.get());
                     let parts=if parts.is_empty(){vec![Part{id:empty.get(),kind:PartKind::Text{text:String::new()}}]}else{parts};
                     parts.into_iter().map(|p|(p.id.clone(),p)).collect::<Vec<_>>()
                 } {
-                    col height:min-content {
-                        DraftPart model:(model) controller:(controller)
-                            part:(part.clone()) mirror:false
+                        col height:min-content {
+                            DraftPart model:(model) controller:(controller) part:(part.clone())
+                                mirror:false
+                        }
                     }
                 }
+            } as draft_scroll
+            {
+                draft_scroll.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(draft_extent.get().min((doc_height.get() - px(200.0)).clamp(px(24.0), px(240.0)))).basis(Dimension::Auto).grow(0.0).shrink(0.0));
+                controller.get_untracked().borrow_mut().draft_viewport = Some(draft_scroll.clone());
             }
-        } as draft_scroll
-        {
-            draft_scroll.root().style_dyn(move || Style::stack().width(Dimension::Fill).height(draft_extent.get().min((doc_height.get() - px(200.0)).clamp(px(24.0), px(240.0)))).basis(Dimension::Auto).grow(0.0).shrink(0.0));
-            controller.get_untracked().borrow_mut().draft_viewport = Some(draft_scroll.clone());
         }
-    }
     };
     let editor_area = editor.clone();
     let has_content =
@@ -938,11 +911,6 @@ pub fn Conversation(model: Model) -> Element {
                 FingerprintStrip tools:(relay_ui::Live::from(tools))
             }
             Notice model:(model)
-            if !model.command_flow.get().is_empty() {
-                BoundedPanel limit:(auxiliary_limit) {
-                    CommandPanel model:(model)
-                }
-            }
             if menu.get() {
                 BoundedPanel limit:(auxiliary_limit) {
                     col height:min-content gap:0px shrink:0
@@ -1181,6 +1149,7 @@ pub fn Conversation(model: Model) -> Element {
                 }
             } as document_scroll
             {
+                document_scroll.root().label("Transcript viewport");
                 document_scroll.root().on_layout(move |rect| viewport_size.set(rect.size));
                 controller.get_untracked().borrow_mut().viewport=Some(document_scroll.clone());
                 let gesture_controller=controller.get_untracked();
@@ -1269,11 +1238,55 @@ pub fn Conversation(model: Model) -> Element {
             row height:min-content shrink:0
                 pad:(left:{px(if compact.get() {0.0} else {28.0})}px right:{px(if compact.get() {0.0} else {36.0})}px bottom:{px(if compact.get() {0.0} else {20.0})}px)
                 justify:center {
-                col width:1fr max-width:{px(848.0)}px height:min-content {
+                col width:1fr max-width:{px(848.0)}px height:min-content gap:0px label:"Composer dock" {
+                    if !model.command_flow.get().is_empty() {
+                        col height:min-content shrink:0 fill:ground.panel
+                            stroke:(width:{px(1.0)} color:ground.rule edges:(top left right))
+                            label:"Harness command panel" {
+                            // Each step starts at the top with its own focus entry point.
+                            for (_, _) in {vec![((model.command_flow.get(), model.command_model.get()), ())]} {
+                                BoundedPanel limit:(auxiliary_limit) {
+                                    CommandPanel model:(model)
+                                }
+                            }
+                        }
+                    }
+                    if model.completion.get().is_some() {
+                        col height:min-content shrink:0 fill:ground.panel
+                            stroke:(width:{px(1.0)} color:ground.rule edges:(top left right))
+                            label:"Command suggestions panel" {
+                            BoundedPanel limit:(auxiliary_limit) {
+                                col height:min-content shrink:0 gap:0px
+                                    label:"Inline suggestions" {
+                                    // Key by content, not position: filtering must replace the displayed row.
+                                    for (key, choice) in {model.completion.get().map(|c|c.choices.into_iter().map(|choice|((choice.label.clone(),choice.description.clone()),choice)).collect::<Vec<_>>()).unwrap_or_default()} {
+                                        let picked_label=key.0.clone();
+                                        let choice=State::new(choice.clone());
+                                        row height:{px(32.0)}px min-width:0px shrink:0
+                                            stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                                            {
+                                                let picked = picked_label.clone();
+                                                let current = Derived::new(move || model.completion.get().is_some_and(|c| c.choices.get(c.index).is_some_and(|c| c.label == choice.get().label)));
+                                                parent.adopt(&view! {
+                                                    CellButton label:(Derived::new(move || choice.get().label)) start:true selected:(current)
+                                                        horizontal-inset:(12.0)
+                                                        on-press:(press(move || if let Some(index) = model.completion.get_untracked().and_then(|c| c.choices.iter().position(|c| c.label == picked)) { accept_completion(model, &controller.get_untracked(), index, false); })) {
+                                                        Ellipsis text:(Derived::new(move || format!("{} · {}", choice.get().label, choice.get().description.split_whitespace().collect::<Vec<_>>().join(" "))))
+                                                            role:(TextRole::Label)
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Composer settings:(relay_ui::Live::from(ledger)) ledger-actions:(ledger_actions)
                         on-send:(send) on-attach:(attach) editor:(Some(editor))
                         has-content:(Some(relay_ui::Live::from(has_content)))
-                        hint:(relay_ui::Live::from(hint))
+                        hint:(relay_ui::Live::from(hint)) as composer
+                    { composer.label("Message composer"); }
                 }
             }
         }
@@ -1283,8 +1296,31 @@ pub fn Conversation(model: Model) -> Element {
         cleanup_controller.borrow_mut().viewport = None;
     });
     let keys_controller = controller.get_untracked();
-    root.on_key(move |_, _| {
+    let restore_controller = keys_controller.clone();
+    let was_open = Rc::new(Cell::new(false));
+    Effect::new(move || {
+        let open = !model.command_flow.get().is_empty();
+        if was_open.replace(open)
+            && !open
+            && let Some((_, (field, _))) = restore_controller
+                .borrow()
+                .surfaces
+                .iter()
+                .find(|(key, _)| key.starts_with("draft-"))
+        {
+            field.focus();
+            field.reveal();
+        }
+    });
+    root.on_key(move |event, ctx| {
         keys_controller.borrow_mut().history_anchor = None;
+        if matches!(event.kind, KeyEventKind::Down { .. })
+            && event.key == Key::Escape
+            && !model.command_flow.get_untracked().is_empty()
+        {
+            model.command_flow.set(String::new());
+            ctx.stop_propagation();
+        }
     });
     let drag_controller = controller.get_untracked();
     root.on_pointer(move |event, _| match event.kind {

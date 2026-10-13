@@ -410,6 +410,122 @@ fn harness_completion_inserts_durable_skills_and_opens_native_model_flow() {
 }
 
 #[test]
+fn harness_command_panel_is_attached_bounded_and_escape_restores_draft_focus() {
+    for (width, height) in [(1380.0, 900.0), (820.0, 900.0), (500.0, 480.0)] {
+        let mut mounted = mount(false, width);
+        mounted.size.height = height;
+        mounted.model.open_session("session-plan".into());
+        let mut catalog = demo_catalog("session-plan", Harness::Codex);
+        catalog.commands.push(HarnessCommand {
+            name: "model".into(),
+            description: "Choose model".into(),
+            argument_hint: String::new(),
+            dispatch: CommandDispatch::Flow,
+            reason: None,
+        });
+        catalog.models = (0..24)
+            .map(|i| HarnessModel {
+                id: format!("model-{i}"),
+                name: format!("Model {i}"),
+                efforts: vec!["low".into(), "high".into()],
+                default_effort: Some("low".into()),
+                fast: false,
+            })
+            .collect();
+        mounted
+            .model
+            .catalogs
+            .set(std::collections::BTreeMap::from([(
+                "session-plan".into(),
+                Ok(catalog),
+            )]));
+        mounted.settle();
+        let before = mounted.rect("Transcript viewport");
+        let draft = mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .find_map(|n| n.label.filter(|s| s.starts_with("Draft text")))
+            .unwrap();
+        mounted.focus(&draft);
+        mounted.key(Key::Character("/model".into()), false);
+        let suggestions = mounted.rect("Command suggestions panel");
+        let composer = mounted.rect("Message composer");
+        assert!((suggestions.max_y() - composer.origin.y).abs() < 0.1);
+        assert!((suggestions.origin.x - composer.origin.x).abs() < 0.1);
+        assert!((suggestions.size.width - composer.size.width).abs() < 0.1);
+        mounted.key(Key::Enter, false);
+        assert_eq!(mounted.model.command_flow.get_untracked(), "model");
+        let panel = mounted.rect("Harness command panel");
+        let composer = mounted.rect("Message composer");
+        let transcript = mounted.rect("Transcript viewport");
+        assert!((panel.max_y() - composer.origin.y).abs() < 0.1);
+        assert!((panel.origin.x - composer.origin.x).abs() < 0.1);
+        assert!((panel.size.width - composer.size.width).abs() < 0.1);
+        assert!(panel.size.height <= 280.1 && panel.size.height > 0.0);
+        assert!(panel.origin.x >= transcript.origin.x && panel.max_x() <= transcript.max_x());
+        assert!(
+            transcript.max_y() <= panel.origin.y + 0.1,
+            "{width}x{height}: transcript {transcript:?}, panel {panel:?}, composer {composer:?}"
+        );
+        assert!(transcript.size.height < before.size.height);
+        assert!(composer.max_y() <= height + 0.1);
+        assert_eq!(
+            focused_label(&mounted).as_deref(),
+            Some("Choose model Model 0")
+        );
+        mounted.key(Key::ArrowDown, false);
+        assert_eq!(
+            focused_label(&mounted).as_deref(),
+            Some("Choose model Model 1")
+        );
+        mounted.key(Key::ArrowUp, false);
+        assert_eq!(
+            focused_label(&mounted).as_deref(),
+            Some("Choose model Model 0")
+        );
+        // The real clip/hit chain must reject transcript painting over panel controls.
+        assert_control_hit(&mounted, "Choose model Model 0");
+        assert_control_hit(&mounted, "Choose model Model 23");
+        mounted.key(Key::Escape, false);
+        assert!(mounted.model.command_flow.get_untracked().is_empty());
+        assert_eq!(focused_label(&mounted).as_deref(), Some(draft.as_str()));
+        mounted.key(Key::Character("Follow up".into()), false);
+        assert_eq!(
+            plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+            "Follow up"
+        );
+        // Reopening and using the close cell follows the same focus return path.
+        crate::command_ui::open(mounted.model, "model");
+        mounted.settle();
+        mounted.click("Close commands");
+        assert_eq!(focused_label(&mounted).as_deref(), Some(draft.as_str()));
+        crate::command_ui::open(mounted.model, "model");
+        mounted.settle();
+        mounted.key(Key::Enter, false);
+        assert_eq!(mounted.model.command_model.get_untracked(), "model-0");
+        assert_eq!(
+            focused_label(&mounted).as_deref(),
+            Some("Choose effort low")
+        );
+        mounted.key(Key::ArrowDown, false);
+        mounted.key(Key::Enter, false);
+        assert!(mounted.model.command_flow.get_untracked().is_empty());
+        assert_eq!(focused_label(&mounted).as_deref(), Some(draft.as_str()));
+        assert!(matches!(mounted.commands.try_recv().unwrap().command,
+            Command::SetHarnessSelection { selection: HarnessSelection { model: Some(ref model), effort: Some(ref effort), .. }, .. }
+                if model == "model-0" && effort == "high"));
+        crate::command_ui::open(mounted.model, "status");
+        mounted.settle();
+        assert_eq!(focused_label(&mounted).as_deref(), Some("Close commands"));
+        mounted.key(Key::Escape, false);
+        assert!(mounted.model.command_flow.get_untracked().is_empty());
+        assert_eq!(focused_label(&mounted).as_deref(), Some(draft.as_str()));
+    }
+}
+
+#[test]
 fn command_completion_escape_and_ime_keep_normal_editing() {
     let mounted = mount(false, 1380.0);
     mounted.model.open_session("session-plan".into());

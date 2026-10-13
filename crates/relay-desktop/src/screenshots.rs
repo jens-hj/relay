@@ -181,7 +181,11 @@ fn shell_screenshots() {
             ui.frame(logical, 1.0);
         }
     };
-    let shots: [(&str, &dyn Fn()); 14] = [
+    let shots: [(&str, &dyn Fn()); 15] = [
+        ("command-model", &|| {
+            model.open_session("session-plan".into());
+            crate::command_ui::open(model, "model");
+        }),
         ("conversation", &|| {
             model.open_session("session-plan".into())
         }),
@@ -296,6 +300,9 @@ fn shell_screenshots() {
         scope.run(open);
         settle();
         render(&ui, logical, 1.0, &format!("{directory}/{name}.png"));
+        if name == "command-model" {
+            scope.run(|| model.command_flow.set(String::new()));
+        }
     }
     scope.dispose();
 }
