@@ -41,7 +41,7 @@ pub fn bind_discovery(model: Model) {
         let session = snapshot
             .sessions
             .iter()
-            .find(|s| s.id == id && !s.fixture && s.worker.is_some());
+            .find(|s| s.id == id && s.worker.is_some());
         let key = format!(
             "{connected}:{id}:{:?}:{:?}:{:?}",
             session.map(|s| (&s.workspaces, &s.connection_ids)),
@@ -57,6 +57,43 @@ pub fn bind_discovery(model: Model) {
             if connected && (session.is_some() || id.starts_with("director-draft-")) {
                 refresh(model, false);
             }
+        }
+    });
+    // Tree rows show effort from any loaded catalog of their harness, so
+    // load one catalog per harness the selected project runs.
+    let requested = State::new(std::collections::BTreeSet::<String>::new());
+    Effect::new(move || {
+        let snapshot = model.snapshot.get();
+        let project = model.project.get();
+        let catalogs = model.catalogs.get();
+        if !model.connected.get() {
+            return;
+        }
+        let Some(sender) = model.buffer_requests.get_untracked() else {
+            return;
+        };
+        for harness in [Harness::Codex, Harness::ClaudeCode] {
+            if catalogs
+                .values()
+                .any(|c| c.as_ref().is_ok_and(|c| c.harness == harness))
+            {
+                continue;
+            }
+            let Some(session) = snapshot.sessions.iter().find(|s| {
+                s.project_id == project && s.worker.as_ref().is_some_and(|w| w.harness == harness)
+            }) else {
+                continue;
+            };
+            if requested.get_untracked().contains(&session.id) {
+                continue;
+            }
+            requested.update(|ids| {
+                ids.insert(session.id.clone());
+            });
+            let _ = sender.send(crate::buffer_network::Request::Catalog {
+                session: session.id.clone(),
+                force: false,
+            });
         }
     });
 }

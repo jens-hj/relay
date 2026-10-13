@@ -509,3 +509,27 @@ fn combined_gallery_keeps_both_workstreams_inside_the_capture() {
         .fold(0.0f32, f32::max);
     assert!(bottom < 13950.0, "gallery reaches {bottom}");
 }
+#[test]
+fn ledger_without_effort_steps_names_the_selection_or_lets_the_model_fill() {
+    let mut named = gallery::d2::settings(false);
+    named.effort = Effort::default();
+    named.effort_label = Some("high".into());
+    let state = State::new(named);
+    let noop: OnPress = Rc::new(|| {});
+    let mounted = mount(Size::new(848.0, 180.0), || {
+        view! {
+            Composer settings:(state) ledger-actions:(actions(state)) on-send:(noop.clone())
+                on-attach:(noop.clone())
+        }
+    });
+    assert!(mounted.labels().iter().any(|l| l == "Selected effort"));
+    assert!(!mounted.labels().iter().any(|l| l.starts_with("Effort ")));
+    let model = mounted.rect("Model: GPT Sol 6.1. Change model");
+    assert!((model.size.height - 40.0).abs() < 1.0, "{model:?}");
+    state.update(|s| s.effort_label = None);
+    mounted.settle();
+    assert!(!mounted.labels().iter().any(|l| l == "Selected effort"));
+    assert!(!mounted.labels().iter().any(|l| l == "EFFORT"));
+    let model = mounted.rect("Model: GPT Sol 6.1. Change model");
+    assert!(model.size.height > 100.0, "the model cell fills: {model:?}");
+}

@@ -7355,3 +7355,65 @@ fn tool_kinds_keep_their_verbs_and_unknown_outcomes_stay_unclaimed() {
         );
     }
 }
+
+#[test]
+fn one_catalog_per_project_harness_lets_every_row_show_effort() {
+    let mut mounted = mount_orchestration(1380.0);
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(sender));
+    mounted
+        ._scope
+        .run(|| crate::command_ui::bind_discovery(mounted.model));
+    mounted.settle();
+    let mut asked = Vec::new();
+    while let Ok(request) = requests.try_recv() {
+        if let crate::buffer_network::Request::Catalog { session, .. } = request {
+            asked.push(session);
+        }
+    }
+    asked.sort();
+    asked.dedup();
+    // The first Codex and the first Claude Code session of the project.
+    assert_eq!(asked, ["session-plan", "session-worker"]);
+    // With both catalogs loaded, rows of every model show their effort.
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([
+            (
+                "session-plan".to_string(),
+                Ok(demo_catalog("session-plan", Harness::ClaudeCode)),
+            ),
+            (
+                "session-worker".to_string(),
+                Ok(demo_catalog("session-worker", Harness::Codex)),
+            ),
+        ]));
+    mounted.settle();
+    // Opus at high (of four steps and max), Sonnet at medium, Codex at medium.
+    for track in ["Effort 3 of 4", "Effort 2 of 3"] {
+        assert!(has_label(&mounted, track), "{track}");
+    }
+    let _ = &mut mounted;
+}
+
+#[test]
+fn the_ledger_names_a_selected_effort_without_its_steps() {
+    let mounted = mount_orchestration(1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    // No catalog yet: the selection is named, with no step track.
+    assert!(has_label(&mounted, "Selected effort"));
+    assert!(has_label(&mounted, "high"));
+    assert!(!has_label(&mounted, "Effort max"));
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([(
+            "session-plan".to_string(),
+            Ok(demo_catalog("session-plan", Harness::ClaudeCode)),
+        )]));
+    mounted.settle();
+    assert!(!has_label(&mounted, "Selected effort"));
+    assert!(has_label(&mounted, "Effort max"));
+}

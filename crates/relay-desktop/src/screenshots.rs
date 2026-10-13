@@ -132,6 +132,17 @@ fn shell_screenshots() {
         .unwrap()
         .as_secs();
     demo_usage(&mut snapshot, now);
+    // What the server answers for the example sessions' discovery.
+    model.catalogs.set(std::collections::BTreeMap::from([
+        (
+            "session-plan".to_string(),
+            Ok(demo_catalog("session-plan", Harness::ClaudeCode)),
+        ),
+        (
+            "session-backfill".to_string(),
+            Ok(demo_catalog("session-backfill", Harness::Codex)),
+        ),
+    ]));
     model.receive(NetworkState {
         snapshot,
         connected: true,

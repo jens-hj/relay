@@ -286,6 +286,22 @@ pub fn demo_orchestration(snapshot: &mut Snapshot) {
         child
     });
     snapshot.sessions.splice(review..review, spawned);
+    // The effort each example agent runs at; the demo catalog offers it.
+    for (id, effort) in [
+        ("session-plan", "high"),
+        ("session-worker", "medium"),
+        ("session-migration", "medium"),
+        ("session-write", "high"),
+        ("session-backfill", "medium"),
+        ("session-verify", "low"),
+        ("session-index", "low"),
+        ("session-tests", "high"),
+    ] {
+        if let Some(session) = snapshot.sessions.iter_mut().find(|s| s.id == id) {
+            session.selection.model = session.worker.as_ref().and_then(|w| w.model.clone());
+            session.selection.effort = Some(effort.into());
+        }
+    }
     snapshot.messages.extend(tool_messages());
     snapshot.tool_permissions.push(ToolPermission {
         id: "permission-migrate".into(),
@@ -731,5 +747,63 @@ pub fn demo_usage(snapshot: &mut Snapshot, now: u64) {
             },
             now,
         );
+    }
+}
+
+/// The model catalog the demo's example sessions describe, so their effort
+/// tracks render. Fixture sessions never run a harness, so the server
+/// answers discovery for them with this instead.
+pub fn demo_catalog(session_id: &str, harness: Harness) -> HarnessCatalog {
+    let model = |id: &str, name: &str, efforts: &[&str], default: &str| HarnessModel {
+        id: id.into(),
+        name: name.into(),
+        efforts: efforts.iter().map(|e| e.to_string()).collect(),
+        default_effort: Some(default.into()),
+        fast: false,
+    };
+    let models = match harness {
+        Harness::ClaudeCode => vec![
+            model(
+                "claude-opus-4-5",
+                "Opus 4.5",
+                &["low", "medium", "high", "xhigh", "max"],
+                "high",
+            ),
+            model(
+                "claude-sonnet-4-5",
+                "Sonnet 4.5",
+                &["low", "medium", "high"],
+                "medium",
+            ),
+            model(
+                "claude-haiku-4-5",
+                "Haiku 4.5",
+                &["low", "medium", "high"],
+                "low",
+            ),
+        ],
+        Harness::Codex => vec![
+            model(
+                "gpt-5.1-codex",
+                "GPT-5.1 Codex",
+                &["minimal", "low", "medium", "high"],
+                "medium",
+            ),
+            model(
+                "gpt-5.1-codex-mini",
+                "GPT-5.1 Codex mini",
+                &["low", "medium", "high"],
+                "medium",
+            ),
+        ],
+    };
+    HarnessCatalog {
+        session_id: session_id.into(),
+        harness,
+        commands: vec![],
+        skills: vec![],
+        models,
+        warnings: vec![],
+        mcp: vec![],
     }
 }

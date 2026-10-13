@@ -43,6 +43,10 @@ pub struct LedgerView {
     pub harness: crate::glyph::Harness,
     pub model: ModelIdentity,
     pub effort: Effort,
+    /// The selected effort by name, shown without a step track when the
+    /// model's steps are unknown (`effort` has no levels). Without it
+    /// and without steps, the model cell fills the ledger.
+    pub effort_label: Option<String>,
     pub collapsed: bool,
 }
 crate::value::live_value!(LedgerView);

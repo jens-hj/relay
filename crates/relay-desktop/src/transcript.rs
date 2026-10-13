@@ -331,6 +331,11 @@ pub(crate) fn ledger_view(model: Model, open: bool) -> LedgerView {
     LedgerView {
         harness: adapt::harness(harness),
         model: identity.unwrap_or_else(|| ModelIdentity::new("Default", "", ModelHue::Neutral)),
+        // Without the model's steps, name the selected effort alone.
+        effort_label: effort
+            .is_none()
+            .then(|| session.and_then(|s| s.selection.effort.clone()))
+            .flatten(),
         effort: effort.unwrap_or_default(),
         collapsed: !open,
     }

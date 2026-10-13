@@ -969,3 +969,29 @@ async fn interrupted_fork_creation_cleans_partial_worktrees_and_branches() {
     assert!(branches.status.success());
     assert!(branches.stdout.is_empty());
 }
+
+#[tokio::test]
+async fn example_sessions_describe_the_demo_catalog_without_a_harness() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    demo_orchestration(&mut snapshot);
+    let w = workspace(&dir.path().join("db"), &snapshot, config());
+    let claude = commands::discover(&w, "session-plan", false).await.unwrap();
+    assert_eq!(claude.harness, Harness::ClaudeCode);
+    let opus = claude
+        .models
+        .iter()
+        .find(|m| m.id == "claude-opus-4-5")
+        .unwrap();
+    assert!(opus.efforts.iter().any(|e| e == "max"));
+    let codex = commands::discover(&w, "session-backfill", false)
+        .await
+        .unwrap();
+    assert_eq!(codex.harness, Harness::Codex);
+    // An example session without a run still has nothing to discover.
+    assert!(
+        commands::discover(&w, "session-review", false)
+            .await
+            .is_err()
+    );
+}

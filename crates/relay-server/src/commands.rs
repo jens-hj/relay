@@ -181,6 +181,15 @@ pub(super) async fn discover(
 ) -> Result<HarnessCatalog, Error> {
     let _probe = workspace.catalog_probe.lock().await;
     let snapshot = workspace.snapshots.borrow().clone();
+    // Example sessions never run a harness; they describe the demo catalog.
+    if let Some(worker) = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == id && s.fixture)
+        .and_then(|s| s.worker.as_ref())
+    {
+        return Ok(demo_catalog(id, worker.harness));
+    }
     let session = snapshot.sessions.iter().find(|s| s.id == id && !s.fixture);
     let draft_director = id
         .strip_prefix("director-draft-")
