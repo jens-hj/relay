@@ -656,3 +656,27 @@ fn washes_match_srgb_blending() {
     let header = crate::tokens::srgb_alpha(tint, under, 0.14);
     assert!(header > 0.02 && header < 0.08, "{header}");
 }
+
+/// The approval wash thins from left to right like the boards' `gWa`
+/// (0.6 → 0.08). Coverage per eighth of a Needs-you card measured on the
+/// board screenshot (text included) ran 0.73 → 0.08.
+#[test]
+fn approval_wash_thins_to_the_right_like_the_boards() {
+    for (width, height) in [(356.0, 118.0), (720.0, 232.0)] {
+        let spec = DitherSpec::new(width, height, 1.0, Gradient::Amber, 1.0);
+        let mask = spec.mask();
+        let (w, h) = spec.pixels();
+        let coverage = |band: u32| {
+            let (x0, x1) = (band * w / 8, (band + 1) * w / 8);
+            let on = (0..h)
+                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                .filter(|(x, y)| mask[(*y * w + *x) as usize])
+                .count();
+            on as f32 / ((x1 - x0) * h) as f32
+        };
+        let bands: Vec<f32> = (0..8).map(coverage).collect();
+        assert!(bands[0] > 0.5 && bands[0] < 0.8, "{bands:?}");
+        assert!(bands[7] < 0.12, "{bands:?}");
+        assert!(bands.windows(2).all(|p| p[1] <= p[0] + 0.02), "{bands:?}");
+    }
+}
