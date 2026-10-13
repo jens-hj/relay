@@ -304,3 +304,38 @@ fn arrow_keys_walk_and_fold_the_tree() {
     mounted.key(Key::Enter);
     assert_eq!(opened.borrow().last().map(String::as_str), Some("write"));
 }
+
+#[test]
+fn each_level_indents_by_one_fourteen_pixel_elbow_column() {
+    let mounted = mount(Size::new(380.0, 400.0), || {
+        view! {
+            AgentSidebar roots:(chain())
+        }
+    });
+    // The status square's x for each displayed depth.
+    let square_x = |name: &str| {
+        let row = mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .find(|n| n.label.as_deref() == Some(name) && n.role == mosaic::widgets::Role::ListItem)
+            .unwrap()
+            .rect;
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .filter(|n| {
+                n.role == mosaic::widgets::Role::Image && (n.rect.size.width - 10.0).abs() < 0.5
+            })
+            .filter(|n| (n.rect.center().y - row.center().y).abs() < 1.0)
+            .map(|n| n.rect.origin.x)
+            .fold(f32::MAX, f32::min)
+    };
+    let depths = ["root", "a", "b", "c"].map(square_x);
+    for pair in depths.windows(2) {
+        assert!((pair[1] - pair[0] - 14.0).abs() < 0.5, "{depths:?}");
+    }
+}

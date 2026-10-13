@@ -4,7 +4,7 @@
 use super::logic::{AgentLine, FoldedLine, Guide, StatusTally, TreeLine, status_segments};
 use super::{OnAgent, OnToggle};
 use crate::prelude::*;
-use crate::tokens::{Signal, ground, px};
+use crate::tokens::{Signal, ground, px, shape};
 use mosaic::core::theme::color;
 use mosaic::prelude::*;
 use mosaic::widgets::Role;
@@ -48,16 +48,24 @@ fn paint_guide(scene: &mut mosaic::render::Scene, rect: Rect, guide: Guide) {
     }
 }
 
-/// The elbow columns of a line, each 14px wide and as tall as the row.
-/// Built as separate cells so the row's gap spaces them like the board.
+/// The elbow columns of a line, each the `indent` token (14px) wide and
+/// as tall as the row. They sit flush in one group, so each level
+/// indents by exactly one column; the row's gap follows the group.
 pub(crate) fn elbow_cells(parent: &Element, guides: &[Guide]) {
+    if guides.is_empty() {
+        return;
+    }
+    let group = view! {
+        row width:max-content gap:0px shrink:0 nohit {}
+    };
     for &guide in guides {
         let cell = view! {
-            el width:{px(ELBOW_WIDTH)}px height:fill shrink:0 nohit {}
+            el width:{px(mosaic::core::theme::scalar(shape.indent))}px height:fill shrink:0 nohit {}
         };
         cell.paint(move |ctx| paint_guide(ctx.scene, ctx.rect, guide));
-        parent.adopt(&cell);
+        group.adopt(&cell);
     }
+    parent.adopt(&group);
 }
 
 /// Square elbows for a line at any depth: one 14px column per level.
@@ -67,7 +75,7 @@ pub fn Elbows(
     guides: Vec<Guide>,
 ) -> Element {
     let host = view! {
-        row width:max-content height:{px(ROW_HEIGHT)}px gap:{px(8.0)}px shrink:0 nohit {}
+        row width:max-content height:{px(ROW_HEIGHT)}px shrink:0 nohit {}
     };
     elbow_cells(&host, &guides);
     host
@@ -241,10 +249,16 @@ pub fn AgentTreeRow(
         }
         _ => {}
     }
-    let content = view! {
-        row gap:{px(8.0)}px align:center pad:(left:{px(12.0)}px right:{px(14.0)}px) {}
+    // Elbows sit flush before the gapped content, so every level indents
+    // by exactly one column.
+    let outer = view! {
+        row align:center pad:(left:{px(12.0)}px right:{px(14.0)}px) {}
     };
-    elbow_cells(&content, &line.guides);
+    elbow_cells(&outer, &line.guides);
+    let content = view! {
+        row width:1fr min-width:0px gap:{px(8.0)}px align:center {}
+    };
+    outer.adopt(&content);
     if line.expandable {
         content.adopt(&caret(&line, on_toggle.clone()));
     } else {
@@ -310,7 +324,7 @@ pub fn AgentTreeRow(
             });
         }
     }
-    row.adopt(&content);
+    row.adopt(&outer);
     {
         let open = on_open.clone();
         let id = line.id.clone();
@@ -452,11 +466,15 @@ pub fn FoldedBranch(
     #[prop(optional)]
     on_focus: Option<OnAgent>,
 ) -> Element {
-    let content = view! {
-        row height:{px(ROW_HEIGHT)}px shrink:0 gap:{px(8.0)}px align:center
+    let outer = view! {
+        row height:{px(ROW_HEIGHT)}px shrink:0 align:center
             pad:(left:{px(12.0)}px right:{px(14.0)}px) {}
     };
-    elbow_cells(&content, &line.guides);
+    elbow_cells(&outer, &line.guides);
+    let content = view! {
+        row width:1fr min-width:0px gap:{px(8.0)}px align:center {}
+    };
+    outer.adopt(&content);
     let parent = line.parent.clone();
     let focus: crate::cells::OnPress = Rc::new(move || {
         if let Some(focus) = &on_focus {
@@ -472,5 +490,5 @@ pub fn FoldedBranch(
     content.adopt(&view! {
         LinkButton text:"Focus" on-press:(focus)
     });
-    content
+    outer
 }

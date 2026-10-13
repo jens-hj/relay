@@ -6687,8 +6687,7 @@ fn agent_tree_follows_parent_links_scoped_to_the_selected_project() {
     let write = tree_row(&mounted, "Write migrations");
     assert!((plan.size.height - 34.0).abs() < 1.0);
     assert!(plan.origin.y < migration.origin.y && migration.origin.y < write.origin.y);
-    // Each level adds a 14px elbow column and the row's 8px gap, as on
-    // the design board: compare the status squares.
+    // Each level adds one 14px elbow column: compare the status squares.
     let indent = |row: &str| {
         let rect = tree_row(&mounted, row);
         mounted
@@ -6701,7 +6700,7 @@ fn agent_tree_follows_parent_links_scoped_to_the_selected_project() {
             .map(|n| n.rect.origin.x)
             .fold(f32::MAX, f32::min)
     };
-    assert!((indent("Write migrations") - indent("Schema migration") - 22.0).abs() < 1.0);
+    assert!((indent("Write migrations") - indent("Schema migration") - 14.0).abs() < 1.0);
     // Another project's agents stay out of this project's tree.
     let mut snapshot = mounted.model.snapshot.get_untracked();
     let mut other = snapshot.projects[0].clone();
