@@ -522,7 +522,9 @@ pub fn UsageFoot(
     );
     view! {
         col height:min-content shrink:0 pad:(bottom:{px(8.0)}px) fill:ground.panel
-            stroke:(width:{px(1.0)} color:ground.rule edges:top) {
+            label:"Usage foot" {
+            el width:fill height:{px(1.0)}px shrink:0 fill:ground.rule label:"Usage boundary"
+                nohit {}
             row height:min-content gap:{px(8.0)}px align:end
                 pad:(left:{px(18.0)}px right:{px(18.0)}px top:{px(12.0)}px bottom:{px(6.0)}px) {
                 SerifTitle text:"Usage" size:(SerifSize::Small) italic:true

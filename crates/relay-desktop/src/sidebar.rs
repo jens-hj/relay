@@ -456,6 +456,7 @@ fn ServerFoot(model: Model) -> Element {
     });
     host.adopt(&view! {
         ConnectionStatus state:(relay_ui::Live::from(state)) latency:(relay_ui::Live::from(latency))
+            sending:(relay_ui::Live::from(Derived::new(move || model.sending())))
             info:(relay_ui::Live::from(info)) telemetry:(relay_ui::Live::from(telemetry))
             on-copy:(Some(press(move || model.ui.get_untracked().set_clipboard_text(model.server_endpoint.get_untracked()))))
     });

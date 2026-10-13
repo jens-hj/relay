@@ -121,6 +121,35 @@ async fn protocol_guard_and_multiple_local_projects_round_trip_without_remote_cr
         .unwrap()
         .id
         .clone();
+    let connection = current
+        .connections
+        .iter()
+        .find(|c| c.project_id == project && matches!(c.kind, ConnectionKind::Directory { .. }))
+        .unwrap()
+        .clone();
+    let captured_sessions = current.sessions.clone();
+    let update = envelope(
+        current.revision,
+        Command::UpdateConnection {
+            connection_id: connection.id.clone(),
+            name: "Project workspace".into(),
+        },
+    );
+    current = applied(&server, &update).await;
+    assert_eq!(
+        applied(&server, &update).await,
+        current,
+        "receipt replay over HTTP"
+    );
+    let renamed = current
+        .connections
+        .iter()
+        .find(|c| c.id == connection.id)
+        .unwrap();
+    assert_eq!(renamed.name, "Project workspace");
+    assert_eq!(renamed.kind, connection.kind);
+    assert_eq!(renamed.enabled, connection.enabled);
+    assert_eq!(current.sessions, captured_sessions);
     let board = current
         .boards
         .iter()

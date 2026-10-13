@@ -5,6 +5,43 @@ use std::cell::RefCell;
 
 const HOUR: Duration = Duration::from_secs(3600);
 
+#[test]
+fn usage_foot_has_a_full_width_internal_hairline_above_its_heading() {
+    let mounted = mount(Size::new(380.0, 300.0), || {
+        view! {
+            col justify:end {
+                UsageFoot harnesses:(vec![claude(UsageInsight::default())])
+            }
+        }
+    });
+    let foot = mounted.rect("Usage foot");
+    let rule = mounted.rect("Usage boundary");
+    assert_eq!(rule.origin, foot.origin);
+    assert_eq!(rule.size, Size::new(foot.size.width, 1.0));
+    assert!(mounted.rect("Usage").origin.y > rule.origin.y);
+    let id = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some("Usage boundary"))
+        .unwrap()
+        .id;
+    let details = mounted.ui.inspection_details(id).unwrap();
+    assert_eq!(
+        details
+            .attributes
+            .iter()
+            .find(|a| a.name == "fill")
+            .unwrap()
+            .value,
+        format!(
+            "{:?}",
+            mosaic::render::PaintSpec::from(crate::tokens::ground.rule)
+        )
+    );
+}
+
 fn claude(insight: UsageInsight) -> HarnessUsage {
     HarnessUsage {
         harness: Harness::ClaudeCode,

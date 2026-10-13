@@ -227,11 +227,16 @@ fn phase(
     }
     (elapsed, visible)
 }
-fn ring(state: Connection, latency: Option<u32>, motion: Rc<Cell<f32>>) -> Element {
+fn ring(state: Connection, latency: Option<u32>, sending: bool, motion: Rc<Cell<f32>>) -> Element {
     let glyph = view! {
         el width:{px(20.0)}px height:{px(20.0)}px shrink:0 nohit {}
     };
-    let (time, visible) = phase(&glyph, 1.6, state == Connection::Connecting, motion);
+    let (time, visible) = phase(
+        &glyph,
+        1.6,
+        state == Connection::Connecting || (state == Connection::Connected && sending),
+        motion,
+    );
     glyph.paint(move |ctx| {
         visible.set(true);
         let path = [
@@ -252,9 +257,26 @@ fn ring(state: Connection, latency: Option<u32>, motion: Rc<Cell<f32>>) -> Eleme
                         ctx.rect,
                         &portion(&path, 0.0, f32::from(latency_bars(ms)) / 4.0),
                         2.2,
-                        tint,
+                        if sending { tint.alpha(0.35) } else { tint },
                         16.0,
                     );
+                }
+                if sending {
+                    for (start, end) in [
+                        (time.get(), (time.get() + 0.18).min(1.0)),
+                        (0.0, (time.get() + 0.18 - 1.0).max(0.0)),
+                    ] {
+                        if end > start {
+                            line(
+                                ctx.scene,
+                                ctx.rect,
+                                &portion(&path, start, end),
+                                2.2,
+                                color(ground.ink),
+                                16.0,
+                            );
+                        }
+                    }
                 }
             }
             Connection::Offline => {
@@ -491,18 +513,17 @@ fn endpoint_text(endpoint: String) -> Element {
             display.clone()
         }
     });
+    // Span colours are resolved here, so the theme's ink and muted colours
+    // are part of the key: a theme switch rebuilds the spans.
     host.switch(
-        move || shown.get(),
-        move |parent, value| {
+        move || (shown.get(), color(ground.ink), color(ground.muted)),
+        move |parent, (value, ink, muted)| {
             let split = value.find('/').unwrap_or(value.len());
             let spans = vec![
-                mosaic::widgets::TextSpan::new(
-                    &value[..split],
-                    TextStyle::inherited().color(color(ground.ink)),
-                ),
+                mosaic::widgets::TextSpan::new(&value[..split], TextStyle::inherited().color(*ink)),
                 mosaic::widgets::TextSpan::new(
                     &value[split..],
-                    TextStyle::inherited().color(color(ground.muted)),
+                    TextStyle::inherited().color(*muted),
                 ),
             ];
             parent.adopt(&view! {
@@ -513,85 +534,6 @@ fn endpoint_text(endpoint: String) -> Element {
     host
 }
 
-fn endpoint_icon(copy: bool) -> Element {
-    let icon = view! {
-        el width:{px(14.0)}px height:{px(14.0)}px shrink:0 nohit {}
-    };
-    icon.paint(move |ctx| {
-        let tint = color(if copy { ground.ink } else { ground.muted });
-        if copy {
-            line(
-                ctx.scene,
-                ctx.rect,
-                &[
-                    (5.0, 5.0),
-                    (13.0, 5.0),
-                    (13.0, 13.0),
-                    (5.0, 13.0),
-                    (5.0, 5.0),
-                ],
-                1.3,
-                tint,
-                16.0,
-            );
-            line(
-                ctx.scene,
-                ctx.rect,
-                &[(3.0, 11.0), (3.0, 3.0), (11.0, 3.0)],
-                1.3,
-                tint,
-                16.0,
-            );
-        } else {
-            line(
-                ctx.scene,
-                ctx.rect,
-                &[
-                    (3.0, 3.0),
-                    (13.0, 3.0),
-                    (13.0, 13.0),
-                    (3.0, 13.0),
-                    (3.0, 3.0),
-                ],
-                1.3,
-                tint,
-                16.0,
-            );
-            line(
-                ctx.scene,
-                ctx.rect,
-                &[(3.0, 8.0), (13.0, 8.0)],
-                1.3,
-                tint,
-                16.0,
-            );
-            line(
-                ctx.scene,
-                ctx.rect,
-                &[(8.0, 3.0), (6.5, 5.5), (6.0, 8.0), (6.5, 10.5), (8.0, 13.0)],
-                1.3,
-                tint,
-                16.0,
-            );
-            line(
-                ctx.scene,
-                ctx.rect,
-                &[
-                    (8.0, 3.0),
-                    (9.5, 5.5),
-                    (10.0, 8.0),
-                    (9.5, 10.5),
-                    (8.0, 13.0),
-                ],
-                1.3,
-                tint,
-                16.0,
-            );
-        }
-    });
-    icon
-}
-
 fn panel(
     state: Connection,
     latency: Option<u32>,
@@ -600,7 +542,7 @@ fn panel(
     copy: Option<OnPress>,
     motion: &ConnectionMotion,
 ) -> Element {
-    let glyph = ring(state, latency, motion.ring.clone());
+    let glyph = ring(state, latency, false, motion.ring.clone());
     let drawing = topology(state, info, telemetry, motion.socket.clone());
     let info = info.clone();
     let telemetry = telemetry.clone();
@@ -694,8 +636,19 @@ fn panel(
                     }
                 }
                 row height:min-content align:center gap:{px(6.0)}px {
-                    Label text:(if telemetry.compatible==Some(true) {"✓"} else {"!"})
-                        role:(TextRole::Caption) tone:(compatibility_tone)
+                    row width:{px(12.0)}px height:{px(12.0)}px shrink:0 align:center justify:center
+                        font-color:(compatibility_tone.token()) {
+                        {
+                            if telemetry.compatible == Some(true) {
+                                parent.adopt(&crate::icons::icon_mark(crate::icons::mark.check, 12.0));
+                            } else {
+                                parent.adopt(&view! {
+                                    Label text:"!" role:(TextRole::Caption) tone:(compatibility_tone)
+                                        weight:600
+                                });
+                            }
+                        }
+                    }
                     text font-size:{px(10.5)}px
                         font-color:(match telemetry.compatible {Some(false)=>status.failed,None=>status.needs_you,_=>ground.muted})
                         {compatibility.clone()}
@@ -705,14 +658,13 @@ fn panel(
                 stroke:(width:{px(1.0)} color:ground.rule edges:top) {
                 row width:1fr min-width:0px align:center gap:{px(10.0)}px
                     pad:(left:{px(18.0)}px right:{px(8.0)}px) {
-                    endpoint_icon(false)
+                    row width:{px(14.0)}px height:{px(14.0)}px shrink:0 font-color:ground.muted {
+                        {parent.adopt(&crate::icons::icon_mark(crate::icons::mark.link, 14.0));}
+                    }
                     endpoint_text(endpoint.clone())
                 }
                 row width:{px(40.0)}px shrink:0 {
-                    CellButton label:"Copy endpoint" rule:(Rule::Left) horizontal-inset:0.0
-                        on-press:(copy.clone().unwrap_or_else(||Rc::new(||{}))) {
-                        endpoint_icon(true)
-                    }
+                    {parent.adopt(&copy_cell(copy.clone()));}
                 }
             }
         }
@@ -723,6 +675,7 @@ fn panel(
 #[component]
 pub fn ConnectionStatus(
     state: Live<Connection>,
+    #[prop(default = Live::fixed(false))] sending: Live<bool>,
     #[prop(default=Live::fixed(None))] latency: Live<Option<u32>>,
     #[prop(default=Live::fixed(ConnectionInfo::default()))] info: Live<ConnectionInfo>,
     #[prop(default=Live::fixed(ConnectionTelemetry::default()))] telemetry: Live<
@@ -776,12 +729,13 @@ pub fn ConnectionStatus(
     let glyph = view! {
         col width:{px(20.0)}px height:{px(20.0)}px shrink:0 {}
     };
-    let (glyph_state, glyph_latency) = (state.clone(), latency.clone());
+    let (glyph_state, glyph_latency, glyph_sending) =
+        (state.clone(), latency.clone(), sending.clone());
     let banner_motion = Rc::new(Cell::new(0.0));
     glyph.switch(
-        move || (glyph_state.get(), glyph_latency.get()),
-        move |parent, (state, latency)| {
-            parent.adopt(&ring(*state, *latency, banner_motion.clone()));
+        move || (glyph_state.get(), glyph_latency.get(), glyph_sending.get()),
+        move |parent, (state, latency, sending)| {
+            parent.adopt(&ring(*state, *latency, *sending, banner_motion.clone()));
         },
     );
     let word_state = state.clone();
@@ -790,12 +744,23 @@ pub fn ConnectionStatus(
     let tone = Derived::new(move || tone_state.get().token());
     let (summary_state, summary_latency, summary_telemetry) =
         (state.clone(), latency.clone(), telemetry.clone());
+    let summary_sending = sending.clone();
     let summary = Derived::new(move || {
+        if summary_state.get() == Connection::Connected && summary_sending.get() {
+            return "sending…".into();
+        }
         summary_telemetry
             .get()
             .summary(summary_state.get(), summary_latency.get())
     });
+    let label_sending = sending.clone();
     let label = Derived::new(move || {
+        if state.get() == Connection::Connected && label_sending.get() {
+            return format!(
+                "Connection: Connected, sending…. {} details",
+                if open.get() { "Hide" } else { "Show" }
+            );
+        }
         telemetry
             .get()
             .label(state.get(), latency.get(), open.get())
@@ -813,4 +778,60 @@ pub fn ConnectionStatus(
         }
     });
     host
+}
+
+/// How long the copy cell shows its confirming check before turning back.
+pub const COPIED_FOR: Duration = Duration::from_millis(1600);
+
+/// The endpoint row's copy cell. Pressing it copies, then the copy icon
+/// crossfades to a green check over a green-tinted cell for
+/// [`COPIED_FOR`], and back.
+fn copy_cell(copy: Option<OnPress>) -> Element {
+    let copied = State::new(false);
+    let slot: Rc<std::cell::RefCell<Option<Element>>> = Rc::default();
+    let driver = slot.clone();
+    let press = move || {
+        if let Some(copy) = &copy {
+            copy();
+        }
+        copied.set(true);
+        if let Some(cell) = driver.borrow().as_ref() {
+            let mut left = COPIED_FOR;
+            cell.animate(move |dt| {
+                left = left.saturating_sub(dt);
+                if left.is_zero() {
+                    copied.set(false);
+                    Tick::Done
+                } else {
+                    Tick::Sleep(left)
+                }
+            });
+        }
+    };
+    let green = status.full_steam;
+    let cell = view! {
+        button @click:{press()} width:fill height:fill radius:0px pad:0px align:center
+            justify:center label:{if copied.get() { "Endpoint copied" } else { "Copy endpoint" }}
+            fill:{if copied.get() {
+                let tint = color(green);
+                tint.alpha(crate::tokens::srgb_alpha(tint, color(ground.panel), 0.14))
+            } else {
+                Color::TRANSPARENT
+            }}
+            stroke:(width:{px(1.0)} color:ground.rule edges:left) hover { fill:ground.hover }
+            focused { stroke:+(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
+            stack width:{px(14.0)}px height:{px(14.0)}px shrink:0 nohit {
+                row font-color:ground.ink opacity:{if copied.get() { 0.0 } else { 1.0 }}
+                    transition:(opacity:ease(150ms)) {
+                    {parent.adopt(&crate::icons::icon_mark(crate::icons::mark.copy, 14.0));}
+                }
+                row font-color:(green) opacity:{if copied.get() { 1.0 } else { 0.0 }}
+                    transition:(opacity:ease(150ms)) {
+                    {parent.adopt(&crate::icons::icon_mark(crate::icons::mark.check, 14.0));}
+                }
+            }
+        }
+    };
+    *slot.borrow_mut() = Some(cell.clone());
+    cell
 }

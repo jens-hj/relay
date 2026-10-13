@@ -8,6 +8,62 @@ use crate::tokens::{Signal, ground, px};
 use mosaic::prelude::*;
 use std::rc::Rc;
 
+/// A removal action embedded at the right edge of a resource row.
+#[component]
+pub fn RemoveCell(
+    label: UiText,
+    on_press: OnPress,
+    #[prop(default = crate::Live::fixed(false))] disabled: crate::Live<bool>,
+) -> Element {
+    use crate::tokens::{srgb_alpha, status};
+    use mosaic::core::theme::color;
+    use mosaic::widgets::Visual;
+    let body = view! {
+        row width:max-content height:min-content gap:{px(8.0)}px align:center {}
+    };
+    let accessible = label.clone();
+    let cell = view! {
+        button @click:{on_press()} width:max-content height:fill shrink:0 radius:0px
+            pad:(horizontal:{px(14.0)}px vertical:0px) gap:{px(8.0)}px align:center
+            label:{accessible.get()} disabled:{disabled.get()} {
+            { parent.adopt(&body); }
+        }
+    };
+    let interaction = cell.interaction();
+    cell.visual_dyn(move || {
+        let red = color(status.failed);
+        let amount = if interaction.pressed() { 0.16 } else { 0.08 };
+        let fill = if interaction.hovered() || interaction.pressed() {
+            red.alpha(srgb_alpha(red, color(ground.page), amount))
+        } else {
+            Color::TRANSPARENT
+        };
+        let mut visual = Visual::new()
+            .fill(fill)
+            .stroke(StrokeSpec::new(px(1.0), color(ground.rule)).edges(StrokeEdges::LEFT));
+        if interaction.focus_visible() {
+            visual = visual.stroke(StrokeSpec::new(px(1.0), color(ground.ink)).offset(-px(1.0)));
+        }
+        visual
+    });
+    let tint = move || {
+        color(if interaction.hovered() || interaction.pressed() {
+            status.failed
+        } else {
+            ground.ink
+        })
+    };
+    let icon = crate::icons::icon_mark(crate::icons::mark.remove, 14.0);
+    icon.font_color_dyn(tint);
+    body.adopt(&icon);
+    let word = view! {
+        text font-family:monospace font-size:{px(11.5)}px font-weight:500 {label.get()}
+    };
+    word.font_color_dyn(tint);
+    body.adopt(&word);
+    cell
+}
+
 /// A full-height control cell for a [`PageHeader`]: an optional mark, the
 /// label, and an optional key hint.
 #[component]
@@ -101,14 +157,13 @@ pub fn PageHeader(
     }
 }
 
-/// A section of a settings-like page: a head (serif, or mono caps when
-/// `caps`) over a hairline, then the content.
+/// A named page section: an icon and serif title on a raised heading band.
 #[component]
 pub fn Module(
     title: String,
-    /// Sets the head in mono caps instead of the serif.
-    #[prop(default = false)]
-    caps: bool,
+    /// A fitting icon for the named section.
+    #[prop(optional)]
+    icon: Option<SvgToken>,
     /// A muted note at the head's right end.
     #[prop(optional)]
     note: Option<UiText>,
@@ -120,28 +175,23 @@ pub fn Module(
     head_label: Option<String>,
     #[prop(optional)] children: Children,
 ) -> Element {
-    let head = if caps {
-        let text = title.to_uppercase();
-        view! {
-            text font-family:monospace font-size:{px(11.0)}px font-weight:500
-                letter-spacing:{px(1.1)}px font-color:ground.muted (text)
-        }
-    } else {
-        view! {
-            SerifTitle text:(title.clone()) size:(SerifSize::Small)
-        }
+    let head = view! {
+        SerifTitle text:(title.clone()) size:(SerifSize::Small)
     };
     let has_end = head_end.is_some();
     view! {
         col height:min-content shrink:0 label:(title)
             stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-            row height:{if caps { Dimension::Px(px(40.0)) } else { Dimension::MinContent }}
-                gap:{px(12.0)}px align:{if caps { Align::Center } else { Align::End }}
-                pad:(left:{px(18.0)}px right:{px(if has_end { 0.0 } else { 18.0 })}px top:{px(if caps { 0.0 } else { 16.0 })}px bottom:{px(if caps { 0.0 } else { 8.0 })}px)
+            el width:fill height:{px(1.0)}px shrink:0 fill:ground.rule-strong nohit {}
+            row height:{px(42.0)}px shrink:0 fill:ground.panel-raised gap:{px(12.0)}px align:center
+                pad:(left:{px(18.0)}px right:{px(if has_end { 0.0 } else { 18.0 })}px top:0px bottom:0px)
                 label:(head_label.clone().unwrap_or_default())
                 stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                row width:max-content height:min-content align:center {
+                row width:max-content height:min-content gap:{px(8.0)}px align:center {
                     {
+                        if let Some(icon) = icon {
+                            parent.adopt(&crate::icons::icon_mark(icon, 16.0));
+                        }
                         parent.adopt(&head);
                     }
                 }

@@ -152,7 +152,7 @@ fn first_director_draft_requests_command_discovery_and_completes() {
     assert!(
         mounted
             .model
-            .notice
+            .command_feedback
             .get_untracked()
             .contains("first message")
     );
@@ -305,7 +305,7 @@ fn inline_suggestions_filter_browser_input_and_remain_clickable() {
                 assert!(
                     mounted
                         .model
-                        .notice
+                        .command_feedback
                         .get_untracked()
                         .contains("Test command")
                 );
@@ -407,6 +407,382 @@ fn harness_completion_inserts_durable_skills_and_opens_native_model_flow() {
     assert!(
         matches!(envelope.command,Command::SetHarnessSelection{selection:HarnessSelection{model:Some(ref model),effort:Some(ref effort),..},..} if model=="test-model" && effort=="high")
     );
+}
+
+#[test]
+fn harness_command_panel_is_attached_bounded_and_escape_restores_draft_focus() {
+    for (width, height) in [(1380.0, 900.0), (820.0, 900.0), (500.0, 480.0)] {
+        let mut mounted = mount(false, width);
+        mounted.size.height = height;
+        mounted.model.open_session("session-plan".into());
+        let mut catalog = demo_catalog("session-plan", Harness::Codex);
+        catalog.commands.push(HarnessCommand {
+            name: "model".into(),
+            description: "Choose model".into(),
+            argument_hint: String::new(),
+            dispatch: CommandDispatch::Flow,
+            reason: None,
+        });
+        catalog.models = (0..24)
+            .map(|i| HarnessModel {
+                id: format!("model-{i}"),
+                name: format!("Model {i}"),
+                efforts: vec!["low".into(), "high".into()],
+                default_effort: Some("low".into()),
+                fast: false,
+            })
+            .collect();
+        mounted
+            .model
+            .catalogs
+            .set(std::collections::BTreeMap::from([(
+                "session-plan".into(),
+                Ok(catalog),
+            )]));
+        mounted.settle();
+        let before = mounted.rect("Transcript viewport");
+        let draft = mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .find_map(|n| n.label.filter(|s| s.starts_with("Draft text")))
+            .unwrap();
+        mounted.focus(&draft);
+        mounted.key(Key::Character("/model".into()), false);
+        let suggestions = mounted.rect("Command suggestions panel");
+        let composer = mounted.rect("Message composer");
+        assert!((suggestions.max_y() - composer.origin.y).abs() < 0.1);
+        assert!((suggestions.origin.x - composer.origin.x).abs() < 0.1);
+        assert!((suggestions.size.width - composer.size.width).abs() < 0.1);
+        mounted.key(Key::Enter, false);
+        assert_eq!(mounted.model.command_flow.get_untracked(), "model");
+        let panel = mounted.rect("Harness command panel");
+        let composer = mounted.rect("Message composer");
+        let transcript = mounted.rect("Transcript viewport");
+        assert!((panel.max_y() - composer.origin.y).abs() < 0.1);
+        assert!((panel.origin.x - composer.origin.x).abs() < 0.1);
+        assert!((panel.size.width - composer.size.width).abs() < 0.1);
+        assert!(panel.size.height <= 280.1 && panel.size.height > 0.0);
+        assert!(panel.origin.x >= transcript.origin.x && panel.max_x() <= transcript.max_x());
+        assert!(
+            transcript.max_y() <= panel.origin.y + 0.1,
+            "{width}x{height}: transcript {transcript:?}, panel {panel:?}, composer {composer:?}"
+        );
+        assert!(transcript.size.height < before.size.height);
+        assert!(composer.max_y() <= height + 0.1);
+        assert_eq!(
+            focused_label(&mounted).as_deref(),
+            Some("Choose model Model 0")
+        );
+        mounted.key(Key::ArrowDown, false);
+        assert_eq!(
+            focused_label(&mounted).as_deref(),
+            Some("Choose model Model 1")
+        );
+        mounted.key(Key::ArrowUp, false);
+        assert_eq!(
+            focused_label(&mounted).as_deref(),
+            Some("Choose model Model 0")
+        );
+        // The real clip/hit chain must reject transcript painting over panel controls.
+        assert_control_hit(&mounted, "Choose model Model 0");
+        assert_control_hit(&mounted, "Choose model Model 23");
+        mounted.key(Key::Escape, false);
+        assert!(mounted.model.command_flow.get_untracked().is_empty());
+        assert_eq!(focused_label(&mounted).as_deref(), Some(draft.as_str()));
+        mounted.key(Key::Character("Follow up".into()), false);
+        assert_eq!(
+            plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+            "Follow up"
+        );
+        // Reopening and using the close cell follows the same focus return path.
+        crate::command_ui::open(mounted.model, "model");
+        mounted.settle();
+        mounted.click("Close commands");
+        assert_eq!(focused_label(&mounted).as_deref(), Some(draft.as_str()));
+        crate::command_ui::open(mounted.model, "model");
+        mounted.settle();
+        mounted.key(Key::Enter, false);
+        assert_eq!(mounted.model.command_model.get_untracked(), "model-0");
+        assert_eq!(
+            focused_label(&mounted).as_deref(),
+            Some("Choose effort low")
+        );
+        mounted.key(Key::ArrowDown, false);
+        mounted.key(Key::Enter, false);
+        assert!(mounted.model.command_flow.get_untracked().is_empty());
+        assert_eq!(focused_label(&mounted).as_deref(), Some(draft.as_str()));
+        assert!(matches!(mounted.commands.try_recv().unwrap().command,
+            Command::SetHarnessSelection { selection: HarnessSelection { model: Some(ref model), effort: Some(ref effort), .. }, .. }
+                if model == "model-0" && effort == "high"));
+        crate::command_ui::open(mounted.model, "status");
+        mounted.settle();
+        assert_eq!(focused_label(&mounted).as_deref(), Some("Close commands"));
+        mounted.key(Key::Escape, false);
+        assert!(mounted.model.command_flow.get_untracked().is_empty());
+        assert_eq!(focused_label(&mounted).as_deref(), Some(draft.as_str()));
+    }
+}
+
+#[test]
+fn draft_reply_strip_removes_only_the_reply_and_keeps_shared_edges() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    let original = mounted.model.snapshot.get_untracked().messages;
+    let source = original.iter().find(|m| m.id == "m1").unwrap();
+    let other = Part::text("Unrelated draft");
+    crate::buffer::edit(
+        mounted.model,
+        "session-plan",
+        vec![
+            Part {
+                id: "reply-strip-test".into(),
+                kind: PartKind::Reply {
+                    anchor: relay_core::Anchor {
+                        message_id: source.id.clone(),
+                        start: 0,
+                        end: source.body.len(),
+                        quote: source.body.clone(),
+                    },
+                    parts: vec![Part::text("Reply draft")],
+                },
+            },
+            other.clone(),
+        ],
+    );
+    mounted.settle();
+    let snapshot = mounted.ui.inspection_snapshot();
+    // The final instance is the composer; the source transcript also mirrors it.
+    let rect = |label| {
+        snapshot
+            .nodes
+            .iter()
+            .rev()
+            .find(|n| n.label.as_deref() == Some(label))
+            .unwrap()
+            .rect
+    };
+    let quote = rect("Go to reply source");
+    let remove = rect("Remove draft reply");
+    assert!((quote.max_x() - remove.origin.x).abs() < 0.1);
+    assert_eq!(quote.origin.y, remove.origin.y);
+    assert_eq!(quote.size.height, remove.size.height);
+    for kind in [
+        PointerEventKind::Down(PointerButton::Primary),
+        PointerEventKind::Up(PointerButton::Primary),
+    ] {
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind,
+            position: remove.center(),
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+    }
+    mounted.settle();
+    assert_eq!(
+        crate::buffer::parts(mounted.model, "session-plan"),
+        vec![other]
+    );
+    assert_eq!(mounted.model.snapshot.get_untracked().messages, original);
+}
+
+#[test]
+fn command_feedback_is_attached_and_clears_on_edit_escape_and_panel_open() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([(
+            "session-plan".into(),
+            Ok(HarnessCatalog {
+                commands: vec![HarnessCommand {
+                    name: "config".into(),
+                    description: "Configure".into(),
+                    argument_hint: String::new(),
+                    dispatch: CommandDispatch::Unavailable,
+                    reason: Some("Configure this feature on the server".into()),
+                }],
+                ..Default::default()
+            }),
+        )]));
+    mounted.settle();
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|s| s.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&draft);
+    mounted.key(Key::Character("/config".into()), false);
+    mounted.key(Key::Enter, false);
+    assert_eq!(
+        mounted.model.command_feedback.get_untracked(),
+        "Configure this feature on the server"
+    );
+    assert!(mounted.model.notice.get_untracked().is_empty());
+    let feedback = mounted.rect("Command feedback");
+    let composer = mounted.rect("Message composer");
+    assert!((feedback.max_y() - composer.origin.y).abs() < 0.1);
+    assert_eq!(feedback.size.width, composer.size.width);
+    mounted.key(Key::Character("x".into()), false);
+    assert!(mounted.model.command_feedback.get_untracked().is_empty());
+    mounted.model.command_feedback.set("Unknown command".into());
+    mounted.settle();
+    mounted.key(Key::Escape, false);
+    assert!(mounted.model.command_feedback.get_untracked().is_empty());
+    mounted.model.command_feedback.set("Unknown command".into());
+    crate::command_ui::open(mounted.model, "model");
+    assert!(mounted.model.command_feedback.get_untracked().is_empty());
+    crate::command_ui::run(mounted.model, "review", "");
+    mounted.settle();
+    assert!(!mounted.model.command_feedback.get_untracked().is_empty());
+    assert!(
+        (mounted.rect("Command feedback").max_y() - mounted.rect("Message composer").origin.y)
+            .abs()
+            < 0.1
+    );
+}
+
+#[test]
+fn page_banner_escape_dismisses_settings_failure_without_changing_its_draft() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.page.set(Page::Settings);
+    mounted
+        .model
+        .notice
+        .set("Settings could not be saved".into());
+    let preferences = mounted.model.preferences.get_untracked();
+    mounted.settle();
+    assert!(mounted.rect("Dismiss").size.width > 0.0);
+    mounted.key(Key::Escape, false);
+    assert!(mounted.model.notice.get_untracked().is_empty());
+    assert_eq!(mounted.model.preferences.get_untracked(), preferences);
+}
+
+#[test]
+fn request_sending_and_send_pending_clear_on_ack_and_conflicts_keep_actions() {
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(sender));
+    let model = mounted.model;
+    let mut send = |text: &str, serial| {
+        model.worker_approval.set(true);
+        crate::buffer::edit(model, "session-plan", vec![Part::text(text)]);
+        crate::buffer::send(model);
+        assert!(
+            model.submission_pending(),
+            "pending includes the draft-save acknowledgement stage"
+        );
+        let (session, request) = loop {
+            match requests.try_recv().unwrap() {
+                crate::buffer_network::Request::Save { session, request } => {
+                    break (session, request);
+                }
+                crate::buffer_network::Request::Forget(_) => {}
+                _ => panic!("Expected draft save"),
+            }
+        };
+        let saved = Draft {
+            session_id: session.clone(),
+            revision: serial * 2 - 1,
+            parts: request.parts.clone(),
+        };
+        crate::buffer::receive(
+            model,
+            crate::buffer_network::Update {
+                serial,
+                initialized: true,
+                connected: true,
+                drafts: vec![saved.clone()],
+                outcomes: std::collections::BTreeMap::from([(
+                    request.request_id.clone(),
+                    crate::buffer_network::Outcome::Saved {
+                        session,
+                        request,
+                        result: Ok(saved),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+    };
+    send("Queue this turn", 1);
+    let request = mounted.commands.try_recv().unwrap();
+    mounted.settle();
+    assert!(mounted.model.sending() && mounted.model.submission_pending());
+    assert!(mounted.model.notice.get_untracked().is_empty());
+    assert!(
+        mounted
+            .rect("Submission awaiting acknowledgement")
+            .size
+            .width
+            > 0.0
+    );
+    assert!(
+        mounted
+            .rect("Connection: Connected, sending…. Show details")
+            .size
+            .height
+            > 0.0
+    );
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        outcome: Some((request.request_id, Ok(()))),
+        outcome_serial: 1,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(!mounted.model.sending() && !mounted.model.submission_pending());
+    assert!(!mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+        n.label
+            .as_deref()
+            .is_some_and(|label| label.starts_with("Connection:") && label.contains("sending"))
+    }));
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Submission awaiting acknowledgement"))
+    );
+    // Another conversation must not show this draft's Send pending state.
+    send("Another turn", 2);
+    let request = mounted.commands.try_recv().unwrap();
+    mounted.model.open_session("session-worker".into());
+    assert!(mounted.model.sending() && !mounted.model.submission_pending());
+    mounted.model.open_session("session-plan".into());
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        outcome: Some((
+            request.request_id,
+            Err("Revision conflict; review latest".into()),
+        )),
+        outcome_serial: 2,
+        outcome_conflict: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(!mounted.model.sending() && !mounted.model.submission_pending());
+    for label in [
+        "Review latest state",
+        "Review conflict for new request",
+        "Retry original request",
+    ] {
+        assert!(mounted.rect(label).size.width > 0.0);
+    }
+    mounted.key(Key::Escape, false);
+    assert!(mounted.model.notice.get_untracked().is_empty());
+    assert!(mounted.model.can_retry());
+    mounted.model.retry_pending();
+    assert!(mounted.model.sending() && mounted.model.submission_pending());
 }
 
 #[test]
@@ -3239,6 +3615,14 @@ fn connection_states_update_and_retry_and_remove_use_stable_connection_ids() {
     mounted.model.snapshot.set(snapshot);
     mounted.model.page.set(Page::Connections);
     mounted.settle();
+    let row = mounted.rect("Connection row repo-1");
+    let remove = mounted.rect("Remove connection");
+    assert_eq!(remove.origin.y, row.origin.y);
+    assert_eq!(remove.size.height, row.size.height);
+    assert_eq!(
+        remove.origin.x + remove.size.width,
+        row.origin.x + row.size.width
+    );
     mounted.click("Retry connection");
     let retry = mounted.commands.try_recv().unwrap();
     assert!(
@@ -3277,6 +3661,49 @@ fn connection_states_update_and_retry_and_remove_use_stable_connection_ids() {
             .nodes
             .iter()
             .any(|n| n.label.as_deref() == Some("Remove connection"))
+    );
+}
+
+#[test]
+fn connection_edit_submits_only_a_name_and_cancel_keeps_resources() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    snapshot
+        .connections
+        .retain(|c| !matches!(c.kind, ConnectionKind::Board { .. }));
+    snapshot.connections.push(ProjectConnection {
+        id: "workspace".into(),
+        project_id: snapshot.projects[0].id.clone(),
+        name: "Workspace".into(),
+        enabled: true,
+        state: ConnectionState::Ready,
+        error: None,
+        kind: ConnectionKind::Directory {
+            path: "/srv/relay/workspace".into(),
+        },
+    });
+    let original = snapshot.connections[0].clone();
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.page.set(Page::Connections);
+    mounted.settle();
+    let edit = format!("Edit connection {}", original.name);
+    mounted.click(&edit);
+    type_in(&mounted, "Connection name", "Source workspace");
+    mounted.click("Cancel connection edit");
+    assert!(mounted.commands.is_empty());
+    assert_eq!(
+        mounted.model.snapshot.get_untracked().connections[0],
+        original
+    );
+    mounted.click(&edit);
+    type_in(&mounted, "Connection name", "Source workspace");
+    mounted.click("Save connection name");
+    assert!(matches!(mounted.commands.try_recv().unwrap().command,
+        Command::UpdateConnection { connection_id, name } if connection_id == original.id && name == "Source workspace"));
+    assert_eq!(
+        mounted.model.snapshot.get_untracked().connections[0],
+        original,
+        "the client waits for the authoritative server snapshot"
     );
 }
 

@@ -13,6 +13,10 @@ mosaic::scheme! {
         command { navigate:Svg, profile:Svg, create:Svg, search:Svg, sync:Svg, worker:Svg, settings:Svg, project:Svg, board:Svg },
         /// Execution approval modes: automatic, ask each time, unrestricted.
         execution { automatic:Svg, ask:Svg, unrestricted:Svg },
+        /// Small marks: check, link, copy, remove, reply and edit.
+        mark { check:Svg, link:Svg, copy:Svg, remove:Svg, reply:Svg, edit:Svg },
+        /// Named page sections.
+        section { appearance:Svg, fonts:Svg, scope:Svg, permissions:Svg },
     }
 }
 
@@ -45,6 +49,16 @@ pub fn icons() -> UiIcons {
         execution {
             automatic:"assets/icons/approval-automatic.svg", ask:"assets/icons/approval-ask.svg",
             unrestricted:"assets/icons/approval-unrestricted.svg",
+        },
+        mark {
+            check:"assets/icons/mark-check.svg", link:"assets/icons/mark-link.svg",
+            copy:"assets/icons/mark-copy.svg",
+            remove:"assets/icons/mark-remove.svg", reply:"assets/icons/mark-reply.svg",
+            edit:"assets/icons/mark-edit.svg",
+        },
+        section {
+            appearance:"assets/icons/section-appearance.svg", fonts:"assets/icons/section-fonts.svg",
+            scope:"assets/icons/section-scope.svg", permissions:"assets/icons/section-permissions.svg",
         },
     } }
 }

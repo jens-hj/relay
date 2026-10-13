@@ -97,9 +97,20 @@ fn call(vm: ToolCallView, on_opening: OnOpening, actions: ToolActions) -> (Eleme
             }
         }
     };
+    // Hover and press tint the row in the tool's own colour, faintly; read
+    // inside the bindings so a theme switch recolours them.
+    let tint = move |alpha: f32| {
+        let c = mosaic::core::theme::color(colour);
+        c.alpha(crate::tokens::srgb_alpha(
+            c,
+            mosaic::core::theme::color(ground.panel),
+            alpha,
+        ))
+    };
     let control = view! {
         button @click:{on_opening(opening.next())} width:fill height:{px(36.0)}px shrink:0
             radius:0px pad:0px fill:(Color::TRANSPARENT) label:(opening.label())
+            hover { fill:{tint(0.08)} } pressed { fill:{tint(0.14)} }
             focused { stroke:+(width:1px color:ground.ink offset:-1px) } {
             { parent.adopt(&header); }
         }

@@ -198,7 +198,7 @@ pub struct DitherSpec {
     pub scale: f32,
     pub seed: i32,
     pub gradient: Gradient,
-    /// Fraction of the width the gradient spans (from the left edge).
+    /// Fraction of width spanned; a corner radius may exceed the width.
     pub reach: f32,
     /// Noise base frequency per logical pixel.
     pub frequency: f32,
@@ -237,7 +237,15 @@ impl DitherSpec {
             return out;
         }
         let noise = Turbulence::new(self.seed);
-        let reach_px = (self.width * self.reach.clamp(0.0, 1.0)).max(f32::EPSILON);
+        // A narrow model cell needs a radius larger than its width for the
+        // lower-left glow to rise into the family name. Linear washes still
+        // stop at the full width; the corner mask remains clipped to its cell.
+        let reach = if self.gradient == Gradient::Corner {
+            self.reach.max(0.0)
+        } else {
+            self.reach.clamp(0.0, 1.0)
+        };
+        let reach_px = (self.width * reach).max(f32::EPSILON);
         let scale = self.scale.max(f32::EPSILON);
         for py in 0..ph {
             let y = (py as f32 + 0.5) / scale;
@@ -298,7 +306,8 @@ pub fn Dither(
     /// Density fall-off.
     #[prop(default = Gradient::Horizontal)]
     gradient: Gradient,
-    /// Fraction of the width the dither reaches, 0..1.
+    /// Fraction of the width the dither reaches, 0..1 for linear washes.
+    /// Corner glows may have a radius larger than their cell's width.
     #[prop(default = Live::fixed(1.0))]
     reach: Live<f32>,
     /// Overall opacity: row 0.3, header 0.14, approval 0.22.

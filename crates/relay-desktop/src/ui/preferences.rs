@@ -78,7 +78,7 @@ pub(crate) fn Settings(model: Model) -> Element {
         },
     );
     let harnesses = view! {
-        Module title:"Harnesses" caps:true
+        Module title:"Harnesses" icon:(Some(relay_ui::icons::harness.codex))
             note:(Some(UiText::from("Installed on the connected server"))) {
             if !model.connected.get() || !model.harness_error.get().is_empty() {
                 { parent.adopt(&toned_caption(Derived::new(move || if !model.connected.get() {"Disconnected · last checked status retained".to_string()} else {model.harness_error.get()}), true, Tone::Signal(relay_ui::tokens::Signal::NeedsYou))); }
@@ -108,14 +108,14 @@ pub(crate) fn Settings(model: Model) -> Element {
                     { parent.adopt(&caption(Derived::new(move || model.settings_store.get().backup.map(|b| format!("Previous settings file kept at {}", b.display())).unwrap_or_default()), true)); }
                 }
                 { parent.adopt(&harnesses); }
-                Module title:"Appearance" caps:true
+                Module title:"Appearance" icon:(Some(relay_ui::icons::section.appearance))
                     note:(Some(UiText::from("Saved on this machine"))) {
                     AppearanceRow model:(model) title:"Theme"
                         setting:(crate::settings::Setting::Mode)
                     AppearanceRow model:(model) title:"Contrast"
                         setting:(crate::settings::Setting::Contrast)
                 }
-                Module title:"Interface scale" caps:true
+                Module title:"Interface scale" icon:(Some(relay_ui::icons::call.search))
                     note:(Some(UiText::from("Display scaling follows the operating system"))) {
                     row height:{px(40.0)}px gap:0px align:center label:"Interface scale" {
                         row width:{px(150.0)}px shrink:0
@@ -130,7 +130,7 @@ pub(crate) fn Settings(model: Model) -> Element {
                             name:("interface scale")
                     }
                 }
-                Module title:"Fonts" caps:true {
+                Module title:"Fonts" icon:(Some(relay_ui::icons::section.fonts)) {
                     { parent.adopt(&caption("Text: Geist Mono · Titles: Instrument Serif", false)); }
                 }
                 { parent.adopt(&caption("Appearance is saved on this machine. Projects and harness configuration are saved on the server.", false)); }

@@ -8,6 +8,7 @@ use crate::{
 };
 use mosaic::prelude::*;
 use relay_core::*;
+use relay_ui::cells::CellButtonHandle;
 use relay_ui::prelude::{
     CellButton, CellButtonProps, Label, LabelProps, Rule, TextRole, Tone, UiText,
 };
@@ -214,6 +215,7 @@ pub fn discovery_feedback(model: Model) -> Option<String> {
 }
 
 pub fn open(model: Model, name: &str) {
+    model.command_feedback.set(String::new());
     let parts = buffer::parts(model, &model.session.get_untracked());
     let text = plain_text(&parts);
     if parts
@@ -269,16 +271,20 @@ pub fn intercept(model: Model) -> bool {
     let catalogs = model.catalogs.get_untracked();
     let Some(Ok(catalog)) = catalogs.get(&model.session.get_untracked()) else {
         model
-            .notice
+            .command_feedback
             .set("Wait for commands and skills to load, or retry discovery".into());
         return true;
     };
     let Some(command) = catalog.commands.iter().find(|c| c.name == name) else {
-        model.notice.set(format!("Unknown command /{name}"));
+        model
+            .command_feedback
+            .set(format!("Unknown command /{name}"));
         return true;
     };
     if command.dispatch == CommandDispatch::Unavailable {
-        model.notice.set(command.reason.clone().unwrap_or_default());
+        model
+            .command_feedback
+            .set(command.reason.clone().unwrap_or_default());
         return true;
     }
     if command.dispatch == CommandDispatch::Flow && !matches!(name, "compact" | "review") {
@@ -287,13 +293,13 @@ pub fn intercept(model: Model) -> bool {
             .any(|p| !matches!(p.kind, PartKind::Text { .. }))
         {
             model
-                .notice
+                .command_feedback
                 .set("Send this command separately from skills, replies, and attachments".into());
             return true;
         }
         let native = canonical_command(name);
         if !arg.trim().is_empty() && !matches!(native, "model" | "effort" | "fast" | "resume") {
-            model.notice.set(format!(
+            model.command_feedback.set(format!(
                 "Open /{name} without arguments to use its controls"
             ));
             return true;
@@ -303,7 +309,7 @@ pub fn intercept(model: Model) -> bool {
             && !catalog.models.iter().any(|m| m.id == arg.trim())
         {
             model
-                .notice
+                .command_feedback
                 .set("Choose an available model from /model".into());
             return true;
         }
@@ -320,7 +326,9 @@ pub fn intercept(model: Model) -> bool {
                     .and_then(|w| w.model.as_ref())
             });
             let Some(chosen) = catalog.models.iter().find(|m| Some(&m.id) == id) else {
-                model.notice.set("Choose a session model first".into());
+                model
+                    .command_feedback
+                    .set("Choose a session model first".into());
                 return true;
             };
             let effort = if native == "effort" {
@@ -330,7 +338,7 @@ pub fn intercept(model: Model) -> bool {
                     Some(arg.trim().into())
                 } else {
                     model
-                        .notice
+                        .command_feedback
                         .set("Effort is not supported by this model".into());
                     return true;
                 }
@@ -345,7 +353,7 @@ pub fn intercept(model: Model) -> bool {
                     "on" if chosen.fast => true,
                     "off" => false,
                     _ => {
-                        model.notice.set(
+                        model.command_feedback.set(
                             "Use /fast on or /fast off with a model that supports fast mode".into(),
                         );
                         return true;
@@ -367,7 +375,7 @@ pub fn intercept(model: Model) -> bool {
                 .and_then(|s| s.conversations.iter().find(|c| c.id == arg.trim()));
             if target.is_none() {
                 model
-                    .notice
+                    .command_feedback
                     .set("Choose a retained conversation from /resume".into());
                 return true;
             }
@@ -427,7 +435,7 @@ fn selection(model: Model, model_id: String, effort: Option<String>, fast: bool)
 pub(crate) fn run(model: Model, name: &str, arg: &str) {
     if has_content(&buffer::parts(model, &model.session.get_untracked())) {
         model
-            .notice
+            .command_feedback
             .set("Send or clear the current draft before running this command".into());
         return;
     }
@@ -458,8 +466,9 @@ pub fn CommandPanel(model: Model) -> Element {
     let argument = model.command_argument;
     let some = |text: String| Some(UiText::from(text));
     let disconnected = Derived::new(move || !model.connected.get());
+    let entry = State::new(None::<Element>);
     let head = view! {
-        row height:{px(40.0)}px align:center gap:0px
+        row height:{px(40.0)}px shrink:0 align:center gap:0px
             stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
             row width:1fr min-width:0px height:min-content
                 pad:(horizontal:{px(18.0)}px vertical:0px) {
@@ -476,12 +485,13 @@ pub fn CommandPanel(model: Model) -> Element {
                 CellButton label:"Close commands" rule:(Rule::Left)
                     on-press:(press(move || model.command_flow.set(String::new()))) {
                     Label text:"Close" role:(TextRole::Label) weight:500
-                }
+                } as close
+                { entry.set(Some(close.root().clone())); }
             }
         }
     };
-    view! {
-        col height:min-content stroke:(width:{px(1.0)} color:ground.rule edges:bottom) {
+    let panel = view! {
+        col height:min-content gap:0px {
             { parent.adopt(&head); }
             if catalog.get().is_some_and(|c|c.is_err()) {
                 Caption
@@ -497,7 +507,7 @@ pub fn CommandPanel(model: Model) -> Element {
                             let command=State::new(command.clone());
                             ActionCell label:(format!("Command /{}", command.get_untracked().name))
                                 text:(some(format!("/{} {} · {}", command.get_untracked().name, command.get_untracked().argument_hint, command.get_untracked().reason.unwrap_or(command.get_untracked().description))))
-                                on-press:(press(move || { let c = command.get_untracked(); if c.dispatch == CommandDispatch::Unavailable { model.notice.set(c.reason.unwrap_or_default()); } else { open(model, &c.name); } }))
+                                on-press:(press(move || { let c = command.get_untracked(); if c.dispatch == CommandDispatch::Unavailable { model.command_feedback.set(c.reason.unwrap_or_default()); } else { open(model, &c.name); } }))
                         }
                     }
                     for (_, skill) in {current.get().skills.clone().into_iter().map(|s|(format!("{}:{}",s.id,s.name),s)).collect::<Vec<_>>()} {
@@ -610,5 +620,45 @@ pub fn CommandPanel(model: Model) -> Element {
                 }
             }
         }
-    }
+    };
+    let entry = entry.get_untracked().unwrap();
+    let initial = std::cell::Cell::new(true);
+    let layout_panel = panel.clone();
+    panel.on_layout(move |_| {
+        if initial.replace(false) {
+            let ui = model.ui.get_untracked();
+            entry.focus();
+            // The first command choice follows the header cells. Information-only
+            // commands keep focus on Close rather than stepping into the composer.
+            ui.focus_next();
+            if !layout_panel.interaction().focus_within() {
+                entry.focus();
+            }
+        }
+    });
+    let keys_panel = panel.clone();
+    panel.on_key(move |event, ctx| {
+        let ui = model.ui.get_untracked();
+        if !matches!(event.kind, KeyEventKind::Down { .. }) || ui.wants_text_input() {
+            return;
+        }
+        if matches!(event.key, Key::ArrowDown | Key::ArrowUp) {
+            let previous = ui.focused();
+            if event.key == Key::ArrowDown {
+                ui.focus_next();
+            } else {
+                ui.focus_prev();
+            }
+            if !keys_panel.interaction().focus_within()
+                && let Some(previous) = previous
+            {
+                previous.focus();
+            }
+            if let Some(field) = ui.focused() {
+                field.reveal();
+            }
+            ctx.stop_propagation();
+        }
+    });
+    panel
 }

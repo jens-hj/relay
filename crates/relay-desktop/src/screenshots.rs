@@ -123,9 +123,41 @@ fn shell_screenshots() {
     relay_ui::fonts::install(&mut fonts);
     ui.set_fonts(fonts);
     relay_ui::attach(&ui);
-    let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
+    let (sender, commands) = tokio::sync::mpsc::unbounded_channel();
+    let commands = std::cell::RefCell::new(commands);
+    let receipt = std::cell::RefCell::new(None::<String>);
+    let outcome_serial = std::cell::Cell::new(0u64);
     let model = scope.run(|| crate::model::Model::new(&ui, sender));
     let mut snapshot = demo_snapshot(DirectorProfile::default());
+    // Demo conversations predate project connections. Include real resource
+    // rows here so Connections screenshots exercise their embedded actions.
+    let project_id = snapshot.projects[0].id.clone();
+    snapshot.connections = vec![
+        ProjectConnection {
+            id: "shot-workspace".into(),
+            project_id: project_id.clone(),
+            name: "Workspace".into(),
+            enabled: true,
+            state: ConnectionState::Ready,
+            error: None,
+            kind: ConnectionKind::Directory {
+                path: "/srv/relay/workspace".into(),
+            },
+        },
+        ProjectConnection {
+            id: "shot-repository".into(),
+            project_id: project_id.clone(),
+            name: "jens-hj/relay".into(),
+            enabled: true,
+            state: ConnectionState::Ready,
+            error: None,
+            kind: ConnectionKind::Repository {
+                remote: "https://github.com/jens-hj/relay.git".into(),
+                checkout: Some("/srv/relay/repos/github.com/jens-hj/relay".into()),
+                owned: true,
+            },
+        },
+    ];
     demo_orchestration(&mut snapshot);
     let now = crate::platform::SystemTime::now()
         .duration_since(crate::platform::UNIX_EPOCH)
@@ -150,6 +182,9 @@ fn shell_screenshots() {
         round_trip_ms: Some(42),
         ..Default::default()
     });
+    // A selected single shot must not depend on an earlier conversation
+    // opening the demo project.
+    model.project.set(project_id);
     model.server_endpoint.set("http://127.0.0.1:7331".into());
     // One harness ready and one needing a sign-in, so both availability
     // colours show.
@@ -181,7 +216,61 @@ fn shell_screenshots() {
             ui.frame(logical, 1.0);
         }
     };
-    let shots: [(&str, &dyn Fn()); 14] = [
+    let submit_shot = || {
+        model.open_session("session-plan".into());
+        let parts = vec![Part::text("Please check the next turn.")];
+        crate::buffer::edit(model, "session-plan", parts.clone());
+        model.submit(
+            Command::SubmitTurn {
+                session_id: "session-plan".into(),
+                draft_revision: 0,
+                parts: parts.clone(),
+                approve_implementation: true,
+            },
+            model.snapshot.get_untracked().revision,
+            crate::model::Saved::Buffer(Draft {
+                session_id: "session-plan".into(),
+                revision: 0,
+                parts,
+            }),
+        );
+        let request = commands.borrow_mut().try_recv().unwrap();
+        *receipt.borrow_mut() = Some(request.request_id.clone());
+        request.request_id
+    };
+    let shots: [(&str, &dyn Fn()); 20] = [
+        ("notice-command-feedback", &|| {
+            model.open_session("session-plan".into());
+            model.command_feedback.set("Configure this feature on the server; the harness does not expose its interactive editor here".into());
+        }),
+        ("notice-sending", &|| {
+            submit_shot();
+        }),
+        ("notice-conflict", &|| {
+            let id = submit_shot();
+            outcome_serial.set(outcome_serial.get() + 1);
+            model.receive(NetworkState {
+                snapshot: model.snapshot.get_untracked(),
+                connected: true,
+                outcome: Some((
+                    id,
+                    Err("Revision conflict; review latest state before retrying.".into()),
+                )),
+                outcome_serial: outcome_serial.get(),
+                outcome_conflict: true,
+                ..Default::default()
+            });
+        }),
+        ("composer-reply", &|| {
+            composer_reply_shot(model, &ui, false, &settle)
+        }),
+        ("composer-reply-collapsed", &|| {
+            composer_reply_shot(model, &ui, true, &settle)
+        }),
+        ("command-model", &|| {
+            model.open_session("session-plan".into());
+            crate::command_ui::open(model, "model");
+        }),
         ("conversation", &|| {
             model.open_session("session-plan".into())
         }),
@@ -296,8 +385,130 @@ fn shell_screenshots() {
         scope.run(open);
         settle();
         render(&ui, logical, 1.0, &format!("{directory}/{name}.png"));
+        if name.starts_with("notice-") {
+            scope.run(|| {
+                if model.busy.get_untracked() {
+                    outcome_serial.set(outcome_serial.get() + 1);
+                    model.receive(NetworkState {
+                        snapshot: model.snapshot.get_untracked(),
+                        connected: true,
+                        outcome: receipt.borrow_mut().take().map(|id| (id, Ok(()))),
+                        outcome_serial: outcome_serial.get(),
+                        ..Default::default()
+                    });
+                } else if model.can_rebase() {
+                    model.rebase_conflict();
+                }
+                model.command_feedback.set(String::new());
+                model.notice.set(String::new());
+                crate::buffer::edit(model, "session-plan", vec![]);
+            });
+        }
+        if name.starts_with("composer-reply") {
+            let snapshot = ui.inspection_snapshot();
+            let source = image::open(format!("{directory}/{name}.png")).unwrap();
+            for (suffix, rect) in [
+                (
+                    "reply",
+                    snapshot
+                        .nodes
+                        .iter()
+                        .rev()
+                        .find(|n| n.label.as_deref() == Some("Draft reply strip"))
+                        .unwrap()
+                        .rect,
+                ),
+                (
+                    "glow",
+                    snapshot
+                        .nodes
+                        .iter()
+                        .find(|n| {
+                            n.label.as_deref().is_some_and(|label| {
+                                label.starts_with("Model:") || label.starts_with("Agent settings:")
+                            })
+                        })
+                        .unwrap()
+                        .rect,
+                ),
+            ] {
+                source
+                    .crop_imm(
+                        rect.origin.x.floor() as u32,
+                        rect.origin.y.floor() as u32,
+                        rect.size.width.ceil() as u32,
+                        rect.size.height.ceil() as u32,
+                    )
+                    .save(format!("{directory}/{name}-{suffix}.png"))
+                    .unwrap();
+            }
+            scope.run(|| {
+                crate::buffer::edit(model, "session-plan", vec![]);
+                set_ledger_collapsed(&ui, false);
+            });
+        }
+        if name == "command-model" {
+            scope.run(|| model.command_flow.set(String::new()));
+        }
     }
     scope.dispose();
+}
+
+fn composer_reply_shot(model: crate::model::Model, ui: &Ui, collapsed: bool, settle: &impl Fn()) {
+    model.open_session("session-plan".into());
+    let source = model
+        .snapshot
+        .get_untracked()
+        .messages
+        .into_iter()
+        .find(|m| m.session_id == "session-plan" && m.tool.is_none())
+        .unwrap();
+    let quote = source.body.lines().next().unwrap().to_owned();
+    crate::buffer::edit(
+        model,
+        "session-plan",
+        vec![relay_core::Part {
+            id: "screenshot-reply".into(),
+            kind: relay_core::PartKind::Reply {
+                anchor: relay_core::Anchor {
+                    message_id: source.id,
+                    start: 0,
+                    end: quote.len(),
+                    quote,
+                },
+                parts: vec![relay_core::Part::text("Keep this in the next turn.")],
+            },
+        }],
+    );
+    settle();
+    set_ledger_collapsed(ui, collapsed);
+}
+
+fn set_ledger_collapsed(ui: &Ui, collapsed: bool) {
+    let label = if collapsed {
+        "Collapse agent settings"
+    } else {
+        "Expand agent settings"
+    };
+    if let Some(control) = ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some(label))
+    {
+        for kind in [
+            PointerEventKind::Down(PointerButton::Primary),
+            PointerEventKind::Up(PointerButton::Primary),
+        ] {
+            ui.dispatch_pointer(PointerEvent {
+                kind,
+                position: control.rect.center(),
+                pointer_type: PointerType::Mouse,
+                modifiers: Modifiers::default(),
+                timestamp: Duration::ZERO,
+            });
+        }
+    }
 }
 
 enum ConnectionShot {
