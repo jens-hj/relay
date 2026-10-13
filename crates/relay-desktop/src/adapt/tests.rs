@@ -339,6 +339,41 @@ fn tool_calls_map_measured_details_and_pending_permissions() {
 }
 
 #[test]
+fn fingerprint_counts_older_transcripts_tool_messages() {
+    // Transcripts recorded before typed tool calls store Codex commands and
+    // file changes as plain messages; the transcript shows them as calls,
+    // so the strip counts them too.
+    let message = |id: &str, kind: &str, body: &str| Message {
+        id: id.into(),
+        session_id: "s".into(),
+        author: "Codex".into(),
+        kind: kind.into(),
+        body: body.into(),
+        parts: vec![],
+        tool: None,
+    };
+    let messages = vec![
+        message(
+            "a",
+            "command_execution",
+            "Command: cargo check\nExit: 0\nok",
+        ),
+        message("b", "command_execution", "Command: git status\nExit: 0\n"),
+        message("c", "file_change", "src/lib.rs"),
+        message("d", "agent_message", "Done."),
+    ];
+    let counts: Vec<_> = fingerprint(&messages, "s")
+        .into_iter()
+        .map(|c| (c.kind, c.count))
+        .collect();
+    assert_eq!(
+        counts,
+        vec![(UiKind::Run, 2), (UiKind::Edit, 1)],
+        "{counts:?}"
+    );
+}
+
+#[test]
 fn fingerprint_counts_every_tool_kind_once_in_first_seen_order() {
     let snapshot = demo();
     let counts = fingerprint(&snapshot.messages, "session-plan");

@@ -13,6 +13,8 @@ mosaic::scheme! {
         command { navigate:Svg, profile:Svg, create:Svg, search:Svg, sync:Svg, worker:Svg, settings:Svg, project:Svg, board:Svg },
         /// Execution approval modes: automatic, ask each time, unrestricted.
         execution { automatic:Svg, ask:Svg, unrestricted:Svg },
+        /// Small marks: a confirming check, a link (endpoints), copy.
+        mark { check:Svg, link:Svg, copy:Svg },
     }
 }
 
@@ -45,6 +47,10 @@ pub fn icons() -> UiIcons {
         execution {
             automatic:"assets/icons/approval-automatic.svg", ask:"assets/icons/approval-ask.svg",
             unrestricted:"assets/icons/approval-unrestricted.svg",
+        },
+        mark {
+            check:"assets/icons/mark-check.svg", link:"assets/icons/mark-link.svg",
+            copy:"assets/icons/mark-copy.svg",
         },
     } }
 }

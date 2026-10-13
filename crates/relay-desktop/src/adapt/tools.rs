@@ -378,13 +378,14 @@ pub fn tool_view(
 }
 
 /// Calls per tool type in a session's loaded transcript, in the order the
-/// types first appear.
+/// types first appear. Older transcripts' tool messages count as the typed
+/// calls the transcript shows them as.
 pub fn fingerprint(messages: &[Message], session_id: &str) -> Vec<ToolCount> {
     let mut counts: Vec<ToolCount> = Vec::new();
     for tool in messages
         .iter()
         .filter(|m| m.session_id == session_id)
-        .filter_map(|m| m.tool.as_ref())
+        .filter_map(|m| crate::tool_activity::with_legacy_tool(m.clone()).tool)
     {
         let kind = ui_kind(tool.kind);
         match counts.iter_mut().find(|c| c.kind == kind) {

@@ -564,3 +564,40 @@ fn connection_banner_keeps_keyboard_focus_across_updates() {
     mounted.key(Key::Enter);
     assert!(mounted.has("Connection: Connected, 61 ms. Hide details"));
 }
+
+#[test]
+fn copying_the_endpoint_confirms_with_a_check_and_turns_back() {
+    let copies = Rc::new(std::cell::Cell::new(0));
+    let record = copies.clone();
+    let mounted = mount(Size::new(380.0, 500.0), move || {
+        view! {
+            col {
+                ConnectionStatus state:(Connection::Connected)
+                    on-copy:(Some(Rc::new(move || record.set(record.get() + 1)) as OnPress))
+                    info:(ConnectionInfo { endpoint: "https://relay.local/api".into(), ..Default::default() })
+            }
+        }
+    });
+    let banner = mounted
+        .labels()
+        .into_iter()
+        .find(|label| label.starts_with("Connection: Connected"))
+        .unwrap();
+    mounted.click_label(&banner);
+    mounted.click_label("Copy endpoint");
+    assert_eq!(copies.get(), 1);
+    assert!(mounted.has("Endpoint copied"), "the cell confirms the copy");
+    assert!(!mounted.has("Copy endpoint"));
+    mounted.ui.tick(std::time::Duration::from_millis(800));
+    mounted.settle();
+    assert!(
+        mounted.has("Endpoint copied"),
+        "still confirming before 1.6s"
+    );
+    mounted.ui.tick(super::connection::COPIED_FOR);
+    mounted.settle();
+    assert!(
+        mounted.has("Copy endpoint"),
+        "turns back after the confirmation"
+    );
+}

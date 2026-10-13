@@ -491,18 +491,17 @@ fn endpoint_text(endpoint: String) -> Element {
             display.clone()
         }
     });
+    // Span colours are resolved here, so the theme's ink and muted colours
+    // are part of the key: a theme switch rebuilds the spans.
     host.switch(
-        move || shown.get(),
-        move |parent, value| {
+        move || (shown.get(), color(ground.ink), color(ground.muted)),
+        move |parent, (value, ink, muted)| {
             let split = value.find('/').unwrap_or(value.len());
             let spans = vec![
-                mosaic::widgets::TextSpan::new(
-                    &value[..split],
-                    TextStyle::inherited().color(color(ground.ink)),
-                ),
+                mosaic::widgets::TextSpan::new(&value[..split], TextStyle::inherited().color(*ink)),
                 mosaic::widgets::TextSpan::new(
                     &value[split..],
-                    TextStyle::inherited().color(color(ground.muted)),
+                    TextStyle::inherited().color(*muted),
                 ),
             ];
             parent.adopt(&view! {
@@ -511,85 +510,6 @@ fn endpoint_text(endpoint: String) -> Element {
         },
     );
     host
-}
-
-fn endpoint_icon(copy: bool) -> Element {
-    let icon = view! {
-        el width:{px(14.0)}px height:{px(14.0)}px shrink:0 nohit {}
-    };
-    icon.paint(move |ctx| {
-        let tint = color(if copy { ground.ink } else { ground.muted });
-        if copy {
-            line(
-                ctx.scene,
-                ctx.rect,
-                &[
-                    (5.0, 5.0),
-                    (13.0, 5.0),
-                    (13.0, 13.0),
-                    (5.0, 13.0),
-                    (5.0, 5.0),
-                ],
-                1.3,
-                tint,
-                16.0,
-            );
-            line(
-                ctx.scene,
-                ctx.rect,
-                &[(3.0, 11.0), (3.0, 3.0), (11.0, 3.0)],
-                1.3,
-                tint,
-                16.0,
-            );
-        } else {
-            line(
-                ctx.scene,
-                ctx.rect,
-                &[
-                    (3.0, 3.0),
-                    (13.0, 3.0),
-                    (13.0, 13.0),
-                    (3.0, 13.0),
-                    (3.0, 3.0),
-                ],
-                1.3,
-                tint,
-                16.0,
-            );
-            line(
-                ctx.scene,
-                ctx.rect,
-                &[(3.0, 8.0), (13.0, 8.0)],
-                1.3,
-                tint,
-                16.0,
-            );
-            line(
-                ctx.scene,
-                ctx.rect,
-                &[(8.0, 3.0), (6.5, 5.5), (6.0, 8.0), (6.5, 10.5), (8.0, 13.0)],
-                1.3,
-                tint,
-                16.0,
-            );
-            line(
-                ctx.scene,
-                ctx.rect,
-                &[
-                    (8.0, 3.0),
-                    (9.5, 5.5),
-                    (10.0, 8.0),
-                    (9.5, 10.5),
-                    (8.0, 13.0),
-                ],
-                1.3,
-                tint,
-                16.0,
-            );
-        }
-    });
-    icon
 }
 
 fn panel(
@@ -694,8 +614,19 @@ fn panel(
                     }
                 }
                 row height:min-content align:center gap:{px(6.0)}px {
-                    Label text:(if telemetry.compatible==Some(true) {"✓"} else {"!"})
-                        role:(TextRole::Caption) tone:(compatibility_tone)
+                    row width:{px(12.0)}px height:{px(12.0)}px shrink:0 align:center justify:center
+                        font-color:(compatibility_tone.token()) {
+                        {
+                            if telemetry.compatible == Some(true) {
+                                parent.adopt(&crate::icons::icon_mark(crate::icons::mark.check, 12.0));
+                            } else {
+                                parent.adopt(&view! {
+                                    Label text:"!" role:(TextRole::Caption) tone:(compatibility_tone)
+                                        weight:600
+                                });
+                            }
+                        }
+                    }
                     text font-size:{px(10.5)}px
                         font-color:(match telemetry.compatible {Some(false)=>status.failed,None=>status.needs_you,_=>ground.muted})
                         {compatibility.clone()}
@@ -705,14 +636,13 @@ fn panel(
                 stroke:(width:{px(1.0)} color:ground.rule edges:top) {
                 row width:1fr min-width:0px align:center gap:{px(10.0)}px
                     pad:(left:{px(18.0)}px right:{px(8.0)}px) {
-                    endpoint_icon(false)
+                    row width:{px(14.0)}px height:{px(14.0)}px shrink:0 font-color:ground.muted {
+                        {parent.adopt(&crate::icons::icon_mark(crate::icons::mark.link, 14.0));}
+                    }
                     endpoint_text(endpoint.clone())
                 }
                 row width:{px(40.0)}px shrink:0 {
-                    CellButton label:"Copy endpoint" rule:(Rule::Left) horizontal-inset:0.0
-                        on-press:(copy.clone().unwrap_or_else(||Rc::new(||{}))) {
-                        endpoint_icon(true)
-                    }
+                    {parent.adopt(&copy_cell(copy.clone()));}
                 }
             }
         }
@@ -813,4 +743,60 @@ pub fn ConnectionStatus(
         }
     });
     host
+}
+
+/// How long the copy cell shows its confirming check before turning back.
+pub const COPIED_FOR: Duration = Duration::from_millis(1600);
+
+/// The endpoint row's copy cell. Pressing it copies, then the copy icon
+/// crossfades to a green check over a green-tinted cell for
+/// [`COPIED_FOR`], and back.
+fn copy_cell(copy: Option<OnPress>) -> Element {
+    let copied = State::new(false);
+    let slot: Rc<std::cell::RefCell<Option<Element>>> = Rc::default();
+    let driver = slot.clone();
+    let press = move || {
+        if let Some(copy) = &copy {
+            copy();
+        }
+        copied.set(true);
+        if let Some(cell) = driver.borrow().as_ref() {
+            let mut left = COPIED_FOR;
+            cell.animate(move |dt| {
+                left = left.saturating_sub(dt);
+                if left.is_zero() {
+                    copied.set(false);
+                    Tick::Done
+                } else {
+                    Tick::Sleep(left)
+                }
+            });
+        }
+    };
+    let green = status.full_steam;
+    let cell = view! {
+        button @click:{press()} width:fill height:fill radius:0px pad:0px align:center
+            justify:center label:{if copied.get() { "Endpoint copied" } else { "Copy endpoint" }}
+            fill:{if copied.get() {
+                let tint = color(green);
+                tint.alpha(crate::tokens::srgb_alpha(tint, color(ground.panel), 0.14))
+            } else {
+                Color::TRANSPARENT
+            }}
+            stroke:(width:{px(1.0)} color:ground.rule edges:left) hover { fill:ground.hover }
+            focused { stroke:+(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
+            stack width:{px(14.0)}px height:{px(14.0)}px shrink:0 nohit {
+                row font-color:ground.ink opacity:{if copied.get() { 0.0 } else { 1.0 }}
+                    transition:(opacity:ease(150ms)) {
+                    {parent.adopt(&crate::icons::icon_mark(crate::icons::mark.copy, 14.0));}
+                }
+                row font-color:(green) opacity:{if copied.get() { 1.0 } else { 0.0 }}
+                    transition:(opacity:ease(150ms)) {
+                    {parent.adopt(&crate::icons::icon_mark(crate::icons::mark.check, 14.0));}
+                }
+            }
+        }
+    };
+    *slot.borrow_mut() = Some(cell.clone());
+    cell
 }
