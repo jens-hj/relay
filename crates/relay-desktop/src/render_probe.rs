@@ -24,7 +24,7 @@ pub fn run(workload: &str) -> Result<(), String> {
                 let model = crate::model::Model::new(ui, sender);
                 model.window.set(context.window());
                 model.receive(crate::network::NetworkState {
-                    snapshot: relay_core::demo_snapshot(relay_core::DirectorProfile::default()),
+                    snapshot: relay_core::demo_snapshot(relay_core::AgentProfile::default()),
                     connected: true,
                     status: "Connected".into(),
                     ..Default::default()

@@ -53,15 +53,15 @@ pub fn bind_discovery(model: Model) {
             "{connected}:{id}:{:?}:{:?}:{:?}",
             session.map(|s| (&s.workspaces, &s.connection_ids)),
             snapshot.installations,
-            id.strip_prefix("director-draft-")
-                .and_then(|id| snapshot.directors.iter().find(|d| d.id == id))
+            id.strip_prefix("agent-draft-")
+                .and_then(|id| snapshot.agent_configs.iter().find(|d| d.id == id))
                 .and_then(|d| snapshot.effective_profile(d).ok())
         );
         if catalog_key.get_untracked() != key {
             catalog_key.set(key);
             model.completion.set(None);
             model.command_flow.set(String::new());
-            if connected && (session.is_some() || id.starts_with("director-draft-")) {
+            if connected && (session.is_some() || id.starts_with("agent-draft-")) {
                 refresh(model, false);
             }
         }

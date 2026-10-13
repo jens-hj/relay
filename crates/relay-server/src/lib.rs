@@ -88,14 +88,29 @@ impl std::error::Error for Error {}
 
 struct Store {
     agent_capabilities: HashMap<String, agent_tools::Capability>,
-    defaults: DirectorProfile,
+    defaults: AgentProfile,
     connection: Connection,
     controls: HashMap<String, watch::Sender<bool>>,
     closing: bool,
 }
 
 impl Store {
-    fn open(path: &Path, defaults: DirectorProfile) -> Result<Self, Error> {
+    fn stop_controls(&mut self, snapshot: &Snapshot, session_id: &str) {
+        let mut ids = vec![session_id.to_owned()];
+        ids.extend(
+            snapshot
+                .descendants(session_id)
+                .iter()
+                .map(|s| s.id.clone()),
+        );
+        for id in ids {
+            self.agent_capabilities.remove(&id);
+            if let Some(control) = self.controls.get(&id) {
+                control.send_replace(true);
+            }
+        }
+    }
+    fn open(path: &Path, defaults: AgentProfile) -> Result<Self, Error> {
         defaults.validate().map_err(Error::invalid)?;
         let connection = Connection::open(path).map_err(Error::internal)?;
         connection
@@ -107,7 +122,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 12 {
+        if version > 13 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -127,7 +142,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 12;"
+             PRAGMA user_version = 13;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -150,7 +165,7 @@ impl Store {
                 })
                 .map_err(Error::internal)?;
             let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
-            let mut old = DirectorProfile::default();
+            let mut old = AgentProfile::default();
             old.permissions.insert(Task::Implement, Permission::Ask);
             for project in &mut snapshot.projects {
                 if project.defaults == old {
@@ -197,7 +212,7 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
-        if version < 12 {
+        if version < 13 {
             // Protocol 5: sub-agent links, compactions, tool details, and usage records
             // default to empty. Rewriting normalizes legacy tool kinds.
             let json: String = connection
@@ -258,6 +273,15 @@ impl Store {
         envelope: CommandEnvelope,
         config: &RuntimeConfig,
     ) -> Result<(Snapshot, Option<Action>), Error> {
+        self.apply_prepared(envelope, config, None)
+    }
+
+    fn apply_prepared(
+        &mut self,
+        envelope: CommandEnvelope,
+        config: &RuntimeConfig,
+        prepared_child: Option<Session>,
+    ) -> Result<(Snapshot, Option<Action>), Error> {
         uuid::Uuid::parse_str(&envelope.request_id)
             .map_err(|_| Error::invalid("request_id must be a UUID"))?;
         let request = serde_json::to_string(&envelope).map_err(Error::internal)?;
@@ -298,8 +322,92 @@ impl Store {
         }
         let mut action = None;
         match envelope.command {
-            command @ Command::StartDirector { .. } => {
-                let Command::StartDirector {
+            Command::StartChildAgent {
+                parent_session_id,
+                name,
+                profile,
+                prompt,
+                approve_implementation,
+            } => {
+                validate_prompt(&prompt)?;
+                if name.trim().is_empty() || name.len() > 100 {
+                    return Err(Error::invalid("Enter an agent name of at most 100 bytes"));
+                }
+                let parent = snapshot
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == parent_session_id)
+                    .ok_or_else(|| Error::invalid("Parent agent missing"))?;
+                if parent.fixture {
+                    return Err(Error::invalid("Fixture agents cannot create workers"));
+                }
+                snapshot
+                    .validate_profile(&parent.project_id, &profile)
+                    .map_err(Error::invalid)?;
+                let mut child = prepared_child
+                    .ok_or_else(|| Error::invalid("Child workspaces were not prepared"))?;
+                if child.id != format!("session-{}", envelope.request_id)
+                    || child.project_id != parent.project_id
+                    || child.agent_config_id != parent.agent_config_id
+                {
+                    return Err(Error::invalid("Child workspace identity changed"));
+                }
+                let parent_profile = snapshot.session_profile(parent).map_err(Error::invalid)?;
+                if let AgentScope::Issues { issue_ids } = &parent_profile.scope
+                    && !matches!(&profile.scope, AgentScope::Issues { issue_ids: child_ids } if child_ids.iter().all(|id| issue_ids.iter().any(|parent_id| snapshot.canonical_issue_id(parent_id) == snapshot.canonical_issue_id(id))))
+                {
+                    return Err(Error::invalid(
+                        "Child scope must stay within its parent's scope",
+                    ));
+                }
+                child.title = name.trim().into();
+                child.role = SessionRole::Worker;
+                child.parent_session_id = Some(parent_session_id);
+                child.profile = Some(profile.clone());
+                child.spawn = Some(SpawnGrant {
+                    task: prompt.clone(),
+                    context: None,
+                    permissions: Default::default(),
+                    requested_by_run: None,
+                });
+                child.compactions.clear();
+                child.selection = Default::default();
+                let worker = child
+                    .worker
+                    .as_mut()
+                    .ok_or_else(|| Error::invalid("Parent has no execution workspace"))?;
+                worker.harness = profile.harness;
+                worker.execution = None;
+                worker.model = None;
+                worker.context_tokens = None;
+                worker.context_window = None;
+                worker.status = WorkerStatus::Queued;
+                agent_tools::authorize_session(&snapshot, &child, approve_implementation, config)?;
+                let session_id = child.id.clone();
+                snapshot.sessions.push(child);
+                snapshot.messages.push(Message {
+                    id: format!("prompt-{}", envelope.request_id),
+                    session_id: session_id.clone(),
+                    author: "You".into(),
+                    kind: "user".into(),
+                    body: prompt.clone(),
+                    parts: vec![Part::text(&prompt)],
+                    tool: None,
+                });
+                snapshot.submissions.push(Submission {
+                    id: envelope.request_id.clone(),
+                    session_id: session_id.clone(),
+                    parts: vec![Part::text(&prompt)],
+                    state: SubmissionState::Launching,
+                    approve_implementation,
+                    error: None,
+                    interrupts_run: None,
+                    last_edit_request: None,
+                });
+                action = Some(Action::Run { session_id, prompt });
+            }
+            command @ Command::StartRootAgent { .. } => {
+                let Command::StartRootAgent {
                     ref parts,
                     ref prompt,
                     approve_implementation,
@@ -487,7 +595,7 @@ impl Store {
             }
             Command::StartWorker {
                 issue_id,
-                director_id,
+                agent_config_id,
                 prompt,
                 approve_implementation,
             } => {
@@ -495,7 +603,7 @@ impl Store {
                 runtime::authorize_turn(
                     &snapshot,
                     &issue_id,
-                    &director_id,
+                    &agent_config_id,
                     approve_implementation,
                     config,
                 )?;
@@ -503,15 +611,16 @@ impl Store {
                 let chosen_harness = snapshot
                     .effective_profile(
                         snapshot
-                            .directors
+                            .agent_configs
                             .iter()
-                            .find(|d| d.id == director_id)
+                            .find(|d| d.id == agent_config_id)
                             .unwrap(),
                     )
                     .map_err(Error::invalid)?
                     .harness;
                 let session_id = format!("session-{}", envelope.request_id);
                 snapshot.sessions.push(Session {
+                    profile: None,
                     parent_session_id: None,
                     spawn: None,
                     compactions: vec![],
@@ -532,7 +641,7 @@ impl Store {
                     id: session_id.clone(),
                     project_id: issue.project_id.clone(),
                     issue_id: Some(issue_id),
-                    director_id,
+                    agent_config_id,
                     title: issue.title.clone(),
                     role: SessionRole::Worker,
                     fixture: false,
@@ -898,7 +1007,7 @@ impl Workspace {
                         i.project_id == project_id && !issues.iter().any(|new| new.id == i.id)
                     }) {
                         let linked = snapshot.sessions.iter().any(|s| s.issue_id.as_deref() == Some(old.id.as_str()))
-                            || snapshot.directors.iter().any(|d| snapshot.effective_profile(d).ok().is_some_and(|p| matches!(p.scope, DirectorScope::Issues { issue_ids } if issue_ids.contains(&old.id))));
+                            || snapshot.agent_configs.iter().any(|d| snapshot.effective_profile(d).ok().is_some_and(|p| matches!(p.scope, AgentScope::Issues { issue_ids } if issue_ids.contains(&old.id))));
                         if linked {
                             let mut historic = old.clone();
                             historic.column_id = "github-removed-from-board".into();
@@ -1009,7 +1118,7 @@ impl Workspace {
 pub fn router(
     path: impl AsRef<Path>,
     token: String,
-    defaults: DirectorProfile,
+    defaults: AgentProfile,
 ) -> Result<Router, Error> {
     router_with_config(path, token, defaults, RuntimeConfig::default())
 }
@@ -1017,7 +1126,7 @@ pub fn router(
 pub fn router_with_config(
     path: impl AsRef<Path>,
     token: String,
-    defaults: DirectorProfile,
+    defaults: AgentProfile,
     config: RuntimeConfig,
 ) -> Result<Router, Error> {
     router_with_shutdown(path, token, defaults, config).map(|(router, _)| router)
@@ -1103,7 +1212,7 @@ impl Shutdown {
 pub fn router_with_shutdown(
     path: impl AsRef<Path>,
     token: String,
-    defaults: DirectorProfile,
+    defaults: AgentProfile,
     config: RuntimeConfig,
 ) -> Result<(Router, Shutdown), Error> {
     router_with_browser(path, token, defaults, config, BrowserConfig::default())
@@ -1112,7 +1221,7 @@ pub fn router_with_shutdown(
 pub fn router_with_browser(
     path: impl AsRef<Path>,
     token: String,
-    defaults: DirectorProfile,
+    defaults: AgentProfile,
     config: RuntimeConfig,
     browser_config: BrowserConfig,
 ) -> Result<(Router, Shutdown), Error> {
@@ -1238,8 +1347,9 @@ pub fn router_with_browser(
                     sync_error: None,
                 }),
             });
-            initial.directors.push(Director {
-                id: format!("director-{id}"),
+            initial.agent_configs.push(AgentConfig {
+                template: "director".into(),
+                id: format!("agent-config-{id}"),
                 project_id: id,
                 name: "Project director".into(),
                 overrides: ProfileOverrides::default(),
@@ -1537,8 +1647,8 @@ async fn command(
             })
     };
     if !already_applied {
-        if let Command::StartDirector {
-            director_id,
+        if let Command::StartRootAgent {
+            agent_config_id,
             parts,
             prompt,
             ..
@@ -1551,7 +1661,7 @@ async fn command(
             };
             if has_skill_references(&input) || prompt.trim_start().starts_with('/') {
                 let catalog =
-                    commands::discover(&workspace, &format!("director-draft-{director_id}"), true)
+                    commands::discover(&workspace, &format!("agent-draft-{agent_config_id}"), true)
                         .await?;
                 commands::invocation(&input, &catalog)?;
                 resolve_skills(&input, &catalog).map_err(Error::invalid)?;
@@ -1593,6 +1703,63 @@ async fn command(
             commands::validate_selection(&catalog, selection)?;
         }
     }
+    let prepared_child = if !already_applied
+        && let Command::StartChildAgent {
+            parent_session_id,
+            name,
+            profile,
+            prompt,
+            ..
+        } = &envelope.command
+    {
+        uuid::Uuid::parse_str(&envelope.request_id)
+            .map_err(|_| Error::invalid("request_id must be a UUID"))?;
+        validate_prompt(prompt)?;
+        if name.trim().is_empty() || name.len() > 100 {
+            return Err(Error::invalid("Enter an agent name of at most 100 bytes"));
+        }
+        let snapshot = workspace.snapshots.borrow().clone();
+        if snapshot.revision != envelope.expected_revision {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                "conflict",
+                "Workspace changed; review before creating the agent",
+            ));
+        }
+        let parent = snapshot
+            .sessions
+            .iter()
+            .find(|s| &s.id == parent_session_id)
+            .ok_or_else(|| Error::invalid("Parent agent missing"))?
+            .clone();
+        if parent.fixture || parent.worker.is_none() || parent.workspaces.is_empty() {
+            return Err(Error::invalid(
+                "Start the parent agent before creating a worker",
+            ));
+        }
+        snapshot
+            .validate_profile(&parent.project_id, profile)
+            .map_err(Error::invalid)?;
+        let id = format!("session-{}", envelope.request_id);
+        let resource_workspace = workspace.clone();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                let _job = ProjectJob::new(&resource_workspace);
+                let session = process::with_cancellation(
+                    resource_workspace.transport_shutdown.subscribe(),
+                    || commands::fork_workspaces(&parent, &id),
+                )?;
+                Ok::<_, Error>(commands::ForkResources {
+                    workspace: resource_workspace,
+                    session,
+                })
+            })
+            .await
+            .map_err(Error::internal)??,
+        )
+    } else {
+        None
+    };
     let handle = tokio::runtime::Handle::current();
     let result = tokio::task::spawn_blocking(move || {
         let mut store = workspace.store.lock().map_err(Error::internal)?;
@@ -1606,7 +1773,11 @@ async fn command(
         let run_id = envelope.request_id.clone();
         let request_id = run_id.clone();
         let reset_status = matches!(envelope.command, Command::ConfigureHarness { .. });
-        let (snapshot, action) = store.apply(envelope, &workspace.config)?;
+        let (snapshot, action) = if let Some(resources) = &prepared_child {
+            store.apply_prepared(envelope, &workspace.config, Some(resources.session.clone()))?
+        } else {
+            store.apply(envelope, &workspace.config)?
+        };
         if reset_status {
             workspace
                 .harness_status
@@ -1635,19 +1806,7 @@ async fn command(
             }
             Some(Action::Stop(session_id)) => {
                 let snapshot = store.snapshot()?;
-                let mut ids = vec![session_id.clone()];
-                ids.extend(
-                    snapshot
-                        .descendants(&session_id)
-                        .iter()
-                        .map(|s| s.id.clone()),
-                );
-                for id in ids {
-                    store.agent_capabilities.remove(&id);
-                    if let Some(control) = store.controls.get(&id) {
-                        control.send_replace(true);
-                    }
-                }
+                store.stop_controls(&snapshot, &session_id);
             }
             Some(Action::Promote(session_id)) => {
                 if let Some(control) = store.controls.get(&session_id) {

@@ -3,6 +3,7 @@
 
 use super::logic::{AgentLine, FoldedLine, Guide, StatusTally, TreeLine, status_segments};
 use super::{OnAgent, OnToggle};
+use crate::overlay::{Tooltip, TooltipProps};
 use crate::prelude::*;
 use crate::tokens::{Signal, ground, px, shape};
 use mosaic::core::theme::color;
@@ -89,7 +90,7 @@ pub fn segment_token(status: AgentStatus) -> ColorToken {
         AgentStatus::Waiting => Signal::NeedsYou.token(),
         AgentStatus::Failed => Signal::Failed.token(),
         AgentStatus::Queued => ground.rule_strong,
-        AgentStatus::Done => ground.outline,
+        AgentStatus::Idle | AgentStatus::Done => ground.outline,
     }
 }
 
@@ -220,6 +221,9 @@ pub fn AgentTreeRow(
     /// Expands or collapses the agent's children.
     #[prop(optional)]
     on_toggle: Option<OnToggle>,
+    /// Creates a child of this agent.
+    #[prop(optional)]
+    on_spawn: Option<OnAgent>,
     /// Arrow-key navigation across the tree this row belongs to.
     #[prop(optional)]
     nav: Option<Rc<TreeNav>>,
@@ -231,6 +235,7 @@ pub fn AgentTreeRow(
     let row = view! {
         stack height:{px(ROW_HEIGHT)}px shrink:0 clip label:(line.name.clone())
             fill:{if line.selected { color(ground.selected) } else { Color::TRANSPARENT }}
+            hover { fill:ground.hover }
             focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {}
     };
     row.role(Role::ListItem);
@@ -267,7 +272,7 @@ pub fn AgentTreeRow(
         });
     }
     let name_tone = match line.status {
-        AgentStatus::Done => Tone::Muted,
+        AgentStatus::Idle | AgentStatus::Done => Tone::Muted,
         AgentStatus::Waiting => Tone::Signal(Signal::NeedsYou),
         _ => Tone::Ink,
     };
@@ -323,6 +328,46 @@ pub fn AgentTreeRow(
                     tiers:(effort.tiers) colour:(model.hue.token()) size:(TrackSize::Compact)
             });
         }
+    }
+    if let Some(spawn) = on_spawn {
+        let id = line.id.clone();
+        let interaction = row.interaction();
+        let action = view! {
+            button @click:{spawn(id.clone())} width:{px(26.0)}px height:{px(26.0)}px shrink:0
+                pad:0px radius:0px fill:(Color::TRANSPARENT) disabled:{!line.can_spawn}
+                label:(format!("New worker for {}", line.name)) hover { fill:ground.hover }
+                focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
+                { parent.adopt(&crate::marks::mark(crate::marks::Mark::Plus, 12.0, ground.ink)); }
+            }
+        };
+        let button_interaction = action.interaction();
+        action.opacity_dyn(move || {
+            if interaction.hovered() || interaction.focused() || button_interaction.focused() {
+                1.0
+            } else {
+                0.0
+            }
+        });
+        let hit = action.clone();
+        Effect::new(move || {
+            hit.hit_testable(
+                interaction.hovered() || interaction.focused() || button_interaction.focused(),
+            );
+        });
+        action.on_pointer(move |event, ctx| {
+            if matches!(
+                event.kind,
+                PointerEventKind::Down(_) | PointerEventKind::Click(_)
+            ) {
+                ctx.stop_propagation();
+            }
+        });
+        content.adopt(&view! {
+            Tooltip
+                text:(if line.can_spawn { "New Worker" } else { "New Worker · start this agent first" }) {
+                { parent.adopt(&action); }
+            }
+        });
     }
     row.adopt(&outer);
     {

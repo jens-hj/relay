@@ -55,7 +55,7 @@ async fn setup(dir: &Path) -> (Workspace, String, PathBuf) {
     config.repository = Some(repo);
     config.codex = binary;
     let mut snapshot = live();
-    snapshot.projects[0].defaults = DirectorProfile::default();
+    snapshot.projects[0].defaults = AgentProfile::default();
     let w = workspace(&dir.join("db"), &snapshot, config);
     let (id, run, stop, prompt) = reserve(&w, env(snapshot.revision, start(&snapshot)));
     runtime::run(w.clone(), id.clone(), run, prompt, stop).await;
@@ -180,7 +180,7 @@ async fn codex_discovery_skills_settings_and_compaction_use_native_protocol() {
             .iter()
             .any(|m| m.body == "Compaction completed")
     );
-    let reopened = Store::open(&dir.path().join("db"), DirectorProfile::default()).unwrap();
+    let reopened = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
     assert_eq!(
         reopened
             .snapshot()
@@ -401,7 +401,7 @@ async fn claude_uniform_skills_commands_and_forks_preserve_native_dispatch() {
     config.repository = Some(repo);
     config.claude = binary;
     let mut snapshot = live();
-    snapshot.projects[0].defaults = DirectorProfile {
+    snapshot.projects[0].defaults = AgentProfile {
         harness: Harness::ClaudeCode,
         ..Default::default()
     };
@@ -507,7 +507,7 @@ async fn catalog_and_session_choices_cross_http_and_reconnect_without_replaying_
     let (app, shutdown) = router_with_shutdown(
         dir.path().join("db"),
         "relay-test-token-command".into(),
-        DirectorProfile::default(),
+        AgentProfile::default(),
         (*w.config).clone(),
     )
     .unwrap();
@@ -559,13 +559,13 @@ async fn catalog_and_session_choices_cross_http_and_reconnect_without_replaying_
         .json()
         .await
         .unwrap();
-    let director_id = &before
+    let agent_config_id = &before
         .sessions
         .iter()
         .find(|s| s.id == id)
         .unwrap()
-        .director_id;
-    let draft_id = format!("director-draft-{director_id}");
+        .agent_config_id;
+    let draft_id = format!("agent-draft-{agent_config_id}");
     let draft_catalog: HarnessCatalog = client
         .get(format!("{endpoint}/v1/sessions/{draft_id}/catalog"))
         .bearer_auth("relay-test-token-command")
@@ -602,8 +602,9 @@ async fn catalog_and_session_choices_cross_http_and_reconnect_without_replaying_
         .header("x-relay-protocol", relay_core::PROTOCOL_VERSION.to_string())
         .json(&env(
             before.revision,
-            Command::StartDirector {
-                director_id: director_id.clone(),
+            Command::StartRootAgent {
+                issue_id: None,
+                agent_config_id: agent_config_id.clone(),
                 prompt: plain_text(&parts),
                 parts,
                 approve_implementation: false,
@@ -812,14 +813,14 @@ async fn installed_harness_commands(harness: Harness) {
     let mut config = config();
     config.repository = Some(repo);
     let mut snapshot = live();
-    snapshot.projects[0].defaults = DirectorProfile {
+    snapshot.projects[0].defaults = AgentProfile {
         harness,
         ..Default::default()
     };
     let w = workspace(&dir.path().join("db"), &snapshot, config);
     let command = Command::StartWorker {
         issue_id: snapshot.issues[0].id.clone(),
-        director_id: snapshot.directors[0].id.clone(),
+        agent_config_id: snapshot.agent_configs[0].id.clone(),
         prompt: "Reply READY. Do not edit files, use tools, or perform implementation.".into(),
         approve_implementation: true,
     };
@@ -973,7 +974,7 @@ async fn interrupted_fork_creation_cleans_partial_worktrees_and_branches() {
 #[tokio::test]
 async fn example_sessions_describe_the_demo_catalog_without_a_harness() {
     let dir = tempfile::tempdir().unwrap();
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     demo_orchestration(&mut snapshot);
     let w = workspace(&dir.path().join("db"), &snapshot, config());
     let claude = commands::discover(&w, "session-plan", false).await.unwrap();

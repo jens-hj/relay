@@ -1,7 +1,7 @@
 //! Named workspaces, independent resources, and board membership.
 use crate::*;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardDiscovery {
@@ -398,7 +398,7 @@ mod alias_tests {
 
     #[test]
     fn publication_aliases_keep_history_and_resolve_active_membership() {
-        let mut snapshot = demo_snapshot(DirectorProfile::default());
+        let mut snapshot = demo_snapshot(AgentProfile::default());
         snapshot.migrate_projects();
         let mut historical = snapshot.issues[0].clone();
         let canonical = historical.id.clone();
@@ -429,7 +429,7 @@ mod alias_tests {
 
     #[test]
     fn malformed_alias_cycle_does_not_loop_or_select_an_arbitrary_task() {
-        let mut snapshot = demo_snapshot(DirectorProfile::default());
+        let mut snapshot = demo_snapshot(AgentProfile::default());
         snapshot
             .issue_aliases
             .extend([("a".into(), "b".into()), ("b".into(), "a".into())]);

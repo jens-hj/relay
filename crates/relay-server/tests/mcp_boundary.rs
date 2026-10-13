@@ -139,7 +139,7 @@ done
             })
             .await;
         let director = snapshot
-            .directors
+            .agent_configs
             .iter()
             .find(|d| {
                 snapshot
@@ -148,9 +148,9 @@ done
                     .any(|p| p.id == d.project_id && p.name == "MCP boundary")
             })
             .unwrap();
-        let director_id = director.id.clone();
-        self.command(Command::UpdateDirector {
-            director_id: director_id.clone(),
+        let agent_config_id = director.id.clone();
+        self.command(Command::UpdateAgentConfig {
+            agent_config_id: agent_config_id.clone(),
             name: director.name.clone(),
             overrides: ProfileOverrides {
                 harness: Some(harness),
@@ -158,7 +158,7 @@ done
             },
         })
         .await;
-        let snapshot = self.command(Command::StartDirector { director_id,prompt:"Call the Relay MCP tool mcp__relay__list_agents once, then reply with only the agent count. Do not use other tools or inspect environment variables.".into(),parts:vec![],approve_implementation:true }).await;
+        let snapshot = self.command(Command::StartRootAgent { issue_id:None,agent_config_id,prompt:"Call the Relay MCP tool mcp__relay__list_agents once, then reply with only the agent count. Do not use other tools or inspect environment variables.".into(),parts:vec![],approve_implementation:true }).await;
         snapshot
             .sessions
             .iter()
@@ -220,7 +220,9 @@ async fn stdio_http_run_capability_boundary() {
         .collect::<Vec<_>>();
     assert_eq!(values.len(), 4);
     assert_eq!(values[0]["result"]["capabilities"]["tools"], json!({}));
-    assert_eq!(values[1]["result"]["tools"].as_array().unwrap().len(), 5);
+    let tools = values[1]["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 6);
+    assert!(tools.iter().any(|tool| tool["name"] == "stop_agent"));
     assert_eq!(values[3]["result"]["isError"], false);
     let content: Value =
         serde_json::from_str(values[3]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();

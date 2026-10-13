@@ -188,11 +188,11 @@ pub struct Submission {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DirectorProfile, demo_snapshot};
+    use crate::{AgentProfile, demo_snapshot};
 
     #[test]
     fn anchors_distinguish_repeated_passages_and_reject_invalid_unicode_ranges() {
-        let mut snapshot = demo_snapshot(DirectorProfile::default());
+        let mut snapshot = demo_snapshot(AgentProfile::default());
         snapshot.messages[0].body = "λ same λ same".into();
         let message = &snapshot.messages[0];
         let reply = |start, end| Part {
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn ordered_context_survives_serialization_and_bounds_include_reply_quotes() {
-        let snapshot = demo_snapshot(DirectorProfile::default());
+        let snapshot = demo_snapshot(AgentProfile::default());
         let parts = vec![
             Part::text("Before "),
             Part {

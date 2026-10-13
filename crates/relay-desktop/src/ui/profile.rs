@@ -1,6 +1,6 @@
 use super::*;
 use crate::window_chrome::{WindowControlsSpace, WindowControlsSpaceProps};
-use relay_ui::overlay::{Tooltip, TooltipProps};
+use relay_ui::overlay::{Popover, PopoverContent, PopoverProps, Tooltip, TooltipProps};
 use relay_ui::prelude::{
     CellButton, CellButtonProps, Ellipsis, EllipsisProps, HarnessGlyph, HarnessGlyphProps, Label,
     LabelProps, PrimaryButton, PrimaryButtonProps, Rule, SerifSize, SerifTitle, SerifTitleProps,
@@ -15,6 +15,144 @@ use relay_ui::tokens::Signal;
 
 /// The seven profile fields a director can override, each as a whole.
 const OVERRIDE_FIELDS: usize = 7;
+
+#[component]
+fn AgentProfileSelector(model: Model) -> Element {
+    let open = State::new(false);
+    let content: PopoverContent = std::rc::Rc::new(move || {
+        view! {
+            col width:{px(240.0)}px height:min-content {
+                for (_, id) in { ["director", "worker"].into_iter().map(|id| (id.to_string(), id.to_string())) } {
+                    let id = id.clone();
+                    let title = if id == "director" { "Director" } else { "Worker" };
+                    row height:{px(40.0)}px {
+                        CellButton label:(format!("Use {title} profile")) start:true
+                            on-press:(press(move || { model.select_agent_template(id.clone()); open.set(false); })) {
+                            Label text:(title) role:(TextRole::Label)
+                        }
+                    }
+                }
+                for (_, template) in {model.snapshot.get().agent_templates.into_iter().filter(|p| p.project_id == model.project.get()).map(|p| (p.id.clone(), p)).collect::<Vec<_>>()} {
+                    let template = template.clone();
+                    let id = template.id.clone();
+                    row height:{px(40.0)}px {
+                        CellButton label:(format!("Use {} profile", template.name)) start:true
+                            on-press:(press(move || { model.select_agent_template(id.clone()); open.set(false); })) {
+                            Ellipsis text:(template.name.clone()) role:(TextRole::Label)
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let trigger = view! {
+        CellButton label:"Select agent profile" horizontal-inset:0.0 start:true
+            on-press:(press(move || open.set(!open.get_untracked()))) {
+            row width:1fr min-width:0px height:min-content clip {
+                SerifTitle text:(Derived::new(move || model.agent_template_name()))
+                    size:(SerifSize::Large)
+            }
+            icon size:{px(12.0)}px tree-chevron-down
+        }
+    };
+    let handle = trigger.clone();
+    view! {
+        stack min-width:0px height:min-content {
+            { parent.adopt(&trigger); }
+            Popover open:(open) label:"Agent profiles" content:(content) trigger:(Some(handle))
+        }
+    }
+}
+
+#[component]
+fn AgentSetup(model: Model) -> Element {
+    let parent_title = Derived::new(move || {
+        let id = model.editor_parent.get();
+        model
+            .snapshot
+            .get()
+            .sessions
+            .into_iter()
+            .find(|s| Some(&s.id) == id.as_ref())
+            .map(|s| s.title)
+            .unwrap_or_default()
+    });
+    view! {
+        col height:min-content {
+            TextInput value:(model.editor_name) label:"Agent name" placeholder:"Agent name"
+                framed:false
+            if model.editor_parent.get().is_some() {
+                row height:min-content pad:{px(14.0)}px {
+                    Label text:(Derived::new(move || format!("Subagent of {}", parent_title.get())))
+                        role:(TextRole::Caption) tone:(Tone::Muted)
+                }
+                TextInput value:(model.worker_prompt) label:"Agent task"
+                    placeholder:"What should this agent do?" multiline:true framed:false
+                if model.editor_profile.get().permissions[&Task::Implement] == Permission::Ask {
+                    row height:{px(36.0)}px {
+                        CellButton label:"Approve agent implementation" start:true
+                            selected:(model.worker_approval)
+                            on-press:(press(move || model.worker_approval.set(!model.worker_approval.get_untracked()))) {
+                            Label text:"Approve implementation for the first turn"
+                                role:(TextRole::Caption)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ProfileChangeActions(model: Model) -> Element {
+    let open = State::new(false);
+    let content: PopoverContent = std::rc::Rc::new(move || {
+        view! {
+            col width:{px(260.0)}px height:min-content {
+                TextInput value:(model.editor_template_name) label:"Profile name"
+                    placeholder:"Profile name" framed:false
+                row height:{px(40.0)}px {
+                    CellButton label:"Save new agent profile"
+                        on-press:(press(move || { model.save_agent_template(); open.set(false); })) {
+                        Label text:"Save profile" role:(TextRole::Label)
+                    }
+                }
+            }
+        }
+    });
+    view! {
+        row width:max-content shrink:0 {
+            row width:{px(40.0)}px {
+                Tooltip text:"Override for this agent" height:(Dimension::Fill) {
+                    CellButton label:"Override for this agent" rule:(Rule::Left)
+                        horizontal-inset:0.0 selected:(model.editor_override_accepted)
+                        on-press:(press(move || model.editor_override_accepted.set(true))) {
+                        { parent.adopt(&relay_ui::marks::mark(relay_ui::marks::Mark::Check, 12.0, ground.ink)); }
+                    }
+                }
+            }
+            stack width:{px(40.0)}px {
+                Tooltip text:"Save as new profile" height:(Dimension::Fill) {
+                    CellButton label:"Save as new profile" rule:(Rule::Left) horizontal-inset:0.0
+                        on-press:(press(move || open.set(!open.get_untracked()))) {
+                        icon size:{px(14.0)}px plus-icon
+                    }
+                }
+                Popover open:(open) label:"Save agent profile" content:(content)
+                    align:(OverlayAlign::End)
+            }
+            row width:{px(40.0)}px {
+                Tooltip text:"Discard profile changes" height:(Dimension::Fill) {
+                    CellButton label:"Discard profile changes" rule:(Rule::Left)
+                        horizontal-inset:0.0
+                        on-press:(press(move || model.discard_profile_changes())) {
+                        icon size:{px(14.0)}px reset-icon
+                    }
+                }
+            }
+        }
+    }
+}
 
 pub(crate) fn overridden_fields(overrides: &ProfileOverrides) -> Vec<&'static str> {
     [
@@ -32,14 +170,14 @@ pub(crate) fn overridden_fields(overrides: &ProfileOverrides) -> Vec<&'static st
 }
 
 /// A one-line summary of a profile: harness, scope and worker limit.
-fn profile_summary(profile: &DirectorProfile, snapshot: &Snapshot) -> String {
+fn profile_summary(profile: &AgentProfile, snapshot: &Snapshot) -> String {
     let harness = match profile.harness {
         Harness::Codex => "Codex",
         Harness::ClaudeCode => "Claude Code",
     };
     let scope = match &profile.scope {
-        DirectorScope::Project => "Whole project".to_string(),
-        DirectorScope::Issues { .. } => scope_label(&profile.scope, snapshot)
+        AgentScope::Project => "Whole project".to_string(),
+        AgentScope::Issues { .. } => scope_label(&profile.scope, snapshot)
             .trim_start_matches("Selected issues: ")
             .to_string(),
     };
@@ -57,13 +195,25 @@ fn profile_summary(profile: &DirectorProfile, snapshot: &Snapshot) -> String {
 pub(crate) fn Profiles(model: Model) -> Element {
     let width = State::new(0.0f32);
     let wide = Derived::new(move || width.get() >= px(960.0));
-    let save_disabled = Derived::new(move || model.busy.get() || !model.connected.get());
+    let save_disabled = Derived::new(move || {
+        model.busy.get()
+            || !model.connected.get()
+            || (model.editor.get() == EditTarget::New
+                && (model.editor_name.get().trim().is_empty()
+                    || (model.editor_parent.get().is_some()
+                        && model.worker_prompt.get().trim().is_empty())
+                    || (model.editor_profile.get() != model.editor_base.get()
+                        && !model.editor_override_accepted.get())))
+    });
     view! {
         col width:1fr gap:0px @layout:{move |rect: Rect| width.set(rect.size.width)} {
             ProfileHeader model:(model)
             Notice model:(model)
             scroll {
                 col height:min-content gap:0px {
+                    if model.editor.get() == EditTarget::New {
+                        AgentSetup model:(model)
+                    }
                     Inheritance model:(model)
                     // One grid for both layouts: the track template changes with the
                     // width, the controls themselves are never rebuilt.
@@ -84,12 +234,20 @@ pub(crate) fn Profiles(model: Model) -> Element {
                 stroke:(width:{px(1.0)} color:ground.rule edges:top) {
                 row width:1fr min-width:0px height:min-content
                     pad:(horizontal:{px(18.0)}px vertical:0px) {
-                    Ellipsis text:"Explicit overrides survive project default changes"
+                    Ellipsis
+                        text:(Derived::new(move || if model.editor.get() == EditTarget::New {
+                        if model.editor_override_accepted.get() { "Profile changes apply only to this agent".into() } else { "Choose a profile and configure this agent".into() }
+                    } else { "Explicit overrides survive project default changes".into() }))
                         role:(TextRole::Caption) tone:(Tone::Muted)
                 }
+                if model.editor.get() == EditTarget::New && model.editor_profile.get() != model.editor_base.get() {
+                    ProfileChangeActions model:(model)
+                }
                 row width:max-content shrink:0 {
-                    PrimaryButton text:"Save profile" on-press:(press(move || model.save_profile()))
-                        disabled:(save_disabled) fill:true
+                    PrimaryButton
+                        text:(Derived::new(move || if model.editor.get() == EditTarget::New { "Create agent".into() } else { "Save profile".into() }))
+                        on-press:(press(move || model.save_profile())) disabled:(save_disabled)
+                        fill:true
                 }
             }
         }
@@ -104,14 +262,14 @@ fn ProfileHeader(model: Model) -> Element {
     let readings = Derived::new(move || width.get() >= px(856.0));
     let defaults = Derived::new(move || model.editor.get() == EditTarget::Defaults);
     let director = Derived::new(move || match model.editor.get() {
-        EditTarget::Director(id) => Some(id),
+        EditTarget::Config(id) => Some(id),
         _ => None,
     });
     let kind = Derived::new(move || {
         String::from(match model.editor.get() {
             EditTarget::Defaults => "Project defaults",
-            EditTarget::Director(_) => "Director profile",
-            EditTarget::New => "New director",
+            EditTarget::Config(_) => "Agent profile",
+            EditTarget::New => "New agent",
         })
     });
     let title = Derived::new(move || {
@@ -137,11 +295,11 @@ fn ProfileHeader(model: Model) -> Element {
             .map(|id| crate::sidebar::director_capacity(&model.snapshot.get(), &id))
             .unwrap_or_default()
     });
-    let directors = Derived::new(move || {
+    let agent_configs = Derived::new(move || {
         let count = model
             .snapshot
             .get()
-            .directors
+            .agent_configs
             .iter()
             .filter(|d| d.project_id == model.project.get())
             .count();
@@ -173,7 +331,12 @@ fn ProfileHeader(model: Model) -> Element {
             col width:1fr min-width:0px justify:center gap:{px(4.0)}px
                 pad:(horizontal:{px(if width.get() < px(600.0) {8.0} else {18.0})}px vertical:0px) {
                 Label text:(kind) role:(TextRole::Caption) tone:(Tone::Muted) weight:500 caps:true
-                if defaults.get() {
+                if model.editor.get() == EditTarget::New {
+                    row height:min-content min-width:0px gap:{px(8.0)}px align:center {
+                        SerifTitle text:"New" size:(SerifSize::Large)
+                        AgentProfileSelector model:(model)
+                    }
+                } else if defaults.get() {
                     row height:min-content min-width:0px clip {
                         SerifTitle text:(title) size:(SerifSize::Large)
                     }
@@ -181,14 +344,14 @@ fn ProfileHeader(model: Model) -> Element {
                     input width:fill height:{px(32.0)}px pad:0px radius:0px
                         fill:(Color::TRANSPARENT)
                         stroke:(width:{px(1.0)} color:(Color::TRANSPARENT)) font-family:serif
-                        font-size:{px(26.0)}px font-color:ground.ink label:"Director name"
-                        placeholder:"Director name"
+                        font-size:{px(26.0)}px font-color:ground.ink label:"Agent name"
+                        placeholder:"Agent name"
                         focused { stroke:(width:{px(1.0)} color:ground.ink edges:bottom) }
                         model.editor_name
                 }
             }
             if defaults.get() && readings.get() {
-                ReadoutCell key:"Directors" value:(directors)
+                ReadoutCell key:"Directors" value:(agent_configs)
             }
             if director.get().is_some() && readings.get() {
                 ReadoutCell key:"Overrides"
@@ -230,7 +393,7 @@ fn Inheritance(model: Model) -> Element {
     });
     let director = Derived::new(move || {
         if defaults.get() {
-            return "Each director may override fields".to_string();
+            return "Each agent may override fields".to_string();
         }
         let fields = overridden_fields(&model.editor_overrides.get());
         if fields.is_empty() {
@@ -244,13 +407,15 @@ fn Inheritance(model: Model) -> Element {
             stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
             @layout:{move |rect:Rect| width.set(rect.size.width)}
             cols:{if horizontal.get() {GridTracks::new([GridTrack::fr(1.0),GridTrack::fr(1.0),GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0)])}} {
-            ChainStep step:"01 · Project defaults" value:(base) current:(defaults)
-                last:(Derived::new(|| false)) horizontal:(horizontal)
-            ChainStep step:"02 · Director overrides" value:(director)
+            ChainStep
+                step:(Derived::new(move || if model.editor.get() == EditTarget::New { format!("01 · {} profile", model.agent_template_name()) } else { "01 · Project defaults".into() }))
+                value:(base) current:(defaults) last:(Derived::new(|| false))
+                horizontal:(horizontal)
+            ChainStep step:"02 · Agent overrides" value:(director)
                 current:(Derived::new(move || !defaults.get())) last:(Derived::new(|| false))
                 horizontal:(horizontal)
-            ChainStep step:"03 · Next worker turn"
-                value:(Derived::new(|| "Applies when the next worker turn starts".to_string()))
+            ChainStep step:"03 · Next agent turn"
+                value:(Derived::new(|| "Applies when the next agent turn starts".to_string()))
                 current:(Derived::new(|| false)) last:(Derived::new(|| true))
                 horizontal:(horizontal)
         }
@@ -259,7 +424,7 @@ fn Inheritance(model: Model) -> Element {
 
 #[component]
 fn ChainStep(
-    step: &'static str,
+    step: relay_ui::UiText,
     value: Derived<String>,
     current: Derived<bool>,
     last: Derived<bool>,
@@ -286,7 +451,7 @@ fn field_origin(
     field: &'static str,
     extra: Option<Element>,
 ) -> Element {
-    let overridden = Derived::new(move || model.origin(field) == "Director override");
+    let overridden = Derived::new(move || model.origin(field) == "Agent override");
     let detail = Derived::new(move || {
         format!(
             "{title}: {}. Overrides replace this whole field.",
@@ -462,7 +627,7 @@ fn field_cell(
     field: &'static str,
     short: &'static str,
 ) -> Element {
-    let overridden = Derived::new(move || model.origin(field) == "Director override");
+    let overridden = Derived::new(move || model.origin(field) == "Agent override");
     let detail = Derived::new(move || {
         format!(
             "{title}: {}. Overrides replace this whole field.",
@@ -519,7 +684,7 @@ fn ProfileToml(model: Model) -> Element {
                     row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px)
                         stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                         Label
-                            text:"Project defaults use a complete profile. Directors use overrides; omitted fields inherit. Copy this text to export."
+                            text:"Project defaults use a complete profile. Agents use overrides; omitted fields inherit. Copy this text to export."
                             role:(TextRole::Caption) tone:(Tone::Muted)
                     }
                     row height:min-content
@@ -571,11 +736,11 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
         });
     });
     let capacity = Derived::new(move || match model.editor.get() {
-        EditTarget::Director(id) => crate::sidebar::director_capacity(&model.snapshot.get(), &id),
+        EditTarget::Config(id) => crate::sidebar::director_capacity(&model.snapshot.get(), &id),
         _ => (0, 0, 0),
     });
     let whole_project =
-        Derived::new(move || model.editor_profile.get().scope == DirectorScope::Project);
+        Derived::new(move || model.editor_profile.get().scope == AgentScope::Project);
     let harness = field_module(
         model,
         "Agent harness",
@@ -612,7 +777,7 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
     );
     let whole = view! {
         CellButton label:"Scope: Whole project" selected:(whole_project)
-            on-press:(press(move || model.modify_profile("scope", |p| p.scope = DirectorScope::Project))) {
+            on-press:(press(move || model.modify_profile("scope", |p| p.scope = AgentScope::Project))) {
             Label text:"Whole project" role:(TextRole::Label) weight:500
         }
     };
@@ -660,10 +825,10 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
                             let limit = model.editor_profile.get().max_workers;
                             if limit == 0 {
                                 "0 pauses delegation · range 0–64".to_string()
-                            } else if matches!(model.editor.get(), EditTarget::Director(_)) {
+                            } else if matches!(model.editor.get(), EditTarget::Config(_)) {
                                 format!("{} active · limit {limit} · range 0–64", capacity.get().1)
                             } else {
-                                format!("Limit {limit} per director · range 0–64")
+                                format!("Limit {limit} per agent tree · range 0–64")
                             }
                         }))
                         role:(TextRole::Caption) tone:(Tone::Muted)
@@ -777,12 +942,12 @@ fn ScopeChip(model: Model, issue: Issue) -> Element {
         Derived::new(move || format!("Scope {}", number.get().unwrap_or_else(|| title.get())));
     let scope_id = id.clone();
     let on = Derived::new(
-        move || matches!(&model.editor_profile.get().scope, DirectorScope::Issues { issue_ids } if model.scope_contains(issue_ids, &scope_id)),
+        move || matches!(&model.editor_profile.get().scope, AgentScope::Issues { issue_ids } if model.scope_contains(issue_ids, &scope_id)),
     );
     let toggle = press(move || {
         model.modify_profile("scope", |p| {
             let mut ids = match &p.scope {
-                DirectorScope::Issues { issue_ids } => issue_ids.clone(),
+                AgentScope::Issues { issue_ids } => issue_ids.clone(),
                 _ => vec![],
             };
             if model.scope_contains(&ids, &id) {
@@ -792,9 +957,9 @@ fn ScopeChip(model: Model, issue: Issue) -> Element {
                 ids.push(id.clone());
             }
             p.scope = if ids.is_empty() {
-                DirectorScope::Project
+                AgentScope::Project
             } else {
-                DirectorScope::Issues { issue_ids: ids }
+                AgentScope::Issues { issue_ids: ids }
             };
         });
     });

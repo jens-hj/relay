@@ -25,7 +25,7 @@ pub(super) fn handles(command: &Command) -> bool {
             | Command::PublishBoard { .. }
             | Command::RetryOperation { .. }
             | Command::ReconcileOperation { .. }
-            | Command::StartDirector { .. }
+            | Command::StartRootAgent { .. }
             | Command::StartSession { .. }
             | Command::SetSessionConnections { .. }
     )
@@ -333,7 +333,7 @@ pub(super) fn apply(
     snapshot: &mut Snapshot,
     command: Command,
     request: &str,
-    defaults: DirectorProfile,
+    defaults: AgentProfile,
     config: &RuntimeConfig,
 ) -> Result<Option<Action>, Error> {
     let mut jobs = Vec::new();
@@ -385,8 +385,9 @@ pub(super) fn apply(
                 defaults,
                 github: None,
             });
-            snapshot.directors.push(Director {
-                id: format!("director-{id}"),
+            snapshot.agent_configs.push(AgentConfig {
+                template: "director".into(),
+                id: format!("agent-config-{id}"),
                 project_id: id.clone(),
                 name: "Project director".into(),
                 overrides: ProfileOverrides::default(),
@@ -807,8 +808,9 @@ pub(super) fn apply(
             operation.error = None;
             jobs.push(operation_id);
         }
-        Command::StartDirector {
-            director_id,
+        Command::StartRootAgent {
+            agent_config_id,
+            issue_id,
             prompt,
             parts: _,
             approve_implementation,
@@ -816,9 +818,9 @@ pub(super) fn apply(
             return start(
                 snapshot,
                 request,
-                &director_id,
-                None,
-                SessionRole::Director,
+                &agent_config_id,
+                issue_id,
+                SessionRole::Root,
                 prompt,
                 approve_implementation,
                 None,
@@ -826,7 +828,7 @@ pub(super) fn apply(
             );
         }
         Command::StartSession {
-            director_id,
+            agent_config_id,
             issue_id,
             role,
             prompt,
@@ -836,7 +838,7 @@ pub(super) fn apply(
             return start(
                 snapshot,
                 request,
-                &director_id,
+                &agent_config_id,
                 issue_id,
                 role,
                 prompt,
@@ -955,7 +957,7 @@ pub(super) fn validate_connections(
 fn start(
     snapshot: &mut Snapshot,
     request: &str,
-    director_id: &str,
+    agent_config_id: &str,
     issue_id: Option<String>,
     role: SessionRole,
     prompt: String,
@@ -965,9 +967,9 @@ fn start(
 ) -> Result<Option<Action>, Error> {
     crate::validate_prompt(&prompt)?;
     let director = snapshot
-        .directors
+        .agent_configs
         .iter()
-        .find(|d| d.id == director_id)
+        .find(|d| d.id == agent_config_id)
         .ok_or_else(|| Error::invalid("Director not found"))?
         .clone();
     let project = snapshot
@@ -979,7 +981,7 @@ fn start(
     }
     let issue_id = if let Some(id) = issue_id {
         snapshot.canonical_issue_id(&id).to_owned()
-    } else if role == SessionRole::Director {
+    } else if role == SessionRole::Root {
         let board_id = local_board(snapshot, &project.id);
         let id = format!("task-{request}");
         let title = prompt
@@ -1010,7 +1012,14 @@ fn start(
     } else {
         return Err(Error::invalid("Choose a task for the worker"));
     };
-    runtime::authorize_session(snapshot, &issue_id, director_id, approved, &role, config)?;
+    runtime::authorize_session(
+        snapshot,
+        &issue_id,
+        agent_config_id,
+        approved,
+        &role,
+        config,
+    )?;
     let ids = ids.unwrap_or_else(|| {
         snapshot
             .connections
@@ -1029,21 +1038,26 @@ fn start(
         .effective_profile(&director)
         .map_err(Error::invalid)?;
     let session_id = format!("session-{request}");
-    let title = snapshot
-        .issues
-        .iter()
-        .find(|i| i.id == issue_id)
-        .unwrap()
-        .title
-        .clone();
+    let title = if role == SessionRole::Root {
+        director.name.clone()
+    } else {
+        snapshot
+            .issues
+            .iter()
+            .find(|i| i.id == issue_id)
+            .unwrap()
+            .title
+            .clone()
+    };
     snapshot.sessions.push(Session {
+        profile: None,
         parent_session_id: None,
         spawn: None,
         compactions: vec![],
         id: session_id.clone(),
         project_id: project.id,
         issue_id: Some(issue_id),
-        director_id: director_id.into(),
+        agent_config_id: agent_config_id.into(),
         title,
         role,
         fixture: false,
@@ -1292,7 +1306,7 @@ mod tests {
             .position(|c| matches!(c.kind, ConnectionKind::Directory { .. }))
             .unwrap();
         let id = original.connections[slot].id.clone();
-        original.sessions = demo_snapshot(DirectorProfile::default()).sessions;
+        original.sessions = demo_snapshot(AgentProfile::default()).sessions;
         for session in &mut original.sessions {
             session.project_id = original.projects[0].id.clone();
             session.connection_ids = vec![id.clone()];
@@ -1356,8 +1370,7 @@ mod tests {
         }
         drop(store);
         drop(w);
-        let reopened =
-            crate::Store::open(&dir.path().join("db"), DirectorProfile::default()).unwrap();
+        let reopened = crate::Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
         assert_eq!(reopened.snapshot().unwrap(), renamed);
     }
 
@@ -1371,7 +1384,7 @@ mod tests {
                 connections: vec![],
             },
             &request,
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         )
         .unwrap();
@@ -1399,7 +1412,7 @@ mod tests {
                 repository_connection_id: None,
             },
             "canonical",
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         )
         .unwrap();
@@ -1409,14 +1422,14 @@ mod tests {
         s.issue_aliases
             .insert("historical-task".into(), "task-canonical".into());
         let director = s
-            .directors
+            .agent_configs
             .iter_mut()
             .find(|d| d.project_id == project)
             .unwrap();
-        director.overrides.scope = Some(DirectorScope::Issues {
+        director.overrides.scope = Some(AgentScope::Issues {
             issue_ids: vec!["historical-task".into()],
         });
-        let director_id = director.id.clone();
+        let agent_config_id = director.id.clone();
         let mut retired = s.boards[0].clone();
         let board_id = retired.id.clone();
         retired.id = "retired-board".into();
@@ -1433,7 +1446,7 @@ mod tests {
             runtime::authorize_session(
                 &s,
                 id,
-                &director_id,
+                &agent_config_id,
                 false,
                 &SessionRole::Worker,
                 &RuntimeConfig::default(),
@@ -1448,7 +1461,7 @@ mod tests {
                 body: "Body".into(),
             },
             "edit",
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         )
         .unwrap();
@@ -1481,13 +1494,13 @@ mod tests {
             "Task"
         );
         assert_eq!(
-            s.directors
+            s.agent_configs
                 .iter()
-                .find(|d| d.id == director_id)
+                .find(|d| d.id == agent_config_id)
                 .unwrap()
                 .overrides
                 .scope,
-            Some(DirectorScope::Issues {
+            Some(AgentScope::Issues {
                 issue_ids: vec!["historical-task".into()]
             })
         );
@@ -1520,7 +1533,7 @@ mod tests {
                     repository_connection_id: None
                 },
                 "blocked",
-                DirectorProfile::default(),
+                AgentProfile::default(),
                 &RuntimeConfig::default()
             )
             .is_err()
@@ -1532,7 +1545,7 @@ mod tests {
                 connection_id: "local-board-connection".into(),
             },
             "restore",
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         )
         .unwrap();
@@ -1548,7 +1561,7 @@ mod tests {
                 repository_connection_id: None,
             },
             "accepted",
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         )
         .unwrap();
@@ -1572,7 +1585,7 @@ mod tests {
                 },
             },
             "clone",
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         )
         .unwrap();
@@ -1626,7 +1639,7 @@ mod tests {
                 connections: vec![],
             },
             "project",
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         );
         assert!(result.err().unwrap().to_string().contains("escapes"));
@@ -1644,7 +1657,7 @@ mod tests {
                 },
             },
             "clone-symlink",
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         )
         .unwrap();
@@ -1732,7 +1745,7 @@ mod tests {
                 },
             },
             "board",
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         )
         .unwrap();
@@ -1790,7 +1803,7 @@ mod tests {
         let second = create(&mut s, &dir.path().join("two"), "Two");
         assert_ne!(first, second);
         assert_eq!(s.projects.len(), 2);
-        assert_eq!(s.directors.len(), 2);
+        assert_eq!(s.agent_configs.len(), 2);
         let board = s
             .boards
             .iter()
@@ -1807,7 +1820,7 @@ mod tests {
                 repository_connection_id: None,
             },
             "local-task",
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         )
         .unwrap();
@@ -1825,7 +1838,7 @@ mod tests {
                 column_id: "done".into(),
             },
             "move",
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         )
         .unwrap();
@@ -1842,7 +1855,7 @@ mod tests {
                 &mut s,
                 remove,
                 "remove",
-                DirectorProfile::default(),
+                AgentProfile::default(),
                 &RuntimeConfig::default()
             )
             .is_err()
@@ -1865,7 +1878,7 @@ mod tests {
                     connections: vec![]
                 },
                 "duplicate",
-                DirectorProfile::default(),
+                AgentProfile::default(),
                 &RuntimeConfig::default()
             )
             .is_err()
@@ -1882,7 +1895,7 @@ mod tests {
                 },
             },
             "directory",
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         )
         .unwrap();
@@ -1911,7 +1924,7 @@ mod tests {
         let mut s = Snapshot::default();
         let project = create(&mut s, &dir.path().join("project"), "Project");
         let director = s
-            .directors
+            .agent_configs
             .iter()
             .find(|d| d.project_id == project)
             .unwrap()
@@ -1919,20 +1932,21 @@ mod tests {
             .clone();
         let action = apply(
             &mut s,
-            Command::StartDirector {
-                director_id: director,
+            Command::StartRootAgent {
+                issue_id: None,
+                agent_config_id: director,
                 prompt: "Plan this project".into(),
                 parts: vec![],
                 approve_implementation: false,
             },
             "director-start",
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         )
         .unwrap();
         assert!(matches!(action, Some(Action::Run { .. })));
         let session = &s.sessions[0];
-        assert_eq!(session.role, SessionRole::Director);
+        assert_eq!(session.role, SessionRole::Root);
         assert!(session.issue_id.is_some());
         assert!(s.visible_task(session.issue_id.as_ref().unwrap()));
         assert_eq!(session.connection_ids.len(), 1);
@@ -1946,7 +1960,7 @@ mod tests {
                     connection_ids: vec![]
                 },
                 "changed",
-                DirectorProfile::default(),
+                AgentProfile::default(),
                 &RuntimeConfig::default()
             )
             .is_err()
@@ -1958,7 +1972,7 @@ mod tests {
     fn accepted_project_creation_is_idempotent_across_database_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("db");
-        let mut store = crate::Store::open(&db, DirectorProfile::default()).unwrap();
+        let mut store = crate::Store::open(&db, AgentProfile::default()).unwrap();
         let before = store.snapshot().unwrap();
         let request = env(
             before.revision,
@@ -1972,7 +1986,7 @@ mod tests {
             .apply(request.clone(), &RuntimeConfig::default())
             .unwrap();
         drop(store);
-        let mut store = crate::Store::open(&db, DirectorProfile::default()).unwrap();
+        let mut store = crate::Store::open(&db, AgentProfile::default()).unwrap();
         let (retry, action) = store.apply(request, &RuntimeConfig::default()).unwrap();
         assert_eq!(s, retry);
         assert!(action.is_none());
@@ -1997,7 +2011,7 @@ mod tests {
                 },
             },
             "clone",
-            DirectorProfile::default(),
+            AgentProfile::default(),
             &RuntimeConfig::default(),
         )
         .unwrap();
@@ -2006,11 +2020,11 @@ mod tests {
         let (_router, _shutdown) = crate::router_with_shutdown(
             &db,
             "test-secret-token".into(),
-            DirectorProfile::default(),
+            AgentProfile::default(),
             RuntimeConfig::default(),
         )
         .unwrap();
-        let store = crate::Store::open(&db, DirectorProfile::default()).unwrap();
+        let store = crate::Store::open(&db, AgentProfile::default()).unwrap();
         let next = store.snapshot().unwrap();
         assert_eq!(next.projects, s.projects);
         assert_eq!(next.operations[0].state, OperationState::Interrupted);

@@ -488,7 +488,10 @@ mod tests {
         assert!(
             validate_protocol(&Snapshot::default())
                 .unwrap_err()
-                .contains("requires protocol 5")
+                .contains(&format!(
+                    "requires protocol {}",
+                    relay_core::PROTOCOL_VERSION
+                ))
         );
         assert!(
             validate_protocol(&Snapshot {
@@ -529,7 +532,7 @@ mod tests {
             Event::Stream(StreamEvent::Reset {
                 protocol_version: relay_core::PROTOCOL_VERSION,
                 snapshot: Box::new(relay_core::demo_snapshot(
-                    relay_core::DirectorProfile::default(),
+                    relay_core::AgentProfile::default(),
                 )),
                 history: HistoryState::default(),
             }),
@@ -587,7 +590,10 @@ mod outcome_tests {
                 assert!(
                     String::from_utf8_lossy(&request)
                         .to_lowercase()
-                        .contains("x-relay-protocol: 5")
+                        .contains(&format!(
+                            "x-relay-protocol: {}",
+                            relay_core::PROTOCOL_VERSION
+                        ))
                 );
                 if let Some(code) = status {
                     let body = "invalid or rejected response";

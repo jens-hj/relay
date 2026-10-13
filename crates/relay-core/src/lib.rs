@@ -55,7 +55,7 @@ pub struct Project {
     pub repository: String,
     pub fixture: bool,
     pub columns: Vec<BoardColumn>,
-    pub defaults: DirectorProfile,
+    pub defaults: AgentProfile,
     #[serde(default)]
     pub github: Option<GitHubProject>,
 }
@@ -84,23 +84,33 @@ pub struct Issue {
     pub result: Option<String>,
 }
 
+fn director_template() -> String {
+    "director".into()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Director {
+pub struct AgentConfig {
     pub id: String,
     pub project_id: String,
     pub name: String,
+    #[serde(default = "director_template")]
+    pub template: String,
     pub overrides: ProfileOverrides,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionRole {
-    Director,
+    #[serde(alias = "director")]
+    Root,
     Worker,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
+    /// Instance settings for a manually configured agent; inherited when absent.
+    #[serde(default)]
+    pub profile: Option<AgentProfile>,
     #[serde(default)]
     pub connection_ids: Vec<String>,
     #[serde(default)]
@@ -112,7 +122,8 @@ pub struct Session {
     pub id: String,
     pub project_id: String,
     pub issue_id: Option<String>,
-    pub director_id: String,
+    #[serde(alias = "director_id")]
+    pub agent_config_id: String,
     pub title: String,
     pub role: SessionRole,
     pub fixture: bool,
@@ -226,6 +237,8 @@ pub struct Comment {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub agent_templates: Vec<AgentTemplate>,
     /// Retained IDs redirect to the identities preserved by board publication.
     #[serde(default)]
     pub board_aliases: std::collections::BTreeMap<String, String>,
@@ -250,7 +263,8 @@ pub struct Snapshot {
     pub revision: u64,
     pub projects: Vec<Project>,
     pub issues: Vec<Issue>,
-    pub directors: Vec<Director>,
+    #[serde(alias = "directors")]
+    pub agent_configs: Vec<AgentConfig>,
     pub sessions: Vec<Session>,
     pub messages: Vec<Message>,
     pub comments: Vec<Comment>,
@@ -344,15 +358,17 @@ pub enum Command {
         result: String,
     },
     StartSession {
-        director_id: String,
+        agent_config_id: String,
         issue_id: Option<String>,
         role: SessionRole,
         prompt: String,
         approve_implementation: bool,
         connection_ids: Option<Vec<String>>,
     },
-    StartDirector {
-        director_id: String,
+    StartRootAgent {
+        agent_config_id: String,
+        #[serde(default)]
+        issue_id: Option<String>,
         prompt: String,
         #[serde(default)]
         parts: Vec<Part>,
@@ -411,9 +427,21 @@ pub enum Command {
     },
     StartWorker {
         issue_id: String,
-        director_id: String,
+        agent_config_id: String,
         prompt: String,
         approve_implementation: bool,
+    },
+    StartChildAgent {
+        parent_session_id: String,
+        name: String,
+        profile: AgentProfile,
+        prompt: String,
+        approve_implementation: bool,
+    },
+    SaveAgentTemplate {
+        project_id: String,
+        name: String,
+        profile: AgentProfile,
     },
     SendWorker {
         session_id: String,
@@ -425,15 +453,16 @@ pub enum Command {
     },
     UpdateProjectDefaults {
         project_id: String,
-        profile: DirectorProfile,
+        profile: AgentProfile,
     },
-    CreateDirector {
+    CreateAgentConfig {
         project_id: String,
         name: String,
+        template: String,
         overrides: ProfileOverrides,
     },
-    UpdateDirector {
-        director_id: String,
+    UpdateAgentConfig {
+        agent_config_id: String,
         name: String,
         overrides: ProfileOverrides,
     },
@@ -459,20 +488,75 @@ impl Snapshot {
             .ok_or_else(|| "Project not found".into())
     }
 
-    pub fn effective_profile(&self, director: &Director) -> Result<DirectorProfile, String> {
-        Ok(director
-            .overrides
-            .resolve(&self.project(&director.project_id)?.defaults))
+    pub fn effective_profile(&self, director: &AgentConfig) -> Result<AgentProfile, String> {
+        Ok(director.overrides.resolve(&self.config_base(director)?))
     }
 
-    pub fn validate_profile(
+    pub fn config_base(&self, config: &AgentConfig) -> Result<AgentProfile, String> {
+        self.template_profile(
+            &config.project_id,
+            &config.template,
+            &self.project(&config.project_id)?.defaults,
+        )
+    }
+
+    fn template_profile(
         &self,
         project_id: &str,
-        profile: &DirectorProfile,
-    ) -> Result<(), String> {
+        template: &str,
+        defaults: &AgentProfile,
+    ) -> Result<AgentProfile, String> {
+        match template {
+            "director" => Ok(defaults.clone()),
+            "worker" => Ok(AgentProfile::worker(defaults)),
+            id => self
+                .agent_templates
+                .iter()
+                .find(|p| p.id == id && p.project_id == project_id)
+                .map(|p| p.profile.clone())
+                .ok_or_else(|| "Agent profile not found in this project".into()),
+        }
+    }
+
+    pub fn session_profile(&self, session: &Session) -> Result<AgentProfile, String> {
+        let director = self
+            .agent_configs
+            .iter()
+            .find(|d| d.id == session.agent_config_id && d.project_id == session.project_id)
+            .ok_or("Agent configuration missing")?;
+        let mut profile = self.effective_profile(director)?;
+        let mut chain = vec![session];
+        let mut seen = std::collections::BTreeSet::from([session.id.as_str()]);
+        while let Some(id) = chain.last().unwrap().parent_session_id.as_deref() {
+            if !seen.insert(id) {
+                return Err("Invalid session ancestry".into());
+            }
+            let parent = self
+                .sessions
+                .iter()
+                .find(|s| {
+                    s.id == id
+                        && s.project_id == session.project_id
+                        && s.agent_config_id == session.agent_config_id
+                })
+                .ok_or("Parent missing")?;
+            chain.push(parent);
+        }
+        for session in chain.into_iter().rev() {
+            if let Some(settings) = &session.profile {
+                profile = settings.clone();
+            }
+            if let Some(grant) = &session.spawn {
+                profile.permissions.extend(grant.permissions.clone());
+            }
+        }
+        Ok(profile)
+    }
+
+    pub fn validate_profile(&self, project_id: &str, profile: &AgentProfile) -> Result<(), String> {
         self.project(project_id)?;
         profile.validate()?;
-        if let DirectorScope::Issues { issue_ids } = &profile.scope {
+        if let AgentScope::Issues { issue_ids } = &profile.scope {
             for id in issue_ids {
                 if !self
                     .issues
@@ -504,7 +588,7 @@ impl Snapshot {
             | Command::RetryOperation { .. }
             | Command::ReconcileOperation { .. }
             | Command::StartSession { .. }
-            | Command::StartDirector { .. }
+            | Command::StartRootAgent { .. }
             | Command::SetSessionConnections { .. }
             | Command::ConfigureProject { .. }
             | Command::ConfigureHarness { .. }
@@ -514,6 +598,7 @@ impl Snapshot {
             | Command::ConversationCommand { .. }
             | Command::SyncProject { .. }
             | Command::StartWorker { .. }
+            | Command::StartChildAgent { .. }
             | Command::SendWorker { .. }
             | Command::SubmitTurn { .. }
             | Command::PromoteTurn { .. }
@@ -524,13 +609,45 @@ impl Snapshot {
             | Command::StopWorker { .. } => {
                 return Err("This command requires the server runtime".into());
             }
+            Command::SaveAgentTemplate {
+                project_id,
+                name,
+                profile,
+            } => {
+                validate_text("Profile name", &name, 100)?;
+                self.validate_profile(&project_id, &profile)?;
+                if ["director", "worker"].contains(&name.trim().to_lowercase().as_str())
+                    || self.agent_templates.iter().any(|p| {
+                        p.project_id == project_id && p.name.eq_ignore_ascii_case(name.trim())
+                    })
+                {
+                    return Err("Choose a unique profile name".into());
+                }
+                self.agent_templates.push(AgentTemplate {
+                    id: format!("profile-{id}"),
+                    project_id,
+                    name: name.trim().into(),
+                    profile,
+                });
+            }
             Command::UpdateProjectDefaults {
                 project_id,
                 profile,
             } => {
                 self.validate_profile(&project_id, &profile)?;
-                for director in self.directors.iter().filter(|d| d.project_id == project_id) {
-                    self.validate_profile(&project_id, &director.overrides.resolve(&profile))?;
+                for director in self
+                    .agent_configs
+                    .iter()
+                    .filter(|d| d.project_id == project_id)
+                {
+                    self.validate_profile(
+                        &project_id,
+                        &director.overrides.resolve(&self.template_profile(
+                            &project_id,
+                            &director.template,
+                            &profile,
+                        )?),
+                    )?;
                 }
                 self.projects
                     .iter_mut()
@@ -538,42 +655,48 @@ impl Snapshot {
                     .unwrap()
                     .defaults = profile;
             }
-            Command::CreateDirector {
+            Command::CreateAgentConfig {
                 project_id,
                 name,
+                template,
                 overrides,
             } => {
-                validate_text("Director name", &name, 100)?;
+                validate_text("Agent name", &name, 100)?;
                 self.validate_profile(
                     &project_id,
-                    &overrides.resolve(&self.project(&project_id)?.defaults),
+                    &overrides.resolve(&self.template_profile(
+                        &project_id,
+                        &template,
+                        &self.project(&project_id)?.defaults,
+                    )?),
                 )?;
-                self.directors.push(Director {
-                    id: format!("director-{id}"),
+                self.agent_configs.push(AgentConfig {
+                    id: format!("agent-config-{id}"),
                     project_id,
                     name: name.trim().into(),
+                    template,
                     overrides,
                 });
             }
-            Command::UpdateDirector {
-                director_id,
+            Command::UpdateAgentConfig {
+                agent_config_id,
                 name,
                 overrides,
             } => {
-                validate_text("Director name", &name, 100)?;
+                validate_text("Agent name", &name, 100)?;
                 let director = self
-                    .directors
+                    .agent_configs
                     .iter()
-                    .find(|d| d.id == director_id)
+                    .find(|d| d.id == agent_config_id)
                     .ok_or("Director not found")?;
                 self.validate_profile(
                     &director.project_id,
-                    &overrides.resolve(&self.project(&director.project_id)?.defaults),
+                    &overrides.resolve(&self.config_base(director)?),
                 )?;
                 let director = self
-                    .directors
+                    .agent_configs
                     .iter_mut()
-                    .find(|d| d.id == director_id)
+                    .find(|d| d.id == agent_config_id)
                     .unwrap();
                 director.name = name.trim().into();
                 director.overrides = overrides;

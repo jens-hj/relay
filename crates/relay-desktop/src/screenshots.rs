@@ -128,7 +128,7 @@ fn shell_screenshots() {
     let receipt = std::cell::RefCell::new(None::<String>);
     let outcome_serial = std::cell::Cell::new(0u64);
     let model = scope.run(|| crate::model::Model::new(&ui, sender));
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     // Demo conversations predate project connections. Include real resource
     // rows here so Connections screenshots exercise their embedded actions.
     let project_id = snapshot.projects[0].id.clone();
@@ -238,7 +238,7 @@ fn shell_screenshots() {
         *receipt.borrow_mut() = Some(request.request_id.clone());
         request.request_id
     };
-    let shots: [(&str, &dyn Fn()); 20] = [
+    let shots: [(&str, &dyn Fn()); 22] = [
         ("notice-command-feedback", &|| {
             model.open_session("session-plan".into());
             model.command_feedback.set("Configure this feature on the server; the harness does not expose its interactive editor here".into());
@@ -283,10 +283,55 @@ fn shell_screenshots() {
         }),
         ("settings", &|| model.page.set(Page::Settings)),
         ("profile", &|| {
-            model.open_profile(crate::model::EditTarget::Director("director-main".into()))
+            model.open_profile(crate::model::EditTarget::Config("director-main".into()))
         }),
-        ("new-director", &|| {
+        ("new-agent", &|| {
             model.open_profile(crate::model::EditTarget::New)
+        }),
+        ("new-worker", &|| {
+            model.open_new_worker("session-plan".into());
+            model.editor_name.set("Validation".into());
+            model
+                .worker_prompt
+                .set("Verify the parent agent's changes and report the results".into());
+            model.modify_profile("harness", |p| p.harness = Harness::ClaudeCode);
+            settle();
+            let rect = ui
+                .inspection_snapshot()
+                .nodes
+                .into_iter()
+                .find(|n| n.label.as_deref() == Some("Profile design") && n.role == Role::ListItem)
+                .unwrap()
+                .rect;
+            ui.dispatch_pointer(PointerEvent {
+                kind: PointerEventKind::Move,
+                position: rect.center(),
+                pointer_type: PointerType::Mouse,
+                modifiers: Modifiers::default(),
+                timestamp: Duration::ZERO,
+            });
+        }),
+        ("projects", &|| {
+            settle();
+            let rect = ui
+                .inspection_snapshot()
+                .nodes
+                .into_iter()
+                .find(|n| n.label.as_deref() == Some("Toggle project Relay · demo"))
+                .unwrap()
+                .rect;
+            for kind in [
+                PointerEventKind::Down(PointerButton::Primary),
+                PointerEventKind::Up(PointerButton::Primary),
+            ] {
+                ui.dispatch_pointer(PointerEvent {
+                    kind,
+                    position: rect.center(),
+                    pointer_type: PointerType::Mouse,
+                    modifiers: Modifiers::default(),
+                    timestamp: Duration::ZERO,
+                });
+            }
         }),
         ("connections", &|| model.page.set(Page::Connections)),
         ("palette", &|| {

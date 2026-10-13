@@ -855,9 +855,9 @@ pub fn Conversation(model: Model) -> Element {
                 .sessions
                 .iter()
                 .find(|s| s.id == model.session.get_untracked())
-                .map(|s| s.director_id.clone())
+                .map(|s| s.agent_config_id.clone())
                 .unwrap_or_else(|| model.worker_director.get_untracked());
-            model.open_profile(EditTarget::Director(director));
+            model.open_profile(EditTarget::Config(director));
         }),
         change_model: Rc::new(move || crate::command_ui::open(model, "model")),
         set_effort: Rc::new(move |step| choose_effort(model, step)),
@@ -928,7 +928,7 @@ pub fn Conversation(model: Model) -> Element {
                             {
                                 let none = move || session.get().is_none();
                                 parent.adopt(&action_cell("Linked issue", "Issue", none, move || model.open_worker_issue()));
-                                parent.adopt(&action_cell("Director profile", "Profile", || false, move || model.open_profile(EditTarget::Director(session.get_untracked().map(|s| s.director_id).unwrap_or_else(|| model.worker_director.get_untracked())))));
+                                parent.adopt(&action_cell("Root agent profile", "Profile", || false, move || model.open_profile(EditTarget::Config(session.get_untracked().map(|s| s.agent_config_id).unwrap_or_else(|| model.worker_director.get_untracked())))));
                                 parent.adopt(&action_cell("Toggle change review", "Changes", none, move || {
                                     if details.get_untracked() != "changes" {
                                         model.request_history(relay_core::StreamRequest::Review { session_id: model.session.get_untracked() });
@@ -943,7 +943,7 @@ pub fn Conversation(model: Model) -> Element {
                             let current = session.get_untracked().unwrap();
                             let session_id = current.id.clone();
                             let snapshot = model.snapshot.get();
-                            let inherited = snapshot.directors.iter().find(|d| d.id == current.director_id).and_then(|d|snapshot.effective_profile(d).ok()).map(|p|p.execution.approval).unwrap_or_default();
+                            let inherited = snapshot.session_profile(&current).ok().map(|p|p.execution.approval).unwrap_or_default();
                             let worker = current.worker.unwrap();
                             row height:min-content
                                 pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px) {
@@ -958,7 +958,7 @@ pub fn Conversation(model: Model) -> Element {
                                 let mode_index = Derived::new(move || {
                                     let snapshot = model.snapshot.get();
                                     let session = snapshot.sessions.iter().find(|s| s.id == mode_session);
-                                    let inherited = session.and_then(|s| snapshot.directors.iter().find(|d| d.id == s.director_id)).and_then(|d| snapshot.effective_profile(d).ok()).map(|p| p.execution.approval).unwrap_or_default();
+                                    let inherited = session.and_then(|s| snapshot.session_profile(s).ok()).map(|p| p.execution.approval).unwrap_or_default();
                                     let mode = session.and_then(|s| s.worker.as_ref()).and_then(|w| w.execution.as_ref()).map(|e| e.approval).unwrap_or(inherited);
                                     ApprovalMode::ALL.iter().position(|m| *m == mode).unwrap_or(0)
                                 });
@@ -1210,7 +1210,7 @@ pub fn Conversation(model: Model) -> Element {
                         cols:{if compact.get() {GridTracks::new([GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0), GridTrack::MaxContent])}} {
                         row height:min-content min-width:0px
                             pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px) {
-                            Label text:"This director requires approval to implement this turn."
+                            Label text:"This agent’s profile requires approval to implement this turn."
                                 role:(TextRole::Caption) tone:(Tone::Muted)
                         }
                         { parent.adopt(&action_cell("Approve this turn and send", "Approve and send", || false, move || { model.worker_approval.set(true); buffer::send(model); })); }

@@ -155,38 +155,8 @@ pub(super) fn configure(
 }
 
 /// Resolve ancestry iteratively, without a depth limit. Missing/cyclic links fail closed.
-pub(super) fn profile(snapshot: &Snapshot, session: &Session) -> Result<DirectorProfile, Error> {
-    let director = snapshot
-        .directors
-        .iter()
-        .find(|d| d.id == session.director_id)
-        .ok_or_else(|| Error::invalid("Director missing"))?;
-    let mut profile = snapshot
-        .effective_profile(director)
-        .map_err(Error::invalid)?;
-    let mut chain = vec![session];
-    let mut seen = std::collections::BTreeSet::from([session.id.as_str()]);
-    while let Some(id) = chain.last().unwrap().parent_session_id.as_deref() {
-        if !seen.insert(id) {
-            return Err(Error::invalid("Invalid session ancestry"));
-        }
-        let parent = snapshot
-            .sessions
-            .iter()
-            .find(|s| {
-                s.id == id
-                    && s.project_id == session.project_id
-                    && s.director_id == session.director_id
-            })
-            .ok_or_else(|| Error::invalid("Parent missing"))?;
-        chain.push(parent);
-    }
-    for session in chain.into_iter().rev() {
-        if let Some(grant) = &session.spawn {
-            profile.permissions.extend(grant.permissions.clone());
-        }
-    }
-    Ok(profile)
+pub(super) fn profile(snapshot: &Snapshot, session: &Session) -> Result<AgentProfile, Error> {
+    snapshot.session_profile(session).map_err(Error::invalid)
 }
 /// Existing scope/board/slot checks, with the session's effective permission map.
 pub(super) fn authorize_session(
@@ -198,20 +168,43 @@ pub(super) fn authorize_session(
     let effective = profile(snapshot, session)?;
     let mut candidate = snapshot.clone();
     candidate.sessions.retain(|s| s.id != session.id);
+    let root_limit = candidate
+        .effective_profile(
+            candidate
+                .agent_configs
+                .iter()
+                .find(|d| d.id == session.agent_config_id)
+                .ok_or_else(|| Error::invalid("Agent configuration missing"))?,
+        )
+        .map_err(Error::invalid)?
+        .max_workers;
+    let mut effective = effective;
+    effective.max_workers = root_limit;
+    let overrides = ProfileOverrides::between(
+        &candidate
+            .config_base(
+                candidate
+                    .agent_configs
+                    .iter()
+                    .find(|d| d.id == session.agent_config_id)
+                    .ok_or_else(|| Error::invalid("Agent configuration missing"))?,
+            )
+            .map_err(Error::invalid)?,
+        &effective,
+    );
     candidate
-        .directors
+        .agent_configs
         .iter_mut()
-        .find(|d| d.id == session.director_id)
+        .find(|d| d.id == session.agent_config_id)
         .ok_or_else(|| Error::invalid("Director missing"))?
-        .overrides
-        .permissions = Some(effective.permissions);
+        .overrides = overrides;
     runtime::authorize_session(
         &candidate,
         session
             .issue_id
             .as_deref()
             .ok_or_else(|| Error::invalid("Linked issue missing"))?,
-        &session.director_id,
+        &session.agent_config_id,
         approved,
         &session.role,
         config,
@@ -326,6 +319,84 @@ async fn call(
             Ok(json!({"agents":agents}))
         }
         "spawn_agent" => spawn(workspace, caller, run, parse(input)?, stop).await,
+        "stop_agent" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Stop {
+                agent: String,
+            }
+            let args: Stop = parse(input)?;
+            let snapshot = workspace.snapshots.borrow().clone();
+            let parent = snapshot
+                .sessions
+                .iter()
+                .find(|s| s.id == caller)
+                .ok_or_else(|| Error::invalid("Caller missing"))?;
+            let delegate = profile(&snapshot, parent)?.permissions[&Task::Delegate];
+            if !snapshot
+                .descendants(caller)
+                .iter()
+                .any(|s| s.id == args.agent)
+            {
+                return Err(Error::invalid("Only your own descendants can be stopped"));
+            }
+            match delegate {
+                Permission::Deny => {
+                    return Err(Error::invalid("Profile denies managing subagents"));
+                }
+                Permission::Ask => {
+                    approval(
+                        workspace,
+                        caller,
+                        run,
+                        "mcp__relay__stop_agent",
+                        &format!("Stop subagent {} and its descendants", args.agent),
+                        stop,
+                    )
+                    .await?
+                }
+                Permission::Allow => {}
+            }
+            let mut store = workspace.store.lock().map_err(Error::internal)?;
+            let mut current = store.snapshot()?;
+            active_caller(&store, &current, caller, run)?;
+            let parent = current.sessions.iter().find(|s| s.id == caller).unwrap();
+            if profile(&current, parent)?.permissions[&Task::Delegate] != delegate
+                || !current
+                    .descendants(caller)
+                    .iter()
+                    .any(|s| s.id == args.agent)
+            {
+                return Err(Error::invalid("Agent policy changed; retry"));
+            }
+            let mut ids = vec![args.agent.clone()];
+            ids.extend(
+                current
+                    .descendants(&args.agent)
+                    .iter()
+                    .map(|s| s.id.clone()),
+            );
+            for id in ids {
+                conversation::pause(&mut current, &id, "Queue paused by an ancestor agent");
+            }
+            current.messages.push(Message {
+                id: format!("agent-stop-{}", uuid::Uuid::new_v4()),
+                session_id: caller.into(),
+                author: "Relay".into(),
+                kind: "agent_control".into(),
+                body: format!("Requested stop for {} and its descendants", args.agent),
+                parts: vec![],
+                tool: None,
+            });
+            current.revision = current
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| Error::invalid("Revision exhausted"))?;
+            store.save(&current)?;
+            store.stop_controls(&current, &args.agent);
+            workspace.snapshots.send_replace(current);
+            Ok(json!({"agent":args.agent,"stop_requested":true}))
+        }
         "message_agent" => message_agent(workspace, caller, run, parse(input)?, stop).await,
         "wait_for_agents" => {
             let args: Wait = parse(input)?;
@@ -492,18 +563,28 @@ async fn spawn(
     if effective.permissions[&Task::Delegate] == Permission::Deny {
         return Err(Error::invalid("Parent denies delegation"));
     }
+    let root_limit = snapshot
+        .effective_profile(
+            snapshot
+                .agent_configs
+                .iter()
+                .find(|d| d.id == parent.agent_config_id)
+                .ok_or_else(|| Error::invalid("Agent configuration missing"))?,
+        )
+        .map_err(Error::invalid)?
+        .max_workers;
     if snapshot
         .sessions
         .iter()
         .filter(|s| {
-            s.director_id == parent.director_id
+            s.agent_config_id == parent.agent_config_id
                 && s.role == SessionRole::Worker
                 && s.worker
                     .as_ref()
                     .is_some_and(|w| runtime::active(&w.status))
         })
         .count()
-        >= usize::from(effective.max_workers)
+        >= usize::from(effective.max_workers.min(root_limit))
     {
         return Err(Error::invalid("Current director worker limit reached"));
     }
@@ -565,6 +646,7 @@ async fn spawn(
     .await
     .map_err(Error::internal)??;
     let mut child = resources.session.clone();
+    child.profile = None;
     child.title = args.title;
     child.role = SessionRole::Worker;
     child.parent_session_id = Some(caller.into());
@@ -927,6 +1009,12 @@ fn tools() -> Value {
             vec!["title", "task"],
         ),
         (
+            "stop_agent",
+            "Stop one of your descendants and its subtree. Requires delegation permission; retains history and workspaces.",
+            json!({"agent":string}),
+            vec!["agent"],
+        ),
+        (
             "message_agent",
             "Queue a turn for an agent in this tree.",
             json!({"agent":string,"text":string}),
@@ -991,6 +1079,7 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
                     let name = request["params"]["name"].as_str().unwrap_or("");
                     if ![
                         "spawn_agent",
+                        "stop_agent",
                         "message_agent",
                         "wait_for_agents",
                         "report_result",
@@ -1075,7 +1164,7 @@ mod tests {
                 .defaults
                 .permissions
                 .insert(Task::Delegate, delegate);
-            snapshot.directors[0].overrides = Default::default();
+            snapshot.agent_configs[0].overrides = Default::default();
             let config = RuntimeConfig {
                 repository: Some(repo.clone()),
                 codex: binary,
@@ -1199,6 +1288,168 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn scoped_root_profiles_start_on_the_selected_task_without_creating_another() {
+        let f = Fixture::new(Permission::Allow);
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let parent = snapshot.sessions[0].clone();
+        let task = parent.issue_id.clone().unwrap();
+        let before = snapshot.issues.len();
+        f.change(|s| {
+            s.agent_configs
+                .iter_mut()
+                .find(|c| c.id == parent.agent_config_id)
+                .unwrap()
+                .overrides
+                .scope = Some(AgentScope::Issues {
+                issue_ids: vec![task.clone()],
+            });
+        });
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let envelope = crate::tests::env(
+            snapshot.revision,
+            Command::StartRootAgent {
+                agent_config_id: parent.agent_config_id,
+                issue_id: Some(task.clone()),
+                prompt: "Review the scoped task".into(),
+                parts: vec![],
+                approve_implementation: false,
+            },
+        );
+        let (snapshot, action) = f
+            .workspace
+            .store
+            .lock()
+            .unwrap()
+            .apply(envelope, &f.workspace.config)
+            .unwrap();
+        assert!(matches!(action, Some(Action::Run { .. })));
+        assert_eq!(
+            snapshot.sessions.last().unwrap().issue_id.as_deref(),
+            Some(task.as_str())
+        );
+        assert_eq!(
+            snapshot.sessions.last().unwrap().title,
+            snapshot.agent_configs[0].name
+        );
+        assert_eq!(snapshot.issues.len(), before);
+        f.workspace.snapshots.send_replace(snapshot);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn human_child_creation_forks_a_completed_parent_and_replays_once() {
+        let f = Fixture::new(Permission::Deny);
+        let path = f.workspace.snapshots.borrow().sessions[0].workspaces[0]
+            .path
+            .clone();
+        std::fs::write(Path::new(&path).join("manual-untracked"), "parent changes").unwrap();
+        f.change(|s| {
+            s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed;
+        });
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let profile =
+            AgentProfile::worker(&snapshot.session_profile(&snapshot.sessions[0]).unwrap());
+        let envelope = crate::tests::env(
+            snapshot.revision,
+            Command::StartChildAgent {
+                parent_session_id: f.caller.clone(),
+                name: "Manual worker".into(),
+                profile: profile.clone(),
+                prompt: "Verify parent changes".into(),
+                approve_implementation: false,
+            },
+        );
+        let id = format!("session-{}", envelope.request_id);
+        let headers = || {
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", "Bearer test-token".parse().unwrap());
+            headers
+        };
+        let _ = command(
+            State(f.workspace.clone()),
+            headers(),
+            Ok(Json(envelope.clone())),
+        )
+        .await
+        .unwrap();
+        let current = f.workspace.snapshots.borrow().clone();
+        let child = current.sessions.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(child.parent_session_id.as_deref(), Some(f.caller.as_str()));
+        assert_eq!(child.issue_id, snapshot.sessions[0].issue_id);
+        assert_eq!(current.session_profile(child).unwrap(), profile);
+        assert_eq!(child.spawn.as_ref().unwrap().requested_by_run, None);
+        assert_ne!(child.workspaces[0].path, path);
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&child.workspaces[0].path).join("manual-untracked"))
+                .unwrap(),
+            "parent changes"
+        );
+        let _ = command(State(f.workspace.clone()), headers(), Ok(Json(envelope)))
+            .await
+            .unwrap();
+        assert_eq!(
+            f.workspace
+                .snapshots
+                .borrow()
+                .sessions
+                .iter()
+                .filter(|s| s.id == id)
+                .count(),
+            1
+        );
+        Shutdown {
+            workspace: f.workspace.clone(),
+        }
+        .shutdown()
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopping_descendants_requires_delegation_and_cannot_stop_the_parent() {
+        let f = Fixture::new(Permission::Allow);
+        let child = f
+            .call("spawn_agent", json!({"title":"Child", "task":"Verify"}))
+            .await
+            .unwrap()["agent"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            f.call("stop_agent", json!({"agent":f.caller}))
+                .await
+                .is_err()
+        );
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Delegate, Permission::Deny);
+        });
+        assert!(f.call("stop_agent", json!({"agent":child})).await.is_err());
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Delegate, Permission::Allow);
+        });
+        assert_eq!(
+            f.call("stop_agent", json!({"agent":child})).await.unwrap()["stop_requested"],
+            true
+        );
+        assert!(
+            f.workspace
+                .store
+                .lock()
+                .unwrap()
+                .controls
+                .get(&child)
+                .is_none_or(|c| *c.borrow())
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test]
     async fn spawn_forks_dirty_state_and_records_provenance() {
         let f = Fixture::new(Permission::Allow);
         let shared = f._directory.path().join("shared");
@@ -1244,7 +1495,7 @@ mod tests {
         let snapshot = f.workspace.snapshots.borrow().clone();
         let child = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
         assert_eq!(child.parent_session_id.as_deref(), Some(f.caller.as_str()));
-        assert_eq!(child.director_id, snapshot.sessions[0].director_id);
+        assert_eq!(child.agent_config_id, snapshot.sessions[0].agent_config_id);
         assert_eq!(child.issue_id, snapshot.sessions[0].issue_id);
         assert_eq!(
             child.spawn.as_ref().unwrap().requested_by_run.as_deref(),
@@ -1269,7 +1520,7 @@ mod tests {
             .unwrap();
         assert_eq!(staged.stdout, b"one");
         assert!(snapshot.messages.iter().any(|m| matches!(m.tool.as_ref().and_then(|t|t.detail.as_ref()),Some(ToolDetail::Spawn {child_session_id:Some(child)}) if child == id)));
-        assert_eq!(snapshot.protocol_version, 5);
+        assert_eq!(snapshot.protocol_version, PROTOCOL_VERSION);
         let schema: u32 = f
             .workspace
             .store
@@ -1278,7 +1529,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 12);
+        assert_eq!(schema, 13);
         f.finish().await;
     }
     #[tokio::test]
@@ -1705,13 +1956,13 @@ mod tests {
             snapshot.sessions.push(session);
         }
         {
-            let mut store = Store::open(&path, DirectorProfile::default()).unwrap();
+            let mut store = Store::open(&path, AgentProfile::default()).unwrap();
             store.save(&snapshot).unwrap();
         }
         let (_, shutdown) = router_with_shutdown(
             &path,
             uuid::Uuid::new_v4().to_string(),
-            DirectorProfile::default(),
+            AgentProfile::default(),
             RuntimeConfig::default(),
         )
         .unwrap();

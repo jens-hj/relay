@@ -51,14 +51,7 @@ pub(super) fn mode(snapshot: &Snapshot, session: &str) -> Result<ApprovalMode, E
         .iter()
         .find(|s| s.id == session)
         .ok_or_else(|| Error::invalid("Session not found"))?;
-    let director = snapshot
-        .directors
-        .iter()
-        .find(|d| d.id == session.director_id)
-        .ok_or_else(|| Error::invalid("Director not found"))?;
-    let profile = snapshot
-        .effective_profile(director)
-        .map_err(Error::invalid)?;
+    let profile = snapshot.session_profile(session).map_err(Error::invalid)?;
     Ok(session
         .worker
         .as_ref()
@@ -124,7 +117,7 @@ pub(super) async fn permission(
 pub(super) fn add_project(
     snapshot: &mut Snapshot,
     binding: ProjectBinding,
-    defaults: DirectorProfile,
+    defaults: AgentProfile,
 ) -> Result<String, Error> {
     validate_binding(&binding)?;
     let binding_id = binding.project_id();
@@ -189,8 +182,9 @@ pub(super) fn add_project(
                 sync_error: None,
             }),
         });
-        snapshot.directors.push(Director {
-            id: format!("director-{id}"),
+        snapshot.agent_configs.push(AgentConfig {
+            template: "director".into(),
+            id: format!("agent-config-{id}"),
             project_id: id.clone(),
             name: "Project director".into(),
             overrides: ProfileOverrides::default(),

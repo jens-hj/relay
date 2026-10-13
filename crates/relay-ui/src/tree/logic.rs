@@ -7,6 +7,7 @@ use crate::model::{AgentStatus, Effort, Harness, ModelIdentity};
 /// How many agents are in each state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct StatusTally {
+    pub idle: usize,
     pub working: usize,
     pub waiting: usize,
     pub failed: usize,
@@ -53,6 +54,7 @@ impl StatusTally {
 
     fn slot(&mut self, status: AgentStatus) -> &mut usize {
         match status {
+            AgentStatus::Idle => &mut self.idle,
             AgentStatus::Working => &mut self.working,
             AgentStatus::Waiting => &mut self.waiting,
             AgentStatus::Failed => &mut self.failed,
@@ -63,6 +65,7 @@ impl StatusTally {
 
     pub fn get(&self, status: AgentStatus) -> usize {
         match status {
+            AgentStatus::Idle => self.idle,
             AgentStatus::Working => self.working,
             AgentStatus::Waiting => self.waiting,
             AgentStatus::Failed => self.failed,
@@ -72,7 +75,7 @@ impl StatusTally {
     }
 
     pub fn total(&self) -> usize {
-        self.working + self.waiting + self.failed + self.queued + self.done
+        self.working + self.waiting + self.failed + self.queued + self.done + self.idle
     }
 }
 
@@ -204,6 +207,7 @@ pub enum Guide {
 /// Everything a tree row draws.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AgentLine {
+    pub can_spawn: bool,
     pub id: String,
     pub name: String,
     pub status: AgentStatus,
@@ -338,6 +342,7 @@ fn walk(
     let expandable = has_children && !folds;
     let expanded = expandable && (node.expanded || options.filter.is_some());
     out.push(TreeLine::Agent(AgentLine {
+        can_spawn: node.can_spawn,
         id: node.id.clone(),
         name: node.name.clone(),
         status: node.status,

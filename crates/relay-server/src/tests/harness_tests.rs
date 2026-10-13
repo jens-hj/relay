@@ -46,7 +46,7 @@ fn claude_workspace(dir: &Path, source: &str) -> Workspace {
     c.repository = Some(repo);
     c.claude = bin;
     let mut s = live();
-    s.projects[0].defaults = DirectorProfile::default();
+    s.projects[0].defaults = AgentProfile::default();
     s.projects[0].defaults.harness = Harness::ClaudeCode;
     workspace(&dir.join("db"), &s, c)
 }
@@ -84,7 +84,7 @@ done
 async fn multi_workspace(harness: Harness) {
     let dir = tempfile::tempdir().unwrap();
     let mut snapshot = Snapshot::default();
-    let defaults = DirectorProfile {
+    let defaults = AgentProfile {
         harness,
         ..Default::default()
     };
@@ -144,7 +144,7 @@ async fn multi_workspace(harness: Harness) {
             },
         },
         "external",
-        DirectorProfile::default(),
+        AgentProfile::default(),
         &RuntimeConfig::default(),
     )
     .unwrap();
@@ -158,7 +158,7 @@ async fn multi_workspace(harness: Harness) {
             repository_connection_id: None,
         },
         "multi-task",
-        DirectorProfile::default(),
+        AgentProfile::default(),
         &RuntimeConfig::default(),
     )
     .unwrap();
@@ -191,7 +191,7 @@ done
     };
     let w = workspace(&dir.path().join("db"), &snapshot, config);
     let command = Command::StartSession {
-        director_id: snapshot.directors[0].id.clone(),
+        agent_config_id: snapshot.agent_configs[0].id.clone(),
         issue_id: Some(snapshot.issues[0].id.clone()),
         role: SessionRole::Worker,
         prompt: "Implement the task".into(),
@@ -707,7 +707,7 @@ async fn claude_interrupt_and_error_are_truthful() {
 fn schema_four_updates_only_inherited_bundled_defaults_and_keeps_old_threads() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("db");
-    let mut s = demo_snapshot(DirectorProfile::default());
+    let mut s = demo_snapshot(AgentProfile::default());
     s.sessions[0].worker = Some(WorkerRun {
         model: None,
         context_tokens: None,
@@ -732,7 +732,7 @@ fn schema_four_updates_only_inherited_bundled_defaults_and_keeps_old_threads() {
     custom.id = "custom".into();
     custom.defaults.max_workers = 1;
     s.projects.push(custom.clone());
-    s.directors[0].overrides.permissions = Some(s.projects[0].defaults.permissions.clone());
+    s.agent_configs[0].overrides.permissions = Some(s.projects[0].defaults.permissions.clone());
     let mut json = serde_json::to_value(&s).unwrap();
     for key in ["bindings", "installations", "tool_permissions"] {
         json.as_object_mut().unwrap().remove(key);
@@ -746,7 +746,7 @@ fn schema_four_updates_only_inherited_bundled_defaults_and_keeps_old_threads() {
     for p in json["projects"].as_array_mut().unwrap() {
         p["defaults"].as_object_mut().unwrap().remove("execution");
     }
-    let store = Store::open(&db, DirectorProfile::default()).unwrap();
+    let store = Store::open(&db, AgentProfile::default()).unwrap();
     store
         .connection
         .execute("UPDATE workspace SET snapshot=?1", [json.to_string()])
@@ -756,14 +756,14 @@ fn schema_four_updates_only_inherited_bundled_defaults_and_keeps_old_threads() {
         .pragma_update(None, "user_version", 3)
         .unwrap();
     drop(store);
-    let store = Store::open(&db, DirectorProfile::default()).unwrap();
+    let store = Store::open(&db, AgentProfile::default()).unwrap();
     let next = store.snapshot().unwrap();
     assert_eq!(
         next.projects[0].defaults.permissions[&Task::Implement],
         Permission::Allow
     );
     assert_eq!(next.projects[1], custom);
-    assert_eq!(next.directors, s.directors);
+    assert_eq!(next.agent_configs, s.agent_configs);
     assert_eq!(next.sessions, s.sessions);
     assert_eq!(next.messages, s.messages);
     assert_eq!(
@@ -773,7 +773,7 @@ fn schema_four_updates_only_inherited_bundled_defaults_and_keeps_old_threads() {
     assert!(next.bindings.is_empty());
     drop(store);
     assert_eq!(
-        Store::open(&db, DirectorProfile::default())
+        Store::open(&db, AgentProfile::default())
             .unwrap()
             .snapshot()
             .unwrap(),
@@ -795,7 +795,7 @@ fn registered_project_and_harness_configuration_persist_without_environment() {
         ],
     );
     let db = dir.path().join("db");
-    let mut store = Store::open(&db, DirectorProfile::default()).unwrap();
+    let mut store = Store::open(&db, AgentProfile::default()).unwrap();
     let demo = store.snapshot().unwrap();
     let mut s = demo.clone();
     for number in [5, 6] {
@@ -857,7 +857,7 @@ fn registered_project_and_harness_configuration_persist_without_environment() {
     assert_eq!(store.snapshot().unwrap(), s);
     drop(store);
     assert_eq!(
-        Store::open(&db, DirectorProfile::default())
+        Store::open(&db, AgentProfile::default())
             .unwrap()
             .snapshot()
             .unwrap(),
@@ -887,7 +887,7 @@ async fn harness_probes_are_read_only_cached_independent_and_credential_safe() {
         claude,
         ..Default::default()
     };
-    let s = demo_snapshot(DirectorProfile::default());
+    let s = demo_snapshot(AgentProfile::default());
     let w = workspace(&dir.path().join("db"), &s, c);
     let (a, b) = tokio::join!(
         harness::statuses(State(w.clone())),
@@ -941,7 +941,7 @@ done
             ),
         );
         let mut s = live();
-        s.projects[0].defaults = DirectorProfile::default();
+        s.projects[0].defaults = AgentProfile::default();
         s.projects[0].defaults.execution.approval = mode;
         let c = RuntimeConfig {
             repository: Some(repo),
@@ -1079,7 +1079,7 @@ fn fresh_workspace_and_project_respect_explicit_template_without_migrating_it() 
     );
     // Even a template identical to the former bundled profile is an explicit
     // choice when creating new data, not legacy data requiring migration.
-    let mut defaults = DirectorProfile::default();
+    let mut defaults = AgentProfile::default();
     defaults
         .permissions
         .insert(Task::Implement, Permission::Ask);
@@ -1232,7 +1232,7 @@ async fn codex_large_streaming_event_preserves_completion_and_bounds_transcript(
 fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("db");
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     snapshot.sessions[0].worker = Some(WorkerRun {
         model: None,
         context_tokens: None,
@@ -1254,7 +1254,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
     for key in ["model", "context_tokens", "context_window"] {
         worker.remove(key);
     }
-    let store = Store::open(&db, DirectorProfile::default()).unwrap();
+    let store = Store::open(&db, AgentProfile::default()).unwrap();
     store
         .connection
         .execute("UPDATE workspace SET snapshot=?1", [json.to_string()])
@@ -1264,14 +1264,14 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
         .pragma_update(None, "user_version", 6)
         .unwrap();
     drop(store);
-    let store = Store::open(&db, DirectorProfile::default()).unwrap();
+    let store = Store::open(&db, AgentProfile::default()).unwrap();
     assert_eq!(store.snapshot().unwrap(), snapshot);
     assert_eq!(
         store
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        12
+        13
     );
     let worker = snapshot.sessions[0].worker.as_mut().unwrap();
     worker.model = Some("reported-model".into());
@@ -1286,7 +1286,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
         .unwrap();
     drop(store);
     assert_eq!(
-        Store::open(&db, DirectorProfile::default())
+        Store::open(&db, AgentProfile::default())
             .unwrap()
             .snapshot()
             .unwrap(),
@@ -1386,7 +1386,7 @@ done
             .body
             .contains("File not found")
     );
-    let reopened = Store::open(&dir.path().join("db"), DirectorProfile::default()).unwrap();
+    let reopened = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
     assert_eq!(reopened.snapshot().unwrap(), snapshot);
 }
 
@@ -1422,7 +1422,7 @@ async fn claude_tool_requests_and_results_share_one_transcript_entry() {
 async fn restart_interrupts_unfinished_tool_records_without_erasing_output() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("db");
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     // Fixture sessions own no process, so restart repair leaves them alone.
     snapshot.sessions[0].fixture = false;
     snapshot.messages.push(Message {
@@ -1448,13 +1448,13 @@ async fn restart_interrupts_unfinished_tool_records_without_erasing_output() {
     });
     // The demo orchestration's example states survive a restart.
     demo_orchestration(&mut snapshot);
-    let mut store = Store::open(&db, DirectorProfile::default()).unwrap();
+    let mut store = Store::open(&db, AgentProfile::default()).unwrap();
     store.save(&snapshot).unwrap();
     drop(store);
     let (_, shutdown) = router_with_shutdown(
         &db,
         "tool-restart-test-token".into(),
-        DirectorProfile::default(),
+        AgentProfile::default(),
         RuntimeConfig::default(),
     )
     .unwrap();
@@ -1620,7 +1620,7 @@ done
         ),
         (250, 100, 50)
     );
-    let reopened = Store::open(&dir.path().join("db"), DirectorProfile::default()).unwrap();
+    let reopened = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
     assert_eq!(reopened.snapshot().unwrap(), snapshot);
 }
 

@@ -10,6 +10,7 @@ use relay_ui::tokens::{ground, px};
 /// The word for a state; `None` is an issue no agent has worked on yet.
 pub(crate) fn status_word(status: Option<AgentStatus>) -> &'static str {
     match status {
+        Some(AgentStatus::Idle) => "Ready to start",
         Some(AgentStatus::Working) => "Working",
         Some(AgentStatus::Waiting) => "Waiting for approval",
         Some(AgentStatus::Failed) => "Failed",

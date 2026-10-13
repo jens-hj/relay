@@ -195,9 +195,7 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                 }
             }
             if full.get() && active_boards(model).len() > 1 {
-                ReadoutCell key:"Board" value:"" {
-                    BoardChoices model:(model)
-                }
+                BoardChoices model:(model)
             }
             if model.selected_board().is_some() {
                 row width:{if tight.get() {Dimension::Px(px(36.0))} else {Dimension::MaxContent}}
@@ -361,10 +359,10 @@ pub(crate) fn BoardChoices(model: Model) -> Element {
                 let chosen = id.clone();
                 let name = board.name.clone();
                 row width:max-content shrink:0 {
-                    CellButton label:(format!("Select board {name}"))
+                    CellButton label:(format!("Select board {name}")) rule:(Rule::Left)
                         on-press:(press(move || select_board(model, &id)))
                         selected:(Derived::new(move || model.selected_board().is_some_and(|b| b.id == chosen)))
-                        horizontal-inset:(8.0) {
+                        horizontal-inset:(14.0) {
                         Label text:(name.clone()) role:(TextRole::Label)
                     }
                 }
@@ -820,7 +818,7 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
     let setup = Derived::new(move || {
         let snapshot = model.snapshot.get();
         let director = snapshot
-            .directors
+            .agent_configs
             .iter()
             .find(|d| d.id == model.worker_director.get())
             .map(|d| d.name.clone())
@@ -876,7 +874,7 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
                     if choosing.get() && !continuation {
                         col height:min-content gap:0px
                             stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                            for (_, director) in { model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
+                            for (_, director) in { model.snapshot.get().agent_configs.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
                                 DirectorChoice model:(model) id:(director.id.clone())
                                     name:(director.name.clone())
                             }
@@ -938,11 +936,11 @@ fn DirectorChoice(model: Model, id: String, name: String) -> Element {
     view! {
         row height:{px(34.0)}px shrink:0
             stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-            CellButton label:(format!("Director: {name}"))
+            CellButton label:(format!("Agent: {name}"))
                 on-press:(press(move || { model.worker_director.set(id.clone()); model.worker_approval.set(false); }))
                 selected:(Derived::new(move || model.worker_director.get() == chosen)) start:true
                 horizontal-inset:(18.0) {
-                Label text:(format!("Director: {name}")) role:(TextRole::Label)
+                Label text:(format!("Agent: {name}")) role:(TextRole::Label)
             }
         }
     }
@@ -982,10 +980,10 @@ pub(crate) fn sync_label(synced_at: Option<u64>) -> String {
     )
 }
 
-pub(crate) fn scope_label(scope: &DirectorScope, snapshot: &Snapshot) -> String {
+pub(crate) fn scope_label(scope: &AgentScope, snapshot: &Snapshot) -> String {
     match scope {
-        DirectorScope::Project => "All project issues".into(),
-        DirectorScope::Issues { issue_ids } => format!(
+        AgentScope::Project => "All project issues".into(),
+        AgentScope::Issues { issue_ids } => format!(
             "Selected issues: {}",
             issue_ids
                 .iter()
@@ -1047,7 +1045,7 @@ pub(crate) fn worker_policy(model: Model, continuation: bool) -> Vec<(&'static s
 
 /// The board's reading strip, level with the sidebar footer: task and run
 /// counts for the visible board, and worker activity across the project's
-/// directors. Fixture projects cannot run, so they show only the task count.
+/// agent_configs. Fixture projects cannot run, so they show only the task count.
 #[component]
 fn BoardFooter(model: Model) -> Element {
     let tasks = Derived::new(move || {
@@ -1077,7 +1075,7 @@ fn BoardFooter(model: Model) -> Element {
     let workers = Derived::new(move || {
         let snapshot = model.snapshot.get();
         let (active, limit) = snapshot
-            .directors
+            .agent_configs
             .iter()
             .filter(|d| d.project_id == model.project.get())
             .map(|d| crate::sidebar::director_capacity(&snapshot, &d.id))

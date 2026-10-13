@@ -52,7 +52,7 @@ pub fn shell(model: Model) -> Element {
                     }
                 }
                 col width:1fr min-width:0px label:"Main content" {
-                    if !matches!(model.page.get(), Page::Sessions | Page::Board | Page::Directors | Page::DirectorStart) || model.snapshot.get().projects.is_empty() {
+                    if !matches!(model.page.get(), Page::Sessions | Page::Board | Page::Profiles | Page::AgentStart) || model.snapshot.get().projects.is_empty() {
                         PageHeader model:(model)
                             // Settings and New Project are not about the open project, so
                             // they title themselves.
@@ -60,7 +60,7 @@ pub fn shell(model: Model) -> Element {
                             title:(Derived::new(move || if matches!(model.page.get(), Page::Settings | Page::NewProject) { page_label(model.page.get()).to_string() } else { model.snapshot.get().projects.iter().find(|p| p.id == model.project.get()).map(|p| p.name.clone()).unwrap_or_default() }))
                             compact:(Derived::new(move || width.get() < px(900.0)))
                     }
-                    if !matches!(model.page.get(), Page::Sessions | Page::Board | Page::Directors | Page::DirectorStart) || model.snapshot.get().projects.is_empty() {
+                    if !matches!(model.page.get(), Page::Sessions | Page::Board | Page::Profiles | Page::AgentStart) || model.snapshot.get().projects.is_empty() {
                         Notice model:(model)
                     }
                     if model.page.get() == Page::Settings {
@@ -69,7 +69,7 @@ pub fn shell(model: Model) -> Element {
                         }
                     } else if matches!(model.page.get(), Page::NewProject | Page::Connections | Page::Publish) {
                         ProjectPage model:(model)
-                    } else if model.page.get() == Page::DirectorStart {
+                    } else if model.page.get() == Page::AgentStart {
                         Conversation model:(model)
                     } else {
                         col {
@@ -341,12 +341,12 @@ fn page_label(page: Page) -> &'static str {
     match page {
         Page::Board => "Project board",
         Page::Sessions => "Sessions",
-        Page::Directors => "Directors",
+        Page::Profiles => "Directors",
         Page::Settings => "Settings",
         Page::NewProject => "New Project",
         Page::Connections => "Project Connections",
         Page::Publish => "Publish board",
-        Page::DirectorStart => "Director conversation",
+        Page::AgentStart => "Agent conversation",
     }
 }
 

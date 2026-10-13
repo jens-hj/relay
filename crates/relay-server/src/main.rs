@@ -1,4 +1,4 @@
-use relay_core::DirectorProfile;
+use relay_core::AgentProfile;
 use std::{env, path::PathBuf};
 
 #[tokio::main]
@@ -33,8 +33,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
     let defaults = match env::var("RELAY_DEFAULT_PROFILE") {
-        Ok(path) => DirectorProfile::from_toml(&std::fs::read_to_string(path)?)?,
-        Err(_) => DirectorProfile::default(),
+        Ok(path) => AgentProfile::from_toml(&std::fs::read_to_string(path)?)?,
+        Err(_) => AgentProfile::default(),
     };
     let (app, shutdown) = relay_server::router_with_browser(
         &path,

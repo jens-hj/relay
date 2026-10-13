@@ -28,7 +28,7 @@ impl Server {
         let (app, shutdown) = router_with_browser(
             self.dir.path().join("db"),
             token.into(),
-            DirectorProfile::default(),
+            AgentProfile::default(),
             RuntimeConfig::default(),
             config,
         )
@@ -63,7 +63,7 @@ impl Server {
         let (app, shutdown) = router_with_browser(
             dir.path().join("db"),
             TOKEN.into(),
-            DirectorProfile::default(),
+            AgentProfile::default(),
             RuntimeConfig::default(),
             BrowserConfig {
                 public_origin: Some(ORIGIN.into()),
@@ -600,21 +600,21 @@ async fn form_origin_csrf_limits_and_expiry_fail_closed() {
 async fn migration_rotation_restart_and_disabled_enrollment() {
     let s = Server::start().await;
     let (cookie, _) = s.enroll().await;
-    let store = Store::open(&s.dir.path().join("db"), DirectorProfile::default()).unwrap();
+    let store = Store::open(&s.dir.path().join("db"), AgentProfile::default()).unwrap();
     let before = store.snapshot().unwrap();
     store
         .connection
         .pragma_update(None, "user_version", 5)
         .unwrap();
     drop(store);
-    let mut store = Store::open(&s.dir.path().join("db"), DirectorProfile::default()).unwrap();
+    let mut store = Store::open(&s.dir.path().join("db"), AgentProfile::default()).unwrap();
     assert_eq!(store.snapshot().unwrap(), before);
     assert_eq!(
         store
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        12
+        13
     );
     BrowserAuth::initialize(
         &mut store,
@@ -641,7 +641,7 @@ async fn migration_rotation_restart_and_disabled_enrollment() {
     let disabled = router(
         s.dir.path().join("disabled"),
         TOKEN.into(),
-        DirectorProfile::default(),
+        AgentProfile::default(),
     )
     .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -736,11 +736,11 @@ async fn enrollment_expiry_rotation_races_and_recovery_revocation() {
 fn real_schema_five_migration_preserves_snapshot_receipts_and_assets() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
-    let store = Store::open(&path, DirectorProfile::default()).unwrap();
+    let store = Store::open(&path, AgentProfile::default()).unwrap();
     let snapshot = store.snapshot().unwrap();
     store.connection.execute_batch("DROP TABLE browser_owner; DROP TABLE browser_setup; DROP TABLE browser_sessions; DROP TABLE browser_recovery; DROP TABLE browser_state; PRAGMA user_version=5; INSERT INTO assets VALUES('kept','metadata',X'0102'); INSERT INTO receipts VALUES('receipt','kept');").unwrap();
     drop(store);
-    let store = Store::open(&path, DirectorProfile::default()).unwrap();
+    let store = Store::open(&path, AgentProfile::default()).unwrap();
     assert_eq!(snapshot, store.snapshot().unwrap());
     assert_eq!(
         store

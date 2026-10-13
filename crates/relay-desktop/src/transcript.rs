@@ -36,11 +36,11 @@ fn header_view(model: Model) -> HeaderView {
     let snapshot = model.snapshot.get();
     let id = model.session.get();
     let Some(session) = snapshot.sessions.iter().find(|s| s.id == id) else {
-        let draft = model.page.get() == crate::model::Page::DirectorStart;
+        let draft = model.page.get() == crate::model::Page::AgentStart;
         return HeaderView {
             path: Vec::new(),
             title: if draft {
-                "Director conversation".into()
+                "Agent conversation".into()
             } else {
                 "Agent".into()
             },
@@ -333,13 +333,13 @@ pub(crate) fn ledger_view(model: Model, open: bool) -> LedgerView {
     let id = model.session.get();
     let session = snapshot.sessions.iter().find(|s| s.id == id);
     let director = session
-        .map(|s| s.director_id.clone())
+        .map(|s| s.agent_config_id.clone())
         .unwrap_or_else(|| model.worker_director.get());
     let harness = session
         .and_then(|s| s.worker.as_ref().map(|w| w.harness))
         .or_else(|| {
             snapshot
-                .directors
+                .agent_configs
                 .iter()
                 .find(|d| d.id == director)
                 .and_then(|d| snapshot.effective_profile(d).ok())

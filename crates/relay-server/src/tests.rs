@@ -6,7 +6,7 @@ use std::{path::PathBuf, time::Duration};
 mod command_tests;
 mod harness_tests;
 pub(super) fn live() -> Snapshot {
-    let mut defaults = DirectorProfile::default();
+    let mut defaults = AgentProfile::default();
     defaults
         .permissions
         .insert(Task::Implement, Permission::Ask);
@@ -27,7 +27,7 @@ pub(super) fn live() -> Snapshot {
         i.reference.as_mut().unwrap().provider = Provider::Github;
         i.reference.as_mut().unwrap().repository = p.repository.clone();
     }
-    for director in &mut s.directors {
+    for director in &mut s.agent_configs {
         director.project_id = p.id.clone();
     }
     for session in &mut s.sessions {
@@ -56,13 +56,13 @@ pub(super) fn env(revision: u64, command: Command) -> CommandEnvelope {
 pub(super) fn start(s: &Snapshot) -> Command {
     Command::StartWorker {
         issue_id: s.issues[0].id.clone(),
-        director_id: s.directors[0].id.clone(),
+        agent_config_id: s.agent_configs[0].id.clone(),
         prompt: "Implement safely".into(),
         approve_implementation: true,
     }
 }
 pub(super) fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig) -> Workspace {
-    let mut store = Store::open(path, DirectorProfile::default()).unwrap();
+    let mut store = Store::open(path, AgentProfile::default()).unwrap();
     store.save(snapshot).unwrap();
     let (snapshots, _) = watch::channel(snapshot.clone());
     let browser =
@@ -152,7 +152,7 @@ fn each_turn_checks_current_scope_permissions_harness_and_limit() {
     let mut s = live();
     let c = config();
     let issue = s.issues[0].id.clone();
-    let d = s.directors[0].id.clone();
+    let d = s.agent_configs[0].id.clone();
     assert!(runtime::authorize_turn(&s, &issue, &d, false, &c).is_err());
     assert!(runtime::authorize_turn(&s, &issue, &d, true, &c).is_ok());
     s.projects[0]
@@ -171,11 +171,11 @@ fn each_turn_checks_current_scope_permissions_harness_and_limit() {
     s.projects[0].defaults.harness = Harness::ClaudeCode;
     assert!(runtime::authorize_turn(&s, &issue, &d, true, &c).is_ok());
     s.projects[0].defaults.harness = Harness::Codex;
-    s.projects[0].defaults.scope = DirectorScope::Issues {
+    s.projects[0].defaults.scope = AgentScope::Issues {
         issue_ids: vec!["other".into()],
     };
     assert!(runtime::authorize_turn(&s, &issue, &d, true, &c).is_err());
-    s.projects[0].defaults.scope = DirectorScope::Project;
+    s.projects[0].defaults.scope = AgentScope::Project;
     s.projects[0].fixture = true;
     assert!(runtime::authorize_turn(&s, &issue, &d, true, &c).is_err());
 }
@@ -340,7 +340,7 @@ fn migration_keeps_comments_and_restart_interrupts_only_unfinished_runs() {
         .apply(request.clone(), &w.config)
         .unwrap();
     // Simulate old snapshots with optional contract fields absent.
-    let mut old = serde_json::to_value(demo_snapshot(DirectorProfile::default())).unwrap();
+    let mut old = serde_json::to_value(demo_snapshot(AgentProfile::default())).unwrap();
     for p in old["projects"].as_array_mut().unwrap() {
         p.as_object_mut().unwrap().remove("github");
     }
@@ -353,11 +353,11 @@ fn migration_keeps_comments_and_restart_interrupts_only_unfinished_runs() {
     let _router = router_with_config(
         &path,
         "test-token-long-enough".into(),
-        DirectorProfile::default(),
+        AgentProfile::default(),
         config(),
     )
     .unwrap();
-    let mut store = Store::open(&path, DirectorProfile::default()).unwrap();
+    let mut store = Store::open(&path, AgentProfile::default()).unwrap();
     let restarted = store.snapshot().unwrap();
     assert_eq!(
         restarted
@@ -542,7 +542,7 @@ async fn subprocess_exact_resume_sandbox_stdin_usage_and_untracked_diff() {
     );
     assert_eq!(
         context["effective_profile"]["completion"],
-        serde_json::to_value(s.effective_profile(&s.directors[0]).unwrap().completion).unwrap()
+        serde_json::to_value(s.effective_profile(&s.agent_configs[0]).unwrap().completion).unwrap()
     );
     assert!(prompt.contains("untrusted context"));
     assert!(s.messages.iter().any(|m| m.session_id == id
@@ -821,7 +821,7 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
         let _w = workspace(&db, &s, c.clone());
     }
     let token = "runtime-integration-token";
-    let app = router_with_config(&db, token.into(), DirectorProfile::default(), c).unwrap();
+    let app = router_with_config(&db, token.into(), AgentProfile::default(), c).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -941,9 +941,9 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
     for legacy_version in [0, 1] {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("db");
-        let defaults = DirectorProfile {
+        let defaults = AgentProfile {
             max_workers: 7,
-            ..DirectorProfile::default()
+            ..AgentProfile::default()
         };
         let mut s = demo_snapshot(defaults);
         s.apply(
@@ -988,7 +988,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
             .execute("INSERT INTO workspace VALUES(1,?1)", [value.to_string()])
             .unwrap();
         drop(connection);
-        let mut store = Store::open(&db, DirectorProfile::default()).unwrap();
+        let mut store = Store::open(&db, AgentProfile::default()).unwrap();
         s.migrate_projects();
         assert_eq!(store.snapshot().unwrap(), s);
         // Legacy optional fields default to None; persisted defaults win over new seed defaults.
@@ -1020,10 +1020,10 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            12
+            13
         );
         drop(store);
-        let mut reopened = Store::open(&db, DirectorProfile::default()).unwrap();
+        let mut reopened = Store::open(&db, AgentProfile::default()).unwrap();
         assert_eq!(reopened.snapshot().unwrap(), s);
         assert!(
             reopened
@@ -1044,24 +1044,87 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
 }
 
 #[test]
+fn legacy_agent_configuration_fields_migrate_without_losing_sessions_or_profiles() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("profiles.sqlite3");
+    let original = demo_snapshot(AgentProfile::default());
+    {
+        let store = Store::open(&path, AgentProfile::default()).unwrap();
+        let mut legacy = serde_json::to_value(&original).unwrap();
+        let configs = legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("agent_configs")
+            .unwrap();
+        legacy["directors"] = configs;
+        for config in legacy["directors"].as_array_mut().unwrap() {
+            config.as_object_mut().unwrap().remove("template");
+        }
+        legacy.as_object_mut().unwrap().remove("agent_templates");
+        legacy["protocol_version"] = serde_json::json!(5);
+        for session in legacy["sessions"].as_array_mut().unwrap() {
+            let config = session
+                .as_object_mut()
+                .unwrap()
+                .remove("agent_config_id")
+                .unwrap();
+            session["director_id"] = config;
+            session.as_object_mut().unwrap().remove("profile");
+            if session["role"] == "root" {
+                session["role"] = serde_json::json!("director");
+            }
+        }
+        store
+            .connection
+            .execute(
+                "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                [legacy.to_string()],
+            )
+            .unwrap();
+        store
+            .connection
+            .pragma_update(None, "user_version", 12)
+            .unwrap();
+    }
+    let mut store = Store::open(&path, AgentProfile::default()).unwrap();
+    assert_eq!(store.snapshot().unwrap(), original);
+    let envelope = env(
+        original.revision,
+        Command::SaveAgentTemplate {
+            project_id: original.projects[0].id.clone(),
+            name: "Reviewer".into(),
+            profile: AgentProfile::worker(&original.projects[0].defaults),
+        },
+    );
+    let saved = store.apply(envelope, &config()).unwrap().0;
+    drop(store);
+    let reopened = Store::open(&path, AgentProfile::default())
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    assert_eq!(reopened, saved);
+    assert_eq!(reopened.agent_templates[0].name, "Reviewer");
+}
+
+#[test]
 fn newer_database_version_is_rejected_without_mutating_history() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("db");
-    let store = Store::open(&db, DirectorProfile::default()).unwrap();
+    let store = Store::open(&db, AgentProfile::default()).unwrap();
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 13)
+        .pragma_update(None, "user_version", 14)
         .unwrap();
     drop(store);
-    let error = Store::open(&db, DirectorProfile::default()).err().unwrap();
+    let error = Store::open(&db, AgentProfile::default()).err().unwrap();
     assert_eq!(error.code, "invalid");
     let connection = Connection::open(&db).unwrap();
     assert_eq!(
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        13
+        14
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -1168,7 +1231,7 @@ async fn restart_reaps_owned_process_and_late_output_cannot_replace_interrupted_
     let _restarted = router_with_config(
         &db,
         "test-token-long-enough".into(),
-        DirectorProfile::default(),
+        AgentProfile::default(),
         c,
     )
     .unwrap();
@@ -1249,7 +1312,7 @@ async fn resume_rechecks_current_profile_and_requires_new_approval() {
         .defaults
         .permissions
         .insert(Task::Implement, Permission::Allow);
-    denied.projects[0].defaults.scope = DirectorScope::Issues {
+    denied.projects[0].defaults.scope = AgentScope::Issues {
         issue_ids: vec!["other".into()],
     };
     store.save(&denied).unwrap();
@@ -1674,7 +1737,7 @@ fn removed_board_items_keep_linked_identity_without_becoming_active() {
     })
     .unwrap();
     let issue_id = s.issues[0].id.clone();
-    let director = s.directors[0].id.clone();
+    let director = s.agent_configs[0].id.clone();
     w.store
         .lock()
         .unwrap()
@@ -1922,7 +1985,7 @@ fn oversized_github_capture_reports_error_without_destroying_last_good_board() {
 fn configured_live_project_migration_preserves_demo_and_historical_identities() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("db");
-    let defaults = DirectorProfile::default();
+    let defaults = AgentProfile::default();
     let mut store = Store::open(&db, defaults.clone()).unwrap();
     let mut demo = store.snapshot().unwrap();
     demo.apply(
@@ -1962,15 +2025,15 @@ fn configured_live_project_migration_preserves_demo_and_historical_identities() 
     assert_eq!(a.sessions, demo.sessions);
     assert_eq!(a.messages, demo.messages);
     assert_eq!(a.comments, demo.comments);
-    for director in &demo.directors {
-        assert!(a.directors.contains(director));
+    for director in &demo.agent_configs {
+        assert!(a.agent_configs.contains(director));
         assert_eq!(
             a.effective_profile(director).unwrap(),
             demo.effective_profile(director).unwrap()
         );
     }
     let director = a
-        .directors
+        .agent_configs
         .iter()
         .find(|d| d.project_id == current.id)
         .unwrap();
@@ -2014,7 +2077,7 @@ fn configured_live_project_migration_preserves_demo_and_historical_identities() 
         Some(&demo.projects[0])
     );
     assert_eq!(b.issues, a.issues);
-    assert_eq!(b.directors[..a.directors.len()], a.directors);
+    assert_eq!(b.agent_configs[..a.agent_configs.len()], a.agent_configs);
     assert!(!runtime::configured_project(&current, &next));
     let mut store = Store::open(&db, defaults.clone()).unwrap();
     assert!(
@@ -2036,7 +2099,7 @@ fn configured_live_project_migration_preserves_demo_and_historical_identities() 
     let restored = Store::open(&db, defaults).unwrap().snapshot().unwrap();
     assert_eq!(restored.projects[0], current);
     assert_eq!(restored.projects.len(), 3);
-    assert_eq!(restored.directors, b.directors);
+    assert_eq!(restored.agent_configs, b.agent_configs);
     assert_eq!(restored.comments, demo.comments);
 }
 #[test]
@@ -2053,11 +2116,11 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
     let _router = router_with_config(
         &db,
         "token-at-least-sixteen".into(),
-        DirectorProfile::default(),
+        AgentProfile::default(),
         c.clone(),
     )
     .unwrap();
-    let s = Store::open(&db, DirectorProfile::default())
+    let s = Store::open(&db, AgentProfile::default())
         .unwrap()
         .snapshot()
         .unwrap();
@@ -2084,7 +2147,7 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
     assert_eq!(synced.sessions, s.sessions);
     assert_eq!(synced.messages, s.messages);
     assert_eq!(synced.comments, s.comments);
-    assert_eq!(synced.directors, s.directors);
+    assert_eq!(synced.agent_configs, s.agent_configs);
     assert!(
         synced
             .validate_profile(
@@ -2092,7 +2155,7 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
                 &synced
                     .effective_profile(
                         synced
-                            .directors
+                            .agent_configs
                             .iter()
                             .find(|d| d.id == "director-review")
                             .unwrap()
@@ -2107,7 +2170,7 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
         .find(|i| i.project_id == live_id)
         .unwrap();
     let director = synced
-        .directors
+        .agent_configs
         .iter()
         .find(|d| d.project_id == live_id)
         .unwrap();
@@ -2150,18 +2213,18 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
             .unwrap()
             .result = Some("Reviewed on original board".into());
         snapshot
-            .directors
+            .agent_configs
             .iter_mut()
             .find(|d| d.id == director.id)
             .unwrap()
             .overrides
-            .scope = Some(DirectorScope::Issues {
+            .scope = Some(AgentScope::Issues {
             issue_ids: vec![issue.id.clone()],
         });
         let mut history = snapshot.sessions[0].clone();
         history.id = "retained-board-history".into();
         history.project_id = live_id.clone();
-        history.director_id = director.id.clone();
+        history.agent_config_id = director.id.clone();
         history.issue_id = Some(issue.id.clone());
         history.worker = None;
         snapshot.sessions.push(history);
@@ -2172,11 +2235,11 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
     let _router = router_with_config(
         &db,
         "token-at-least-sixteen".into(),
-        DirectorProfile::default(),
+        AgentProfile::default(),
         second.clone(),
     )
     .unwrap();
-    let second_snapshot = Store::open(&db, DirectorProfile::default())
+    let second_snapshot = Store::open(&db, AgentProfile::default())
         .unwrap()
         .snapshot()
         .unwrap();
@@ -2216,16 +2279,21 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
         Some(old.id.as_str())
     );
     assert_eq!(
-        both.effective_profile(both.directors.iter().find(|d| d.id == director.id).unwrap())
-            .unwrap()
-            .scope,
-        DirectorScope::Issues {
+        both.effective_profile(
+            both.agent_configs
+                .iter()
+                .find(|d| d.id == director.id)
+                .unwrap()
+        )
+        .unwrap()
+        .scope,
+        AgentScope::Issues {
             issue_ids: vec![old.id.clone()]
         }
     );
     assert_eq!(both.issues.iter().filter(|i| i.id == old.id).count(), 1);
     let new_director = both
-        .directors
+        .agent_configs
         .iter()
         .find(|d| d.project_id == second_id)
         .unwrap();
@@ -2274,7 +2342,7 @@ async fn hard_crash_kills_codex_parent_before_restart() {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if pid_file.exists() && db.exists() {
-                let store = Store::open(&db, DirectorProfile::default()).unwrap();
+                let store = Store::open(&db, AgentProfile::default()).unwrap();
                 if store
                     .snapshot()
                     .unwrap()
@@ -2320,7 +2388,7 @@ async fn hard_crash_kills_codex_parent_before_restart() {
     let (_router, shutdown) = router_with_shutdown(
         &db,
         "crash-test-valid-token".into(),
-        DirectorProfile::default(),
+        AgentProfile::default(),
         RuntimeConfig::default(),
     )
     .unwrap();
@@ -2850,11 +2918,11 @@ async fn queue_cancel_edit_and_restart_preserve_payload_and_never_replay_deliver
     let _router = router_with_config(
         dir.path().join("db"),
         "sixteen-character-token".into(),
-        DirectorProfile::default(),
+        AgentProfile::default(),
         c.clone(),
     )
     .unwrap();
-    let mut store = Store::open(&dir.path().join("db"), DirectorProfile::default()).unwrap();
+    let mut store = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
     let s = store.snapshot().unwrap();
     assert_eq!(
         s.submissions
@@ -3022,11 +3090,11 @@ async fn first_director_message_preserves_images_through_process_input_and_retry
             connections: vec![],
         },
         "first-project",
-        DirectorProfile::default(),
+        AgentProfile::default(),
         &RuntimeConfig::default(),
     )
     .unwrap();
-    let director_id = snapshot.directors[0].id.clone();
+    let agent_config_id = snapshot.agent_configs[0].id.clone();
     let w = workspace(
         &dir.path().join("db"),
         &snapshot,
@@ -3061,8 +3129,9 @@ async fn first_director_message_preserves_images_through_process_input_and_retry
     ];
     let request = env(
         snapshot.revision,
-        Command::StartDirector {
-            director_id,
+        Command::StartRootAgent {
+            issue_id: None,
+            agent_config_id,
             prompt: plain_text(&parts),
             parts: parts.clone(),
             approve_implementation: false,
@@ -3071,7 +3140,7 @@ async fn first_director_message_preserves_images_through_process_input_and_retry
     // A missing upload must roll back the new task and session.
     let mut invalid = request.clone();
     invalid.request_id = uuid::Uuid::new_v4().to_string();
-    if let Command::StartDirector { parts, prompt, .. } = &mut invalid.command {
+    if let Command::StartRootAgent { parts, prompt, .. } = &mut invalid.command {
         if let PartKind::Asset { asset } = &mut parts[1].kind {
             asset.id = uuid::Uuid::new_v4().to_string();
         }

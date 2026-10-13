@@ -12,6 +12,7 @@ use std::rc::Rc;
 /// The state of an agent or tool call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AgentStatus {
+    Idle,
     Working,
     Waiting,
     Failed,
@@ -22,7 +23,15 @@ pub enum AgentStatus {
 crate::value::live_value!(AgentStatus);
 
 impl AgentStatus {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
+        Self::Working,
+        Self::Waiting,
+        Self::Failed,
+        Self::Queued,
+        Self::Done,
+        Self::Idle,
+    ];
+    pub const ACTIVITY: [Self; 5] = [
         Self::Working,
         Self::Waiting,
         Self::Failed,
@@ -33,6 +42,7 @@ impl AgentStatus {
     /// The accessible name of the mark.
     pub fn label(self) -> &'static str {
         match self {
+            Self::Idle => "Idle",
             Self::Working => "Working",
             Self::Waiting => "Waiting for approval",
             Self::Failed => "Failed",
@@ -44,6 +54,7 @@ impl AgentStatus {
     /// The short word for counts and filters.
     pub fn word(self) -> &'static str {
         match self {
+            Self::Idle => "idle",
             Self::Working => "working",
             Self::Waiting => "waiting",
             Self::Failed => "failed",
@@ -58,7 +69,7 @@ impl AgentStatus {
             Self::Working => Signal::Live.token(),
             Self::Waiting => Signal::NeedsYou.token(),
             Self::Failed => Signal::Failed.token(),
-            Self::Queued | Self::Done => ground.muted,
+            Self::Idle | Self::Queued | Self::Done => ground.muted,
         }
     }
 }
@@ -113,6 +124,7 @@ pub fn paint_status(scene: &mut Scene, rect: Rect, status: AgentStatus, breath: 
     let inner = Rect::from_xywh(at(1.0, 1.0).x, at(1.0, 1.0).y, 8.0 * unit, 8.0 * unit);
     let tint = color(status.token());
     match status {
+        AgentStatus::Idle => {}
         AgentStatus::Working => {
             scene.shape(Shape::new(inner).fill(tint.alpha(tint.a * breath)));
         }

@@ -38,7 +38,7 @@ fn mount(light: bool, width: f32) -> Mounted {
     let (sender, commands) = tokio::sync::mpsc::unbounded_channel();
     let model = scope.run(|| Model::new(&ui, sender));
     model.receive(NetworkState {
-        snapshot: demo_snapshot(DirectorProfile::default()),
+        snapshot: demo_snapshot(AgentProfile::default()),
         connected: true,
         status: "Connected".into(),
         ..Default::default()
@@ -64,9 +64,9 @@ fn command_discovery_errors_are_visible_and_retryable() {
     let mut snapshot = mounted.model.snapshot.get_untracked();
     snapshot.sessions.clear();
     snapshot.projects[0].fixture = false;
-    let director_id = snapshot.directors[0].id.clone();
+    let agent_config_id = snapshot.agent_configs[0].id.clone();
     mounted.model.snapshot.set(snapshot);
-    mounted.model.open_director(director_id);
+    mounted.model.open_root_agent(agent_config_id);
     let id = mounted.model.session.get_untracked();
     crate::buffer::edit(mounted.model, &id, vec![Part::text("/")]);
     mounted.settle();
@@ -108,12 +108,12 @@ fn first_director_draft_requests_command_discovery_and_completes() {
     let mut snapshot = mounted.model.snapshot.get_untracked();
     snapshot.sessions.clear();
     snapshot.projects[0].fixture = false;
-    let director_id = snapshot.directors[0].id.clone();
+    let agent_config_id = snapshot.agent_configs[0].id.clone();
     mounted.model.snapshot.set(snapshot);
-    mounted.model.open_director(director_id);
+    mounted.model.open_root_agent(agent_config_id);
     mounted.settle();
     let id = mounted.model.session.get_untracked();
-    assert!(id.starts_with("director-draft-"));
+    assert!(id.starts_with("agent-draft-"));
     assert!(
         matches!(requests.try_recv().unwrap(), crate::buffer_network::Request::Catalog {session, force:false} if session == id)
     );
@@ -1481,7 +1481,7 @@ fn profile_controls_preserve_inheritance_and_reject_invalid_imports() {
     mounted.focus("Increase worker limit");
     mounted.click("Increase worker limit");
     assert_eq!(mounted.model.editor_profile.get_untracked().max_workers, 5);
-    assert_eq!(mounted.model.origin("max_workers"), "Director override");
+    assert_eq!(mounted.model.origin("max_workers"), "Agent override");
     mounted.focus("Inherit max_workers");
     mounted.click("Inherit max_workers");
     assert_eq!(mounted.model.editor_profile.get_untracked().max_workers, 4);
@@ -1504,13 +1504,16 @@ fn profile_controls_preserve_inheritance_and_reject_invalid_imports() {
     });
     assert_eq!(
         mounted.model.editor.get_untracked(),
-        EditTarget::Director(format!("director-{}", request.request_id))
+        EditTarget::Config(format!("agent-config-{}", request.request_id))
     );
-    assert_eq!(mounted.model.snapshot.get_untracked().directors.len(), 3);
+    assert_eq!(
+        mounted.model.snapshot.get_untracked().agent_configs.len(),
+        3
+    );
 }
 
 fn live_snapshot() -> Snapshot {
-    let mut defaults = DirectorProfile::default();
+    let mut defaults = AgentProfile::default();
     defaults
         .permissions
         .insert(Task::Implement, Permission::Ask);
@@ -1523,7 +1526,7 @@ fn live_snapshot() -> Snapshot {
         last_synced_at: None,
         sync_error: None,
     });
-    snapshot.directors[0].overrides = ProfileOverrides::default();
+    snapshot.agent_configs[0].overrides = ProfileOverrides::default();
     snapshot
 }
 
@@ -1630,7 +1633,7 @@ fn delayed_start_acknowledgement_opens_the_sessions_own_project() {
     assert_eq!(mounted.model.session.get_untracked(), session.id);
     assert_eq!(
         mounted.model.worker_director.get_untracked(),
-        session.director_id
+        session.agent_config_id
     );
     assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
     assert!(!mounted.model.worker_approval.get_untracked());
@@ -1661,7 +1664,7 @@ fn deny_scope_harness_and_capacity_cannot_be_overridden() {
             .defaults
             .permissions
             .insert(Task::Implement, Permission::Allow);
-        s.projects[0].defaults.scope = DirectorScope::Issues {
+        s.projects[0].defaults.scope = AgentScope::Issues {
             issue_ids: vec!["other".into()],
         };
     });
@@ -1673,7 +1676,7 @@ fn deny_scope_harness_and_capacity_cannot_be_overridden() {
             .contains("scope")
     );
     mounted.model.snapshot.update(|s| {
-        s.projects[0].defaults.scope = DirectorScope::Project;
+        s.projects[0].defaults.scope = AgentScope::Project;
         s.projects[0].defaults.harness = Harness::ClaudeCode;
     });
     assert!(mounted.model.worker_gate(false).is_ok());
@@ -1697,7 +1700,7 @@ fn worker_running_stop_completed_review_and_continue_use_recorded_session() {
     let session = &mut snapshot.sessions[0];
     session.fixture = false;
     session.issue_id = Some("issue-2".into());
-    session.director_id = snapshot.directors[0].id.clone();
+    session.agent_config_id = snapshot.agent_configs[0].id.clone();
     session.worker = Some(WorkerRun {
         model: None,
         context_tokens: None,
@@ -1813,7 +1816,7 @@ fn live_initial_selection_and_dynamic_columns_metadata_remain_reactive() {
     for issue in &mut snapshot.issues {
         issue.project_id = "remote-project".into();
     }
-    for director in &mut snapshot.directors {
+    for director in &mut snapshot.agent_configs {
         director.project_id = "remote-project".into();
     }
     let mut historical = snapshot.projects[0].clone();
@@ -1865,10 +1868,10 @@ fn removed_board_items_keep_history_but_block_new_turns_until_restored() {
         .unwrap();
     let previous_column = issue.column_id.clone();
     issue.column_id = "github-removed-from-board".into();
-    let director_id = snapshot.directors[0].id.clone();
+    let agent_config_id = snapshot.agent_configs[0].id.clone();
     let session = &mut snapshot.sessions[0];
     session.issue_id = Some("issue-2".into());
-    session.director_id = director_id;
+    session.agent_config_id = agent_config_id;
     session.fixture = false;
     session.worker = Some(WorkerRun {
         model: None,
@@ -1983,8 +1986,8 @@ fn removed_board_items_keep_history_but_block_new_turns_until_restored() {
 fn unmodified_default_director_can_delegate_automatically() {
     let mut mounted = mount(false, 1380.0);
     let mut snapshot = live_snapshot();
-    snapshot.projects[0].defaults = DirectorProfile::default();
-    assert_eq!(snapshot.projects[0].defaults, DirectorProfile::default());
+    snapshot.projects[0].defaults = AgentProfile::default();
+    assert_eq!(snapshot.projects[0].defaults, AgentProfile::default());
     assert!(
         !snapshot.projects[0]
             .defaults
@@ -2212,7 +2215,7 @@ fn failed_launch_without_thread_offers_new_linked_worker_instead_of_continue() {
     let session = &mut snapshot.sessions[0];
     session.fixture = false;
     session.issue_id = Some("issue-2".into());
-    session.director_id = snapshot.directors[0].id.clone();
+    session.agent_config_id = snapshot.agent_configs[0].id.clone();
     session.worker = Some(WorkerRun {
         model: None,
         context_tokens: None,
@@ -2259,7 +2262,7 @@ fn failed_launch_without_thread_offers_new_linked_worker_instead_of_continue() {
     );
     assert_eq!(
         mounted.model.worker_director.get_untracked(),
-        mounted.model.snapshot.get_untracked().directors[0].id
+        mounted.model.snapshot.get_untracked().agent_configs[0].id
     );
     assert_eq!(
         mounted.model.worker_prompt.get_untracked(),
@@ -3203,7 +3206,7 @@ fn local_project_snapshot() -> Snapshot {
     let mut snapshot = live_snapshot();
     snapshot.projects[0].github = None;
     snapshot.projects[0].root = Some("/server/projects/relay".into());
-    snapshot.projects[0].defaults = DirectorProfile::default();
+    snapshot.projects[0].defaults = AgentProfile::default();
     for issue in &mut snapshot.issues {
         issue.reference = None;
     }
@@ -3500,14 +3503,14 @@ fn first_director_prompt_uses_planning_session_without_issue_or_implementation_a
     mounted
         .model
         .snapshot
-        .update(|s| s.sessions.retain(|s| s.role != SessionRole::Director));
+        .update(|s| s.sessions.retain(|s| s.role != SessionRole::Root));
     mounted
         .model
         .worker_prompt
         .set("Unrelated worker draft".into());
-    mounted.model.open_director("director-main".into());
+    mounted.model.open_root_agent("director-main".into());
     mounted.settle();
-    assert_eq!(mounted.model.page.get_untracked(), Page::DirectorStart);
+    assert_eq!(mounted.model.page.get_untracked(), Page::AgentStart);
     let draft_label = |mounted: &Mounted| {
         mounted
             .ui
@@ -3518,15 +3521,15 @@ fn first_director_prompt_uses_planning_session_without_issue_or_implementation_a
             .unwrap()
     };
     type_in(&mounted, &draft_label(&mounted), "Plan the project");
-    mounted.model.open_director("director-review".into());
+    mounted.model.open_root_agent("director-review".into());
     mounted.settle();
     type_in(&mounted, &draft_label(&mounted), "Review plan");
-    mounted.model.open_director("director-main".into());
+    mounted.model.open_root_agent("director-main".into());
     mounted.settle();
     assert_eq!(
         plain_text(&crate::buffer::parts(
             mounted.model,
-            "director-draft-director-main"
+            "agent-draft-director-main"
         )),
         "Plan the project"
     );
@@ -3536,7 +3539,7 @@ fn first_director_prompt_uses_planning_session_without_issue_or_implementation_a
     );
     mounted.click("Send message");
     assert!(
-        matches!(mounted.commands.try_recv().unwrap().command,Command::StartDirector{director_id,prompt,parts,approve_implementation:false} if director_id=="director-main" && prompt=="Plan the project" && plain_text(&parts)==prompt)
+        matches!(mounted.commands.try_recv().unwrap().command,Command::StartRootAgent{agent_config_id,prompt,parts,issue_id:None,approve_implementation:false} if agent_config_id=="director-main" && prompt=="Plan the project" && plain_text(&parts)==prompt)
     );
 }
 
@@ -4171,12 +4174,12 @@ fn director_execution_does_not_consume_worker_capacity_or_block_director_continu
         .defaults
         .permissions
         .insert(Task::Implement, Permission::Allow);
-    let director_id = snapshot.directors[0].id.clone();
+    let agent_config_id = snapshot.agent_configs[0].id.clone();
     let session = &mut snapshot.sessions[0];
     session.fixture = false;
-    session.director_id = director_id.clone();
+    session.agent_config_id = agent_config_id.clone();
     session.issue_id = Some("issue-2".into());
-    session.role = SessionRole::Director;
+    session.role = SessionRole::Root;
     session.worker = Some(WorkerRun {
         model: None,
         context_tokens: None,
@@ -4195,7 +4198,7 @@ fn director_execution_does_not_consume_worker_capacity_or_block_director_continu
     });
     let director_session = session.id.clone();
     mounted.model.snapshot.set(snapshot.clone());
-    mounted.model.worker_director.set(director_id);
+    mounted.model.worker_director.set(agent_config_id);
     mounted.model.issue.set(Some("issue-2".into()));
     assert_eq!(mounted.model.worker_profile(false).unwrap().1, 0);
     assert!(mounted.model.worker_gate(false).is_ok());
@@ -4312,8 +4315,8 @@ fn published_aliases_preserve_selected_board_scope_and_linked_sessions() {
         .issue_aliases
         .insert("imported-history".into(), canonical.clone());
     snapshot.sessions[0].issue_id = Some("imported-history".into());
-    let director = snapshot.directors[0].id.clone();
-    snapshot.directors[0].overrides.scope = Some(DirectorScope::Issues {
+    let director = snapshot.agent_configs[0].id.clone();
+    snapshot.agent_configs[0].overrides.scope = Some(AgentScope::Issues {
         issue_ids: vec!["imported-history".into()],
     });
     let mut old_board = snapshot.boards[0].clone();
@@ -4699,7 +4702,7 @@ fn usage_split_separates_cached_input_and_survives_bad_reports() {
 fn issue_status_prefers_waiting_and_active_work_then_the_latest_outcome() {
     use crate::adapt::issue_status;
     use relay_ui::prelude::AgentStatus;
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     let template = snapshot.sessions[1].clone();
     let session = |id: &str, status: WorkerStatus| {
         let mut session = template.clone();
@@ -4773,7 +4776,7 @@ fn session_header_usage_and_execution_mode_use_measured_state() {
     let session = &mut snapshot.sessions[0];
     session.fixture = false;
     session.issue_id = Some("issue-2".into());
-    session.director_id = snapshot.directors[0].id.clone();
+    session.agent_config_id = snapshot.agent_configs[0].id.clone();
     let mut run = worker_run(WorkerStatus::Running);
     run.usage = Some(TokenUsage {
         input_tokens: 48_213,
@@ -4876,8 +4879,10 @@ fn permission_rows_set_exact_values_for_every_action_by_click_and_keyboard() {
 fn director_options_survive_reopening_after_profile_controls_are_removed() {
     let mounted = mount(false, 1380.0);
     for _ in 0..3 {
-        open_project_menu(&mounted);
-        mounted.click("Profile for Project director");
+        mounted
+            .model
+            .open_profile(EditTarget::Config("director-main".into()));
+        mounted.settle();
         mounted
             .model
             .modify_profile("harness", |p| p.harness = Harness::ClaudeCode);
@@ -4888,22 +4893,24 @@ fn director_options_survive_reopening_after_profile_controls_are_removed() {
             .model
             .modify_profile("completion", |p| p.completion.clear());
         mounted.model.modify_profile("scope", |p| {
-            p.scope = DirectorScope::Issues {
+            p.scope = AgentScope::Issues {
                 issue_ids: vec!["issue-1".into()],
             }
         });
         mounted.settle();
-        open_project_menu(&mounted);
-        mounted.click("Open director Project director");
+        mounted.model.open_root_agent("director-main".into());
+        mounted.settle();
         // Reloading defaults changes every toggle after the old page is gone.
-        open_project_menu(&mounted);
-        mounted.click("Profile for Review director");
+        mounted
+            .model
+            .open_profile(EditTarget::Config("director-review".into()));
+        mounted.settle();
         assert_eq!(
             mounted.model.editor.get_untracked(),
-            EditTarget::Director("director-review".into())
+            EditTarget::Config("director-review".into())
         );
-        open_project_menu(&mounted);
-        mounted.click("Open director Project director");
+        mounted.model.open_root_agent("director-main".into());
+        mounted.settle();
     }
 }
 
@@ -4922,7 +4929,7 @@ fn usage_readout_follows_new_reports_for_the_same_session() {
     let mut snapshot = live_snapshot();
     snapshot.sessions[0].fixture = false;
     snapshot.sessions[0].issue_id = Some("issue-2".into());
-    snapshot.sessions[0].director_id = snapshot.directors[0].id.clone();
+    snapshot.sessions[0].agent_config_id = snapshot.agent_configs[0].id.clone();
     let mut run = worker_run(WorkerStatus::Running);
     run.usage = Some(TokenUsage {
         input_tokens: 1_000,
@@ -5103,7 +5110,9 @@ fn inverse_controls_show_hover_and_press_in_every_palette() {
         let light = matches!(variant, ThemeVariant::Light | ThemeVariant::LightContrast);
         let mounted = mount(light, 1380.0);
         install_theme(&theme(variant, 1.0));
-        mounted.model.open_director_profile("director-main".into());
+        mounted
+            .model
+            .open_profile(EditTarget::Config("director-main".into()));
         mounted.settle();
         let fill = |label: &str| {
             let id = mounted
@@ -5152,10 +5161,7 @@ fn inverse_controls_show_hover_and_press_in_every_palette() {
         hold("Save profile", "Save profile");
         hold("Agent harness: Codex", "Agent harness: Codex");
         open_project_menu(&mounted);
-        hold(
-            "Open director Review director",
-            "Open director Review director",
-        );
+        hold("Select project Relay · demo", "Select project Relay · demo");
         open_project_menu(&mounted);
         mounted.click("New Project");
         hold("Create project", "Create project");
@@ -5191,7 +5197,7 @@ fn fixture_projects_read_as_fixtures_and_local_projects_keep_their_status() {
     assert!(has_label(&mounted, "Tasks"));
     assert!(!has_label(&mounted, "Running"));
 
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     snapshot.projects[0].fixture = false;
     snapshot.sessions.clear();
     snapshot.migrate_projects();
@@ -5218,7 +5224,7 @@ fn fixture_projects_read_as_fixtures_and_local_projects_keep_their_status() {
 #[test]
 fn board_actions_menu_closes_on_escape_and_outside_clicks_and_reopens_at_once() {
     let mounted = mount(false, 1380.0);
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     snapshot.projects[0].fixture = false;
     snapshot.migrate_projects();
     mounted.model.receive(NetworkState {
@@ -5272,7 +5278,9 @@ fn board_actions_menu_closes_on_escape_and_outside_clicks_and_reopens_at_once() 
 #[test]
 fn profile_header_counts_real_overrides_and_keeps_its_geometry() {
     let mounted = mount(false, 1380.0);
-    mounted.model.open_director_profile("director-main".into());
+    mounted
+        .model
+        .open_profile(EditTarget::Config("director-main".into()));
     mounted.settle();
     let near = |a: f32, b: f32| (a - b).abs() <= 1.0;
     assert!(near(mounted.rect("Profile header").origin.y, 0.0));
@@ -5306,7 +5314,9 @@ fn profile_field_headers_contain_their_text_and_controls() {
             ._scope
             .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
         mounted.model.preferences.update(|p| p.scale = scale);
-        mounted.model.open_director_profile("director-main".into());
+        mounted
+            .model
+            .open_profile(EditTarget::Config("director-main".into()));
         for overrides in [false, true] {
             if overrides {
                 mounted.model.modify_profile("harness", |_| {});
@@ -5409,9 +5419,11 @@ fn profile_fields_remain_reachable_at_double_scale_without_rebuilding_the_draft(
         ._scope
         .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
     mounted.model.preferences.update(|p| p.scale = 2.0);
-    mounted.model.open_director_profile("director-main".into());
+    mounted
+        .model
+        .open_profile(EditTarget::Config("director-main".into()));
     mounted.settle();
-    type_in(&mounted, "Director name", "Retained director draft");
+    type_in(&mounted, "Agent name", "Retained director draft");
     mounted.focus("Deploy permission: Allow");
     let control = mounted.rect("Deploy permission: Allow");
     assert!(
@@ -5480,10 +5492,12 @@ fn profile_scope_reacts_to_publication_and_harness_choice_reports_actual_availab
         connected: true,
         ..Default::default()
     });
-    mounted.model.open_director_profile("director-main".into());
+    mounted
+        .model
+        .open_profile(EditTarget::Config("director-main".into()));
     mounted.settle();
     assert!(has_label(&mounted, "Scope Local task title"));
-    type_in(&mounted, "Director name", "Unsubmitted edit");
+    type_in(&mounted, "Agent name", "Unsubmitted edit");
     let task = snapshot
         .issues
         .iter_mut()
@@ -5570,7 +5584,7 @@ fn profile_scope_reacts_to_publication_and_harness_choice_reports_actual_availab
 #[test]
 fn new_task_draft_survives_closing_and_reopening_the_form() {
     let mut mounted = mount(false, 1380.0);
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     snapshot.projects[0].fixture = false;
     snapshot.migrate_projects();
     mounted.model.receive(NetworkState {
@@ -5603,7 +5617,7 @@ fn wide_sessions_turn_narrow_at_double_scale_without_rebuilding_the_draft() {
     let mut snapshot = live_snapshot();
     let session = &mut snapshot.sessions[0];
     session.fixture = false;
-    session.director_id = snapshot.directors[0].id.clone();
+    session.agent_config_id = snapshot.agent_configs[0].id.clone();
     session.worker = Some(worker_run(WorkerStatus::Running));
     let session_id = session.id.clone();
     snapshot.tool_permissions.push(ToolPermission {
@@ -5786,7 +5800,7 @@ fn bounded_session_disclosures_keep_controls_reachable_and_draft_mounted() {
     let mut snapshot = live_snapshot();
     let session = &mut snapshot.sessions[0];
     session.fixture = false;
-    session.director_id = snapshot.directors[0].id.clone();
+    session.agent_config_id = snapshot.agent_configs[0].id.clone();
     let mut worker = worker_run(WorkerStatus::Running);
     worker.error = Some("A long recorded diagnostic. ".repeat(80));
     session.worker = Some(worker);
@@ -5860,10 +5874,10 @@ fn bounded_worker_setup_scrolls_long_choices_without_losing_prompt() {
         mounted.model.preferences.update(|p| p.scale = scale);
         let mut snapshot = local_project_snapshot();
         for i in 0..24 {
-            let mut director = snapshot.directors[0].clone();
+            let mut director = snapshot.agent_configs[0].clone();
             director.id = format!("director-extra-{i}");
-            director.name = format!("Director {i}");
-            snapshot.directors.push(director);
+            director.name = format!("Agent {i}");
+            snapshot.agent_configs.push(director);
             snapshot.connections.push(ProjectConnection {
                 id: format!("directory-{i}"),
                 project_id: "demo".into(),
@@ -5954,7 +5968,7 @@ fn bounded_operation_history_exposes_recorded_results_and_keeps_close_reachable(
 #[test]
 fn page_header_eyebrow_follows_navigation_between_shared_header_pages() {
     let mounted = mount(false, 1380.0);
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     snapshot.projects[0].fixture = false;
     snapshot.migrate_projects();
     mounted.model.receive(NetworkState {
@@ -6220,7 +6234,7 @@ fn direct_project_connections_and_header_actions_use_full_cells() {
     mounted
         .model
         .snapshot
-        .set(demo_snapshot(DirectorProfile::default()));
+        .set(demo_snapshot(AgentProfile::default()));
     mounted.settle();
     mounted.size = Size::new(820.0, 900.0);
     mounted.settle();
@@ -6330,7 +6344,7 @@ fn first_director_message_uses_inline_assets_shortcuts_and_retains_edits_on_ackn
     let mut mounted = mount(false, 600.0);
     mounted.model.snapshot.set(local_project_snapshot());
     mounted.model.snapshot.update(|s| s.sessions.clear());
-    mounted.model.open_director("director-main".into());
+    mounted.model.open_root_agent("director-main".into());
     mounted.settle();
     let label = mounted
         .ui
@@ -6383,7 +6397,7 @@ fn first_director_message_uses_inline_assets_shortcuts_and_retains_edits_on_ackn
     mounted.key(Key::Enter, true);
     let command = mounted.commands.try_recv().unwrap();
     assert!(
-        matches!(command.command, Command::StartDirector { parts: ref sent, approve_implementation: false, .. } if sent == &parts)
+        matches!(command.command, Command::StartRootAgent { parts: ref sent, approve_implementation: false, .. } if sent == &parts)
     );
     // Typing while the request is in flight must survive switching to the real session.
     let mut later = parts.clone();
@@ -6438,12 +6452,12 @@ fn merged_headers_keep_window_controls_at_the_right_across_pages_and_scales() {
         for page in [
             Page::Board,
             Page::Sessions,
-            Page::Directors,
+            Page::Profiles,
             Page::Settings,
             Page::NewProject,
             Page::Connections,
             Page::Publish,
-            Page::DirectorStart,
+            Page::AgentStart,
         ] {
             mounted.model.page.set(page);
             mounted.model.notice.set("A connection notice".into());
@@ -6552,13 +6566,15 @@ fn header_drag_targets_include_text_and_gaps_but_exclude_interactive_descendants
     mounted.click("Open command palette");
     assert!(mounted.model.palette.get_untracked());
     mounted.model.palette.set(false);
-    mounted.model.open_director_profile("director-main".into());
+    mounted
+        .model
+        .open_profile(EditTarget::Config("director-main".into()));
     mounted.settle();
     assert!(!draggable(
         "Profile header",
-        mounted.rect("Director name").center()
+        mounted.rect("Agent name").center()
     ));
-    mounted.click("Director name");
+    mounted.click("Agent name");
     mounted.key(Key::Character("X".into()), false);
     assert!(mounted.model.editor_name.get_untracked().contains('X'));
 }
@@ -7041,7 +7057,7 @@ fn retained_search_result_does_not_repeatedly_move_the_reader() {
 
 /// The demo workspace running its example orchestration.
 fn orchestration() -> Snapshot {
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     demo_orchestration(&mut snapshot);
     snapshot
 }
@@ -7085,20 +7101,12 @@ fn sidebar_keeps_project_navigation_in_ruled_cells_above_the_agent_tree() {
         assert!((rect.size.height - head.size.height).abs() < 1.0, "{cell}");
         assert!(rect.origin.y + rect.size.height <= mounted.rect("Agents").origin.y + 1.0);
     }
-    mounted.click("Toggle project Relay · demo");
     open_project_menu(&mounted);
-    mounted.click("Profile for Project director");
-    assert_eq!(mounted.model.page.get_untracked(), Page::Directors);
-    assert_eq!(
-        mounted.model.editor.get_untracked(),
-        EditTarget::Director("director-main".into())
-    );
+    assert!(!has_label(&mounted, "Open director Project director"));
     assert!(!has_label(&mounted, "Profile for Project director"));
-    mounted.click("Toggle project Relay · demo");
-    mounted.click("Open director Project director");
-    assert_eq!(mounted.model.session.get_untracked(), "session-plan");
-    assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
-    mounted.click("Toggle project Relay · demo");
+    mounted.click("Select project Relay · demo");
+    assert!(!has_label(&mounted, "Projects"));
+    open_project_menu(&mounted);
     mounted.click("Create director");
     assert_eq!(mounted.model.editor.get_untracked(), EditTarget::New);
     mounted.click("Toggle project Relay · demo");
@@ -7284,7 +7292,7 @@ fn connection_status_reports_state_latency_endpoint_protocol_and_builds() {
     for text in [
         "https://relay.example:7440/",
         "WebSocket · open",
-        "v5",
+        &format!("v{PROTOCOL_VERSION}"),
         "42 ms",
     ] {
         assert!(has_label(&mounted, text), "Missing {text}");
@@ -7502,7 +7510,7 @@ fn session_header_shows_only_recorded_values() {
     let mut snapshot = live_snapshot();
     let session = &mut snapshot.sessions[0];
     session.fixture = false;
-    session.director_id = snapshot.directors[0].id.clone();
+    session.agent_config_id = snapshot.agent_configs[0].id.clone();
     let mut run = worker_run(WorkerStatus::Running);
     run.thread_id = None;
     run.worktree = Some("/srv/relay/worktrees/issue-2-a41c".into());
@@ -8024,7 +8032,7 @@ fn window_controls_are_one_ruled_group_apart_from_page_controls() {
         assert!((group.origin.x + group.size.width - 1380.0).abs() < 1.0);
         assert!(group.origin.y.abs() < 1.0);
         assert!(close_issue.origin.x + close_issue.size.width <= group.origin.x + 0.5);
-        for page in [Page::Sessions, Page::Settings, Page::Directors] {
+        for page in [Page::Sessions, Page::Settings, Page::Profiles] {
             mounted.model.issue.set(None);
             mounted.model.page.set(page);
             mounted.settle();
@@ -8034,13 +8042,340 @@ fn window_controls_are_one_ruled_group_apart_from_page_controls() {
 }
 
 #[test]
-fn project_sidebar_children_have_one_outer_tree_indent() {
+fn director_presets_enable_delegation_even_under_a_worker_parent() {
+    let mounted = mount_orchestration(1380.0);
+    mounted.model.snapshot.update(|s| {
+        let base = s.projects[0].defaults.clone();
+        let mut profile = AgentProfile::worker(&base);
+        profile.scope = AgentScope::Issues {
+            issue_ids: vec!["issue-2".into()],
+        };
+        profile.execution.approval = ApprovalMode::Ask;
+        s.sessions
+            .iter_mut()
+            .find(|s| s.id == "session-plan")
+            .unwrap()
+            .profile = Some(profile);
+    });
+    mounted.model.open_new_worker("session-plan".into());
+    assert!(!mounted.model.editor_profile.get_untracked().can_delegate());
+    mounted.model.select_agent_template("director".into());
+    let profile = mounted.model.editor_profile.get_untracked();
+    assert!(profile.can_delegate());
+    assert_eq!(profile.execution.approval, ApprovalMode::Ask);
+    assert_eq!(
+        profile.scope,
+        AgentScope::Issues {
+            issue_ids: vec!["issue-2".into()]
+        }
+    );
+}
+
+#[test]
+fn scoped_root_agents_preserve_their_task_and_request_first_turn_approval() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(local_project_snapshot());
+    mounted.model.snapshot.update(|s| {
+        s.sessions.clear();
+        s.agent_configs[0].overrides.scope = Some(AgentScope::Issues {
+            issue_ids: vec!["issue-2".into()],
+        });
+        s.agent_configs[0].overrides.permissions = Some({
+            let mut permissions = s.projects[0].defaults.permissions.clone();
+            permissions.insert(Task::Implement, Permission::Ask);
+            permissions
+        });
+    });
+    mounted.model.open_root_agent("director-main".into());
+    mounted.settle();
+    assert_eq!(
+        mounted.model.issue.get_untracked().as_deref(),
+        Some("issue-2")
+    );
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|l| l.starts_with("Draft text")))
+        .unwrap();
+    type_in(&mounted, &draft, "Review the scoped task");
+    crate::buffer::send(mounted.model);
+    mounted.settle();
+    assert!(mounted.commands.try_recv().is_err());
+    assert!(mounted.model.buffer.get_untracked().approval_needed);
+    mounted.click("Approve this turn and send");
+    assert!(
+        matches!(mounted.commands.try_recv().unwrap().command, Command::StartRootAgent { issue_id: Some(issue), approve_implementation: true, .. } if issue == "issue-2")
+    );
+}
+
+#[test]
+fn hovering_a_selected_agent_reveals_child_creation_without_reopening_the_parent() {
+    let mounted = mount_orchestration(1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Move,
+        position: tree_row(&mounted, "Profile design").center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: Duration::ZERO,
+    });
+    mounted.settle();
+    mounted.click("New worker for Profile design");
+    assert_eq!(mounted.model.page.get_untracked(), Page::Profiles);
+    assert_eq!(
+        mounted.model.editor_parent.get_untracked().as_deref(),
+        Some("session-plan")
+    );
+}
+
+#[test]
+fn saved_agent_profiles_wait_for_metadata_and_retain_edits_made_during_save() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.open_profile(EditTarget::New);
+    mounted.model.select_agent_template("worker".into());
+    mounted
+        .model
+        .modify_profile("harness", |p| p.harness = Harness::ClaudeCode);
+    mounted.model.editor_template_name.set("Reviewer".into());
+    mounted.model.save_agent_template();
+    let envelope = mounted.commands.try_recv().unwrap();
+    mounted
+        .model
+        .modify_profile("execution", |p| p.execution.approval = ApprovalMode::Ask);
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        outcome: Some((envelope.request_id.clone(), Ok(()))),
+        outcome_serial: 1,
+        ..Default::default()
+    });
+    assert!(mounted.model.busy.get_untracked());
+    assert_eq!(mounted.model.editor_template.get_untracked(), "worker");
+    snapshot
+        .apply(envelope.command, &envelope.request_id, 0)
+        .unwrap();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(!mounted.model.busy.get_untracked());
+    assert_eq!(
+        mounted.model.editor_template.get_untracked(),
+        format!("profile-{}", envelope.request_id)
+    );
+    assert_eq!(
+        mounted.model.editor_base.get_untracked().execution.approval,
+        ApprovalMode::Automatic
+    );
+    assert_eq!(
+        mounted
+            .model
+            .editor_profile
+            .get_untracked()
+            .execution
+            .approval,
+        ApprovalMode::Ask
+    );
+    assert!(
+        mounted
+            .model
+            .editor_overrides
+            .get_untracked()
+            .execution
+            .is_some()
+    );
+}
+
+#[test]
+fn new_root_agents_keep_the_selected_profile_and_open_after_metadata_arrives() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.open_profile(EditTarget::New);
+    mounted.model.select_agent_template("worker".into());
+    mounted.model.editor_name.set("Independent worker".into());
+    mounted.model.save_profile();
+    let envelope = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(&envelope.command, Command::CreateAgentConfig { template, .. } if template == "worker")
+    );
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        outcome: Some((envelope.request_id.clone(), Ok(()))),
+        outcome_serial: 1,
+        ..Default::default()
+    });
+    assert_eq!(mounted.model.page.get_untracked(), Page::Profiles);
+    assert!(mounted.model.busy.get_untracked());
+    snapshot
+        .apply(envelope.command, &envelope.request_id, 0)
+        .unwrap();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert_eq!(mounted.model.page.get_untracked(), Page::AgentStart);
+    assert!(!mounted.model.busy.get_untracked());
+    mounted.model.page.set(Page::Board);
+    mounted.settle();
+    assert!(has_row(&mounted, "Independent worker"));
+    mounted.click("Independent worker");
+    assert_eq!(mounted.model.page.get_untracked(), Page::AgentStart);
+}
+
+#[test]
+fn agent_creation_uses_director_and_worker_profiles_and_preserves_parent_links() {
+    let mut mounted = mount_orchestration(1380.0);
+    mounted.click("New agent");
+    assert!(has_label(&mounted, "New agent"));
+    assert_eq!(mounted.model.editor_template.get_untracked(), "director");
+    assert!(mounted.model.editor_profile.get_untracked().can_delegate());
+    assert!(mounted.model.editor_parent.get_untracked().is_none());
+    mounted.model.editor_name.set("Coordinator".into());
+    mounted
+        .model
+        .modify_profile("harness", |p| p.harness = Harness::ClaudeCode);
+    mounted.settle();
+    assert!(has_label(&mounted, "Override for this agent"));
+    assert!(has_label(&mounted, "Save as new profile"));
+    mounted.click("Discard profile changes");
+    assert_eq!(
+        mounted.model.editor_profile.get_untracked(),
+        mounted.model.editor_base.get_untracked()
+    );
+    assert!(!has_label(&mounted, "Discard profile changes"));
+    mounted.focus("New worker for Profile design");
+    mounted.key(Key::Enter, false);
+    assert_eq!(
+        mounted.model.editor_parent.get_untracked().as_deref(),
+        Some("session-plan")
+    );
+    assert_eq!(mounted.model.editor_template.get_untracked(), "worker");
+    assert!(!mounted.model.editor_profile.get_untracked().can_delegate());
+    assert!(has_label(&mounted, "Agent task"));
+    mounted.model.editor_name.set("Validation".into());
+    mounted
+        .model
+        .worker_prompt
+        .set("Run the validation suite".into());
+    mounted.settle();
+    mounted.click("Create agent");
+    assert!(
+        matches!(mounted.commands.try_recv().unwrap().command, Command::StartChildAgent { parent_session_id, profile, .. } if parent_session_id == "session-plan" && !profile.can_delegate())
+    );
+}
+
+#[test]
+fn agent_profile_selector_and_named_profile_save_keep_instance_changes() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.click("New agent");
+    mounted.click("Select agent profile");
+    mounted.click("Use Worker profile");
+    assert_eq!(mounted.model.editor_template.get_untracked(), "worker");
+    mounted.model.editor_name.set("Reviewer".into());
+    mounted
+        .model
+        .modify_profile("harness", |p| p.harness = Harness::ClaudeCode);
+    mounted.settle();
+    mounted.click("Override for this agent");
+    assert!(mounted.model.editor_override_accepted.get_untracked());
+    mounted.click("Save as new profile");
+    mounted
+        .model
+        .editor_template_name
+        .set("Claude reviewer".into());
+    mounted.settle();
+    mounted.click("Save new agent profile");
+    assert!(
+        matches!(mounted.commands.try_recv().unwrap().command, Command::SaveAgentTemplate { name, profile, .. } if name == "Claude reviewer" && profile.harness == Harness::ClaudeCode && !profile.can_delegate())
+    );
+}
+
+#[test]
+fn project_menu_summarizes_running_agents_and_updates_without_reopening() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot.tool_permissions.clear();
+        snapshot.submissions.clear();
+        snapshot.sessions.truncate(2);
+        for session in &mut snapshot.sessions {
+            session.worker = Some(WorkerRun {
+                model: None,
+                context_tokens: None,
+                context_window: None,
+                last_usage: None,
+                harness: Harness::Codex,
+                execution: None,
+                status: WorkerStatus::Running,
+                thread_id: None,
+                worktree: None,
+                branch: None,
+                base_commit: None,
+                error: None,
+                usage: None,
+                changes: None,
+            });
+        }
+        let mut other = snapshot.projects[0].clone();
+        other.id = "other".into();
+        other.name = "Other project".into();
+        snapshot.projects.push(other);
+        let mut session = snapshot.sessions[0].clone();
+        session.id = "other-session".into();
+        session.project_id = "other".into();
+        session.title = "Other agent".into();
+        snapshot.sessions.push(session);
+    });
+    mounted.settle();
+    open_project_menu(&mounted);
+    let images = |name: &str| {
+        let rect = mounted.rect(&format!("Project row {name}"));
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .filter(|n| n.role == Role::Image && rect.contains(n.rect.center()))
+            .filter_map(|n| n.label)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(images("Relay · demo"), vec!["2 working"]);
+    assert_eq!(images("Other project"), vec!["1 working"]);
+    assert!(has_label(&mounted, "3 agents"));
+    assert!(!has_row(&mounted, "Other agent"));
+    assert!(!has_label(&mounted, "Director row Project director"));
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed;
+    });
+    mounted.settle();
+    assert_eq!(images("Relay · demo"), vec!["1 working"]);
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot.sessions[1].worker.as_mut().unwrap().status = WorkerStatus::Queued;
+    });
+    mounted.settle();
+    assert!(images("Relay · demo").is_empty());
+    assert_eq!(images("Other project"), vec!["1 working"]);
+    mounted.click("Select project Other project");
+    assert!(!has_label(&mounted, "Projects"));
+    assert!(has_row(&mounted, "Other agent"));
+    assert!(!has_row(&mounted, "Profile design"));
+}
+
+#[test]
+fn project_sidebar_summaries_keep_the_selected_agent_tree_indented() {
     let mounted = mount(false, 1380.0);
     mounted.click("Toggle project Relay · demo");
     let project = mounted.rect("Select project Relay · demo");
-    let director = mounted.rect("Director row Project director");
-    assert!((director.origin.x - project.origin.x - 14.0).abs() < 0.1);
-    assert!(director.origin.y >= project.origin.y + project.size.height);
+    assert!(!has_label(&mounted, "Director row Project director"));
+    assert!(!has_label(&mounted, "Open director Project director"));
     // The 60px agents header starts right under the project menu; its New
     // agent cell is centred in it.
     let new_project = mounted.rect("New Project");

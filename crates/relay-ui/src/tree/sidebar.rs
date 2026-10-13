@@ -7,6 +7,7 @@ use super::logic::{
 use super::row::TreeNav;
 use super::{AgentNode, OnAgent, OnFilter, OnFocus, OnToggle};
 use crate::marks::{mark, sized_text};
+use crate::overlay::{Tooltip, TooltipProps};
 use crate::prelude::*;
 use crate::tokens::{Signal, ground, px, shape};
 use mosaic::core::theme::color;
@@ -37,7 +38,7 @@ pub fn StatusCounts(
         grid cols:(repeat(5 1fr)) height:min-content shrink:0
             stroke:(width:{px(1.0)} color:ground.hairline edges:(top bottom)) {}
     };
-    for status in AgentStatus::ALL {
+    for status in AgentStatus::ACTIVITY {
         let (count, label, selected) = (tally.clone(), tally.clone(), active.clone());
         let amber = {
             let tally = tally.clone();
@@ -257,6 +258,7 @@ pub fn AgentSidebar(
     #[prop(default = Live::fixed(None))]
     focus: Live<Option<String>>,
     #[prop(optional)] on_new: Option<OnPress>,
+    #[prop(optional)] on_spawn: Option<OnAgent>,
     #[prop(optional)] on_open: Option<OnAgent>,
     #[prop(optional)] on_toggle: Option<OnToggle>,
     #[prop(optional)] on_focus: Option<OnFocus>,
@@ -368,6 +370,16 @@ pub fn AgentSidebar(
         })
     };
     let new_agent: OnPress = on_new.unwrap_or_else(|| Rc::new(|| {}));
+    let action_cell = {
+        view! {
+            Tooltip text:"New Director" width:(Dimension::Fill) height:(Dimension::Fill) {
+                CellButton label:"New agent" rule:(Rule::Left) horizontal-inset:0.0
+                    on-press:(new_agent) {
+                    { parent.adopt(&mark(Mark::Plus, 12.0, ground.ink)); }
+                }
+            }
+        }
+    };
 
     let crumb_host = view! {
         col height:min-content shrink:0 {}
@@ -425,7 +437,12 @@ pub fn AgentSidebar(
         Effect::new(move || nav.set_lines(lines.get()));
     }
     {
-        let (open, toggle, nav) = (on_open.clone(), toggle.clone(), nav.clone());
+        let (open, toggle, nav, spawn) = (
+            on_open.clone(),
+            toggle.clone(),
+            nav.clone(),
+            on_spawn.clone(),
+        );
         let focus_branch = set_focus.clone();
         tree.keyed(
             move || lines.get().into_iter().map(|line| (line, ())),
@@ -435,7 +452,7 @@ pub fn AgentSidebar(
                         let (open, toggle, nav) = (open.clone(), toggle.clone(), nav.clone());
                         view! {
                             AgentTreeRow line:(agent.clone()) on-open:(open)
-                                on-toggle:(Some(toggle)) nav:(Some(nav))
+                                on-spawn:(spawn.clone()) on-toggle:(Some(toggle)) nav:(Some(nav))
                         }
                     }
                     TreeLine::Folded(folded) => {
@@ -457,18 +474,17 @@ pub fn AgentSidebar(
     view! {
         col width:{px(width)}px shrink:0 fill:ground.panel font-color:ground.ink label:"Agents"
             stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {
-            row height:{px(60.0)}px shrink:0 gap:{px(10.0)}px align:center
-                pad:(left:{px(18.0)}px right:{px(12.0)}px) {
-                SerifTitle text:"Agents" size:(SerifSize::Large)
-                col width:max-content height:min-content pad:(top:{px(6.0)}px) {
-                    text font-family:monospace font-size:{px(11.0)}px font-color:ground.muted
-                        {total.get().to_string()}
-                }
-                el width:1fr height:{px(1.0)}px {}
-                IconCell label:"New agent" on-press:(new_agent) {
-                    {
-                        parent.adopt(&mark(Mark::Plus, 12.0, ground.ink));
+            row height:{px(60.0)}px shrink:0 {
+                row width:1fr gap:{px(10.0)}px align:center
+                    pad:(horizontal:{px(18.0)}px vertical:0px) {
+                    SerifTitle text:"Agents" size:(SerifSize::Large)
+                    col width:max-content height:min-content pad:(top:{px(6.0)}px) {
+                        text font-family:monospace font-size:{px(11.0)}px font-color:ground.muted
+                            {total.get().to_string()}
                     }
+                }
+                row width:{px(60.0)}px shrink:0 {
+                    { parent.adopt(&action_cell); }
                 }
             }
             {

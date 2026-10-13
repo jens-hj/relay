@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn invalid_update_does_not_modify_state() {
-        let mut snapshot = crate::demo_snapshot(crate::DirectorProfile::default());
+        let mut snapshot = crate::demo_snapshot(crate::AgentProfile::default());
         let before = snapshot.clone();
         let event = StreamEvent::Update {
             base_revision: snapshot.revision,

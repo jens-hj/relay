@@ -8,7 +8,7 @@ use relay_ui::tree::{Flatten, TreeLine, approvals, flatten};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn demo() -> Snapshot {
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     demo_orchestration(&mut snapshot);
     snapshot
 }
@@ -73,7 +73,7 @@ fn statuses_map_runs_permissions_and_queued_turns() {
     assert_eq!(status(&snapshot, "session-write"), AgentStatus::Waiting);
     assert_eq!(status(&snapshot, "session-verify"), AgentStatus::Queued);
     assert_eq!(status(&snapshot, "session-tests"), AgentStatus::Failed);
-    assert_eq!(status(&snapshot, "session-review"), AgentStatus::Done);
+    assert_eq!(status(&snapshot, "session-review"), AgentStatus::Idle);
     snapshot.submissions.push(Submission {
         id: "turn".into(),
         session_id: "session-review".into(),

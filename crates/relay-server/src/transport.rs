@@ -668,7 +668,7 @@ mod tests {
     };
 
     fn archive() -> Snapshot {
-        let mut snapshot = demo_snapshot(DirectorProfile::default());
+        let mut snapshot = demo_snapshot(AgentProfile::default());
         snapshot.messages.clear();
         snapshot.comments.clear();
         for index in 0..1000 {
@@ -859,13 +859,13 @@ mod tests {
     fn protocol_three_migration_preserves_archive_receipts_and_drafts() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("db");
-        let mut store = Store::open(&path, DirectorProfile::default()).unwrap();
+        let mut store = Store::open(&path, AgentProfile::default()).unwrap();
         let mut original = archive();
         original.protocol_version = 3;
         store.save(&original).unwrap();
         store.connection.execute_batch("PRAGMA user_version=10; INSERT INTO receipts VALUES('preserved','request'); INSERT INTO drafts VALUES('preserved','draft');").unwrap();
         drop(store);
-        let store = Store::open(&path, DirectorProfile::default()).unwrap();
+        let store = Store::open(&path, AgentProfile::default()).unwrap();
         let migrated = store.snapshot().unwrap();
         original.protocol_version = PROTOCOL_VERSION;
         assert_eq!(migrated, original);
@@ -883,7 +883,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            12
+            13
         );
     }
 
@@ -891,7 +891,7 @@ mod tests {
     fn schema_eleven_migration_loads_protocol_four_data() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("db");
-        let store = Store::open(&path, DirectorProfile::default()).unwrap();
+        let store = Store::open(&path, AgentProfile::default()).unwrap();
         let mut value = serde_json::to_value(archive()).unwrap();
         value["protocol_version"] = 4.into();
         value.as_object_mut().unwrap().remove("usage_limits");
@@ -917,7 +917,7 @@ mod tests {
             )
             .unwrap();
         drop(store);
-        let store = Store::open(&path, DirectorProfile::default()).unwrap();
+        let store = Store::open(&path, AgentProfile::default()).unwrap();
         let migrated = store.snapshot().unwrap();
         assert_eq!(migrated.protocol_version, PROTOCOL_VERSION);
         assert_eq!(migrated.messages.len(), 1000);
@@ -956,7 +956,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            12
+            13
         );
     }
 
@@ -1019,13 +1019,13 @@ mod tests {
     async fn small_acknowledgements_and_probes_work_over_throttled_http_and_websocket() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("db");
-        let mut store = Store::open(&path, DirectorProfile::default()).unwrap();
+        let mut store = Store::open(&path, AgentProfile::default()).unwrap();
         let snapshot = archive();
         assert!(serde_json::to_vec(&snapshot).unwrap().len() > 3_350_000);
         store.save(&snapshot).unwrap();
         drop(store);
         let token = uuid::Uuid::new_v4().to_string();
-        let app = router(&path, token.clone(), DirectorProfile::default()).unwrap();
+        let app = router(&path, token.clone(), AgentProfile::default()).unwrap();
         let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = server.local_addr().unwrap();
         let server_task = tokio::spawn(async move {

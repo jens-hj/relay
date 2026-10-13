@@ -16,6 +16,7 @@ use mosaic::widgets::Visual;
 /// "Working", "Waiting", … for a status cell.
 pub fn status_title(status: AgentStatus) -> &'static str {
     match status {
+        AgentStatus::Idle => "Idle",
         AgentStatus::Working => "Working",
         AgentStatus::Waiting => "Waiting",
         AgentStatus::Failed => "Failed",

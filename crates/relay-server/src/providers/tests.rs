@@ -190,7 +190,7 @@ fn repeated_github_cursor_and_auth_failure_are_errors() {
 }
 #[test]
 fn same_issue_multiple_boards_preserves_task_id_results_and_removed_history() {
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     snapshot.boards.clear();
     snapshot.memberships.clear();
     let mut steps = gh_metadata();
@@ -353,7 +353,7 @@ async fn workspace(config: RuntimeConfig) -> (TempDir, Workspace) {
     let (_, shutdown) = crate::router_with_shutdown(
         temp.path().join("db"),
         "test-provider-token".into(),
-        DirectorProfile::default(),
+        AgentProfile::default(),
         config,
     )
     .unwrap();
@@ -550,7 +550,7 @@ fn reconcile(
             result: result.into(),
         },
         "recovery-request",
-        DirectorProfile::default(),
+        AgentProfile::default(),
         &RuntimeConfig::default(),
     )
 }
@@ -938,7 +938,7 @@ async fn publication_reuses_existing_issue_and_fetches_preexisting_destination_t
                 remote_item_id: Some("ITEM1".into()),
             });
             s.sessions[0].issue_id = Some("imported-history".into());
-            s.directors[0].overrides.scope = Some(DirectorScope::Issues {
+            s.agent_configs[0].overrides.scope = Some(AgentScope::Issues {
                 issue_ids: vec!["imported-history".into()],
             });
             Ok(())
@@ -996,8 +996,8 @@ async fn publication_reuses_existing_issue_and_fetches_preexisting_destination_t
         Some("Historical result")
     );
     assert_eq!(
-        snapshot.directors[0].overrides.scope,
-        Some(DirectorScope::Issues {
+        snapshot.agent_configs[0].overrides.scope,
+        Some(AgentScope::Issues {
             issue_ids: vec!["imported-history".into()]
         })
     );
@@ -1024,7 +1024,7 @@ async fn publication_reuses_existing_issue_and_fetches_preexisting_destination_t
             .filter(|m| m.board_id == "board")
             .all(|m| m.issue_id != "imported-history")
     );
-    let restored = crate::Store::open(&_temp.path().join("db"), DirectorProfile::default())
+    let restored = crate::Store::open(&_temp.path().join("db"), AgentProfile::default())
         .unwrap()
         .snapshot()
         .unwrap();
@@ -1068,7 +1068,7 @@ fn gitlab_label_columns_follow_remote_positions() {
 
 #[test]
 fn successful_publication_creates_one_ready_connection_and_is_idempotent() {
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     snapshot.boards.push(board_record(gh_source()));
     preserve_board_identity(&mut snapshot, "board").unwrap();
     preserve_board_identity(&mut snapshot, "board").unwrap();
@@ -1486,7 +1486,7 @@ fn authoritative_merge_returns_board_connection_to_ready() {
     let mut remote = metadata(&fake.config(), &gh_source()).unwrap();
     remote.board.id = "board".into();
     remote.board.project_id = "project".into();
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     snapshot.boards.push(remote.board.clone());
     snapshot.connections.push(ProjectConnection {
         id: "board-connection".into(),
@@ -1615,7 +1615,7 @@ fn recovery_snapshot(
     source: BoardSource,
     pending: &str,
 ) -> Snapshot {
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     snapshot.boards.push(board_record(source));
     snapshot.issues.push(task);
     snapshot.memberships.push(membership_record());
@@ -1865,7 +1865,7 @@ fn same_gitlab_repository_and_issue_number_on_distinct_hosts_remain_distinct_tas
         number: 2,
         url: "https://other.example/group/repo/-/boards/2".into(),
     };
-    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    let mut snapshot = demo_snapshot(AgentProfile::default());
     snapshot
         .boards
         .extend([first.board.clone(), second.board.clone()]);

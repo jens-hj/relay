@@ -39,7 +39,7 @@ pub fn session_status(snapshot: &Snapshot, session: &Session) -> AgentStatus {
             }) {
                 AgentStatus::Queued
             } else {
-                AgentStatus::Done
+                AgentStatus::Idle
             }
         }
     }
@@ -103,6 +103,8 @@ pub fn agent_forest(
             built.model = model;
             built.effort = effort;
             built.expanded = !collapsed.contains(&session.id);
+            built.can_spawn =
+                session.worker.is_some() && (session.fixture || !session.workspaces.is_empty());
             built.selected = session.id == selected;
             let mut nodes = Vec::new();
             for child in children.get(session.id.as_str()).into_iter().flatten() {
@@ -127,6 +129,28 @@ pub fn agent_forest(
             forest.push(build(session, &mut visited));
         }
     }
+    for config in snapshot
+        .agent_configs
+        .iter()
+        .filter(|c| c.project_id == project_id)
+    {
+        if !snapshot
+            .sessions
+            .iter()
+            .any(|s| s.agent_config_id == config.id && s.role == relay_core::SessionRole::Root)
+        {
+            let profile = snapshot.effective_profile(config).ok();
+            let mut node = AgentNode::new(
+                format!("config:{}", config.id),
+                config.name.clone(),
+                AgentStatus::Idle,
+                harness(profile.map_or(relay_core::Harness::Codex, |p| p.harness)),
+            );
+            node.can_spawn = false;
+            node.selected = selected == format!("agent-draft-{}", config.id);
+            forest.push(node);
+        }
+    }
     forest
 }
 
@@ -134,9 +158,9 @@ pub fn agent_forest(
 /// effective profile.
 fn director_harness(snapshot: &Snapshot, session: &Session) -> relay_core::Harness {
     snapshot
-        .directors
+        .agent_configs
         .iter()
-        .find(|d| d.id == session.director_id)
+        .find(|d| d.id == session.agent_config_id)
         .and_then(|d| snapshot.effective_profile(d).ok())
         .map(|p| p.harness)
         .unwrap_or_default()

@@ -15,7 +15,7 @@ impl Drop for Server {
 }
 
 async fn start(path: &Path) -> Server {
-    let app = relay_server::router(path, TOKEN.into(), DirectorProfile::default()).unwrap();
+    let app = relay_server::router(path, TOKEN.into(), AgentProfile::default()).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async {
@@ -89,11 +89,11 @@ async fn protocol_guard_and_multiple_local_projects_round_trip_without_remote_cr
         "protocol_mismatch"
     );
     assert_eq!(snapshot(&server).await, initial);
-    assert_eq!(PROTOCOL_VERSION, 5);
+    assert_eq!(PROTOCOL_VERSION, 6);
     let previous = reqwest::Client::new()
         .post(format!("{}/v1/commands", server.endpoint))
         .bearer_auth(TOKEN)
-        .header("x-relay-protocol", "4")
+        .header("x-relay-protocol", PROTOCOL_VERSION - 1)
         .json(&envelope(initial.revision, comment()))
         .send()
         .await
@@ -265,7 +265,7 @@ async fn authentication_covers_reads_writes_and_event_upgrade() {
         relay_server::router(
             db.path().join("bad.sqlite3"),
             "short".into(),
-            DirectorProfile::default()
+            AgentProfile::default()
         )
         .is_err()
     );
@@ -319,7 +319,8 @@ async fn directors_inherit_updated_defaults_while_overrides_stay_specialized() {
     let server = start(&db.path().join("relay.sqlite3")).await;
     let create = envelope(
         0,
-        Command::CreateDirector {
+        Command::CreateAgentConfig {
+            template: "director".into(),
             project_id: "demo".into(),
             name: "Release director".into(),
             overrides: ProfileOverrides {
@@ -329,8 +330,8 @@ async fn directors_inherit_updated_defaults_while_overrides_stay_specialized() {
         },
     );
     let created: Snapshot = applied(&server, &create).await;
-    assert_eq!(created.directors.len(), 3);
-    let defaults = DirectorProfile {
+    assert_eq!(created.agent_configs.len(), 3);
+    let defaults = AgentProfile {
         max_workers: 8,
         harness: Harness::ClaudeCode,
         ..Default::default()
@@ -348,19 +349,21 @@ async fn directors_inherit_updated_defaults_while_overrides_stay_specialized() {
     .await;
     assert_eq!(
         updated
-            .effective_profile(&updated.directors[0])
+            .effective_profile(&updated.agent_configs[0])
             .unwrap()
             .max_workers,
         8
     );
-    let specialized = updated.effective_profile(&updated.directors[2]).unwrap();
+    let specialized = updated
+        .effective_profile(&updated.agent_configs[2])
+        .unwrap();
     assert_eq!(specialized.max_workers, 2);
     assert_eq!(specialized.harness, Harness::ClaudeCode);
-    let invalid_scope = Command::UpdateDirector {
-        director_id: updated.directors[2].id.clone(),
+    let invalid_scope = Command::UpdateAgentConfig {
+        agent_config_id: updated.agent_configs[2].id.clone(),
         name: "Release director".into(),
         overrides: ProfileOverrides {
-            scope: Some(DirectorScope::Issues {
+            scope: Some(AgentScope::Issues {
                 issue_ids: vec!["elsewhere".into()],
             }),
             ..Default::default()
@@ -378,7 +381,8 @@ async fn request_ids_cannot_be_reused_for_other_commands() {
     let server = start(&db.path().join("relay.sqlite3")).await;
     let mut request = envelope(0, comment());
     assert_eq!(send(&server, &request).await.status(), 200);
-    request.command = Command::CreateDirector {
+    request.command = Command::CreateAgentConfig {
+        template: "director".into(),
         project_id: "demo".into(),
         name: "Different".into(),
         overrides: ProfileOverrides::default(),

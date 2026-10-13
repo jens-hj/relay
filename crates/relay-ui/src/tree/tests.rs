@@ -350,6 +350,7 @@ fn status_words_keep_right_padding_and_trim_in_narrow_sidebars() {
             failed: 2,
             queued: 4,
             done: 7,
+            idle: 0,
         };
         view! {
             col width:{240.0}px {
@@ -396,6 +397,7 @@ fn status_words_show_in_full_at_the_design_width() {
             failed: 2,
             queued: 4,
             done: 7,
+            idle: 0,
         };
         view! {
             col width:{380.0}px {

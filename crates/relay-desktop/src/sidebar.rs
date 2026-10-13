@@ -12,8 +12,8 @@ use mosaic::core::theme::color;
 use mosaic::prelude::*;
 use relay_core::*;
 use relay_ui::prelude::{
-    AgentNode, AgentSidebar, AgentSidebarProps, ConnectionStatus, ConnectionStatusProps, Elbows,
-    ElbowsProps, OnPress, UsageFoot, UsageFootProps,
+    AgentNode, AgentSidebar, AgentSidebarProps, ConnectionStatus, ConnectionStatusProps, OnPress,
+    UsageFoot, UsageFootProps,
 };
 use relay_ui::prelude::{
     CellButton, CellButtonProps, Ellipsis, EllipsisProps, Label, LabelProps, Rule, TextRole, Tone,
@@ -21,7 +21,7 @@ use relay_ui::prelude::{
 };
 use relay_ui::surfaces::{Connection, ConnectionInfo, ConnectionTelemetry};
 use relay_ui::tokens::{ground, px};
-use relay_ui::tree::Guide;
+use relay_ui::tree::{ChildStatusBar, ChildStatusBarProps, StatusTally};
 use std::rc::Rc;
 
 /// Logical sidebar width before UI scale.
@@ -89,7 +89,7 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     let menu = State::new(false);
     let roots = Derived::new(move || {
         let snapshot = model.snapshot.get();
-        let selected = if matches!(model.page.get(), Page::Sessions) {
+        let selected = if matches!(model.page.get(), Page::Sessions | Page::AgentStart) {
             model.session.get()
         } else {
             String::new()
@@ -105,7 +105,13 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     let usage = Derived::new(move || {
         adapt::harness_usage(&model.snapshot.get(), &model.harnesses.get(), unix_now())
     });
-    let open: Rc<dyn Fn(String)> = Rc::new(move |id| model.open_session(id));
+    let open: Rc<dyn Fn(String)> = Rc::new(move |id| {
+        if let Some(config) = id.strip_prefix("config:") {
+            model.open_root_agent(config.into());
+        } else {
+            model.open_session(id);
+        }
+    });
     let toggle: Rc<dyn Fn(String, bool)> = Rc::new(move |id, open| {
         model.collapsed_agents.update(|ids| {
             if open {
@@ -119,13 +125,15 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     let approve: Rc<dyn Fn(String)> = Rc::new(move |id| respond_first(model, &id, true));
     let review: Rc<dyn Fn(String)> = Rc::new(move |id| model.open_session(id));
     let new_agent: OnPress = Rc::new(move || model.open_profile(EditTarget::New));
+    let spawn: Rc<dyn Fn(String)> = Rc::new(move |parent| model.open_new_worker(parent));
     let roots: relay_ui::Live<Vec<AgentNode>> = roots.into();
     let focused: relay_ui::Live<Option<String>> =
         Derived::new(move || model.agent_focus.get()).into();
     let agents = view! {
         AgentSidebar roots:(roots) width:(width) focus:(focused) root-indent:true
-            on-new:(Some(new_agent)) on-open:(Some(open)) on-toggle:(Some(toggle))
-            on-focus:(Some(focus)) on-approve:(Some(approve)) on-review:(Some(review)) {
+            on-new:(Some(new_agent)) on-spawn:(Some(spawn)) on-open:(Some(open))
+            on-toggle:(Some(toggle)) on-focus:(Some(focus)) on-approve:(Some(approve))
+            on-review:(Some(review)) {
             if !usage.get().is_empty() {
                 UsageFoot harnesses:(relay_ui::Live::from(usage))
             }
@@ -249,25 +257,78 @@ fn menu_cell(
     cell
 }
 
-/// The project menu: each project with its directors, then defaults and a
-/// new project, one ruled row each.
+/// Session count and the states of workers executing in a project.
+fn project_activity(snapshot: &Snapshot, project_id: &str) -> (usize, StatusTally) {
+    let mut count = 0;
+    let mut running = StatusTally::default();
+    for session in snapshot
+        .sessions
+        .iter()
+        .filter(|s| s.project_id == project_id)
+    {
+        count += 1;
+        if session
+            .worker
+            .as_ref()
+            .is_some_and(|w| w.status == WorkerStatus::Running)
+        {
+            running.add(adapt::session_status(snapshot, session));
+        }
+    }
+    count += snapshot
+        .agent_configs
+        .iter()
+        .filter(|c| {
+            c.project_id == project_id
+                && !snapshot
+                    .sessions
+                    .iter()
+                    .any(|s| s.agent_config_id == c.id && s.role == SessionRole::Root)
+        })
+        .count();
+    (count, running)
+}
+
+#[component]
+fn ProjectSummary(model: Model, project_id: State<String>, name: State<String>) -> Element {
+    let activity = Derived::new(move || project_activity(&model.snapshot.get(), &project_id.get()));
+    let indicator = view! {
+        row width:max-content height:min-content {}
+    };
+    indicator.switch(
+        move || activity.get().1,
+        move |parent, tally| {
+            if tally.total() > 0 {
+                parent.adopt(&view! {
+                    ChildStatusBar tally:(*tally) length:24.0
+                });
+            }
+        },
+    );
+    view! {
+        row width:1fr min-width:0px height:min-content gap:{px(8.0)}px align:center {
+            row width:1fr min-width:0px height:min-content {
+                Ellipsis text:(name) role:(TextRole::Label)
+            }
+            Label
+                text:(Derived::new(move || {
+                let count = activity.get().0;
+                format!("{count} {}", if count == 1 { "agent" } else { "agents" })
+            }))
+                role:(TextRole::Caption) tone:(Tone::Muted)
+            { parent.adopt(&indicator); }
+        }
+    }
+}
+
+/// The project menu: project summaries, then defaults and a new project.
 #[component]
 fn ProjectMenu(model: Model, menu: State<bool>) -> Element {
     // Scroll attributes style its content, not its viewport. Bound the viewport
     // explicitly to the fixed-height menu rows so short lists leave room for agents.
     let height = Derived::new(move || {
         let snapshot = model.snapshot.get();
-        let directors = snapshot
-            .directors
-            .iter()
-            .filter(|director| {
-                snapshot
-                    .projects
-                    .iter()
-                    .any(|project| project.id == director.project_id)
-            })
-            .count();
-        (34.0 * (snapshot.projects.len() + directors + 2) as f32).min(360.0)
+        (34.0 * (snapshot.projects.len() + 2) as f32).min(360.0)
     });
     view! {
         col height:{px(height.get())}px shrink:0
@@ -286,7 +347,7 @@ fn ProjectMenu(model: Model, menu: State<bool>) -> Element {
                                     Derived::new(move || format!("Select project {}", name.get())),
                                     press(move || { menu.set(false); model.select_project(id.get_untracked()); }),
                                     true,
-                                    view! { Ellipsis text:(name) role:(TextRole::Label) },
+                                    view! { ProjectSummary model:(model) project-id:(id) name:(name) },
                                     None,
                                 ));
                                 parent.adopt(&menu_cell(
@@ -296,41 +357,6 @@ fn ProjectMenu(model: Model, menu: State<bool>) -> Element {
                                     view! { icon size:{px(14.0)}px connections-icon },
                                     None,
                                 ));
-                            }
-                        }
-                        for (_, director) in {model.snapshot.get().directors.into_iter().filter(|d| d.project_id == id.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>()} {
-                            let id = State::new(director.id.clone());
-                            let name = State::new(director.name.clone());
-                            let project_id = State::new(director.project_id.clone());
-                            row height:{px(34.0)}px
-                                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                                Elbows
-                                    guides:(vec![if model.snapshot.get().directors.iter().rev().find(|d| d.project_id == project_id.get()).is_some_and(|d| d.id == id.get()) { Guide::Last } else { Guide::Branch }])
-                                row width:1fr min-width:0px role:list-item
-                                    label:{format!("Director row {}", name.get())} {
-                                    {
-                                        let open = menu_cell(
-                                            Derived::new(move || format!("Open director {}", name.get())),
-                                            press(move || { menu.set(false); model.open_director(id.get_untracked()); }),
-                                            true,
-                                            view! {
-                                                row width:1fr min-width:0px height:min-content gap:{px(8.0)}px align:center {
-                                                    icon size:{px(13.0)}px director-icon
-                                                    Ellipsis text:(name) role:(TextRole::Label)
-                                                }
-                                            },
-                                            Some(Derived::new(move || capacity_label(director_capacity(&model.snapshot.get(), &id.get())))),
-                                        );
-                                        parent.adopt(&open);
-                                        parent.adopt(&menu_cell(
-                                            Derived::new(move || format!("Profile for {}", name.get())),
-                                            press(move || { menu.set(false); model.open_director_profile(id.get_untracked()); }),
-                                            false,
-                                            view! { icon size:{px(14.0)}px sliders-icon },
-                                            None,
-                                        ));
-                                    }
-                                }
                             }
                         }
                     }
@@ -482,11 +508,11 @@ fn connection_time(seconds: u64) -> String {
 }
 
 /// Running, occupied (running or queued) and allowed workers for a director.
-pub fn director_capacity(snapshot: &Snapshot, director_id: &str) -> (usize, usize, usize) {
+pub fn director_capacity(snapshot: &Snapshot, agent_config_id: &str) -> (usize, usize, usize) {
     let statuses: Vec<&WorkerStatus> = snapshot
         .sessions
         .iter()
-        .filter(|s| s.director_id == director_id && s.role != SessionRole::Director)
+        .filter(|s| s.agent_config_id == agent_config_id && s.role != SessionRole::Root)
         .filter_map(|s| s.worker.as_ref().map(|w| &w.status))
         .collect();
     let running = statuses
@@ -498,18 +524,11 @@ pub fn director_capacity(snapshot: &Snapshot, director_id: &str) -> (usize, usiz
         .filter(|s| matches!(s, WorkerStatus::Running | WorkerStatus::Queued))
         .count();
     let limit = snapshot
-        .directors
+        .agent_configs
         .iter()
-        .find(|d| d.id == director_id)
+        .find(|d| d.id == agent_config_id)
         .and_then(|d| snapshot.effective_profile(d).ok())
         .map(|p| p.max_workers as usize)
         .unwrap_or(0);
     (running, active, limit)
-}
-
-fn capacity_label((running, active, limit): (usize, usize, usize)) -> String {
-    if limit == 0 {
-        return "Delegation paused".into();
-    }
-    format!("{active} of {limit} workers active, {running} running")
 }

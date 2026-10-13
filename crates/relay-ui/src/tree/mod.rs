@@ -31,6 +31,7 @@ pub struct AgentNode {
     pub id: String,
     pub name: String,
     pub status: AgentStatus,
+    pub can_spawn: bool,
     pub harness: Harness,
     /// Hidden when unknown.
     pub model: Option<ModelIdentity>,
@@ -54,6 +55,7 @@ impl AgentNode {
             id: id.into(),
             name: name.into(),
             status,
+            can_spawn: true,
             harness,
             model: None,
             effort: None,

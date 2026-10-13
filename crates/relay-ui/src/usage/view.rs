@@ -532,7 +532,9 @@ pub fn UsageFoot(
         },
     );
     view! {
-        col height:min-content shrink:0 fill:ground.panel label:"Usage foot" {
+        col height:min-content shrink:0 fill:ground.panel
+            stroke:(width:{px(1.0)} color:ground.rule offset:{px(-0.5)} edges:(left right))
+            label:"Usage foot" {
             el width:fill height:{px(1.0)}px shrink:0 fill:ground.rule label:"Usage boundary"
                 nohit {}
             row height:min-content gap:{px(8.0)}px align:end

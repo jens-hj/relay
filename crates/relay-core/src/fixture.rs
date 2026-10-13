@@ -1,6 +1,6 @@
 use crate::*;
 
-pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
+pub fn demo_snapshot(defaults: AgentProfile) -> Snapshot {
     let project = Project {
         root: None,
         id: "demo".into(),
@@ -23,7 +23,7 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
     };
     let issues = [
         ("issue-1", 1, "Connect the project board", "backlog", "integration", "Mirror the authoritative remote board and preserve its column order and issue identity. Relay adds agent activity alongside the existing workflow.", None),
-        ("issue-2", 2, "Make director profiles declarative", "in_progress", "workflow", "Define project defaults and per-director overrides. Let several directors specialize within a project and expose their effective configuration.", None),
+        ("issue-2", 2, "Make director profiles declarative", "in_progress", "workflow", "Define project defaults and per-director overrides. Let several agent_configs specialize within a project and expose their effective configuration.", None),
         ("issue-3", 3, "Review conversations in context", "review", "experience", "Attach feedback to the exact message or quoted passage that prompted it. Keep the conversation and its issue links intact across sessions.", Some("Fixture result: a contextual comment prototype is ready for review.")),
         ("issue-4", 4, "Expose context and usage controls", "backlog", "efficiency", "Support compact, reset context, and archive/start-new as separate actions. Report cache state only when the connected harness provides evidence.", None),
     ].into_iter().map(|(id, number, title, column, label, body, result)| Issue {
@@ -32,20 +32,22 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
             url: format!("https://github.com/demo/relay/issues/{number}"),
         }), title: title.into(), body: body.into(), column_id: column.into(), labels: vec![label.into()], result: result.map(String::from),
     }).collect();
-    let directors = vec![
-        Director {
+    let agent_configs = vec![
+        AgentConfig {
+            template: "director".into(),
             id: "director-main".into(),
             project_id: "demo".into(),
             name: "Project director".into(),
             overrides: ProfileOverrides::default(),
         },
-        Director {
+        AgentConfig {
+            template: "director".into(),
             id: "director-review".into(),
             project_id: "demo".into(),
             name: "Review director".into(),
             overrides: ProfileOverrides {
                 harness: Some(Harness::ClaudeCode),
-                scope: Some(DirectorScope::Issues {
+                scope: Some(AgentScope::Issues {
                     issue_ids: vec!["issue-3".into()],
                 }),
                 responsibilities: Some(vec![Task::Verify, Task::Review]),
@@ -61,7 +63,7 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
             "director-main",
             Some("issue-2"),
             "Profile design",
-            SessionRole::Director,
+            SessionRole::Root,
             None,
         ),
         session(
@@ -79,7 +81,7 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
             "director-review",
             Some("issue-3"),
             "Contextual review",
-            SessionRole::Director,
+            SessionRole::Root,
             None,
         ),
     ];
@@ -89,7 +91,7 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
             "session-plan",
             "You",
             "prompt",
-            "Let directors inherit project defaults, while keeping their explicit overrides intact when those defaults change.",
+            "Let agent_configs inherit project defaults, while keeping their explicit overrides intact when those defaults change.",
         ),
         (
             "m2",
@@ -147,6 +149,7 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
         })
         .collect();
     Snapshot {
+        agent_templates: vec![],
         board_aliases: Default::default(),
         issue_aliases: Default::default(),
         protocol_version: PROTOCOL_VERSION,
@@ -160,7 +163,7 @@ pub fn demo_snapshot(defaults: DirectorProfile) -> Snapshot {
         revision: 0,
         projects: vec![project],
         issues,
-        directors,
+        agent_configs,
         sessions,
         messages,
         comments: vec![],
@@ -220,7 +223,7 @@ pub fn demo_orchestration(snapshot: &mut Snapshot) {
             Harness::ClaudeCode,
             "claude-sonnet-4-5",
             WorkerStatus::Running,
-            "Add the profile override columns and migrate existing directors.",
+            "Add the profile override columns and migrate existing agent_configs.",
         ),
         (
             "session-write",
@@ -333,6 +336,7 @@ fn session(
     worker: Option<WorkerRun>,
 ) -> Session {
     Session {
+        profile: None,
         workspaces: vec![],
         selection: Default::default(),
         conversations: vec![],
@@ -340,7 +344,7 @@ fn session(
         id: id.into(),
         project_id: "demo".into(),
         issue_id: issue.map(Into::into),
-        director_id: director.into(),
+        agent_config_id: director.into(),
         title: title.into(),
         role,
         fixture: true,
@@ -423,7 +427,7 @@ fn tool_messages() -> Vec<Message> {
                 end_line: Some(40),
                 total_lines: Some(243),
             }),
-            "pub struct DirectorProfile {\n    pub harness: Harness,\n    pub scope: DirectorScope,\n    pub max_workers: u16,\n}",
+            "pub struct AgentProfile {\n    pub harness: Harness,\n    pub scope: AgentScope,\n    pub max_workers: u16,\n}",
         ),
         call(
             "t-search",
@@ -548,7 +552,7 @@ fn tool_messages() -> Vec<Message> {
                         owner_session_id: Some("session-worker".into()),
                     },
                     PlanStep {
-                        title: "Migrate stored directors".into(),
+                        title: "Migrate stored agent_configs".into(),
                         done: false,
                         owner_session_id: Some("session-migration".into()),
                     },

@@ -347,25 +347,25 @@ pub fn execution_problem(model: Model) -> Option<String> {
     if !snapshot.visible_task(&issue.id) {
         return Some("Issue is no longer on the board; restore it and sync".into());
     }
-    let Some(director) = snapshot
-        .directors
+    let Some(_director) = snapshot
+        .agent_configs
         .iter()
-        .find(|d| d.id == session.director_id)
+        .find(|d| d.id == session.agent_config_id)
     else {
-        return Some("Director is unavailable".into());
+        return Some("Agent configuration is unavailable".into());
     };
-    let Ok(profile) = snapshot.effective_profile(director) else {
-        return Some("Director profile is invalid".into());
+    let Ok(profile) = snapshot.session_profile(session) else {
+        return Some("Agent profile is invalid".into());
     };
-    if matches!(&profile.scope,DirectorScope::Issues{issue_ids} if !issue_ids.contains(&issue.id)) {
-        return Some("Issue is outside director scope".into());
+    if matches!(&profile.scope,AgentScope::Issues{issue_ids} if !issue_ids.contains(&issue.id)) {
+        return Some("Issue is outside agent scope".into());
     }
     let active = snapshot
         .sessions
         .iter()
         .filter(|s| {
             s.id != session.id
-                && s.director_id == session.director_id
+                && s.agent_config_id == session.agent_config_id
                 && s.worker.as_ref().is_some_and(|w| {
                     matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running)
                 })
@@ -432,7 +432,7 @@ fn send_first(model: Model) {
         return;
     }
     let session_id = model.session.get_untracked();
-    let state = model.buffer.get_untracked();
+    let mut state = model.buffer.get_untracked();
     let parts = parts(model, &session_id);
     if !has_content(&parts) || model.busy.get_untracked() || model.can_retry() {
         return;
@@ -442,6 +442,36 @@ fn send_first(model: Model) {
             .notice
             .set("Reconnect before sending. Your draft is retained.".into());
         return;
+    }
+    let snapshot = model.snapshot.get_untracked();
+    let Some(config) = snapshot
+        .agent_configs
+        .iter()
+        .find(|c| c.id == model.worker_director.get_untracked())
+    else {
+        return;
+    };
+    let Ok(profile) = snapshot.effective_profile(config) else {
+        return;
+    };
+    match profile
+        .permissions
+        .get(&Task::Implement)
+        .copied()
+        .unwrap_or(Permission::Deny)
+    {
+        Permission::Deny => {
+            model
+                .notice
+                .set("Implementation denied by the effective agent profile".into());
+            return;
+        }
+        Permission::Ask if !model.worker_approval.get_untracked() => {
+            state.approval_needed = true;
+            model.buffer.set(state);
+            return;
+        }
+        _ => {}
     }
     if assets(&parts)
         .iter()
@@ -456,15 +486,18 @@ fn send_first(model: Model) {
         model.notice.set(error);
         return;
     }
+    state.approval_needed = false;
+    model.buffer.set(state);
     model.submit(
-        Command::StartDirector {
-            director_id: model.worker_director.get_untracked(),
+        Command::StartRootAgent {
+            agent_config_id: model.worker_director.get_untracked(),
+            issue_id: model.issue.get_untracked(),
             prompt: plain_text(&parts),
             parts: parts.clone(),
-            approve_implementation: false,
+            approve_implementation: model.worker_approval.get_untracked(),
         },
         model.snapshot.get_untracked().revision,
-        Saved::DirectorStart {
+        Saved::AgentStart {
             draft: Draft {
                 session_id,
                 revision: 0,
@@ -490,7 +523,7 @@ pub fn acknowledge_first(model: Model, submitted: &Draft, session: &str) {
 }
 
 pub fn send(model: Model) {
-    if model.page.get_untracked() == crate::model::Page::DirectorStart {
+    if model.page.get_untracked() == crate::model::Page::AgentStart {
         send_first(model);
         return;
     }
@@ -561,14 +594,14 @@ pub fn send(model: Model) {
         promote(model, &id);
         return;
     }
-    let Some(director) = snapshot
-        .directors
+    let Some(_director) = snapshot
+        .agent_configs
         .iter()
-        .find(|d| d.id == session.director_id)
+        .find(|d| d.id == session.agent_config_id)
     else {
         return;
     };
-    let Ok(profile) = snapshot.effective_profile(director) else {
+    let Ok(profile) = snapshot.session_profile(session) else {
         return;
     };
     match profile
@@ -580,7 +613,7 @@ pub fn send(model: Model) {
         Permission::Deny => {
             model
                 .notice
-                .set("Implementation denied by the effective director profile".into());
+                .set("Implementation denied by the effective agent profile".into());
             return;
         }
         Permission::Ask if !model.worker_approval.get_untracked() => {
@@ -776,7 +809,7 @@ pub fn flush(model: Model) {
     {
         let id = model.session.get_untracked();
         if model.catalogs.get_untracked().contains_key(&id)
-            && (id.starts_with("director-draft-")
+            && (id.starts_with("agent-draft-")
                 || model
                     .snapshot
                     .get_untracked()
@@ -831,7 +864,7 @@ pub fn flush(model: Model) {
     let mut submit = None;
     let snapshot = model.snapshot.get_untracked();
     for (session, doc) in &mut state.documents {
-        if session.starts_with("director-draft-") {
+        if session.starts_with("agent-draft-") {
             continue;
         }
         if doc.conflict || !doc.error.is_empty() || doc.submitting || doc.saving.is_some() {

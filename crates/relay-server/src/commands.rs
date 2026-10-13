@@ -191,9 +191,12 @@ pub(super) async fn discover(
         return Ok(demo_catalog(id, worker.harness));
     }
     let session = snapshot.sessions.iter().find(|s| s.id == id && !s.fixture);
-    let draft_director = id
-        .strip_prefix("director-draft-")
-        .and_then(|director_id| snapshot.directors.iter().find(|d| d.id == director_id));
+    let draft_director = id.strip_prefix("agent-draft-").and_then(|agent_config_id| {
+        snapshot
+            .agent_configs
+            .iter()
+            .find(|d| d.id == agent_config_id)
+    });
     let (harness, project_id, worktree, connections, workspaces) = if let Some(session) = session {
         let worker = session
             .worker

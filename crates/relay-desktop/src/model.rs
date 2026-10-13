@@ -8,17 +8,17 @@ use tokio::sync::mpsc::UnboundedSender;
 pub enum Page {
     Board,
     Sessions,
-    Directors,
+    Profiles,
     Settings,
     NewProject,
     Connections,
     Publish,
-    DirectorStart,
+    AgentStart,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditTarget {
     Defaults,
-    Director(String),
+    Config(String),
     New,
 }
 #[derive(Clone)]
@@ -27,8 +27,10 @@ pub enum Saved {
     #[cfg(test)]
     Comment(String),
     Profile,
+    AgentTemplate,
+    ChildAgent,
     Start(String),
-    DirectorStart {
+    AgentStart {
         draft: Draft,
     },
     Send(String),
@@ -114,10 +116,14 @@ pub struct Model {
     pub author: State<String>,
     pub editor: State<EditTarget>,
     pub editor_name: State<String>,
-    pub editor_base: State<DirectorProfile>,
-    pub editor_profile: State<DirectorProfile>,
+    pub editor_base: State<AgentProfile>,
+    pub editor_profile: State<AgentProfile>,
     pub editor_overrides: State<ProfileOverrides>,
     pub editor_revision: State<u64>,
+    pub editor_parent: State<Option<String>>,
+    pub editor_template: State<String>,
+    pub editor_template_name: State<String>,
+    pub editor_override_accepted: State<bool>,
     pub toml: State<String>,
     pub advanced: State<bool>,
     pub worker_prompt: State<String>,
@@ -206,9 +212,13 @@ impl Model {
             #[cfg(test)]
             author: State::new(std::env::var("RELAY_NAME").unwrap_or_else(|_| "Teammate".into())),
             editor: State::new(EditTarget::Defaults),
+            editor_parent: State::new(None),
+            editor_template: State::new("director".into()),
+            editor_template_name: State::new(String::new()),
+            editor_override_accepted: State::new(false),
             editor_name: State::new(String::new()),
-            editor_base: State::new(DirectorProfile::default()),
-            editor_profile: State::new(DirectorProfile::default()),
+            editor_base: State::new(AgentProfile::default()),
+            editor_profile: State::new(AgentProfile::default()),
             editor_overrides: State::new(ProfileOverrides::default()),
             editor_revision: State::new(0),
             toml: State::new(String::new()),
@@ -322,13 +332,13 @@ impl Model {
         if !self.busy.get_untracked() {
             return;
         }
-        self.busy.set(false);
         match result {
             Ok(()) => {
                 self.acknowledge(pending, &id);
                 self.notice.set(String::new());
             }
             Err(message) => {
+                self.busy.set(false);
                 if !update.outcome_ambiguous
                     && let Saved::Buffer(draft) = &pending.saved
                 {
@@ -360,7 +370,7 @@ impl Model {
                 self.clear_worker_draft(&body);
                 self.open_session(format!("session-{id}"));
             }
-            Saved::DirectorStart { draft } => {
+            Saved::AgentStart { draft } => {
                 crate::buffer::acknowledge_first(*self, &draft, &format!("session-{id}"));
                 self.open_session(format!("session-{id}"));
             }
@@ -374,11 +384,52 @@ impl Model {
             }
             Saved::Profile => {
                 if self.editor.get_untracked() == EditTarget::New {
+                    if !self
+                        .snapshot
+                        .get_untracked()
+                        .agent_configs
+                        .iter()
+                        .any(|c| c.id == format!("agent-config-{id}"))
+                    {
+                        return;
+                    }
                     self.editor
-                        .set(EditTarget::Director(format!("director-{id}")));
+                        .set(EditTarget::Config(format!("agent-config-{id}")));
+                    self.open_root_agent(format!("agent-config-{id}"));
                 }
                 self.editor_revision
                     .set(self.snapshot.get_untracked().revision);
+            }
+            Saved::ChildAgent => {
+                if !self
+                    .snapshot
+                    .get_untracked()
+                    .sessions
+                    .iter()
+                    .any(|s| s.id == format!("session-{id}"))
+                {
+                    return;
+                }
+                self.open_session(format!("session-{id}"));
+            }
+            Saved::AgentTemplate => {
+                let snapshot = self.snapshot.get_untracked();
+                let Some(template) = snapshot
+                    .agent_templates
+                    .iter()
+                    .find(|p| p.id == format!("profile-{id}"))
+                else {
+                    return;
+                };
+                self.editor_template.set(format!("profile-{id}"));
+                self.editor_base.set(template.profile.clone());
+                self.editor_overrides.set(ProfileOverrides::between(
+                    &template.profile,
+                    &self.editor_profile.get_untracked(),
+                ));
+                self.editor_revision
+                    .set(self.snapshot.get_untracked().revision);
+                self.editor_override_accepted.set(false);
             }
         }
         self.pending.set(None);
@@ -401,10 +452,26 @@ impl Model {
                 .submissions
                 .iter()
                 .any(|s| s.id == id || s.last_edit_request.as_deref() == Some(&id)),
-            Saved::Start(_) | Saved::DirectorStart { .. } => snapshot
+            Saved::Start(_) | Saved::AgentStart { .. } => snapshot
                 .sessions
                 .iter()
                 .any(|s| s.id == format!("session-{id}")),
+            Saved::ChildAgent => snapshot
+                .sessions
+                .iter()
+                .any(|s| s.id == format!("session-{id}")),
+            Saved::AgentTemplate => snapshot
+                .agent_templates
+                .iter()
+                .any(|p| p.id == format!("profile-{id}")),
+            Saved::Profile
+                if matches!(pending.envelope.command, Command::CreateAgentConfig { .. }) =>
+            {
+                snapshot
+                    .agent_configs
+                    .iter()
+                    .any(|c| c.id == format!("agent-config-{id}"))
+            }
             Saved::Send(_) => snapshot
                 .messages
                 .iter()
@@ -490,7 +557,7 @@ impl Model {
                 .pending
                 .get()
                 .is_some_and(|pending| match pending.saved {
-                    Saved::Buffer(draft) | Saved::DirectorStart { draft } => {
+                    Saved::Buffer(draft) | Saved::AgentStart { draft } => {
                         draft.session_id == self.session.get()
                     }
                     _ => false,
@@ -522,7 +589,7 @@ impl Model {
                         approve_implementation,
                         ..
                     }
-                    | Command::StartDirector {
+                    | Command::StartRootAgent {
                         prompt,
                         approve_implementation,
                         ..
@@ -585,17 +652,23 @@ impl Model {
         }
         let snapshot = self.snapshot.get_untracked();
         self.editor_revision.set(snapshot.revision);
-        if let Ok(project) = snapshot.project(&self.project.get_untracked()) {
-            self.editor_base.set(project.defaults.clone());
-            if matches!(
-                self.editor.get_untracked(),
-                EditTarget::Director(_) | EditTarget::New
-            ) {
-                self.editor_profile.set(
-                    self.editor_overrides
-                        .get_untracked()
-                        .resolve(&project.defaults),
-                );
+        let base = match self.editor.get_untracked() {
+            EditTarget::Config(id) => snapshot
+                .agent_configs
+                .iter()
+                .find(|c| c.id == id)
+                .and_then(|c| snapshot.config_base(c).ok()),
+            EditTarget::Defaults => snapshot
+                .project(&self.project.get_untracked())
+                .ok()
+                .map(|p| p.defaults.clone()),
+            EditTarget::New => None,
+        };
+        if let Some(base) = base {
+            self.editor_base.set(base.clone());
+            if matches!(self.editor.get_untracked(), EditTarget::Config(_)) {
+                self.editor_profile
+                    .set(self.editor_overrides.get_untracked().resolve(&base));
             }
         }
         self.notice
@@ -612,28 +685,124 @@ impl Model {
         let Ok(project) = snapshot.project(&self.project.get_untracked()) else {
             return;
         };
+        let mut base = project.defaults.clone();
+        let mut template = "director".to_string();
         let (name, overrides) = match &target {
-            EditTarget::Director(id) => {
-                let Some(director) = snapshot.directors.iter().find(|d| &d.id == id) else {
+            EditTarget::Config(id) => {
+                let Some(director) = snapshot.agent_configs.iter().find(|d| &d.id == id) else {
                     return;
                 };
+                let Ok(config_base) = snapshot.config_base(director) else {
+                    return;
+                };
+                base = config_base;
+                template = director.template.clone();
                 (director.name.clone(), director.overrides.clone())
             }
-            EditTarget::New => ("New director".into(), ProfileOverrides::default()),
+            EditTarget::New => (String::new(), ProfileOverrides::default()),
             EditTarget::Defaults => ("Project defaults".into(), ProfileOverrides::default()),
         };
-        self.editor_profile
-            .set(overrides.resolve(&project.defaults));
-        self.editor_base.set(project.defaults.clone());
+        self.editor_profile.set(overrides.resolve(&base));
+        self.editor_base.set(base);
         self.editor_overrides.set(overrides);
         self.editor_name.set(name);
         self.editor_revision.set(snapshot.revision);
         self.editor.set(target);
+        self.editor_parent.set(None);
+        self.editor_template.set(template);
+        self.editor_template_name.set(String::new());
+        self.editor_override_accepted.set(false);
         // A TOML draft belongs to the profile loaded above. Hiding and showing
         // its editor preserves the draft; loading a profile starts a new one.
         self.toml.set(String::new());
         self.advanced.set(false);
-        self.page.set(Page::Directors);
+        self.page.set(Page::Profiles);
+    }
+    pub fn open_new_worker(&self, parent_id: String) {
+        let snapshot = self.snapshot.get_untracked();
+        let Some(parent) = snapshot.sessions.iter().find(|s| s.id == parent_id) else {
+            return;
+        };
+        self.project.set(parent.project_id.clone());
+        self.open_profile(EditTarget::New);
+        self.editor_parent.set(Some(parent_id));
+        self.worker_prompt.set(String::new());
+        self.worker_approval.set(false);
+        self.select_agent_template("worker".into());
+    }
+    pub fn select_agent_template(&self, id: String) {
+        let snapshot = self.snapshot.get_untracked();
+        let base = if let Some(parent) = self.editor_parent.get_untracked() {
+            let Some(parent) = snapshot.sessions.iter().find(|s| s.id == parent) else {
+                return;
+            };
+            let Ok(parent_profile) = snapshot.session_profile(parent) else {
+                return;
+            };
+            let Ok(project) = snapshot.project(&parent.project_id) else {
+                return;
+            };
+            let mut profile = project.defaults.clone();
+            profile.scope = parent_profile.scope;
+            profile.execution = parent_profile.execution;
+            profile
+        } else {
+            let Ok(project) = snapshot.project(&self.project.get_untracked()) else {
+                return;
+            };
+            project.defaults.clone()
+        };
+        let profile = match id.as_str() {
+            "director" => base,
+            "worker" => AgentProfile::worker(&base),
+            _ => {
+                let Some(template) = snapshot
+                    .agent_templates
+                    .iter()
+                    .find(|p| p.id == id && p.project_id == self.project.get_untracked())
+                else {
+                    return;
+                };
+                template.profile.clone()
+            }
+        };
+        self.editor_template.set(id);
+        self.editor_base.set(profile.clone());
+        self.editor_profile.set(profile);
+        self.editor_overrides.set(Default::default());
+        self.editor_override_accepted.set(false);
+        self.toml.set(String::new());
+    }
+    pub fn agent_template_name(&self) -> String {
+        match self.editor_template.get().as_str() {
+            "director" => "Director".into(),
+            "worker" => "Worker".into(),
+            id => self
+                .snapshot
+                .get()
+                .agent_templates
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| "Agent".into()),
+        }
+    }
+    pub fn discard_profile_changes(&self) {
+        self.editor_profile.set(self.editor_base.get_untracked());
+        self.editor_overrides.set(Default::default());
+        self.editor_override_accepted.set(false);
+        self.toml.set(String::new());
+    }
+    pub fn save_agent_template(&self) {
+        self.submit(
+            Command::SaveAgentTemplate {
+                project_id: self.project.get_untracked(),
+                name: self.editor_template_name.get_untracked(),
+                profile: self.editor_profile.get_untracked(),
+            },
+            self.editor_revision.get_untracked(),
+            Saved::AgentTemplate,
+        );
     }
     pub fn select_project(&self, id: String) {
         self.sidebar_open.set(false);
@@ -661,7 +830,7 @@ impl Model {
         self.worker_director.set(
             self.snapshot
                 .get_untracked()
-                .directors
+                .agent_configs
                 .iter()
                 .find(|d| d.project_id == id)
                 .map(|d| d.id.clone())
@@ -796,9 +965,9 @@ impl Model {
                 ids.insert(session.project_id.clone());
             });
             self.expanded_directors.update(|ids| {
-                ids.insert(session.director_id.clone());
+                ids.insert(session.agent_config_id.clone());
             });
-            self.worker_director.set(session.director_id.clone());
+            self.worker_director.set(session.agent_config_id.clone());
             if let Some(issue_id) = &session.issue_id {
                 self.select_task_board(issue_id);
             }
@@ -816,39 +985,49 @@ impl Model {
         self.search.set(String::new());
         self.focused_message.set(String::new());
     }
-    pub fn open_director(&self, id: String) {
+    pub fn open_root_agent(&self, id: String) {
         self.command_feedback.set(String::new());
         self.sidebar_open.set(false);
         let snapshot = self.snapshot.get_untracked();
-        let Some(director) = snapshot.directors.iter().find(|d| d.id == id) else {
+        let Some(director) = snapshot.agent_configs.iter().find(|d| d.id == id) else {
             return;
         };
         if let Some(session) = snapshot.sessions.iter().rev().find(|s| {
             s.project_id == director.project_id
-                && s.director_id == id
-                && s.role == SessionRole::Director
+                && s.agent_config_id == id
+                && s.role == SessionRole::Root
         }) {
             self.open_session(session.id.clone());
         } else {
             self.project.set(director.project_id.clone());
-            self.session.set(format!("director-draft-{id}"));
+            let task = snapshot
+                .effective_profile(director)
+                .ok()
+                .and_then(|profile| {
+                    if let AgentScope::Issues { issue_ids } = profile.scope {
+                        let current = self.issue.get_untracked();
+                        current
+                            .filter(|id| {
+                                issue_ids.iter().any(|allowed| {
+                                    snapshot.canonical_issue_id(allowed)
+                                        == snapshot.canonical_issue_id(id)
+                                })
+                            })
+                            .or_else(|| {
+                                issue_ids
+                                    .first()
+                                    .map(|id| snapshot.canonical_issue_id(id).to_owned())
+                            })
+                    } else {
+                        None
+                    }
+                });
+            self.issue.set(task);
+            self.session.set(format!("agent-draft-{id}"));
             self.worker_director.set(id);
             self.worker_approval.set(false);
-            self.page.set(Page::DirectorStart);
+            self.page.set(Page::AgentStart);
         }
-    }
-    pub fn open_director_profile(&self, id: String) {
-        let snapshot = self.snapshot.get_untracked();
-        let Some(director) = snapshot.directors.iter().find(|d| d.id == id) else {
-            return;
-        };
-        if self.project.get_untracked() != director.project_id {
-            self.select_project(director.project_id.clone());
-        }
-        self.expanded_projects.update(|ids| {
-            ids.insert(director.project_id.clone());
-        });
-        self.open_profile(EditTarget::Director(id));
     }
     fn clear_worker_draft(&self, body: &str) {
         if self.worker_prompt.get_untracked() == body {
@@ -873,7 +1052,7 @@ impl Model {
                     .canonical_issue_id(id)
                     .to_owned()
             }));
-            self.worker_director.set(session.director_id.clone());
+            self.worker_director.set(session.agent_config_id.clone());
             self.worker_approval.set(false);
             self.page.set(Page::Board);
         }
@@ -897,9 +1076,9 @@ impl Model {
             .cloned()
             .collect()
     }
-    pub fn worker_profile(&self, continuation: bool) -> Result<(DirectorProfile, usize), String> {
+    pub fn worker_profile(&self, continuation: bool) -> Result<(AgentProfile, usize), String> {
         let snapshot = self.snapshot.get();
-        let (director_id, issue_id) = if continuation {
+        let (agent_config_id, issue_id) = if continuation {
             let session = snapshot
                 .sessions
                 .iter()
@@ -919,7 +1098,7 @@ impl Model {
                 );
             }
             (
-                session.director_id.clone(),
+                session.agent_config_id.clone(),
                 session.issue_id.clone().ok_or("Session has no issue")?,
             )
         } else {
@@ -937,17 +1116,17 @@ impl Model {
             return Err("Issue is no longer on this board. Restore it and sync before starting or continuing.".into());
         }
         let director = snapshot
-            .directors
+            .agent_configs
             .iter()
-            .find(|d| d.id == director_id && d.project_id == issue.project_id)
+            .find(|d| d.id == agent_config_id && d.project_id == issue.project_id)
             .ok_or("Select a project director")?;
         let profile = snapshot.effective_profile(director)?;
         let active = snapshot
             .sessions
             .iter()
             .filter(|s| {
-                s.director_id == director_id
-                    && s.role != SessionRole::Director
+                s.agent_config_id == agent_config_id
+                    && s.role != SessionRole::Root
                     && s.worker.as_ref().is_some_and(|w| {
                         matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running)
                     })
@@ -967,7 +1146,7 @@ impl Model {
         } else {
             self.issue.get()
         };
-        if matches!(&profile.scope, DirectorScope::Issues { issue_ids } if !issue_id.is_some_and(|id| self.scope_contains(issue_ids, &id)))
+        if matches!(&profile.scope, AgentScope::Issues { issue_ids } if !issue_id.is_some_and(|id| self.scope_contains(issue_ids, &id)))
         {
             return Err("Issue is outside director scope".into());
         }
@@ -989,7 +1168,7 @@ impl Model {
                 .get()
                 .sessions
                 .iter()
-                .any(|s| s.id == self.session.get() && s.role == SessionRole::Director);
+                .any(|s| s.id == self.session.get() && s.role == SessionRole::Root);
         if !director_continuation && active >= usize::from(profile.max_workers) {
             return Err("No worker slots available".into());
         }
@@ -1018,7 +1197,7 @@ impl Model {
                 issue_id: self.issue.get_untracked(),
                 role: SessionRole::Worker,
                 connection_ids: self.workspace_selection.get_untracked(),
-                director_id: self.worker_director.get_untracked(),
+                agent_config_id: self.worker_director.get_untracked(),
                 prompt: prompt.clone(),
                 approve_implementation: self.worker_approval.get_untracked(),
             }
@@ -1300,13 +1479,42 @@ impl Model {
                 project_id: self.project.get_untracked(),
                 profile,
             },
-            EditTarget::New => Command::CreateDirector {
-                project_id: self.project.get_untracked(),
-                name: self.editor_name.get_untracked(),
-                overrides: self.editor_overrides.get_untracked(),
-            },
-            EditTarget::Director(director_id) => Command::UpdateDirector {
-                director_id,
+            EditTarget::New => {
+                if let Some(parent_session_id) = self.editor_parent.get_untracked() {
+                    let prompt = self.worker_prompt.get_untracked();
+                    if prompt.trim().is_empty() {
+                        self.notice.set("Enter the worker's task".into());
+                        return;
+                    }
+                    self.submit(
+                        Command::StartChildAgent {
+                            parent_session_id,
+                            name: self.editor_name.get_untracked(),
+                            profile,
+                            prompt,
+                            approve_implementation: self.worker_approval.get_untracked(),
+                        },
+                        self.editor_revision.get_untracked(),
+                        Saved::ChildAgent,
+                    );
+                    return;
+                }
+                let snapshot = self.snapshot.get_untracked();
+                let Ok(project) = snapshot.project(&self.project.get_untracked()) else {
+                    return;
+                };
+                Command::CreateAgentConfig {
+                    template: self.editor_template.get_untracked(),
+                    project_id: project.id.clone(),
+                    name: self.editor_name.get_untracked(),
+                    overrides: ProfileOverrides::between(
+                        &self.editor_base.get_untracked(),
+                        &profile,
+                    ),
+                }
+            }
+            EditTarget::Config(agent_config_id) => Command::UpdateAgentConfig {
+                agent_config_id,
                 name: self.editor_name.get_untracked(),
                 overrides: self.editor_overrides.get_untracked(),
             },
@@ -1317,10 +1525,16 @@ impl Model {
             Saved::Profile,
         );
     }
-    pub fn modify_profile(&self, field: &str, update: impl FnOnce(&mut DirectorProfile)) {
+    pub fn modify_profile(&self, field: &str, update: impl FnOnce(&mut AgentProfile)) {
+        self.editor_override_accepted.set(false);
         let mut profile = self.editor_profile.get_untracked();
         update(&mut profile);
-        if self.editor.get_untracked() != EditTarget::Defaults {
+        if self.editor.get_untracked() == EditTarget::New {
+            self.editor_overrides.set(ProfileOverrides::between(
+                &self.editor_base.get_untracked(),
+                &profile,
+            ));
+        } else if self.editor.get_untracked() != EditTarget::Defaults {
             self.editor_overrides.update(|overrides| match field {
                 "execution" => overrides.execution = Some(profile.execution.clone()),
                 "harness" => overrides.harness = Some(profile.harness),
@@ -1369,7 +1583,9 @@ impl Model {
             _ => false,
         };
         if overridden {
-            "Director override"
+            "Agent override"
+        } else if self.editor.get() == EditTarget::New || self.editor_template.get() != "director" {
+            "Inherited from profile"
         } else {
             "Inherited from project"
         }
@@ -1385,8 +1601,7 @@ impl Model {
     }
     pub fn import_toml(&self) {
         let result = if self.editor.get_untracked() == EditTarget::Defaults {
-            DirectorProfile::from_toml(&self.toml.get_untracked())
-                .map(|p| self.editor_profile.set(p))
+            AgentProfile::from_toml(&self.toml.get_untracked()).map(|p| self.editor_profile.set(p))
         } else {
             ProfileOverrides::from_toml(&self.toml.get_untracked()).and_then(|o| {
                 let profile = o.resolve(&self.editor_base.get_untracked());

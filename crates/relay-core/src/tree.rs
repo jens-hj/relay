@@ -139,6 +139,7 @@ mod tests {
 
     fn session(id: &str, parent: Option<&str>, status: Option<WorkerStatus>) -> Session {
         Session {
+            profile: None,
             connection_ids: vec![],
             workspaces: vec![],
             selection: Default::default(),
@@ -146,7 +147,7 @@ mod tests {
             id: id.into(),
             project_id: "p".into(),
             issue_id: None,
-            director_id: "d".into(),
+            agent_config_id: "d".into(),
             title: id.into(),
             role: SessionRole::Worker,
             fixture: false,

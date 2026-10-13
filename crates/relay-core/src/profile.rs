@@ -11,7 +11,7 @@ pub enum Harness {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum DirectorScope {
+pub enum AgentScope {
     #[default]
     Project,
     Issues {
@@ -81,11 +81,11 @@ impl Permission {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DirectorProfile {
+pub struct AgentProfile {
     #[serde(default)]
     pub execution: crate::ExecutionSettings,
     pub harness: Harness,
-    pub scope: DirectorScope,
+    pub scope: AgentScope,
     pub responsibilities: Vec<Task>,
     pub completion: Vec<Task>,
     /// Zero pauses delegation. The upper bound prevents accidental unbounded fan-out.
@@ -93,14 +93,25 @@ pub struct DirectorProfile {
     pub permissions: BTreeMap<Task, Permission>,
 }
 
-impl Default for DirectorProfile {
+impl Default for AgentProfile {
     fn default() -> Self {
         Self::from_toml(include_str!("../../../profiles/default.toml"))
             .expect("bundled default profile is valid")
     }
 }
 
-impl DirectorProfile {
+impl AgentProfile {
+    pub fn worker(base: &Self) -> Self {
+        let mut profile = base.clone();
+        profile.responsibilities = vec![Task::Implement, Task::Verify];
+        profile.completion = vec![Task::Verify];
+        profile.permissions.insert(Task::Delegate, Permission::Deny);
+        profile
+    }
+
+    pub fn can_delegate(&self) -> bool {
+        self.max_workers > 0 && self.permissions[&Task::Delegate] != Permission::Deny
+    }
     pub fn validate(&self) -> Result<(), String> {
         if self.max_workers > 64 {
             return Err("Worker limit must be between 0 and 64".into());
@@ -124,7 +135,7 @@ impl DirectorProfile {
         {
             return Err("Declare a permission for every action".into());
         }
-        if let DirectorScope::Issues { issue_ids } = &self.scope {
+        if let AgentScope::Issues { issue_ids } = &self.scope {
             if issue_ids.is_empty() {
                 return Err("Issue scope requires at least one issue".into());
             }
@@ -146,6 +157,14 @@ impl DirectorProfile {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTemplate {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub profile: AgentProfile,
+}
+
 /// Missing fields stay inherited. Setting a field replaces that field as a whole.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -155,7 +174,7 @@ pub struct ProfileOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub harness: Option<Harness>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<DirectorScope>,
+    pub scope: Option<AgentScope>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub responsibilities: Option<Vec<Task>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,8 +186,21 @@ pub struct ProfileOverrides {
 }
 
 impl ProfileOverrides {
-    pub fn resolve(&self, base: &DirectorProfile) -> DirectorProfile {
-        DirectorProfile {
+    pub fn between(base: &AgentProfile, profile: &AgentProfile) -> Self {
+        Self {
+            execution: (base.execution != profile.execution).then(|| profile.execution.clone()),
+            harness: (base.harness != profile.harness).then_some(profile.harness),
+            scope: (base.scope != profile.scope).then(|| profile.scope.clone()),
+            responsibilities: (base.responsibilities != profile.responsibilities)
+                .then(|| profile.responsibilities.clone()),
+            completion: (base.completion != profile.completion).then(|| profile.completion.clone()),
+            max_workers: (base.max_workers != profile.max_workers).then_some(profile.max_workers),
+            permissions: (base.permissions != profile.permissions)
+                .then(|| profile.permissions.clone()),
+        }
+    }
+    pub fn resolve(&self, base: &AgentProfile) -> AgentProfile {
+        AgentProfile {
             execution: self
                 .execution
                 .clone()
@@ -202,8 +234,91 @@ impl ProfileOverrides {
 mod tests {
     use super::*;
     #[test]
+    fn worker_presets_and_instance_overrides_keep_delegation_explicit() {
+        let director = AgentProfile::default();
+        assert!(director.can_delegate());
+        let worker = AgentProfile::worker(&director);
+        assert!(!worker.can_delegate());
+        assert!(worker.responsibilities.contains(&Task::Implement));
+        let overrides = ProfileOverrides::between(&director, &worker);
+        assert_eq!(overrides.resolve(&director), worker);
+        assert!(overrides.harness.is_none());
+        assert!(overrides.execution.is_none());
+    }
+
+    #[test]
+    fn manually_configured_child_profiles_are_shared_by_client_and_server() {
+        let mut snapshot = crate::demo_snapshot(AgentProfile::default());
+        let parent = snapshot.sessions[0].clone();
+        let mut child = parent.clone();
+        child.id = "child".into();
+        child.parent_session_id = Some(parent.id.clone());
+        let mut worker = AgentProfile::worker(&AgentProfile::default());
+        worker.harness = Harness::ClaudeCode;
+        worker.execution.approval = crate::ApprovalMode::Ask;
+        child.profile = Some(worker.clone());
+        snapshot.sessions.push(child.clone());
+        assert_eq!(snapshot.session_profile(&child).unwrap(), worker);
+        let mut descendant = child.clone();
+        descendant.id = "descendant".into();
+        descendant.parent_session_id = Some(child.id);
+        descendant.profile = None;
+        assert_eq!(snapshot.session_profile(&descendant).unwrap(), worker);
+    }
+
+    #[test]
+    fn named_profiles_persist_and_reject_duplicate_or_reserved_names() {
+        let mut snapshot = crate::demo_snapshot(AgentProfile::default());
+        let command = crate::Command::SaveAgentTemplate {
+            project_id: snapshot.projects[0].id.clone(),
+            name: "Reviewer".into(),
+            profile: AgentProfile::worker(&AgentProfile::default()),
+        };
+        snapshot.apply(command.clone(), "named", 0).unwrap();
+        let stored: crate::Snapshot =
+            serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        assert_eq!(stored.agent_templates[0].name, "Reviewer");
+        snapshot
+            .apply(
+                crate::Command::CreateAgentConfig {
+                    project_id: snapshot.projects[0].id.clone(),
+                    name: "Review agent".into(),
+                    template: "profile-named".into(),
+                    overrides: ProfileOverrides::default(),
+                },
+                "agent",
+                0,
+            )
+            .unwrap();
+        let config = snapshot.agent_configs.last().unwrap().clone();
+        assert!(!snapshot.effective_profile(&config).unwrap().can_delegate());
+        snapshot.projects[0]
+            .defaults
+            .permissions
+            .insert(Task::Delegate, Permission::Allow);
+        snapshot.projects[0].defaults.harness = Harness::ClaudeCode;
+        assert_eq!(
+            snapshot.effective_profile(&config).unwrap().harness,
+            Harness::Codex
+        );
+        assert!(snapshot.apply(command, "duplicate", 0).is_err());
+        assert!(
+            snapshot
+                .apply(
+                    crate::Command::SaveAgentTemplate {
+                        project_id: snapshot.projects[0].id.clone(),
+                        name: "Worker".into(),
+                        profile: AgentProfile::default()
+                    },
+                    "reserved",
+                    0
+                )
+                .is_err()
+        );
+    }
+    #[test]
     fn inherited_fields_follow_defaults_and_explicit_fields_stay_fixed() {
-        let mut defaults = DirectorProfile::default();
+        let mut defaults = AgentProfile::default();
         let overrides = ProfileOverrides {
             max_workers: Some(2),
             ..Default::default()
@@ -217,14 +332,14 @@ mod tests {
     }
     #[test]
     fn toml_roundtrips_and_rejects_typos_or_invalid_limits() {
-        let profile = DirectorProfile::default();
+        let profile = AgentProfile::default();
         assert_eq!(
-            DirectorProfile::from_toml(&profile.to_toml()).unwrap(),
+            AgentProfile::from_toml(&profile.to_toml()).unwrap(),
             profile
         );
-        assert!(DirectorProfile::from_toml(&(profile.to_toml() + "\n[unknown]\nx = 1\n")).is_err());
+        assert!(AgentProfile::from_toml(&(profile.to_toml() + "\n[unknown]\nx = 1\n")).is_err());
         assert!(
-            DirectorProfile::from_toml(
+            AgentProfile::from_toml(
                 &profile
                     .to_toml()
                     .replace("max_workers = 4", "max_workers = 65")
