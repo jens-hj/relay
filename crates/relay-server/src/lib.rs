@@ -129,8 +129,14 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
              PRAGMA user_version = 12;"
         ).map_err(Error::internal)?;
-        let seed =
-            serde_json::to_string(&demo_snapshot(defaults.clone())).map_err(Error::internal)?;
+        let mut seed = demo_snapshot(defaults.clone());
+        // The isolated demo shows an example orchestration and usage; a live
+        // workspace shows only what its agents and harnesses report.
+        if std::env::var("RELAY_DEMO").as_deref() == Ok("1") {
+            demo_orchestration(&mut seed);
+            demo_usage(&mut seed, now());
+        }
+        let seed = serde_json::to_string(&seed).map_err(Error::internal)?;
         let inserted = connection
             .execute(
                 "INSERT OR IGNORE INTO workspace(id, snapshot) VALUES (1, ?1)",
@@ -1151,8 +1157,17 @@ pub fn router_with_browser(
         .connection
         .execute("DELETE FROM processes", [])
         .map_err(Error::internal)?;
+    // Fixture sessions never own a process: their recorded states are
+    // examples, not runs this restart interrupted.
+    let fixtures: std::collections::BTreeSet<String> = initial
+        .sessions
+        .iter()
+        .filter(|s| s.fixture)
+        .map(|s| s.id.clone())
+        .collect();
     for session in &mut initial.sessions {
         if let Some(w) = &mut session.worker
+            && !session.fixture
             && runtime::active(&w.status)
         {
             w.status = WorkerStatus::Interrupted;
@@ -1164,6 +1179,7 @@ pub fn router_with_browser(
     for message in &mut initial.messages {
         if let Some(tool) = &mut message.tool
             && tool.state == ToolState::Running
+            && !fixtures.contains(&message.session_id)
         {
             tool.state = ToolState::Interrupted;
             changed = true;
@@ -1253,7 +1269,10 @@ pub fn router_with_browser(
         }
     }
     for permission in &mut initial.tool_permissions {
-        if permission.decision.is_none() && !permission.expired {
+        if permission.decision.is_none()
+            && !permission.expired
+            && !fixtures.contains(&permission.session_id)
+        {
             permission.expired = true;
             changed = true;
         }
