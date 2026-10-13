@@ -2,6 +2,8 @@
 //! pack's example data. Shared by the example window and the offscreen
 //! screenshot test.
 
+#[path = "d2.rs"]
+pub(crate) mod d2;
 use mosaic::prelude::*;
 use relay_ui::prelude::*;
 use relay_ui::tokens::{ModelFamily, Signal, ThemeVariant, ToolKind, ground, px};
@@ -34,6 +36,9 @@ pub fn gallery(set_theme: SetTheme) -> Element {
                     dither_section()
                     cells_section()
                     overlay_section()
+                    d2::conversation()
+                    d2::composer_states()
+                    d2::tool_board()
                 }
             }
         }

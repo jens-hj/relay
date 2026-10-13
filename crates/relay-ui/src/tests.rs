@@ -10,11 +10,11 @@ use mosaic::{core::reactive::flush, prelude::*, text::FontContext};
 use std::time::Duration;
 
 #[path = "../examples/gallery/sections.rs"]
-mod gallery;
+pub(super) mod gallery;
 
-struct Mounted {
+pub(super) struct Mounted {
     scope: Scope,
-    ui: Ui,
+    pub(super) ui: Ui,
     size: Size,
 }
 
@@ -24,7 +24,7 @@ impl Drop for Mounted {
     }
 }
 
-fn mount(size: Size, build: impl FnOnce() -> Element) -> Mounted {
+pub(super) fn mount(size: Size, build: impl FnOnce() -> Element) -> Mounted {
     mosaic::core::builtins::install();
     install_theme(&theme(ThemeVariant::Dark, 1.0));
     install_theme(&crate::icons::icons());
@@ -42,7 +42,7 @@ fn mount(size: Size, build: impl FnOnce() -> Element) -> Mounted {
 }
 
 impl Mounted {
-    fn settle(&self) {
+    pub(super) fn settle(&self) {
         flush();
         for _ in 0..12 {
             self.ui.tick(Duration::from_millis(16));
@@ -53,7 +53,7 @@ impl Mounted {
         }
     }
 
-    fn labels(&self) -> Vec<String> {
+    pub(super) fn labels(&self) -> Vec<String> {
         self.ui
             .inspection_snapshot()
             .nodes
@@ -62,7 +62,7 @@ impl Mounted {
             .collect()
     }
 
-    fn rect(&self, label: &str) -> Rect {
+    pub(super) fn rect(&self, label: &str) -> Rect {
         self.ui
             .inspection_snapshot()
             .nodes
@@ -72,7 +72,7 @@ impl Mounted {
             .rect
     }
 
-    fn click(&self, position: Vector2) {
+    pub(super) fn click(&self, position: Vector2) {
         for kind in [
             PointerEventKind::Down(PointerButton::Primary),
             PointerEventKind::Up(PointerButton::Primary),
@@ -88,7 +88,7 @@ impl Mounted {
         self.settle();
     }
 
-    fn key(&self, key: Key) {
+    pub(super) fn key(&self, key: Key) {
         self.ui.dispatch_key(KeyEvent {
             kind: KeyEventKind::Down { repeat: false },
             key,
@@ -516,11 +516,20 @@ fn gallery_screenshots() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(2.0f32);
-    let logical = Size::new(1280.0, 2350.0);
-    let mounted = mount(logical, || {
-        gallery::gallery(std::rc::Rc::new(|variant| {
+    let specimen = std::env::var("RELAY_UI_SPECIMEN").unwrap_or_default();
+    let logical = match specimen.as_str() {
+        "tools" => Size::new(1332.0, 3800.0),
+        "conversation" => Size::new(960.0, 1400.0),
+        "composer" => Size::new(848.0, 1300.0),
+        _ => Size::new(1280.0, 2350.0),
+    };
+    let mounted = mount(logical, || match specimen.as_str() {
+        "tools" => gallery::d2::tool_board(),
+        "conversation" => gallery::d2::conversation(),
+        "composer" => gallery::d2::composer_states(),
+        _ => gallery::gallery(std::rc::Rc::new(|variant| {
             install_theme(&theme(variant, 1.0));
-        }))
+        })),
     });
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
@@ -615,7 +624,12 @@ fn gallery_screenshots() {
             .to_lowercase()
             .replace(", ", "-")
             .replace(' ', "-");
-        let path = format!("{directory}/gallery-{name}.png");
+        let prefix = if specimen.is_empty() {
+            "gallery"
+        } else {
+            specimen.as_str()
+        };
+        let path = format!("{directory}/{prefix}-{name}.png");
         image::RgbaImage::from_raw(width, height, pixels)
             .unwrap()
             .save(&path)

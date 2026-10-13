@@ -22,19 +22,25 @@
 extern crate self as relay_ui;
 
 pub mod cells;
+pub mod composer;
 pub mod dither;
 pub mod effort;
 pub mod fonts;
 pub mod frame;
 pub mod glyph;
 pub mod icons;
+pub mod model;
 pub mod motion;
 pub mod overlay;
 pub mod status;
 pub mod text;
 pub mod tokens;
+pub mod tool_call;
+pub mod transcript;
 mod value;
 
+#[cfg(test)]
+mod d2_tests;
 #[cfg(test)]
 mod tests;
 
@@ -52,6 +58,7 @@ pub mod prelude {
         PrimaryButton, PrimaryButtonProps, Rule, RuledCol, RuledColProps, RuledRow, RuledRowProps,
         SecondaryButton, SecondaryButtonProps,
     };
+    pub use crate::composer::*;
     pub use crate::dither::{Dither, DitherProps, Gradient, Wash, WashProps, live_reach};
     pub use crate::effort::{EffortTrack, EffortTrackProps, OnEffort, Orientation, TrackSize};
     pub use crate::frame::{Corner, Cut, CutCorner, CutCornerProps};
@@ -63,6 +70,8 @@ pub mod prelude {
         Ellipsis, EllipsisProps, Label, LabelProps, SerifSize, SerifTitle, SerifTitleProps,
         TextRole, Tone, VerticalLabel, VerticalLabelProps, Weight,
     };
+    pub use crate::tool_call::*;
+    pub use crate::transcript::*;
     pub use crate::{Live, UiText};
 }
 
