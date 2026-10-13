@@ -794,3 +794,25 @@ fn gallery_sections_stack_without_overlap_in_a_window() {
         );
     }
 }
+
+#[test]
+fn gallery_scrolls_in_a_window() {
+    let mounted = mount(Size::new(1280.0, 960.0), || {
+        gallery::gallery(std::rc::Rc::new(|variant| {
+            install_theme(&theme(variant, 1.0));
+        }))
+    });
+    let before = mounted.rect("EFFORT TRACKS").origin.y;
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Wheel {
+            delta: Vector2::new(0.0, -600.0),
+        },
+        position: Vector2::new(640.0, 500.0),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: Duration::ZERO,
+    });
+    mounted.settle();
+    let after = mounted.rect("EFFORT TRACKS").origin.y;
+    assert!(before - after > 300.0, "scrolled from {before} to {after}");
+}
