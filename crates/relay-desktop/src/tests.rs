@@ -581,7 +581,7 @@ fn large_scale_settings_keep_controls_visible_in_a_narrow_window() {
     let number = nodes
         .nodes
         .iter()
-        .find(|n| n.label.as_deref() == Some("200"))
+        .find(|n| n.label.as_deref() == Some("200%"))
         .unwrap();
     let details = mounted.ui.inspection_details(number.id).unwrap();
     assert_eq!(
@@ -793,6 +793,10 @@ fn phone_navigation_tracks_edge_swipes_and_dismisses_without_activating_content(
         touch(&mounted, PointerEventKind::Move, x + dx, 150.0 + dy);
         touch(&mounted, up, x + dx, 150.0 + dy);
         assert!(!mounted.model.sidebar_open.get_untracked());
+        assert!(
+            mounted.model.issue.get_untracked().is_none(),
+            "gesture from {x}"
+        );
     }
     touch(&mounted, down, 10.0, 150.0);
     touch(&mounted, PointerEventKind::Move, 90.0, 152.0);
@@ -913,7 +917,8 @@ fn command_palette_shares_edges_scrolls_and_dismisses_without_clicking_through()
         assert!(panel.origin.y >= 0.0 && panel.origin.y + panel.size.height <= mounted.size.height);
         assert!(
             results.size.height > 0.0
-                && results.origin.y + results.size.height <= panel.origin.y + panel.size.height
+                && results.origin.y + results.size.height <= panel.origin.y + panel.size.height,
+            "{results:?} {panel:?}"
         );
         for label in ["Open board", "Open sessions", "Publish board"] {
             let action = mounted.rect(label);
@@ -942,7 +947,7 @@ fn command_palette_shares_edges_scrolls_and_dismisses_without_clicking_through()
 fn command_palette_enter_runs_the_keyboard_selected_row() {
     let mounted = mount(false, 1380.0);
     mounted.key(Key::Character("k".into()), true);
-    mounted.key(Key::ArrowDown, false);
+    // The first command starts highlighted; Down moves to the second.
     mounted.key(Key::ArrowDown, false);
     mounted.key(Key::Enter, false);
     assert!(!mounted.model.palette.get_untracked());
@@ -5325,6 +5330,9 @@ fn assert_control_hit(mounted: &Mounted, label: &str) {
         "{label}: {rect:?}"
     );
     let mut hit = mounted.ui.hit_test(rect.center()).map(|e| e.id());
+    let first = hit
+        .and_then(|id| snapshot.nodes.iter().find(|n| n.id == id))
+        .map(|n| (n.label.clone(), n.rect));
     while let Some(id) = hit {
         if id == target.id {
             return;
@@ -5335,7 +5343,7 @@ fn assert_control_hit(mounted: &Mounted, label: &str) {
             .find(|n| n.id == id)
             .and_then(|n| n.parent);
     }
-    panic!("Focused control clipped or obscured: {label}: {rect:?}");
+    panic!("Focused control clipped or obscured: {label}: {rect:?}, hit {first:?}");
 }
 
 #[test]
@@ -5756,13 +5764,29 @@ fn direct_project_connections_and_header_actions_use_full_cells() {
         .unwrap();
     assert!((icon.rect.center().x - tree.center().x).abs() < 0.1);
     assert!((icon.rect.center().y - tree.center().y).abs() < 0.1);
+    // A card with linked sessions counts them in its foot, inside the card.
+    let card = nodes
+        .nodes
+        .iter()
+        .find(|n| {
+            n.description.as_deref().is_some_and(|d| {
+                d.ends_with("linked sessions") && !d.ends_with(" 0 linked sessions")
+            })
+        })
+        .unwrap();
     let count = nodes
         .nodes
         .iter()
-        .find(|n| n.label.as_deref() == Some("Task session count"))
+        .find(|n| {
+            n.label
+                .as_deref()
+                .is_some_and(|l| l.ends_with(" session") || l.ends_with(" sessions"))
+        })
         .unwrap();
-    let footer = nodes.node(count.parent.unwrap()).unwrap();
-    assert_eq!(count.rect.size.height, footer.rect.size.height);
+    assert!(
+        card.rect.contains(count.rect.center()),
+        "{card:?} {count:?}"
+    );
     mounted
         .model
         .snapshot

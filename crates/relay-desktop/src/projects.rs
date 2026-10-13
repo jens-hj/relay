@@ -3,13 +3,13 @@ use crate::ui::{Readout, ReadoutProps};
 use crate::{
     controls::{ButtonStyle, button},
     model::{Model, Page, Saved},
-    ui::{Module, ModuleProps},
 };
 use mosaic::core::theme::color;
 use mosaic::prelude::*;
 use relay_core::*;
 use relay_ui::prelude::{Segments, SegmentsProps};
 use relay_ui::style::*;
+use relay_ui::surfaces::{Module, ModuleProps};
 use relay_ui::tokens::{ground, px, status};
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -272,7 +272,7 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
 fn Connections(model: Model) -> Element {
     view! {
         col height:min-content max-width:{px(760.0)}px gap:{px(24.0)}px {
-            Module title:("Connections".to_string()) {
+            Module title:("Connections".to_string()) caps:true {
                 for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && match &c.kind { ConnectionKind::Board{board_id} => model.snapshot.get().canonical_board_id(board_id) == board_id, _ => true }).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
                     let id = State::new(connection.id.clone());
                     let fallback=connection.clone();
@@ -321,7 +321,7 @@ fn Connections(model: Model) -> Element {
                     }
                 }
             }
-            Module title:("New connection".to_string()) flush:true {
+            Module title:("New connection".to_string()) caps:true {
                 ConnectionForm model:(model) initial:false
             }
             Operations model:(model)
