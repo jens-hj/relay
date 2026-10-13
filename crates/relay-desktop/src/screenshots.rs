@@ -324,7 +324,7 @@ fn shell_screenshots() {
                     (
                         "wrap-context",
                         "issue-context",
-                        "Source context follows the journal.".into(),
+                        "Context sent to agent follows the journal.".into(),
                     ),
                     (
                         "wrap-fence",
