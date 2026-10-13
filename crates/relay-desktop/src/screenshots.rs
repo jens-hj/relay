@@ -151,6 +151,24 @@ fn shell_screenshots() {
         ..Default::default()
     });
     model.server_endpoint.set("http://127.0.0.1:7331".into());
+    // One harness ready and one needing a sign-in, so both availability
+    // colours show.
+    model.harnesses.set(
+        [
+            (Harness::Codex, "ready"),
+            (Harness::ClaudeCode, "signed_out"),
+        ]
+        .into_iter()
+        .map(|(harness, state)| HarnessStatus {
+            harness,
+            executable: String::new(),
+            version: Some("1.0.0".into()),
+            state: state.into(),
+            detail: String::new(),
+            checked_at: now,
+        })
+        .collect(),
+    );
     scope.run(|| {
         let _ambient = ui.enter();
         ui.mount(&ui::shell(model));
@@ -163,7 +181,7 @@ fn shell_screenshots() {
             ui.frame(logical, 1.0);
         }
     };
-    let shots: [(&str, &dyn Fn()); 7] = [
+    let shots: [(&str, &dyn Fn()); 8] = [
         ("conversation", &|| {
             model.open_session("session-plan".into())
         }),
@@ -177,6 +195,9 @@ fn shell_screenshots() {
         ("settings", &|| model.page.set(Page::Settings)),
         ("profile", &|| {
             model.open_profile(crate::model::EditTarget::Director("director-main".into()))
+        }),
+        ("new-director", &|| {
+            model.open_profile(crate::model::EditTarget::New)
         }),
         ("connections", &|| model.page.set(Page::Connections)),
         ("palette", &|| {

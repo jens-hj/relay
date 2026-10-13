@@ -97,13 +97,29 @@ fn form_controls_report_choices() {
         view! {
             col gap:8px {
                 Field label:"Repository" value:(value) placeholder:"owner/name"
-                Segments options:(options.clone()) selected:1usize on-select:(pick)
-                Stepper value:9i64 on-change:(number) min:0i64 max:10i64 step:2i64 label:"Workers"
+                row width:300px height:40px shrink:0 {
+                    Segments options:(options.clone()) selected:1usize on-select:(pick)
+                }
+                row width:150px height:40px shrink:0 {
+                    Stepper value:9i64 on-change:(number) min:0i64 max:10i64 step:2i64
+                        label:"Workers"
+                }
                 Toggle label:"Compact rows" on:false on-toggle:(switch)
-                Select label:"Theme" options:(options) selected:0usize on-select:(select)
+                row width:200px height:40px shrink:0 {
+                    Select label:"Theme" options:(options) selected:0usize on-select:(select)
+                }
             }
         }
     });
+    // Embedded: the segments split their 300px cell equally at its full
+    // height; the stepper's ends and the select fill their cells too.
+    let (dark, light) = (mounted.rect("Dark"), mounted.rect("Light"));
+    assert_eq!((dark.size.width, light.size.width), (150.0, 150.0));
+    assert_eq!((dark.size.height, light.size.height), (40.0, 40.0));
+    assert_eq!(dark.origin.x + 150.0, light.origin.x);
+    assert_eq!(mounted.rect("Decrease").size.height, 40.0);
+    assert_eq!(mounted.rect("Increase").size.height, 40.0);
+    assert_eq!(mounted.rect("Theme").size, Size::new(200.0, 40.0));
     assert!(mounted.has("Repository"));
     // The input fills the 40px row; the label cell names it visibly.
     assert!(

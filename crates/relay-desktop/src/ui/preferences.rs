@@ -14,11 +14,16 @@ use relay_ui::surfaces::{
 
 /// A muted caption in a padded cell over a hairline.
 fn caption(text: impl Into<UiText>, rule: bool) -> Element {
+    toned_caption(text, rule, Tone::Muted)
+}
+
+/// A caption in a status tone, for warnings such as a failed refresh.
+fn toned_caption(text: impl Into<UiText>, rule: bool, tone: Tone) -> Element {
     let text = text.into();
     view! {
         row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px)
             stroke:(width:{px(if rule {1.0} else {0.0})} color:ground.hairline edges:bottom) {
-            Label text:(text) role:(TextRole::Caption) tone:(Tone::Muted)
+            Label text:(text) role:(TextRole::Caption) tone:(tone)
         }
     }
 }
@@ -76,7 +81,7 @@ pub(crate) fn Settings(model: Model) -> Element {
         Module title:"Harnesses" caps:true
             note:(Some(UiText::from("Installed on the connected server"))) {
             if !model.connected.get() || !model.harness_error.get().is_empty() {
-                { parent.adopt(&caption(Derived::new(move || if !model.connected.get() {"Disconnected · last checked status retained".to_string()} else {model.harness_error.get()}), true)); }
+                { parent.adopt(&toned_caption(Derived::new(move || if !model.connected.get() {"Disconnected · last checked status retained".to_string()} else {model.harness_error.get()}), true, Tone::Signal(relay_ui::tokens::Signal::NeedsYou))); }
             }
             HarnessPanel model:(model) harness:(Harness::Codex)
             HarnessPanel model:(model) harness:(Harness::ClaudeCode)
@@ -113,7 +118,7 @@ pub(crate) fn Settings(model: Model) -> Element {
                 Module title:"Interface scale" caps:true
                     note:(Some(UiText::from("Display scaling follows the operating system"))) {
                     row height:{px(40.0)}px gap:0px align:center label:"Interface scale" {
-                        row width:max-content shrink:0
+                        row width:{px(150.0)}px shrink:0
                             stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
                             Stepper value:(relay_ui::Live::from(percent)) on-change:(set_percent)
                                 min:80i64 max:200i64 step:10i64 label:"Interface scale percent"
@@ -148,9 +153,7 @@ fn AppearanceRow(model: Model, title: &'static str, setting: crate::settings::Se
             }
             row width:1fr min-width:0px align:center {
                 if contrast {
-                    row height:min-content pad:(horizontal:{px(14.0)}px vertical:0px) {
-                        ContrastToggle model:(model)
-                    }
+                    ContrastToggle model:(model)
                 } else {
                     ModeSegments model:(model)
                 }
@@ -205,7 +208,13 @@ fn harness_reading(model: Model, harness: Harness) -> (Option<AgentStatus>, Stri
         .and_then(|s| s.version)
         .filter(|_| model.connected.get())
         .unwrap_or_default();
-    (harness_state(&state), word, version)
+    // A failed refresh is retryable: it needs you, like a failed check.
+    let status = if model.connected.get() && !model.harness_error.get().is_empty() {
+        Some(AgentStatus::Waiting)
+    } else {
+        harness_state(&state)
+    };
+    (status, word, version)
 }
 
 /// One harness on relay-ui's harness card, with Refresh and Details cells

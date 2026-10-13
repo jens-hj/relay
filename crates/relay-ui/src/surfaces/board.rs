@@ -304,6 +304,16 @@ impl Permission {
             Self::Deny => "deny",
         }
     }
+
+    /// The chosen colour: Allow lets work run at full steam, Ask waits on
+    /// you, Deny blocks it like a failure.
+    pub fn token(self) -> ColorToken {
+        match self {
+            Self::Allow => Signal::FullSteam.token(),
+            Self::Ask => Signal::NeedsYou.token(),
+            Self::Deny => Signal::Failed.token(),
+        }
+    }
 }
 
 /// One capability in a [`PermissionMatrix`].
@@ -312,8 +322,8 @@ pub struct PermissionRow {
     /// "Write to the database".
     pub action: String,
     pub choice: Permission,
-    /// Whether a request under this rule is waiting for you right now; only
-    /// then is "ask" amber.
+    /// Whether a request under this rule is waiting for you right now; the
+    /// action then reads amber.
     pub pending: bool,
     /// Names the row's choice for assistive technology ("Plan permission");
     /// the action when empty.
@@ -387,7 +397,7 @@ pub fn PermissionMatrix(
             });
         }
         head.adopt(&view! {
-            row width:{px(172.0)}px height:min-content shrink:0 pad:(left:{px(12.0)}px) {
+            row width:{px(172.0)}px height:min-content shrink:0 justify:center {
                 Label text:"Permission" role:(TextRole::Caption) tone:(Tone::Muted) weight:500
                     caps:true
             }
@@ -407,7 +417,12 @@ pub fn PermissionMatrix(
                 .position(|each| Some(*each) == choice)
                 .unwrap_or(0)
         }));
-        let tone = (row.pending && row.choice == Permission::Ask).then(|| Signal::NeedsYou.token());
+        let tones: Vec<ColorToken> = choices.iter().map(|(each, _)| each.token()).collect();
+        let action_tone = if row.pending {
+            Tone::Signal(Signal::NeedsYou)
+        } else {
+            Tone::Ink
+        };
         let options: Vec<String> = choices.iter().map(|(_, word)| word.clone()).collect();
         let group = if row.name.is_empty() {
             row.action.clone()
@@ -419,7 +434,7 @@ pub fn PermissionMatrix(
                 label:(row.action.clone())
                 stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                 row width:1fr min-width:0px height:min-content {
-                    Ellipsis text:(row.action.clone()) role:(TextRole::Label)
+                    Ellipsis text:(row.action.clone()) role:(TextRole::Label) tone:(action_tone)
                 }
             }
         };
@@ -458,9 +473,9 @@ pub fn PermissionMatrix(
             line.adopt(&cell);
         }
         line.adopt(&view! {
-            row width:max-content shrink:0 align:center pad:(horizontal:{px(12.0)}px vertical:0px)
+            row width:{px(172.0)}px shrink:0
                 stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
-                Segments options:(options) selected:(selected) on-select:(pick) chosen-tone:(tone)
+                Segments options:(options) selected:(selected) on-select:(pick) tones:(tones)
                     name:(group)
             }
         });
@@ -501,18 +516,30 @@ fn card_button(face: CardFace, press: OnPress) -> Element {
     if !face.version.is_empty() {
         details.adopt(&sized_text(face.version.into(), 11.0, 400, ground.muted));
     }
+    // Availability reads ok / needs attention / failed: a full-steam check,
+    // the amber waiting square or the red failed square, the word in the
+    // same colour. Anything else (checking, queued) stays muted.
     if let Some((state, word)) = face.status {
         let tone = match state {
             AgentStatus::Failed => Tone::Signal(Signal::Failed),
             AgentStatus::Waiting => Tone::Signal(Signal::NeedsYou),
+            AgentStatus::Done => Tone::Signal(Signal::FullSteam),
             _ => Tone::Muted,
         };
-        details.adopt(&view! {
-            row width:max-content height:min-content gap:{px(6.0)}px align:center {
+        let line = view! {
+            row width:max-content height:min-content gap:{px(6.0)}px align:center {}
+        };
+        if state == AgentStatus::Done {
+            line.adopt(&mark(Mark::Check, 10.0, Signal::FullSteam.token()));
+        } else {
+            line.adopt(&view! {
                 StatusSquare status:(state)
-                Label text:(word) role:(TextRole::Caption) tone:(tone)
-            }
+            });
+        }
+        line.adopt(&view! {
+            Label text:(word) role:(TextRole::Caption) tone:(tone)
         });
+        details.adopt(&line);
     }
     let state = match face.auth {
         HarnessAuth::SignedIn => Some(view! {
@@ -638,9 +665,15 @@ pub fn HarnessChoices(
     min_width: f32,
 ) -> Element {
     let count = options.len();
+    // Side by side the cards divide the whole width equally (one track per
+    // card, so no empty trailing cell); narrower than `min_width` each,
+    // they stack.
+    let width = State::new(f32::MAX);
+    let side = Derived::new(move || width.get() >= px(min_width) * count.max(1) as f32);
     let grid = view! {
         grid height:min-content gap:0px label:(label) role:group
-            cols:{GridTracks::auto_fit(GridTrack::minmax(px(min_width).into(), GridTrack::fr(1.0)))} {}
+            @layout:{move |rect: Rect| width.set(rect.size.width)}
+            cols:{if side.get() { GridTracks::new(vec![GridTrack::fr(1.0); count.max(1)]) } else { GridTracks::new([GridTrack::fr(1.0)]) }} {}
     };
     let cards: Rc<std::cell::RefCell<Vec<Element>>> = Rc::default();
     for (index, option) in options.into_iter().enumerate() {
@@ -691,7 +724,8 @@ pub fn HarnessChoices(
         });
         cards.borrow_mut().push(card.clone());
         let cell = view! {
-            row min-width:0px stroke:(width:{px(1.0)} color:ground.hairline edges:(right bottom)) {}
+            row min-width:0px
+                stroke:(width:{px(1.0)} color:ground.hairline edges:if side.get() && index > 0 { StrokeEdges::LEFT | StrokeEdges::BOTTOM } else { StrokeEdges::BOTTOM }) {}
         };
         cell.adopt(&card);
         grid.adopt(&cell);

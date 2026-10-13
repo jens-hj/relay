@@ -250,8 +250,10 @@ pub struct Command {
     pub title: String,
     /// Key hint ("⇧S"); hidden when empty.
     pub keys: String,
-    /// A muted kind ("Navigate", "Create"); hidden when empty.
+    /// The kind ("Navigate", "Create"), read as the row's description.
     pub detail: String,
+    /// The kind's icon, at the row's left.
+    pub icon: Option<SvgToken>,
 }
 
 impl Command {
@@ -261,7 +263,13 @@ impl Command {
             title: title.into(),
             keys: String::new(),
             detail: String::new(),
+            icon: None,
         }
+    }
+
+    pub fn icon(mut self, icon: SvgToken) -> Self {
+        self.icon = Some(icon);
+        self
     }
 
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
@@ -276,6 +284,7 @@ impl Command {
 }
 
 crate::value::live_value!(Vec<Command>);
+crate::value::live_value!(Tone);
 
 /// The commands whose titles contain every word of `query`, in order of
 /// the list (case-insensitive).
@@ -360,20 +369,34 @@ pub fn CommandPalette(
                     let selected = index == *highlight;
                     let keys = command.keys.clone();
                     let detail = command.detail.clone();
+                    let about = (!detail.is_empty()).then(|| UiText::from(detail.clone()));
+                    let glyph = view! {
+                        row width:{px(16.0)}px height:{px(16.0)}px shrink:0
+                            font-color:(if selected { ground.ink } else { ground.muted }) {}
+                    };
+                    if let Some(token) = command.icon {
+                        glyph.adopt(&crate::icons::icon_mark(token, 16.0));
+                    }
+                    // The icon stands for the category column: an image named by it.
+                    if !detail.is_empty() {
+                        glyph.role(mosaic::widgets::Role::Image);
+                        glyph.label(detail.clone());
+                    }
                     let row = view! {
                         col height:{px(36.0)}px shrink:0
                             fill:(if selected { ground.selected } else { ground.panel_raised }) {
                             CellButton label:(command.title.clone()) on-press:(press)
-                                rule:(Rule::Top) {
-                                row height:min-content gap:{px(10.0)}px align:center {
-                                    Ellipsis text:(command.title.clone()) role:(TextRole::Label)
+                                rule:(Rule::Top) start:true description:(about) {
+                                row height:min-content gap:{px(12.0)}px align:center {
                                     {
-                                        if !detail.is_empty() {
-                                            parent.adopt(&view! {
-                                                Label text:(detail.clone()) role:(TextRole::Micro)
-                                                    tone:(Tone::Muted) weight:500 caps:true
-                                            });
+                                        if command.icon.is_some() || !detail.is_empty() {
+                                            parent.adopt(&glyph);
                                         }
+                                    }
+                                    row width:1fr min-width:0px height:min-content {
+                                        Ellipsis text:(command.title.clone()) role:(TextRole::Label)
+                                    }
+                                    {
                                         if !keys.is_empty() {
                                             parent.adopt(&view! {
                                                 Kbd keys:(keys.clone())
@@ -508,7 +531,14 @@ pub fn CommandPalette(
 /// A header readout: a muted key above its value, as one ruled cell of a
 /// [`PageHeader`]; children (inline controls) follow the value.
 #[component]
-pub fn ReadoutCell(key: String, value: UiText, #[prop(optional)] children: Children) -> Element {
+pub fn ReadoutCell(
+    key: String,
+    value: UiText,
+    /// The value's colour, for readings that carry a signal; ink by default.
+    #[prop(default = Live::fixed(Tone::Ink))]
+    tone: Live<Tone>,
+    #[prop(optional)] children: Children,
+) -> Element {
     view! {
         col width:max-content max-width:{px(320.0)}px min-width:0px shrink:0 justify:center
             gap:{px(4.0)}px pad:(horizontal:{px(14.0)}px vertical:0px) label:(key.clone())
@@ -519,7 +549,7 @@ pub fn ReadoutCell(key: String, value: UiText, #[prop(optional)] children: Child
                 row width:max-content min-width:0px height:min-content clip {
                     text text-wrap:none font-family:monospace
                         font-size:{px(TextRole::Body.size())}px font-weight:500
-                        font-color:ground.ink {value.get()}
+                        font-color:{mosaic::core::theme::color(tone.get().token())} {value.get()}
                 }
                 children
             }
