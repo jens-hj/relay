@@ -263,14 +263,11 @@ pub(crate) fn HarnessSummary(model: Model, harness: Harness) -> Element {
     view! {
         row height:min-content width:1fr min-width:0px align:center gap:{px(8.0)}px
             pad:(horizontal:{px(12.0)}px vertical:{px(10.0)}px) {
-            icon size:{px(20.0)}px shrink:0
-                {if harness==Harness::Codex{harness_codex}else{harness_claude}}
+            HarnessGlyph harness:(crate::adapt::harness(harness)) size:18.0
             row #relay.title height:min-content width:max-content font-size:{px(14.0)}px {
                 text (if harness == Harness::Codex { "Codex" } else { "Claude Code" })
             }
-            icon size:{px(14.0)}px shrink:0
-                font-color:{mosaic::core::theme::color(match state.get().as_str(){"ready"=>ground.ink,"signed_out"|"incompatible"=>status.needs_you,"unknown"|"error"|"failed"=>status.failed,_=>ground.muted})}
-                {match state.get().as_str(){"ready"=>harness_ready,"signed_out"|"incompatible"=>harness_warning,"unknown"|"error"|"failed"=>harness_failed,_=>harness_neutral}}
+            StatusMark status:(Derived::new(move || harness_state(&state.get())))
             row height:min-content width:1fr min-width:0px font-size:{px(12.0)}px
                 font-color:{mosaic::core::theme::color(match state.get().as_str(){"ready"=>ground.ink,"signed_out"|"incompatible"=>status.needs_you,"unknown"|"error"|"failed"=>status.failed,_=>ground.muted})} {
                 text

@@ -26,7 +26,9 @@ use preferences::*;
 pub(crate) use profile::overridden_fields;
 use profile::*;
 use relay_core::*;
-use relay_ui::prelude::{AgentStatus, Chip, ChipProps, Segments, SegmentsProps};
+use relay_ui::prelude::{
+    AgentStatus, Chip, ChipProps, HarnessGlyph, HarnessGlyphProps, Segments, SegmentsProps,
+};
 use relay_ui::style::*;
 use relay_ui::tokens::{ground, px, status};
 pub(crate) use status::*;

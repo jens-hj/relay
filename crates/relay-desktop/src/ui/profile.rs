@@ -156,7 +156,8 @@ fn ProfileHeader(model: Model) -> Element {
                         {kind.get()}
                 }
                 if defaults.get() {
-                    stack #relay.fade-label #relay.title height:min-content font-size:{px(22.0)}px {
+                    stack #relay.fade-label height:min-content font-family:serif
+                        font-size:{px(28.0)}px font-color:ground.ink {
                         row #relay.fade-line {
                             text width:max-content shrink:0 text-wrap:none {title.get()}
                         }
@@ -164,9 +165,8 @@ fn ProfileHeader(model: Model) -> Element {
                 } else {
                     input width:fill height:{px(32.0)}px pad:0px radius:0px
                         fill:(Color::TRANSPARENT)
-                        stroke:(width:{px(1.0)} color:(Color::TRANSPARENT)) font-family:sans-serif
-                        font-size:{px(22.0)}px font-weight:600 label:"Director name"
-                        placeholder:"Director name"
+                        stroke:(width:{px(1.0)} color:(Color::TRANSPARENT)) font-family:serif
+                        font-size:{px(28.0)}px label:"Director name" placeholder:"Director name"
                         focused { stroke:(width:{px(1.0)} color:ground.ink edges:bottom) }
                         model.editor_name
                 }
@@ -700,8 +700,7 @@ fn HarnessChoice(
             col height:min-content min-height:{px(76.0)}px justify:center gap:{px(8.0)}px
                 pad:{px(12.0)}px {
                 row height:min-content gap:{px(8.0)}px align:center font-color:{color(ground.ink)} {
-                    icon size:{px(18.0)}px shrink:0
-                        {if harness == Harness::Codex {harness_codex} else {harness_claude}}
+                    HarnessGlyph harness:(crate::adapt::harness(harness)) size:16.0
                     row height:min-content font-family:sans-serif font-size:{px(14.0)}px
                         font-weight:600 {
                         text (name)
@@ -709,8 +708,7 @@ fn HarnessChoice(
                 }
                 row height:min-content gap:{px(6.0)}px align:center font-color:{tone()}
                     font-size:{px(11.0)}px {
-                    icon size:{px(11.0)}px shrink:0
-                        {match state.get().as_str(){"ready" => harness_ready, "signed_out" | "incompatible" => harness_warning, "unknown" | "error" | "failed" => harness_failed, _ => harness_neutral}}
+                    StatusMark status:(Derived::new(move || harness_state(&state.get())))
                     text {caption.get()}
                 }
                 tooltip #relay.tooltip summary:"Harness availability" {

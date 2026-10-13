@@ -1372,20 +1372,35 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
     });
     let prompt = initial.as_ref().is_some_and(|m| m.kind == "prompt");
     let tool = initial.as_ref().is_some_and(|m| m.tool.is_some());
+    fn speaker_of(message: &Message) -> String {
+        if message.kind == "prompt" {
+            "You".to_string()
+        } else {
+            message.author.clone()
+        }
+    }
+    // A run of messages from one speaker names it once, at the first.
+    let continues = move || {
+        let snapshot = model.snapshot.get();
+        let id = message_id.get();
+        let Some(index) = snapshot.messages.iter().position(|m| m.id == id) else {
+            return false;
+        };
+        let current = &snapshot.messages[index];
+        snapshot.messages[..index]
+            .iter()
+            .rev()
+            .find(|m| m.session_id == current.session_id)
+            .is_some_and(|previous| speaker_of(previous) == speaker_of(current))
+    };
     let speaker = Derived::new(move || {
-        message
-            .get()
-            .map(|m| {
-                if m.kind == "prompt" {
-                    "You".to_string()
-                } else {
-                    m.author
-                }
-            })
-            .unwrap_or_default()
+        if continues() {
+            return String::new();
+        }
+        message.get().map(|m| speaker_of(&m)).unwrap_or_default()
     });
     // Agent messages carry their session's harness glyph when it is known.
-    let harness = (!prompt)
+    let harness = (!prompt && !mosaic::core::reactive::untracked(continues))
         .then(|| {
             let snapshot = model.snapshot.get_untracked();
             let session_id = initial.as_ref().map(|m| m.session_id.clone())?;

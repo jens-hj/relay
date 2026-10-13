@@ -485,15 +485,11 @@ pub(crate) fn IssueCard(model: Model, issue: Issue) -> Element {
     let preview = Derived::new(move || body_preview(&current.get().body));
     view! {
         button @click:{ model.issue.set(Some(id.clone())); model.worker_approval.set(false); }
-            width:fill height:min-content fill:ground.panel pad:0px radius:0px
+            width:fill height:min-content pad:0px radius:0px
             label:{ current.get().reference.map(|r|format!("Open issue #{}",r.number)).unwrap_or_else(||format!("Open local task {}",current.get().title)) }
             description:{ format!("{} · {} linked sessions", if fixture_project(model, &current.get().project_id) { "Fixture" } else { status_word(state.get()) }, session_count.get()) }
-            stroke:(width:{px(if selected.get() {2.0} else {1.0})} color:{color(if selected.get() {ground.ink} else {ground.rule})} offset:{px(-1.0)})
-            shadow:if selected.get() {
-                (offset:(x:{px(4.0)} y:{px(4.0)}) blur:0.0 color:{color(ground.ink)})
-            } else {
-                (offset:(x:0.0 y:0.0) blur:0.0 color:{Color::TRANSPARENT})
-            }
+            fill:{color(if selected.get() {ground.selected} else {ground.panel})}
+            stroke:(width:{px(1.0)} color:{color(if selected.get() {ground.ink} else {ground.hairline})} offset:{px(-1.0)})
             hover { fill:ground.hover }
             focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(2.0)}) } {
             col height:min-content gap:0px pad:{px(2.0)}px clip {
@@ -624,7 +620,8 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                                         "Issue details"
                                 }
                             }
-                            row #relay.title font-size:{px(17.0)}px height:min-content {
+                            row height:min-content font-family:serif font-size:{px(22.0)}px
+                                font-color:ground.ink {
                                 text label:{ current.get().title } { current.get().title }
                             }
                             row height:min-content gap:{px(4.0)}px clip {

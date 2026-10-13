@@ -179,3 +179,14 @@ pub(crate) fn UsageReadout(usage: Derived<Option<relay_core::TokenUsage>>) -> El
         }
     }
 }
+
+/// A harness check as a status mark: ready is done, a sign-in or version
+/// problem needs you, a failed check failed, and anything else is pending.
+pub(crate) fn harness_state(state: &str) -> Option<AgentStatus> {
+    Some(match state {
+        "ready" => AgentStatus::Done,
+        "signed_out" | "incompatible" => AgentStatus::Waiting,
+        "unknown" | "error" | "failed" => AgentStatus::Failed,
+        _ => AgentStatus::Queued,
+    })
+}

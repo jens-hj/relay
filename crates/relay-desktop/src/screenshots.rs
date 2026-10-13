@@ -152,7 +152,7 @@ fn shell_screenshots() {
             ui.frame(logical, 1.0);
         }
     };
-    let shots: [(&str, &dyn Fn()); 4] = [
+    let shots: [(&str, &dyn Fn()); 7] = [
         ("conversation", &|| {
             model.open_session("session-plan".into())
         }),
@@ -164,6 +164,14 @@ fn shell_screenshots() {
             model.issue.set(Some("issue-2".into()));
         }),
         ("settings", &|| model.page.set(Page::Settings)),
+        ("profile", &|| {
+            model.open_profile(crate::model::EditTarget::Director("director-main".into()))
+        }),
+        ("connections", &|| model.page.set(Page::Connections)),
+        ("palette", &|| {
+            model.open_session("session-plan".into());
+            model.palette.set(true);
+        }),
     ];
     for (name, open) in shots {
         if !only.is_empty() && only != name {
