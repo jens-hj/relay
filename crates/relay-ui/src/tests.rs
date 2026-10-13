@@ -443,6 +443,41 @@ fn ruled_rows_put_one_rule_between_neighbours() {
 }
 
 #[test]
+fn open_popover_does_not_resize_or_move_its_trigger() {
+    let open = State::new(false);
+    let mounted = mount(Size::new(600.0, 400.0), move || {
+        let toggle: crate::cells::OnPress =
+            std::rc::Rc::new(move || open.set(!open.get_untracked()));
+        let content: crate::overlay::PopoverContent = std::rc::Rc::new(|| {
+            view! {
+                col width:{240.0}px height:{200.0}px {
+                    Label text:"Panel body"
+                }
+            }
+        });
+        view! {
+            row height:{88.0}px align:center {
+                stack width:max-content height:min-content shrink:0 {
+                    CellButton label:"Open" on-press:(toggle) {
+                        Label text:"Open"
+                    }
+                    Popover open:(open) label:"Details" content:(content)
+                }
+            }
+        }
+    });
+    let before = mounted.rect("Open");
+    mounted.click(before.center());
+    assert!(open.get_untracked());
+    assert!(mounted.rect("Details").size.height >= 200.0);
+    assert_eq!(
+        mounted.rect("Open"),
+        before,
+        "the open panel takes no layout space"
+    );
+}
+
+#[test]
 fn popover_opens_and_dismisses_on_escape_and_outside_clicks() {
     let open = State::new(false);
     let mounted = mount(Size::new(600.0, 400.0), move || {

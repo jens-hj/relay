@@ -46,7 +46,10 @@ pub fn Popover(
         stack nohit {}
     };
     let anchor_handle = anchor.clone();
-    anchor.show(
+    // Hosted at the tree root, so the open panel never adds to the size of
+    // the anchor or its ancestors (and so never shifts its trigger).
+    let attachment = anchor.attachment(Style::stack().size(0.0, 0.0).shrink(0.0));
+    attachment.show(
         move || open.get(),
         move |host| {
             let panel = host.child(
