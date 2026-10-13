@@ -203,6 +203,9 @@ impl TreeNav {
 #[component]
 pub fn AgentTreeRow(
     line: AgentLine,
+    /// Hide the glyph when a transcript has no measured harness identity.
+    #[prop(default = true)]
+    show_harness: bool,
     /// Opens (selects) the agent.
     #[prop(optional)]
     on_open: Option<OnAgent>,
@@ -263,7 +266,9 @@ pub fn AgentTreeRow(
         row width:max-content height:min-content gap:{px(8.0)}px align:center shrink:0
             font-color:ground.muted {
             StatusSquare status:(line.status)
-            HarnessGlyph harness:(line.harness)
+            if show_harness {
+                HarnessGlyph harness:(line.harness)
+            }
         }
     });
     content.adopt(&crate::marks::hugging_ellipsis(

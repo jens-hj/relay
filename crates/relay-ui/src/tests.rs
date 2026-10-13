@@ -10,11 +10,11 @@ use mosaic::{core::reactive::flush, prelude::*, text::FontContext};
 use std::time::Duration;
 
 #[path = "../examples/gallery/sections.rs"]
-mod gallery;
+pub(super) mod gallery;
 
-struct Mounted {
+pub(super) struct Mounted {
     scope: Scope,
-    ui: Ui,
+    pub(super) ui: Ui,
     size: Size,
 }
 
@@ -24,7 +24,7 @@ impl Drop for Mounted {
     }
 }
 
-fn mount(size: Size, build: impl FnOnce() -> Element) -> Mounted {
+pub(super) fn mount(size: Size, build: impl FnOnce() -> Element) -> Mounted {
     mosaic::core::builtins::install();
     install_theme(&theme(ThemeVariant::Dark, 1.0));
     install_theme(&crate::icons::icons());
@@ -42,7 +42,7 @@ fn mount(size: Size, build: impl FnOnce() -> Element) -> Mounted {
 }
 
 impl Mounted {
-    fn settle(&self) {
+    pub(super) fn settle(&self) {
         flush();
         for _ in 0..12 {
             self.ui.tick(Duration::from_millis(16));
@@ -53,7 +53,7 @@ impl Mounted {
         }
     }
 
-    fn labels(&self) -> Vec<String> {
+    pub(super) fn labels(&self) -> Vec<String> {
         self.ui
             .inspection_snapshot()
             .nodes
@@ -62,7 +62,7 @@ impl Mounted {
             .collect()
     }
 
-    fn rect(&self, label: &str) -> Rect {
+    pub(super) fn rect(&self, label: &str) -> Rect {
         self.ui
             .inspection_snapshot()
             .nodes
@@ -72,7 +72,7 @@ impl Mounted {
             .rect
     }
 
-    fn click(&self, position: Vector2) {
+    pub(super) fn click(&self, position: Vector2) {
         for kind in [
             PointerEventKind::Down(PointerButton::Primary),
             PointerEventKind::Up(PointerButton::Primary),
@@ -88,7 +88,7 @@ impl Mounted {
         self.settle();
     }
 
-    fn key(&self, key: Key) {
+    pub(super) fn key(&self, key: Key) {
         self.ui.dispatch_key(KeyEvent {
             kind: KeyEventKind::Down { repeat: false },
             key,
@@ -507,6 +507,7 @@ fn every_variant_builds_the_gallery() {
 #[test]
 #[ignore = "manual: needs a GPU adapter; writes screenshots"]
 fn gallery_screenshots() {
+    use crate::tokens::ground;
     use mosaic::render::Renderer;
     let directory = std::env::var("RELAY_UI_SCREENSHOTS").unwrap_or_else(|_| {
         concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/relay-ui-gallery").into()
@@ -515,12 +516,30 @@ fn gallery_screenshots() {
     let scale = std::env::var("RELAY_UI_SCALE")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(2.0f32);
-    let logical = Size::new(1280.0, 2350.0);
+        .unwrap_or(1.0f32);
+    let specimen = std::env::var("RELAY_UI_SPECIMEN").unwrap_or_default();
+    let logical = match specimen.as_str() {
+        "agents" => Size::new(1280.0, 6800.0),
+        "tools" => Size::new(1332.0, 3800.0),
+        "conversation" => Size::new(960.0, 1400.0),
+        "composer" => Size::new(848.0, 1300.0),
+        _ => Size::new(1440.0, 14000.0),
+    };
     let mounted = mount(logical, || {
-        gallery::gallery(std::rc::Rc::new(|variant| {
-            install_theme(&theme(variant, 1.0));
-        }))
+        let content = match specimen.as_str() {
+            "agents" => gallery::agents::sections(),
+            "tools" => gallery::d2::tool_board(),
+            "conversation" => gallery::d2::conversation(),
+            "composer" => gallery::d2::composer_states(),
+            _ => gallery::gallery(std::rc::Rc::new(|variant| {
+                install_theme(&theme(variant, 1.0));
+            })),
+        };
+        view! {
+            col fill:ground.page font-color:ground.ink font-family:monospace {
+                { parent.adopt(&content); }
+            }
+        }
     });
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
@@ -615,7 +634,12 @@ fn gallery_screenshots() {
             .to_lowercase()
             .replace(", ", "-")
             .replace(' ', "-");
-        let path = format!("{directory}/gallery-{name}.png");
+        let prefix = if specimen.is_empty() {
+            "gallery"
+        } else {
+            specimen.as_str()
+        };
+        let path = format!("{directory}/{prefix}-{name}.png");
         image::RgbaImage::from_raw(width, height, pixels)
             .unwrap()
             .save(&path)

@@ -22,6 +22,7 @@
 extern crate self as relay_ui;
 
 pub mod cells;
+pub mod composer;
 pub mod context;
 pub mod dither;
 pub mod effort;
@@ -39,9 +40,14 @@ pub mod status;
 pub mod surfaces;
 pub mod text;
 pub mod tokens;
+pub mod tool_call;
+pub mod transcript;
 pub mod tree;
 pub mod usage;
 mod value;
+
+#[cfg(test)]
+mod d2_tests;
 
 #[cfg(test)]
 mod testing;
@@ -62,6 +68,7 @@ pub mod prelude {
         PrimaryButton, PrimaryButtonProps, Rule, RuledCol, RuledColProps, RuledRow, RuledRowProps,
         SecondaryButton, SecondaryButtonProps,
     };
+    pub use crate::composer::*;
     pub use crate::context::{
         ContextGauge, ContextGaugeProps, ContextPanel, ContextPanelProps, ContextRing,
         ContextRingProps, ContextShare, ContextView,
@@ -91,6 +98,8 @@ pub mod prelude {
         Ellipsis, EllipsisProps, Label, LabelProps, SerifSize, SerifTitle, SerifTitleProps,
         TextRole, Tone, VerticalLabel, VerticalLabelProps, Weight,
     };
+    pub use crate::tool_call::*;
+    pub use crate::transcript::*;
     pub use crate::tree::{
         AgentNode, AgentSidebar, AgentSidebarProps, AgentTreeRow, AgentTreeRowProps,
         ChildStatusBar, ChildStatusBarProps, Elbows, ElbowsProps, FocusCrumb, FocusCrumbProps,
