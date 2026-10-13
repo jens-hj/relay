@@ -4623,7 +4623,7 @@ fn board_chrome_aligns_with_the_sidebar_and_frames_cards() {
         near(summary.origin.y, connection.origin.y),
         "{summary:?} {connection:?}"
     );
-    assert!(near(summary.size.height, 40.0));
+    assert!(near(summary.size.height, 44.0));
     // Card previews are clipped to three laid-out lines.
     for node in mounted.ui.inspection_snapshot().nodes {
         if node.label.as_deref() == Some("Task preview") {
@@ -6842,7 +6842,7 @@ fn connection_status_reports_state_latency_endpoint_protocol_and_builds() {
     }));
     mounted.model.round_trip_ms.set(Some(42));
     mounted.settle();
-    let foot = mounted.rect("Connected, 42 ms");
+    let foot = mounted.rect("Connection: Connected, 42 ms. Show details");
     let sidebar = mounted.rect("Sidebar");
     assert!(foot.origin.y + foot.size.height <= sidebar.origin.y + sidebar.size.height + 1.0);
     let details = mounted
@@ -6853,20 +6853,28 @@ fn connection_status_reports_state_latency_endpoint_protocol_and_builds() {
         .find(|n| n.label.as_deref() == Some("Server connection details"))
         .unwrap();
     assert!(details.description.unwrap().contains("relay.example:7440"));
-    mounted.click("Connected, 42 ms");
+    mounted.click("Connection: Connected, 42 ms. Show details");
     for text in [
         "https://relay.example:7440/",
-        "HTTP + WebSocket",
+        "WebSocket · open",
         "v5",
         "42 ms",
     ] {
         assert!(has_label(&mounted, text), "Missing {text}");
     }
-    assert!(mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
-        n.label
-            .as_deref()
-            .is_some_and(|l| l.contains("Server 1234567"))
-    }));
+    assert!(has_label(&mounted, "1234567"));
+    let details = mounted.rect("Connection details");
+    assert!(
+        details.origin.x >= sidebar.origin.x
+            && details.origin.x + details.size.width <= sidebar.origin.x + sidebar.size.width + 0.5
+    );
+    mounted.click("Copy endpoint");
+    assert_eq!(
+        mounted.ui.clipboard_text().as_deref(),
+        Some("https://relay.example:7440/")
+    );
+    mounted.click("Connection: Connected, 42 ms. Hide details");
+    assert!(!has_label(&mounted, "Connection details"));
     mounted.model.receive(NetworkState {
         connected: false,
         status: "Reconnecting in 2s".into(),
@@ -7532,4 +7540,107 @@ fn window_controls_are_one_ruled_group_apart_from_page_controls() {
             assert_eq!(mounted.rect("Window controls"), group, "{page:?}");
         }
     }
+}
+
+#[test]
+fn project_sidebar_children_have_one_outer_tree_indent() {
+    let mounted = mount(false, 1380.0);
+    mounted.click("Toggle project Relay · demo");
+    let project = mounted.rect("Select project Relay · demo");
+    let director = mounted.rect("Director row Project director");
+    assert!((director.origin.x - project.origin.x - 14.0).abs() < 0.1);
+    assert!(director.origin.y >= project.origin.y + project.size.height);
+    // The 60px agents header starts right under the project menu; its New
+    // agent cell is centred in it.
+    let new_project = mounted.rect("New Project");
+    let header_top = new_project.origin.y + new_project.size.height;
+    assert!((mounted.rect("New agent").center().y - (header_top + 30.0)).abs() < 1.0);
+    let root = tree_row(&mounted, "Profile design");
+    // The tree keeps its normal 12px row padding plus the project's elbow.
+    assert!(root.origin.x >= project.origin.x);
+    let snapshot = mounted.ui.inspection_snapshot();
+    let title = snapshot
+        .nodes
+        .iter()
+        .find(|n| {
+            n.label.as_deref() == Some("Profile design")
+                && n.role == Role::Label
+                && root.contains(n.rect.center())
+        })
+        .unwrap();
+    let indented_x = title.rect.origin.x;
+    assert!(indented_x >= project.origin.x + 14.0);
+    mounted.model.agent_focus.set(Some("session-plan".into()));
+    mounted.settle();
+    let root = tree_row(&mounted, "Profile design");
+    let snapshot = mounted.ui.inspection_snapshot();
+    let focused_title = snapshot
+        .nodes
+        .iter()
+        .find(|n| {
+            n.label.as_deref() == Some("Profile design")
+                && n.role == Role::Label
+                && root.contains(n.rect.center())
+        })
+        .unwrap();
+    assert!((indented_x - focused_title.rect.origin.x - 14.0).abs() < 0.1);
+}
+
+#[test]
+fn connection_panel_is_embedded_and_shrinks_the_tree() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.round_trip_ms.set(Some(57));
+    mounted.settle();
+    let viewport = |mounted: &Mounted| {
+        let snapshot = mounted.ui.inspection_snapshot();
+        let mut node = snapshot
+            .nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some("Agent tree"))
+            .unwrap();
+        while node.role != Role::ScrollView {
+            node = snapshot
+                .nodes
+                .iter()
+                .find(|n| Some(n.id) == node.parent)
+                .unwrap();
+        }
+        node.rect
+    };
+    let before = viewport(&mounted);
+    mounted.click("Connection: Connected, 57 ms. Show details");
+    let sidebar = mounted.rect("Sidebar");
+    let panel = mounted.rect("Connection details");
+    let after = viewport(&mounted);
+    assert!(after.size.height < before.size.height - panel.size.height + 1.0);
+    assert!(
+        panel.origin.x >= sidebar.origin.x
+            && panel.origin.x + panel.size.width <= sidebar.origin.x + sidebar.size.width + 0.5
+    );
+    assert!(
+        panel.origin.y >= sidebar.origin.y
+            && panel.origin.y + panel.size.height <= sidebar.origin.y + sidebar.size.height
+    );
+    mounted
+        .model
+        .connection_telemetry
+        .set((vec![57, 91], Some(1_000), Some(u64::MAX)));
+    mounted.model.connected.set(false);
+    mounted
+        .model
+        .status
+        .set("Connection lost · retrying".into());
+    mounted.settle();
+    assert!(has_label(&mounted, "Connection details"));
+    assert!(has_label(&mounted, "WebSocket · closed"));
+    assert!(has_label(&mounted, "last 91 ms"));
+    assert!(!has_label(&mounted, "Connected"));
+    mounted
+        .model
+        .connection_telemetry
+        .update(|health| health.2 = None);
+    mounted.model.status.set("Offline".into());
+    mounted.settle();
+    assert!(has_label(&mounted, "Offline"));
+    assert!(has_label(&mounted, "Connection details"));
 }

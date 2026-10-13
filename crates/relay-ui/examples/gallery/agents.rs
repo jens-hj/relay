@@ -3,6 +3,7 @@
 //! the design boards' example data. The data lives only here.
 
 use mosaic::prelude::*;
+use relay_ui::icons::command;
 use relay_ui::prelude::*;
 use relay_ui::tokens::{ground, px};
 use std::rc::Rc;
@@ -162,6 +163,7 @@ pub fn sections() -> Element {
             usage_section()
             header_section()
             surfaces_section()
+            connections()
         }
     }
 }
@@ -404,11 +406,25 @@ fn surfaces_section() -> Element {
     );
     let query = State::new(String::new());
     let commands = vec![
-        Command::new("new", "New agent").keys("N"),
-        Command::new("focus", "Focus branch").keys("F"),
-        Command::new("pause", "Pause session").keys("P"),
-        Command::new("stop", "Stop session").keys("⇧S"),
-        Command::new("theme", "Switch theme"),
+        Command::new("new", "New agent")
+            .keys("N")
+            .detail("Create")
+            .icon(command.create),
+        Command::new("focus", "Focus branch")
+            .keys("F")
+            .detail("Navigate")
+            .icon(command.navigate),
+        Command::new("pause", "Pause session")
+            .keys("P")
+            .detail("Worker")
+            .icon(command.worker),
+        Command::new("stop", "Stop session")
+            .keys("⇧S")
+            .detail("Worker")
+            .icon(command.worker),
+        Command::new("theme", "Switch theme")
+            .detail("Settings")
+            .icon(command.settings),
     ];
     let run: Rc<dyn Fn(String)> = Rc::new(|_| {});
     let issues = [
@@ -465,16 +481,29 @@ fn surfaces_section() -> Element {
                     col width:1fr height:min-content {
                         Module title:"Workspace" {
                             Field label:"Repository" value:(repository) placeholder:"owner/name"
-                            col height:min-content gap:{px(10.0)}px pad:{px(14.0)}px {
+                            row height:{px(40.0)}px
+                                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                                 Segments
                                     options:(vec!["Dark".to_string(), "Light".to_string(), "High contrast".to_string()])
                                     selected:(theme) on-select:(pick)
-                                Stepper value:(workers) on-change:(step) min:1i64 max:12i64
-                                    label:"Workers"
-                                Toggle label:"Compact rows" on:(compact) on-toggle:(flip)
-                                Select label:"Default model"
-                                    options:(vec!["Sol 6.1".to_string(), "Opus 5.5".to_string(), "Sonnet 5.5".to_string()])
-                                    selected:(model) on-select:(choose)
+                            }
+                            row height:{px(40.0)}px
+                                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                                row width:{px(150.0)}px shrink:0
+                                    stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
+                                    Stepper value:(workers) on-change:(step) min:1i64 max:12i64
+                                        label:"Workers"
+                                }
+                                row width:{px(220.0)}px shrink:0
+                                    stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
+                                    Select label:"Default model"
+                                        options:(vec!["Sol 6.1".to_string(), "Opus 5.5".to_string(), "Sonnet 5.5".to_string()])
+                                        selected:(model) on-select:(choose)
+                                }
+                                row width:1fr align:center
+                                    pad:(horizontal:{px(14.0)}px vertical:0px) {
+                                    Toggle label:"Compact rows" on:(compact) on-toggle:(flip)
+                                }
                             }
                         }
                         Module title:"Permissions" caps:true {
@@ -524,4 +553,44 @@ fn surfaces_section() -> Element {
             }
         }
     }
+}
+
+/// Round 08 connection footer, all states and embedded details.
+pub fn connections() -> Element {
+    use relay_ui::surfaces::{Connection, ConnectionInfo, ConnectionTelemetry};
+    let board = view! {
+        col height:min-content gap:24px pad:24px {}
+    };
+    for expanded in [false, true] {
+        let row = view! {
+            row height:min-content gap:24px {}
+        };
+        for state in [
+            Connection::Connected,
+            Connection::Connecting,
+            Connection::Offline,
+        ] {
+            let telemetry = ConnectionTelemetry {
+                samples: vec![
+                    57, 62, 55, 68, 81, 60, 59, 52, 74, 110, 63, 55, 62, 72, 59, 65, 54, 81, 67, 67,
+                ],
+                client_revision: "413e226".into(),
+                server_revision: "9c1f0a2".into(),
+                offline_since: Some("21:42".into()),
+                retry_in: Some(4),
+                compatible: Some(true),
+                warning: None,
+            };
+            row.adopt(&view! {
+                col width:380px height:min-content fill:ground.panel {
+                    ConnectionStatus state:(state)
+                        latency:(if state==Connection::Connected {Some(67u32)} else {None})
+                        telemetry:(telemetry) initially-open:(expanded)
+                        info:(ConnectionInfo {endpoint:"https://mosaic-preview.example.app/api".into(),protocol:"v5".into(),transport:"HTTP + WebSocket".into(),revision:String::new()})
+                }
+            });
+        }
+        board.adopt(&row);
+    }
+    board
 }

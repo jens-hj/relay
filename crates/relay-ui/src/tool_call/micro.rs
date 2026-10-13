@@ -108,37 +108,12 @@ pub(super) fn micrographic(vm: &ToolCallView) -> Element {
             }
         }
         ToolDetail::Run {
-            exit_code,
-            duration,
-            ..
+            duration: Some(t), ..
         } => {
-            if let Some(n) = exit_code {
-                row.adopt(&view! {
-                    Chip text:(format!("exit {n}"))
-                        tone:(Some(if *n == 0 { ground.muted } else { status.failed }))
-                });
-            }
-            if let Some(t) = duration {
-                row.adopt(&label(t.clone()));
-            }
+            row.adopt(&label(t.clone()));
         }
         ToolDetail::Test { passed, failed, .. } => {
             row.adopt(&super::body::test_grid(*passed, *failed, 1.5, 40));
-            if let Some(n) = failed {
-                let counter = view! {
-                    Label text:(format!("{n} failed")) role:(TextRole::Caption)
-                        tone:(if *n > 0 { Tone::Signal(Signal::Failed) } else { Tone::Muted })
-                };
-                row.adopt(&counter);
-            }
-        }
-        ToolDetail::Fetch {
-            status: Some(n), ..
-        } => {
-            row.adopt(&view! {
-                Chip text:(n.to_string())
-                    tone:(Some(if *n >= 400 { status.failed } else { ground.muted }))
-            });
         }
         ToolDetail::Plan {
             steps: Some(steps), ..
@@ -207,11 +182,6 @@ pub(super) fn micrographic(vm: &ToolCallView) -> Element {
                 )));
             }
         }
-        ToolDetail::Approval { .. } if vm.status == AgentStatus::Waiting => {
-            row.adopt(&view! {
-                Chip text:"pending" tone:(Some(status.needs_you))
-            });
-        }
         ToolDetail::Result {
             quantities,
             attachments,
@@ -235,4 +205,49 @@ pub(super) fn micrographic(vm: &ToolCallView) -> Element {
         _ => {}
     }
     row
+}
+
+/// Status belongs to the header's ruled cells, independently of its micrographic.
+pub(super) fn status_cell(vm: &ToolCallView) -> Element {
+    let cell_status = match &vm.detail {
+        Some(ToolDetail::Run {
+            exit_code: Some(n), ..
+        }) => Some((
+            format!("exit {n}"),
+            if *n == 0 { ground.muted } else { status.failed },
+        )),
+        Some(ToolDetail::Test {
+            failed: Some(n), ..
+        }) => Some((
+            format!("{n} failed"),
+            if *n > 0 { status.failed } else { ground.muted },
+        )),
+        Some(ToolDetail::Fetch {
+            status: Some(n), ..
+        }) => Some((
+            n.to_string(),
+            if *n >= 400 {
+                status.failed
+            } else {
+                ground.muted
+            },
+        )),
+        Some(ToolDetail::Approval { .. }) if vm.status == AgentStatus::Waiting => {
+            Some(("pending".into(), status.needs_you))
+        }
+        _ => None,
+    };
+    let has_status = cell_status.is_some();
+    let cell = view! {
+        row width:max-content shrink:0 align:center
+            stroke:(width:{px(if has_status { 1.0 } else { 0.0 })} color:ground.hairline edges:left) {}
+    };
+    if let Some((text, colour)) = cell_status {
+        cell.adopt(&view! {
+            row width:max-content align:center pad:(horizontal:{px(8.0)}px vertical:0px) {
+                Label text:(text) role:(TextRole::Caption) tone:(Tone::Colour(colour))
+            }
+        });
+    }
+    cell
 }

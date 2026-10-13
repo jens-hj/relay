@@ -266,3 +266,16 @@ Every task file points to `design/orchestrator-ui/` and `docs/orchestrator-ui-pl
   - A schema 11 → 12 migration test on a copy of `data/dogfood.sqlite3`.
 - Desktop: `just test` (headless), `just demo` screenshots of every surface, and reconnect behaviour unchanged (network boundary).
 - Final: `just check` on the merged branch. Report any harness events that turned out to be unavailable.
+
+## Form colour
+
+Form controls on the profile (New Director) page and in settings use the status family only, one meaning each; ground greys carry everything else. The mapping lives in `Segments` (`crates/relay-ui/src/surfaces/form.rs`).
+
+| Colour | Meaning on forms | Where |
+| --- | --- | --- |
+| Green (`status.full-steam`) | Work runs without you: allowed or ok | Allow permission, Automatic approval, harness ready (installed and signed in), Connected, Valid profile fields |
+| Amber (`status.needs-you`) | Your hand: you are asked, you must act, or you set it | Ask permission and approval, harness needs a sign-in or update, a failed (retryable) check or refresh, Override origin, the primary action (Save profile) |
+| Red (`status.failed`) | Blocked, failed or a risk | Deny permission, Unrestricted Access approval, harness not installed, settings not being saved, Offline, Invalid profile fields |
+| Ink / muted | Neutral choices, inherited values and pending checks | Theme choice, Default origin, unchosen options, Checking and Connecting (a static hollow square) |
+
+Violet stays reserved for live work and never appears on forms or harness readouts. Status readouts colour their mark and word; the harness glyph and name stay ink. The chosen option of a choice sits on the selected ground with its text, icon and a 2px bar under it in its colour; the others are muted, so the choice also reads without colour.

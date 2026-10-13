@@ -196,6 +196,13 @@ async fn stream(
                 },
             }}
         }.await;
+        if result.is_err()
+            && events
+                .send(Event::RetryAt(Some(connection_now() + u64::from(delay))))
+                .is_err()
+        {
+            break;
+        }
         if let Err(error) = result
             && events
                 .send(Event::Status(

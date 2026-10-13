@@ -69,6 +69,9 @@ pub struct NetworkState {
     pub connected: bool,
     pub status: String,
     pub round_trip_ms: Option<u64>,
+    pub round_trip_samples: Vec<u64>,
+    pub offline_since: Option<u64>,
+    pub retry_at: Option<u64>,
     pub history: HistoryState,
     pub history_error: String,
     pub search_result: Option<(String, u64, String, Option<String>, String)>,
@@ -86,6 +89,7 @@ enum Event {
     Stream(StreamEvent),
     Status(bool, String),
     RoundTrip(u64),
+    RetryAt(Option<u64>),
     Outcome(String, Result<CommandAck, String>, bool, bool),
 }
 
@@ -168,6 +172,13 @@ pub fn start(
     (commands, refresh, requests)
 }
 
+fn connection_now() -> u64 {
+    crate::platform::SystemTime::now()
+        .duration_since(crate::platform::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 fn receive_event(state: &mut NetworkState, event: Event) {
     match event {
         Event::Build(build) => state.server_build = build,
@@ -218,11 +229,22 @@ fn receive_event(state: &mut NetworkState, event: Event) {
         Event::Status(connected, status) => {
             state.connected = connected;
             state.status = status;
-            if !connected {
+            if connected {
+                state.offline_since = None;
+                state.retry_at = None;
+            } else {
+                state.offline_since.get_or_insert_with(connection_now);
                 state.round_trip_ms = None;
             }
         }
-        Event::RoundTrip(ms) => state.round_trip_ms = Some(ms),
+        Event::RetryAt(deadline) => state.retry_at = deadline,
+        Event::RoundTrip(ms) => {
+            state.round_trip_ms = Some(ms);
+            state.round_trip_samples.push(ms);
+            if state.round_trip_samples.len() > 20 {
+                state.round_trip_samples.remove(0);
+            }
+        }
         Event::Outcome(id, result, conflict, ambiguous) => {
             state.outcome_serial += 1;
             state.outcome_conflict = conflict;
@@ -279,6 +301,9 @@ async fn stream(
     let mut delay = 1;
     let mut selected = None;
     loop {
+        if events.send(Event::RetryAt(None)).is_err() {
+            break;
+        }
         let result: Result<(),String>=async {
             let mut url=config.url("v1/events");
             let scheme=if url.scheme()=="https" {"wss"} else {"ws"};
@@ -326,6 +351,13 @@ async fn stream(
                 },
             }}
         }.await;
+        if result.is_err()
+            && events
+                .send(Event::RetryAt(Some(connection_now() + delay)))
+                .is_err()
+        {
+            break;
+        }
         if let Err(message) = result
             && events
                 .send(Event::Status(
@@ -426,6 +458,27 @@ mod tests {
         .await
         .expect("heartbeat round trip should arrive");
         assert!(round_trip < 2_000);
+        let deadline = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(Event::RetryAt(Some(deadline))) = updates.recv().await {
+                    break deadline;
+                }
+            }
+        })
+        .await
+        .expect("disconnect publishes its scheduled retry");
+        assert!(deadline <= connection_now() + 1);
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(Event::RetryAt(None)) = updates.recv().await {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("starting the real retry clears its deadline");
+        assert!(started.elapsed() >= Duration::from_millis(800));
         task.abort();
         server.await.unwrap();
     }
@@ -580,3 +633,27 @@ mod outcome_tests {
 mod web;
 #[cfg(target_arch = "wasm32")]
 pub use web::*;
+
+#[cfg(test)]
+mod connection_telemetry_tests {
+    use super::*;
+    #[test]
+    fn samples_are_bounded_and_disconnect_preserves_history_and_deadlines() {
+        let mut state = NetworkState::default();
+        for ms in 1..=25 {
+            receive_event(&mut state, Event::RoundTrip(ms));
+        }
+        assert_eq!(state.round_trip_samples, (6..=25).collect::<Vec<_>>());
+        receive_event(&mut state, Event::Status(false, "Connection lost".into()));
+        let since = state.offline_since.unwrap();
+        receive_event(&mut state, Event::Status(false, "Still offline".into()));
+        assert_eq!(state.offline_since, Some(since));
+        assert_eq!(state.round_trip_ms, None);
+        assert_eq!(state.round_trip_samples.len(), 20);
+        receive_event(&mut state, Event::RetryAt(Some(since + 4)));
+        assert_eq!(state.retry_at, Some(since + 4));
+        receive_event(&mut state, Event::Status(true, "Connected".into()));
+        assert_eq!(state.retry_at, None);
+        assert_eq!(state.offline_since, None);
+    }
+}

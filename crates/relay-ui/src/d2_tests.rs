@@ -32,9 +32,17 @@ fn all_tools_cycle_openings_and_follow_live_data() {
         });
         for opening in [Opening::Collapsed, Opening::Summary, Opening::Expanded] {
             assert!(mounted.labels().iter().any(|l| l == opening.label()));
-            assert_eq!(mounted.rect(opening.label()).size, Size::new(26.0, 26.0));
-            mounted.click(mounted.rect(opening.label()).center());
+            let header = mounted.rect(opening.label());
+            assert_eq!(header.size.height, 36.0);
+            assert!(header.size.width > 600.0);
+            mounted.click(header.origin + Vector2::new(80.0, 18.0));
             assert_eq!(value.get_untracked().opening, opening.next());
+        }
+        for x in [12.0, 350.0, 700.0] {
+            let header = mounted.rect(value.get_untracked().opening.label());
+            let next = value.get_untracked().opening.next();
+            mounted.click(header.origin + Vector2::new(x, 18.0));
+            assert_eq!(value.get_untracked().opening, next);
         }
         value.update(|v| {
             v.status = AgentStatus::Failed;
@@ -332,7 +340,7 @@ fn opening_control_keeps_keyboard_focus_when_rebuilt() {
     mounted.click(mounted.rect(Opening::Collapsed.label()).center());
     mounted.key(Key::Enter);
     assert_eq!(state.get_untracked().opening, Opening::Expanded);
-    mounted.key(Key::Enter);
+    mounted.key(Key::Space);
     assert_eq!(state.get_untracked().opening, Opening::Collapsed);
 }
 #[test]
@@ -531,4 +539,87 @@ fn ledger_without_effort_steps_names_the_selection_or_lets_the_model_fill() {
     assert!(!mounted.labels().iter().any(|l| l == "EFFORT"));
     let model = mounted.rect("Model: GPT Sol 6.1. Change model");
     assert!(model.size.height > 100.0, "the model cell fills: {model:?}");
+}
+
+#[test]
+fn tool_status_and_opening_share_full_height_cells() {
+    for specimen in gallery::d2::specimens().into_iter().filter(|vm| {
+        matches!(
+            vm.kind,
+            ToolKind::Run | ToolKind::Test | ToolKind::Fetch | ToolKind::Approval
+        )
+    }) {
+        let mounted = mount(Size::new(720.0, 300.0), || {
+            view! {
+                col height:min-content {
+                    ToolCallRow data:(specimen.clone()) on-opening:(Rc::new(|_| {}) as OnOpening)
+                }
+            }
+        });
+        let header = mounted.rect(Opening::Collapsed.label());
+        let snapshot = mounted.ui.inspection_snapshot();
+        let indicator = snapshot
+            .nodes
+            .iter()
+            .find(|n| {
+                n.children.len() == 3
+                    && (n.rect.size.width - 36.0).abs() < 0.1
+                    && (n.rect.size.height - 36.0).abs() < 0.1
+            })
+            .expect("three full-height opening rectangles");
+        assert!((indicator.rect.origin.x + 36.0 - header.origin.x - header.size.width).abs() < 0.1);
+        for child in &indicator.children {
+            let node = snapshot.nodes.iter().find(|n| n.id == *child).unwrap();
+            assert_eq!(node.rect.size, Size::new(12.0, 36.0));
+        }
+        let label = match specimen.kind {
+            ToolKind::Run => {
+                if specimen.status == AgentStatus::Failed {
+                    "exit 1"
+                } else {
+                    "exit 0"
+                }
+            }
+            ToolKind::Test => "2 failed",
+            ToolKind::Fetch => "200",
+            ToolKind::Approval => "pending",
+            _ => unreachable!(),
+        };
+        let mut node = snapshot
+            .nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some(label))
+            .unwrap();
+        while node.rect.size.height < 35.9 {
+            node = snapshot
+                .nodes
+                .iter()
+                .find(|n| Some(n.id) == node.parent)
+                .unwrap();
+        }
+        assert_eq!(node.rect.size.height, header.size.height);
+        assert!((node.rect.origin.x + node.rect.size.width - indicator.rect.origin.x).abs() < 0.1);
+    }
+}
+
+#[test]
+fn opened_tool_body_does_not_cycle_the_header() {
+    let state = State::new(
+        gallery::d2::specimens()
+            .into_iter()
+            .find(|vm| vm.kind == ToolKind::Run)
+            .unwrap(),
+    );
+    state.update(|vm| vm.opening = Opening::Summary);
+    let change: OnOpening = Rc::new(move |opening| state.update(|vm| vm.opening = opening));
+    let mounted = mount(Size::new(720.0, 500.0), || {
+        view! {
+            col height:min-content {
+                ToolCallRow data:(state) on-opening:(change)
+            }
+        }
+    });
+    let header = mounted.rect(Opening::Summary.label());
+    mounted.click(header.origin + Vector2::new(90.0, 65.0));
+    assert_eq!(state.get_untracked().opening, Opening::Summary);
 }

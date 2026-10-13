@@ -62,6 +62,7 @@ pub fn ContrastToggle(model: Model) -> Element {
         Rc::new(move |on| model.preferences.update(|p| p.high_contrast = on));
     view! {
         Toggle label:("High contrast".to_string()) on:(relay_ui::Live::from(on)) on-toggle:(flip)
+            fill:true
     }
 }
 
@@ -81,4 +82,22 @@ pub fn ResetSetting(model: Model, setting: Setting, name: String) -> Element {
             }
         }
     }
+}
+
+/// The icon of each execution approval mode, in [`relay_core::ApprovalMode::ALL`]
+/// order: a checked loop, a question, an open lock.
+pub fn approval_icons() -> Vec<mosaic::prelude::SvgToken> {
+    use relay_ui::icons::execution;
+    vec![execution.automatic, execution.ask, execution.unrestricted]
+}
+
+/// The chosen colour of each approval mode: automatic runs at full steam,
+/// Ask waits on you, unrestricted access is a risk.
+pub fn approval_tones() -> Vec<mosaic::prelude::ColorToken> {
+    use relay_ui::tokens::Signal;
+    vec![
+        Signal::FullSteam.token(),
+        Signal::NeedsYou.token(),
+        Signal::Failed.token(),
+    ]
 }

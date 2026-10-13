@@ -13,10 +13,10 @@ fn recorder<T: 'static>() -> (Log<T>, Log<T>) {
 }
 
 #[test]
-fn connection_cell_states_and_popover() {
+fn connection_cell_states_and_embedded_details() {
     assert_eq!(latency_bars(20), 4);
     assert_eq!(latency_bars(120), 3);
-    assert_eq!(latency_bars(300), 2);
+    assert_eq!(latency_bars(299), 2);
     assert_eq!(latency_bars(900), 1);
     let state = State::new(Connection::Connected);
     let latency = State::new(Some(42u32));
@@ -33,13 +33,19 @@ fn connection_cell_states_and_popover() {
             }
         }
     });
-    assert!(mounted.has("Connected, 42 ms"));
-    assert_eq!(mounted.rect("Connected, 42 ms").size.height, 40.0);
-    mounted.click_label("Connected, 42 ms");
+    assert!(mounted.has("Connection: Connected, 42 ms. Show details"));
+    assert_eq!(
+        mounted
+            .rect("Connection: Connected, 42 ms. Show details")
+            .size
+            .height,
+        44.0
+    );
+    mounted.click_label("Connection: Connected, 42 ms. Show details");
     assert!(mounted.has("relay.local:7171"));
-    assert!(mounted.has("WebSocket"));
+    assert!(mounted.has("WebSocket · open"));
     assert!(!mounted.has("Revision"), "empty fields are hidden");
-    mounted.key(Key::Escape);
+    mounted.click_label("Connection: Connected, 42 ms. Hide details");
     state.set(Connection::Offline);
     latency.set(None);
     mounted.settle();
@@ -97,13 +103,29 @@ fn form_controls_report_choices() {
         view! {
             col gap:8px {
                 Field label:"Repository" value:(value) placeholder:"owner/name"
-                Segments options:(options.clone()) selected:1usize on-select:(pick)
-                Stepper value:9i64 on-change:(number) min:0i64 max:10i64 step:2i64 label:"Workers"
+                row width:300px height:40px shrink:0 {
+                    Segments options:(options.clone()) selected:1usize on-select:(pick)
+                }
+                row width:150px height:40px shrink:0 {
+                    Stepper value:9i64 on-change:(number) min:0i64 max:10i64 step:2i64
+                        label:"Workers"
+                }
                 Toggle label:"Compact rows" on:false on-toggle:(switch)
-                Select label:"Theme" options:(options) selected:0usize on-select:(select)
+                row width:200px height:40px shrink:0 {
+                    Select label:"Theme" options:(options) selected:0usize on-select:(select)
+                }
             }
         }
     });
+    // Embedded: the segments split their 300px cell equally at its full
+    // height; the stepper's ends and the select fill their cells too.
+    let (dark, light) = (mounted.rect("Dark"), mounted.rect("Light"));
+    assert_eq!((dark.size.width, light.size.width), (150.0, 150.0));
+    assert_eq!((dark.size.height, light.size.height), (40.0, 40.0));
+    assert_eq!(dark.origin.x + 150.0, light.origin.x);
+    assert_eq!(mounted.rect("Decrease").size.height, 40.0);
+    assert_eq!(mounted.rect("Increase").size.height, 40.0);
+    assert_eq!(mounted.rect("Theme").size, Size::new(200.0, 40.0));
     assert!(mounted.has("Repository"));
     // The input fills the 40px row; the label cell names it visibly.
     assert!(
@@ -469,4 +491,76 @@ fn a_swipe_across_an_issue_card_does_not_open_it() {
     assert_eq!(*opened.borrow(), 0);
     mounted.click_label("Card");
     assert_eq!(*opened.borrow(), 1);
+}
+
+#[test]
+fn connection_quality_boundaries_and_p95() {
+    for (ms, quarters) in [
+        (0, 4),
+        (79, 4),
+        (80, 3),
+        (149, 3),
+        (150, 2),
+        (299, 2),
+        (300, 1),
+    ] {
+        assert_eq!(latency_bars(ms), quarters);
+    }
+    assert_eq!(ping_p95(&[]), None);
+    assert_eq!(ping_p95(&(1..=20).collect::<Vec<_>>()), Some(19));
+    assert_eq!(ping_p95(&[9, 1, 2]), Some(9));
+}
+
+#[test]
+fn connection_retries_offline_and_copy_are_truthful() {
+    let state = State::new(Connection::Connecting);
+    let telemetry = State::new(ConnectionTelemetry {
+        retry_in: Some(4),
+        offline_since: Some("21:42".into()),
+        ..Default::default()
+    });
+    let copies = Rc::new(std::cell::Cell::new(0));
+    let record = copies.clone();
+    let mounted = mount(Size::new(380.0, 500.0), move || {
+        view! {
+            col {
+                ConnectionStatus state:(state) telemetry:(telemetry)
+                    on-copy:(Some(Rc::new(move ||record.set(record.get()+1)) as OnPress))
+                    info:(ConnectionInfo {endpoint:"https://relay.local/api".into(),..Default::default()})
+            }
+        }
+    });
+    mounted.click_label("Connection: Reconnecting, retry in 4s. Show details");
+    assert!(mounted.has("WebSocket · closed"));
+    mounted.click_label("Copy endpoint");
+    assert_eq!(copies.get(), 1);
+    telemetry.update(|value| value.retry_in = None);
+    mounted.settle();
+    assert!(mounted.has("Connection: Reconnecting. Hide details"));
+    state.set(Connection::Offline);
+    mounted.settle();
+    assert!(mounted.has("Connection: Offline, since 21:42. Hide details"));
+    assert!(mounted.has("no pings"));
+    assert!(mounted.has("Connection details"));
+    mounted.click_label("Connection: Offline, since 21:42. Hide details");
+    assert!(!mounted.has("Connection details"));
+}
+
+#[test]
+fn connection_banner_keeps_keyboard_focus_across_updates() {
+    let latency = State::new(Some(57u32));
+    let mounted = mount(Size::new(380.0, 500.0), || {
+        view! {
+            col {
+                ConnectionStatus state:(Connection::Connected) latency:(latency)
+            }
+        }
+    });
+    mounted.click_label("Connection: Connected, 57 ms. Show details");
+    latency.set(Some(61));
+    mounted.settle();
+    mounted.key(Key::Space);
+    assert!(mounted.has("Connection: Connected, 61 ms. Show details"));
+    mounted.key(Key::Enter);
+    assert!(mounted.has("Connection: Connected, 61 ms. Hide details"));
 }

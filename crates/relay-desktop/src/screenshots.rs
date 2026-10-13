@@ -151,6 +151,24 @@ fn shell_screenshots() {
         ..Default::default()
     });
     model.server_endpoint.set("http://127.0.0.1:7331".into());
+    // One harness ready and one needing a sign-in, so both availability
+    // colours show.
+    model.harnesses.set(
+        [
+            (Harness::Codex, "ready"),
+            (Harness::ClaudeCode, "signed_out"),
+        ]
+        .into_iter()
+        .map(|(harness, state)| HarnessStatus {
+            harness,
+            executable: String::new(),
+            version: Some("1.0.0".into()),
+            state: state.into(),
+            detail: String::new(),
+            checked_at: now,
+        })
+        .collect(),
+    );
     scope.run(|| {
         let _ambient = ui.enter();
         ui.mount(&ui::shell(model));
@@ -163,7 +181,7 @@ fn shell_screenshots() {
             ui.frame(logical, 1.0);
         }
     };
-    let shots: [(&str, &dyn Fn()); 7] = [
+    let shots: [(&str, &dyn Fn()); 14] = [
         ("conversation", &|| {
             model.open_session("session-plan".into())
         }),
@@ -178,14 +196,101 @@ fn shell_screenshots() {
         ("profile", &|| {
             model.open_profile(crate::model::EditTarget::Director("director-main".into()))
         }),
+        ("new-director", &|| {
+            model.open_profile(crate::model::EditTarget::New)
+        }),
         ("connections", &|| model.page.set(Page::Connections)),
         ("palette", &|| {
             model.open_session("session-plan".into());
             model.palette.set(true);
         }),
+        ("connection-collapsed", &|| {
+            connection_shot(model, &ui, ConnectionShot::Connected, false, &settle)
+        }),
+        ("connection-expanded", &|| {
+            connection_shot(model, &ui, ConnectionShot::Connected, true, &settle)
+        }),
+        ("connection-reconnecting", &|| {
+            connection_shot(model, &ui, ConnectionShot::Reconnecting, true, &settle)
+        }),
+        ("connection-offline", &|| {
+            connection_shot(model, &ui, ConnectionShot::Offline, true, &settle)
+        }),
+        ("transcript-wrap", &|| {
+            model.snapshot.update(|snapshot| {
+                snapshot.messages.retain(|m| m.session_id != "session-plan");
+                for (id, kind, body) in [
+                    (
+                        "wrap-journal",
+                        "prompt",
+                        format!(
+                            "journalctl --user\n{}",
+                            format!(
+                                "Oct 10 systemd: /nix/store/{} /home/user/workspace/deploy.py\n",
+                                "long-unbroken-path".repeat(7)
+                            )
+                            .repeat(3)
+                        ),
+                    ),
+                    (
+                        "wrap-context",
+                        "issue-context",
+                        "Source context follows the journal.".into(),
+                    ),
+                    (
+                        "wrap-fence",
+                        "assistant",
+                        "Completed.\n```bash\njournalctl --user -fu relay\n```".into(),
+                    ),
+                    (
+                        "wrap-reply",
+                        "assistant",
+                        "Completion is reported after checks pass.".into(),
+                    ),
+                ] {
+                    snapshot.messages.push(Message {
+                        id: id.into(),
+                        session_id: "session-plan".into(),
+                        author: "Relay".into(),
+                        kind: kind.into(),
+                        body,
+                        parts: vec![],
+                        tool: None,
+                    });
+                }
+            });
+            model.open_session("session-plan".into());
+        }),
+        ("projects", &|| {
+            model.open_session("session-plan".into());
+            settle();
+            let position = ui
+                .inspection_snapshot()
+                .nodes
+                .iter()
+                .find(|n| n.label.as_deref() == Some("Toggle project Relay · demo"))
+                .unwrap()
+                .rect
+                .center();
+            for kind in [
+                PointerEventKind::Down(PointerButton::Primary),
+                PointerEventKind::Up(PointerButton::Primary),
+            ] {
+                ui.dispatch_pointer(PointerEvent {
+                    kind,
+                    position,
+                    pointer_type: PointerType::Mouse,
+                    modifiers: Modifiers::default(),
+                    timestamp: Duration::ZERO,
+                });
+            }
+        }),
     ];
     for (name, open) in shots {
-        if !only.is_empty() && only != name {
+        if !only.is_empty()
+            && only != name
+            && !(only == "connection" && name.starts_with("connection-"))
+        {
             continue;
         }
         scope.run(open);
@@ -193,4 +298,88 @@ fn shell_screenshots() {
         render(&ui, logical, 1.0, &format!("{directory}/{name}.png"));
     }
     scope.dispose();
+}
+
+enum ConnectionShot {
+    Connected,
+    Reconnecting,
+    Offline,
+}
+fn connection_shot(
+    model: crate::model::Model,
+    ui: &Ui,
+    state: ConnectionShot,
+    expanded: bool,
+    settle: &dyn Fn(),
+) {
+    model.palette.set(false);
+    model.open_session("session-plan".into());
+    let now = crate::platform::SystemTime::now()
+        .duration_since(crate::platform::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    model
+        .connected
+        .set(matches!(state, ConnectionShot::Connected));
+    model.status.set(
+        match state {
+            ConnectionShot::Connected => "Connected",
+            ConnectionShot::Reconnecting => "Connection lost · retrying",
+            ConnectionShot::Offline => "Offline",
+        }
+        .into(),
+    );
+    model
+        .round_trip_ms
+        .set(matches!(state, ConnectionShot::Connected).then_some(67));
+    model.connection_telemetry.set((
+        vec![
+            57, 62, 55, 68, 81, 60, 59, 52, 74, 110, 63, 55, 62, 72, 59, 65, 54, 81, 67, 67,
+        ],
+        Some(now - 900),
+        matches!(state, ConnectionShot::Reconnecting).then_some(now + 4),
+    ));
+    model.server_build.set(Some(BuildInfo {
+        version: "0.1.0".into(),
+        revision: "9c1f0a2".into(),
+    }));
+    settle();
+    let button = ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| {
+            n.label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("Connection:") && label.ends_with("details"))
+        })
+        .unwrap();
+    let open = ui
+        .inspection_snapshot()
+        .nodes
+        .iter()
+        .any(|node| node.label.as_deref() == Some("Connection details"));
+    if expanded != open {
+        for kind in [
+            PointerEventKind::Down(PointerButton::Primary),
+            PointerEventKind::Up(PointerButton::Primary),
+        ] {
+            ui.dispatch_pointer(PointerEvent {
+                kind,
+                position: button.rect.center(),
+                pointer_type: PointerType::Mouse,
+                modifiers: Modifiers::default(),
+                timestamp: Duration::ZERO,
+            });
+        }
+    }
+    settle();
+    assert_eq!(
+        ui.inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|node| node.label.as_deref() == Some("Connection details")),
+        expanded,
+        "connection screenshot must show the requested opening"
+    );
 }
