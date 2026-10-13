@@ -4,6 +4,9 @@ use std::{env, path::PathBuf};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = env::args_os().skip(1).collect();
+    if args.len() == 1 && args[0] == "mcp" {
+        return relay_server::mcp_stdio().await;
+    }
     if args.len() == 2 && args[0] == "--initialize-setup-code" {
         relay_server::initialize_setup_code(std::path::Path::new(&args[1]))?;
         return Ok(());
@@ -41,6 +44,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         relay_server::BrowserConfig::from_env()?,
     )?;
     let listener = tokio::net::TcpListener::bind(&bind).await?;
+    let address = listener.local_addr()?;
+    let ip = if address.ip().is_unspecified() {
+        "127.0.0.1".parse()?
+    } else {
+        address.ip()
+    };
+    shutdown.set_agent_endpoint(format!(
+        "http://{}",
+        std::net::SocketAddr::new(ip, address.port())
+    ));
     eprintln!(
         "Relay server listening on {} · database {}",
         listener.local_addr()?,

@@ -5,7 +5,7 @@ use std::{path::PathBuf, time::Duration};
 
 mod command_tests;
 mod harness_tests;
-fn live() -> Snapshot {
+pub(super) fn live() -> Snapshot {
     let mut defaults = DirectorProfile::default();
     defaults
         .permissions
@@ -35,7 +35,7 @@ fn live() -> Snapshot {
     }
     s
 }
-fn config() -> RuntimeConfig {
+pub(super) fn config() -> RuntimeConfig {
     RuntimeConfig {
         remote: Some(RemoteConfig {
             repository: "jens-hj/relay".into(),
@@ -53,7 +53,7 @@ pub(super) fn env(revision: u64, command: Command) -> CommandEnvelope {
         command,
     }
 }
-fn start(s: &Snapshot) -> Command {
+pub(super) fn start(s: &Snapshot) -> Command {
     Command::StartWorker {
         issue_id: s.issues[0].id.clone(),
         director_id: s.directors[0].id.clone(),
@@ -69,6 +69,7 @@ pub(super) fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig)
         browser::BrowserAuth::initialize(&mut store, "test-token", BrowserConfig::default())
             .unwrap();
     Workspace {
+        agent_endpoint: Arc::new(Mutex::new(None)),
         browser,
         harness_status: Arc::new(Mutex::new(vec![])),
         harness_probe: Arc::new(tokio::sync::Mutex::new(())),

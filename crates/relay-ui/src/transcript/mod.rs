@@ -62,50 +62,6 @@ pub struct SpawnChild {
     pub model: Option<ModelIdentity>,
     pub effort: Option<Effort>,
 }
-/// Compatible tree anatomy until D1's AgentTreeRow is integrated.
-#[component]
-pub fn SpawnChildRow(child: SpawnChild) -> Element {
-    let agent_status = child.status;
-    let reach = child.effort.map(|e| live_reach(e.level())).unwrap_or(1.0);
-    let row = view! {
-        row height:{px(34.0)}px align:center gap:{px(8.0)}px
-            pad:(horizontal:{px(14.0)}px vertical:0px) font-color:ground.muted {
-            StatusSquare status:(child.status)
-        }
-    };
-    if let Some(h) = child.harness {
-        row.adopt(&view! {
-            HarnessGlyph harness:(h) size:12.0
-        });
-    }
-    row.adopt(&view! {
-        col width:1fr min-width:0px height:min-content {
-            Ellipsis text:(child.name) weight:500
-                tone:(match child.status { AgentStatus::Done => Tone::Muted, AgentStatus::Waiting => Tone::Signal(Signal::NeedsYou), _ => Tone::Ink })
-        }
-    });
-    if let Some(m) = child.model {
-        row.adopt(&view! {
-            Label text:(m.short_name()) role:(TextRole::Caption) tone:(Tone::Muted)
-        });
-        if let Some(e) = child.effort {
-            row.adopt(&view! {
-                EffortTrack levels:(e.levels) current:(e.selected()) has-max:(e.has_max)
-                    colour:(m.hue.token()) size:(TrackSize::Compact)
-            });
-        }
-    }
-    view! {
-        stack height:{px(34.0)}px clip {
-            if matches!(agent_status, AgentStatus::Working | AgentStatus::Waiting) {
-                Wash
-                    signal:(if agent_status == AgentStatus::Waiting { Signal::NeedsYou } else { Signal::Live })
-                    reach:(reach)
-            }
-            { parent.adopt(&row); }
-        }
-    }
-}
 #[component]
 pub fn SpawnBlock(agents: Live<Vec<SpawnChild>>, on_open_tree: OnPress) -> Element {
     let count = agents.clone();
@@ -119,7 +75,15 @@ pub fn SpawnBlock(agents: Live<Vec<SpawnChild>>, on_open_tree: OnPress) -> Eleme
                 LinkButton text:"Open in tree" on-press:(on_open_tree)
             }
             for (key, child) in { agents.get().into_iter().enumerate().map(|(i, c)| ((i, format!("{c:?}")), c)) } {
-                { let _ = key; parent.adopt(&view! { SpawnChildRow child:(child.clone()) }); }
+                {
+                    let line = crate::tree::AgentLine {
+                        id: format!("spawn-{key:?}"), name: child.name.clone(), status: child.status,
+                        harness: child.harness.unwrap_or(Harness::Codex), model: child.model.clone(),
+                        effort: child.effort, parent: None, guides: vec![], child_count: 0,
+                        expandable: false, expanded: false, selected: false, below: Default::default(),
+                    };
+                    parent.adopt(&view! { AgentTreeRow line:(line) show-harness:(child.harness.is_some()) over:(ground.page) });
+                }
             }
         }
     }

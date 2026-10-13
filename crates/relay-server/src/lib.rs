@@ -16,6 +16,7 @@ mod browser;
 mod tool_activity;
 mod transport;
 pub use browser::{BrowserConfig, initialize_setup_code};
+mod agent_tools;
 mod claude;
 mod commands;
 mod conversation;
@@ -25,6 +26,7 @@ mod process;
 mod projects;
 mod providers;
 mod runtime;
+pub use agent_tools::stdio as mcp_stdio;
 pub use runtime::{RemoteConfig, RuntimeConfig};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::collections::HashMap;
@@ -85,6 +87,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 struct Store {
+    agent_capabilities: HashMap<String, agent_tools::Capability>,
     defaults: DirectorProfile,
     connection: Connection,
     controls: HashMap<String, watch::Sender<bool>>,
@@ -209,6 +212,7 @@ impl Store {
             .execute_batch("COMMIT;")
             .map_err(Error::internal)?;
         Ok(Self {
+            agent_capabilities: HashMap::new(),
             defaults,
             connection,
             controls: HashMap::new(),
@@ -572,17 +576,7 @@ impl Store {
                         "Worker has no recorded thread/worktree to resume",
                     ));
                 }
-                runtime::authorize_session(
-                    &snapshot,
-                    session
-                        .issue_id
-                        .as_deref()
-                        .ok_or_else(|| Error::invalid("Session has no issue"))?,
-                    &session.director_id,
-                    approve_implementation,
-                    &session.role,
-                    config,
-                )?;
+                agent_tools::authorize_session(&snapshot, session, approve_implementation, config)?;
                 let worker = snapshot
                     .sessions
                     .iter_mut()
@@ -609,10 +603,12 @@ impl Store {
                     .find(|s| s.id == session_id)
                     .and_then(|s| s.worker.as_ref())
                     .ok_or_else(|| Error::invalid("Worker session not found"))?;
-                if !runtime::active(&worker.status) {
+                if !runtime::active(&worker.status)
+                    && snapshot.subtree_status(&session_id).active() == 0
+                {
                     return Err(Error::invalid("Worker has no active turn"));
                 }
-                if !self.controls.contains_key(&session_id) {
+                if runtime::active(&worker.status) && !self.controls.contains_key(&session_id) {
                     return Err(Error::invalid(
                         "Worker process is unavailable; restart to classify interrupted runs",
                     ));
@@ -622,6 +618,18 @@ impl Store {
                     &session_id,
                     "Queue paused after stopping the agent",
                 );
+                let descendants = snapshot
+                    .descendants(&session_id)
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect::<Vec<_>>();
+                for id in descendants {
+                    conversation::pause(
+                        &mut snapshot,
+                        &id,
+                        "Queue paused after stopping an ancestor",
+                    );
+                }
                 action = Some(Action::Stop(session_id));
             }
             command => {
@@ -667,6 +675,7 @@ impl Store {
 
 #[derive(Clone)]
 struct Workspace {
+    agent_endpoint: Arc<Mutex<Option<String>>>,
     browser: Arc<browser::BrowserAuth>,
     harness_status: Arc<Mutex<Vec<HarnessStatus>>>,
     harness_probe: Arc<tokio::sync::Mutex<()>>,
@@ -783,6 +792,7 @@ impl Workspace {
             .ok_or_else(|| Error::invalid("Revision exhausted"))?;
         store.save(&snapshot)?;
         store.controls.remove(session);
+        store.agent_capabilities.remove(session);
         self.snapshots.send_replace(snapshot);
         Ok(())
     }
@@ -823,6 +833,7 @@ impl Workspace {
             .is_some_and(|w| !runtime::active(&w.status))
         {
             store.controls.remove(session);
+            store.agent_capabilities.remove(session);
             interrupt_tools(&mut snapshot, session, Some(run));
             harness::expire(&mut snapshot, session, run);
         }
@@ -1011,11 +1022,16 @@ pub struct Shutdown {
     workspace: Workspace,
 }
 impl Shutdown {
+    /// Set the reachable HTTP endpoint after binding the listener.
+    pub fn set_agent_endpoint(&self, endpoint: String) {
+        *self.workspace.agent_endpoint.lock().unwrap() = Some(endpoint);
+    }
     pub async fn shutdown(&self) -> Result<(), Error> {
         self.workspace.transport_shutdown.send_replace(true);
         {
             let mut store = self.workspace.store.lock().map_err(Error::internal)?;
             store.closing = true;
+            store.agent_capabilities.clear();
             let mut snapshot = store.snapshot()?;
             let changed = projects::interrupt_operations(
                 &mut snapshot,
@@ -1290,6 +1306,7 @@ pub fn router_with_browser(
     }
     let (snapshots, _) = watch::channel(initial);
     let workspace = Workspace {
+        agent_endpoint: Arc::new(Mutex::new(None)),
         browser,
         harness_status: Arc::new(Mutex::new(vec![])),
         harness_probe: Arc::new(tokio::sync::Mutex::new(())),
@@ -1354,6 +1371,10 @@ pub fn router_with_browser(
                 workspace.clone(),
                 authorize,
             ))
+            .route(
+                "/v1/agent-tools/{tool}",
+                post(agent_tools::route).layer(DefaultBodyLimit::max(64 * 1024)),
+            )
             .merge(browser::routes(workspace.clone()))
             .layer(axum::middleware::from_fn(browser::response_headers))
             .with_state(workspace),
@@ -1593,7 +1614,20 @@ async fn command(
                 ));
             }
             Some(Action::Stop(session_id)) => {
-                store.controls.get(&session_id).unwrap().send_replace(true);
+                let snapshot = store.snapshot()?;
+                let mut ids = vec![session_id.clone()];
+                ids.extend(
+                    snapshot
+                        .descendants(&session_id)
+                        .iter()
+                        .map(|s| s.id.clone()),
+                );
+                for id in ids {
+                    store.agent_capabilities.remove(&id);
+                    if let Some(control) = store.controls.get(&id) {
+                        control.send_replace(true);
+                    }
+                }
             }
             Some(Action::Promote(session_id)) => {
                 if let Some(control) = store.controls.get(&session_id) {

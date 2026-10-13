@@ -472,3 +472,40 @@ fn injected_editor_reports_content_without_a_plain_text_proxy() {
     mounted.click(mounted.rect("Send").center());
     assert_eq!(sent.get_untracked(), 1);
 }
+
+#[test]
+fn spawn_rows_use_tree_anatomy_and_hide_unknown_harness() {
+    let mounted = mount(Size::new(720.0, 180.0), || {
+        view! {
+            SpawnBlock
+                agents:(Live::fixed(vec![SpawnChild {
+                name:"Unknown harness".into(), status:AgentStatus::Working, harness:None,
+                model:Some(ModelIdentity::new("Sol", "6.1", ModelHue::Sol)),
+                effort:Some(Effort::new(5, 4)),
+            }]))
+                on-open-tree:(noop())
+        }
+    });
+    assert_eq!(mounted.rect("Unknown harness").size.height, 34.0);
+    assert!(mounted.labels().iter().any(|label| label == "Sol 6.1"));
+    assert!(!mounted.labels().iter().any(|label| label == "CODEX"));
+}
+
+#[test]
+fn combined_gallery_keeps_both_workstreams_inside_the_capture() {
+    let mounted = mount(Size::new(1440.0, 14000.0), || {
+        gallery::gallery(Rc::new(|_| {}))
+    });
+    let labels = mounted.labels();
+    assert!(labels.iter().any(|label| label == "AGENT TREE"));
+    assert!(labels.iter().any(|label| label == "Open in tree"));
+    let bottom = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .iter()
+        .filter(|node| node.label.is_some())
+        .map(|node| node.rect.origin.y + node.rect.size.height)
+        .fold(0.0f32, f32::max);
+    assert!(bottom < 13950.0, "gallery reaches {bottom}");
+}

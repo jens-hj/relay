@@ -9,6 +9,9 @@ use relay_ui::prelude::*;
 use relay_ui::tokens::{ModelFamily, Signal, ThemeVariant, ToolKind, ground, px};
 use std::rc::Rc;
 
+#[path = "agents.rs"]
+pub mod agents;
+
 /// Switches the installed theme variant.
 pub type SetTheme = Rc<dyn Fn(ThemeVariant)>;
 
@@ -39,6 +42,7 @@ pub fn gallery(set_theme: SetTheme) -> Element {
                     d2::conversation()
                     d2::composer_states()
                     d2::tool_board()
+                    agents::sections()
                 }
             }
         }

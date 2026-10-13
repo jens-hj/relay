@@ -507,6 +507,7 @@ fn every_variant_builds_the_gallery() {
 #[test]
 #[ignore = "manual: needs a GPU adapter; writes screenshots"]
 fn gallery_screenshots() {
+    use crate::tokens::ground;
     use mosaic::render::Renderer;
     let directory = std::env::var("RELAY_UI_SCREENSHOTS").unwrap_or_else(|_| {
         concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/relay-ui-gallery").into()
@@ -515,21 +516,30 @@ fn gallery_screenshots() {
     let scale = std::env::var("RELAY_UI_SCALE")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(2.0f32);
+        .unwrap_or(1.0f32);
     let specimen = std::env::var("RELAY_UI_SPECIMEN").unwrap_or_default();
     let logical = match specimen.as_str() {
+        "agents" => Size::new(1280.0, 6800.0),
         "tools" => Size::new(1332.0, 3800.0),
         "conversation" => Size::new(960.0, 1400.0),
         "composer" => Size::new(848.0, 1300.0),
-        _ => Size::new(1280.0, 2350.0),
+        _ => Size::new(1440.0, 14000.0),
     };
-    let mounted = mount(logical, || match specimen.as_str() {
-        "tools" => gallery::d2::tool_board(),
-        "conversation" => gallery::d2::conversation(),
-        "composer" => gallery::d2::composer_states(),
-        _ => gallery::gallery(std::rc::Rc::new(|variant| {
-            install_theme(&theme(variant, 1.0));
-        })),
+    let mounted = mount(logical, || {
+        let content = match specimen.as_str() {
+            "agents" => gallery::agents::sections(),
+            "tools" => gallery::d2::tool_board(),
+            "conversation" => gallery::d2::conversation(),
+            "composer" => gallery::d2::composer_states(),
+            _ => gallery::gallery(std::rc::Rc::new(|variant| {
+                install_theme(&theme(variant, 1.0));
+            })),
+        };
+        view! {
+            col fill:ground.page font-color:ground.ink font-family:monospace {
+                { parent.adopt(&content); }
+            }
+        }
     });
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();

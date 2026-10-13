@@ -97,7 +97,7 @@ impl PermissionMode {
     }
 }
 #[derive(Clone, Debug, PartialEq)]
-pub struct Permission {
+pub struct ToolPermission {
     pub capability: String,
     pub mode: PermissionMode,
 }
@@ -175,7 +175,7 @@ pub enum ToolDetail {
         task: Option<String>,
         context: Option<String>,
         reports_to: Option<String>,
-        permissions: Option<Vec<Permission>>,
+        permissions: Option<Vec<ToolPermission>>,
     },
     Message {
         target: Option<String>,

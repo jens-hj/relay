@@ -354,17 +354,7 @@ fn authorize(
             "This worker has no resumable thread; start a new linked worker",
         ));
     }
-    runtime::authorize_session(
-        &candidate,
-        session
-            .issue_id
-            .as_deref()
-            .ok_or_else(|| Error::invalid("Session has no linked issue"))?,
-        &session.director_id,
-        approved,
-        &session.role,
-        config,
-    )
+    crate::agent_tools::authorize_session(snapshot, &session, approved, config)
 }
 
 pub(super) fn apply(
