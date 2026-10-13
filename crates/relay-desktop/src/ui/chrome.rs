@@ -2,7 +2,7 @@
 //! the small key/value cell used across headers and readouts.
 
 use super::*;
-use crate::window_chrome::{WindowControls, WindowControlsProps};
+use crate::window_chrome::{WindowControlsSpace, WindowControlsSpaceProps};
 
 /// The page header: an eyebrow naming the page above the subject, page cells
 /// supplied by the caller, and the command palette entry. `compact` collapses
@@ -33,7 +33,7 @@ pub(crate) fn PageHeader(
             children
             CommandPaletteButton model:(model) compact:(compact)
             if model.page.get() != Page::Board || model.issue.get().is_none() || model.snapshot.get().projects.is_empty() {
-                WindowControls model:(model)
+                WindowControlsSpace
             }
         }
     }

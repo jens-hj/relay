@@ -2,7 +2,7 @@
 //! and approval blocks, queued turns, and the ledger's settings.
 
 use crate::ui::{NavigationButton, NavigationButtonProps};
-use crate::window_chrome::{WindowControls, WindowControlsProps};
+use crate::window_chrome::{WindowControlsSpace, WindowControlsSpaceProps};
 use crate::{adapt, buffer, icons::*, model::Model};
 use mosaic::prelude::*;
 use relay_core::*;
@@ -78,8 +78,13 @@ fn header_view(model: Model) -> HeaderView {
 /// with its context gauge and controls, session actions and the window
 /// controls.
 #[component]
-pub(crate) fn SessionHead(model: Model, menu: State<bool>) -> Element {
-    let data = Derived::new(move || header_view(model));
+pub(crate) fn SessionHead(model: Model, menu: State<bool>, compact: Derived<bool>) -> Element {
+    // Narrow headers keep Stop in the session actions instead.
+    let data = Derived::new(move || {
+        let mut view = header_view(model);
+        view.stoppable &= !compact.get();
+        view
+    });
     let host = view! {
         row width:1fr min-width:0px {}
     };
@@ -125,7 +130,7 @@ pub(crate) fn SessionHead(model: Model, menu: State<bool>) -> Element {
                 stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
                 icon size:{px(16.0)}px more-icon
             }
-            WindowControls model:(model)
+            WindowControlsSpace
         }
     }
 }

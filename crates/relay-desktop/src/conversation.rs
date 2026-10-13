@@ -931,7 +931,7 @@ pub fn Conversation(model: Model) -> Element {
     let root = view! {
         col width:1fr gap:0px
             @layout:{move |rect: Rect| { doc_width.set(rect.size.width); doc_height.set(rect.size.height); }} {
-            SessionHead model:(model) menu:(menu)
+            SessionHead model:(model) menu:(menu) compact:(compact)
             if !tools.get().is_empty() {
                 FingerprintStrip tools:(relay_ui::Live::from(tools))
             }
@@ -946,6 +946,14 @@ pub fn Conversation(model: Model) -> Element {
                     col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
                         gap:{px(10.0)}px shrink:0
                         stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                        if compact.get() && session.get().and_then(|s|s.worker).is_some_and(|w|matches!(w.status,WorkerStatus::Running|WorkerStatus::Queued)) {
+                            row height:min-content {
+                                button #relay.action @click:{model.stop_worker();}
+                                    label:"Stop worker"
+                                    disabled:{!model.connected.get() || model.busy.get()}
+                                    "Stop worker"
+                            }
+                        }
                         grid height:min-content gap:{px(8.0)}px
                             cols:{GridTracks::auto_fit(GridTrack::minmax(px(90.0).into(), GridTrack::fr(1.0)))} {
                             if cfg!(target_arch = "wasm32") {

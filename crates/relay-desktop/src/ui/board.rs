@@ -1,6 +1,6 @@
 use super::*;
 use crate::panels::{BoundedPanel, BoundedPanelProps};
-use crate::window_chrome::{WindowControls, WindowControlsProps};
+use crate::window_chrome::{WindowControlsSpace, WindowControlsSpaceProps};
 use std::{cell::RefCell, rc::Rc};
 
 /// Whether a project is the read-only demo fixture.
@@ -592,7 +592,7 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                         label:"Close issue details" width:{px(36.0)}px pad:0px {
                         icon size:{px(13.0)}px window-close
                     }
-                    WindowControls model:(model)
+                    WindowControlsSpace
                 }
                 Notice model:(model)
             }
@@ -637,7 +637,7 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                         }
                         row width:max-content
                             height:{crate::window_chrome::sidebar_header_height()}px shrink:0 {
-                            WindowControls model:(model)
+                            WindowControlsSpace
                         }
                     }
                     Notice model:(model)

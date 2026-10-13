@@ -8,6 +8,7 @@ mod preferences;
 mod profile;
 mod status;
 
+use crate::window_chrome::{WindowControls, WindowControlsProps};
 use crate::{
     controls::{ButtonStyle, button, stepper_with_options},
     conversation::{Conversation, ConversationProps},
@@ -100,6 +101,12 @@ pub fn shell(model: Model) -> Element {
                             }
                         }
                     }
+                }
+            }
+            if crate::window_chrome::DRAWS_WINDOW_BUTTONS {
+                row width:max-content height:min-content
+                    translate:(x:{width.get() - crate::window_chrome::window_controls_width()}px y:0px) {
+                    WindowControls model:(model)
                 }
             }
             if mobile.get() && (model.sidebar_open.get() || drawer_drag.get().is_some()) {

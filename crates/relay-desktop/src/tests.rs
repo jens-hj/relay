@@ -5222,8 +5222,10 @@ fn wide_sessions_turn_narrow_at_double_scale_without_rebuilding_the_draft() {
             "{label}: {rect:?}"
         );
     }
-    // Stop stays in the header's control block at every width.
-    assert!(has_label(&mounted, "Stop"));
+    // Stop moves into the session actions when the header is narrow.
+    assert!(!has_label(&mounted, "Stop"));
+    mounted.click("Session actions");
+    assert!(has_label(&mounted, "Stop worker"));
 }
 
 /// Pinned Mosaic `text_dyn_styled` binds a live text leaf's content and style
@@ -5385,7 +5387,7 @@ fn bounded_session_disclosures_keep_controls_reachable_and_draft_mounted() {
     assert_control_hit(&mounted, "Session usage and provenance");
     mounted.key(Key::Enter, false);
     for label in [
-        "Stop",
+        "Stop worker",
         "Inherit worker execution settings",
         "Load shared draft",
         "Restore local draft",
@@ -7479,4 +7481,28 @@ fn the_header_pause_cell_and_p_hold_and_resume_the_queue() {
     mounted.settle();
     assert!(!has_label(&mounted, "Pause") && !has_label(&mounted, "Resume"));
     let _ = &mut mounted;
+}
+
+#[test]
+fn window_controls_are_one_ruled_group_apart_from_page_controls() {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mounted = mount(false, 1380.0);
+        mounted.model.page.set(Page::Board);
+        mounted.model.issue.set(Some("issue-2".into()));
+        mounted.settle();
+        let group = mounted.rect("Window controls");
+        let close_issue = mounted.rect("Close issue details");
+        // The group sits at the window's top-right corner, and the
+        // inspector's own close cell ends before it starts.
+        assert!((group.origin.x + group.size.width - 1380.0).abs() < 1.0);
+        assert!(group.origin.y.abs() < 1.0);
+        assert!(close_issue.origin.x + close_issue.size.width <= group.origin.x + 0.5);
+        for page in [Page::Sessions, Page::Settings, Page::Directors] {
+            mounted.model.issue.set(None);
+            mounted.model.page.set(page);
+            mounted.settle();
+            assert_eq!(mounted.rect("Window controls"), group, "{page:?}");
+        }
+    }
 }

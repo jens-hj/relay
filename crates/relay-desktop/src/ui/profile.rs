@@ -1,5 +1,5 @@
 use super::*;
-use crate::window_chrome::{WindowControls, WindowControlsProps};
+use crate::window_chrome::{WindowControlsSpace, WindowControlsSpaceProps};
 use relay_ui::prelude::{HarnessGlyph, HarnessGlyphProps};
 
 /// The seven profile fields a director can override, each as a whole.
@@ -192,7 +192,7 @@ fn ProfileHeader(model: Model) -> Element {
                 CommandPaletteButton model:(model)
                     compact:(Derived::new(move || width.get() < px(600.0)))
             }
-            WindowControls model:(model)
+            WindowControlsSpace
         }
     }
 }
