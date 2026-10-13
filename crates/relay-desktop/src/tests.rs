@@ -8071,3 +8071,44 @@ fn connection_panel_is_embedded_and_shrinks_the_tree() {
     assert!(has_label(&mounted, "Offline"));
     assert!(has_label(&mounted, "Connection details"));
 }
+
+#[test]
+fn relay_context_messages_use_the_relay_mark_not_a_harness_glyph() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    // Harness glyphs are images named after their harness; count those in
+    // the reading column (right of the sidebar).
+    let glyphs = |mounted: &Mounted| {
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .filter(|n| {
+                n.rect.origin.x > 400.0
+                    && matches!(n.label.as_deref(), Some("Codex" | "Claude Code"))
+            })
+            .count()
+    };
+    let before = glyphs(&mounted);
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot.messages.push(Message {
+            id: "context-relay".into(),
+            session_id: "session-plan".into(),
+            author: "Relay".into(),
+            kind: "issue-context".into(),
+            body: "{\"issue\":\"#2\"}".into(),
+            parts: vec![],
+            tool: None,
+        });
+    });
+    mounted.settle();
+    assert!(
+        has_label(&mounted, "Relay"),
+        "Relay speaks for its own context"
+    );
+    assert!(has_label(&mounted, "Context sent to agent"));
+    assert!(!has_label(&mounted, "Source context"));
+    assert_eq!(glyphs(&mounted), before, "no harness glyph for Relay");
+}

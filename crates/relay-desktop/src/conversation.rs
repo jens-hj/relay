@@ -1483,8 +1483,13 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
         }
         message.get().map(|m| speaker_of(&m)).unwrap_or_default()
     });
+    // Relay's own messages (the context it sends with each turn) carry the
+    // Relay mark rather than the session's harness glyph.
+    let from_relay = initial.as_ref().is_some_and(|m| m.author == "Relay");
+    let speaker_icon = (from_relay && !mosaic::core::reactive::untracked(continues))
+        .then_some(relay_ui::icons::mark.relay);
     // Agent messages carry their session's harness glyph when it is known.
-    let harness = (!prompt && !mosaic::core::reactive::untracked(continues))
+    let harness = (!prompt && !from_relay && !mosaic::core::reactive::untracked(continues))
         .then(|| {
             let snapshot = model.snapshot.get_untracked();
             let session_id = initial.as_ref().map(|m| m.session_id.clone())?;
@@ -1512,7 +1517,7 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
                             horizontal-inset:(8.0)
                             on-press:(press(move || expanded.set(!expanded.get_untracked()))) {
                             Label
-                                text:(Derived::new(move || message.get().map(|m|match m.kind.as_str(){"issue-context"=>"Source context","file_change"=>"File changes","reasoning"=>"Reasoning",_=>"Tool activity"}.to_owned()).unwrap_or_default()))
+                                text:(Derived::new(move || message.get().map(|m|match m.kind.as_str(){"issue-context"=>"Context sent to agent","file_change"=>"File changes","reasoning"=>"Reasoning",_=>"Tool activity"}.to_owned()).unwrap_or_default()))
                                 role:(TextRole::Label) weight:500
                         }
                     }
@@ -1572,7 +1577,8 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
         }
     } else {
         view! {
-            MessageRow speaker:(relay_ui::Live::from(speaker)) harness:(harness) {
+            MessageRow speaker:(relay_ui::Live::from(speaker)) harness:(harness)
+                icon:(speaker_icon) {
                 AgentText {
                     { parent.adopt(&body); }
                 }

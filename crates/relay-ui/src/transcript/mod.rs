@@ -16,7 +16,13 @@ pub fn TranscriptColumn(#[prop(optional)] children: Children) -> Element {
 #[component]
 pub fn MessageRow(
     speaker: UiText,
-    #[prop(optional)] harness: Option<Harness>,
+    /// The speaking agent's harness glyph.
+    #[prop(optional)]
+    harness: Option<Harness>,
+    /// A speaker mark for speakers that are not agents (the application
+    /// itself, a system); used when there is no harness.
+    #[prop(optional)]
+    icon: Option<SvgToken>,
     #[prop(optional)] children: Children,
 ) -> Element {
     view! {
@@ -25,6 +31,8 @@ pub fn MessageRow(
                 pad:(top:{px(3.0)}px) font-color:ground.muted {
                 if harness.is_some() {
                     HarnessGlyph harness:(harness.unwrap()) size:12.0
+                } else if icon.is_some() {
+                    { parent.adopt(&crate::icons::icon_mark(icon.unwrap(), 12.0)); }
                 }
                 Ellipsis text:(speaker) role:(TextRole::Label) tone:(Tone::Muted) weight:500
             }

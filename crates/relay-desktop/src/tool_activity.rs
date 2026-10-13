@@ -1,8 +1,9 @@
 //! Recorded tool activity: older transcripts' tool messages gain typed calls.
 use relay_core::{Message, ToolKind, ToolState};
 
-/// Old transcripts lack lifecycle metadata. Give them a typed presentation
-/// while explicitly leaving their status unknown; never infer success from text.
+/// Old transcripts lack lifecycle metadata. Give them a typed presentation.
+/// A recorded exit code is the outcome (zero completed, otherwise failed);
+/// without one the status stays unknown. Never infer success from prose.
 pub(crate) fn with_legacy_tool(mut message: Message) -> Message {
     if message.tool.is_some()
         || !matches!(message.kind.as_str(), "command_execution" | "file_change")
@@ -72,7 +73,11 @@ pub(crate) fn with_legacy_tool(mut message: Message) -> Message {
         run_id: String::new(),
         name,
         kind,
-        state: ToolState::Unknown,
+        state: match code {
+            Some(0) => ToolState::Completed,
+            Some(_) => ToolState::Failed,
+            None => ToolState::Unknown,
+        },
         input,
         target,
         directory: None,
@@ -90,7 +95,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_activity_uses_recorded_type_without_inventing_status() {
+    fn legacy_activity_takes_its_status_from_the_recorded_exit_code() {
         let message = Message {
             id: "old".into(),
             session_id: "session".into(),
@@ -102,9 +107,27 @@ mod tests {
         };
         let shown = with_legacy_tool(message.clone());
         assert_eq!(shown.tool.as_ref().unwrap().kind, ToolKind::Run);
-        assert_eq!(shown.tool.as_ref().unwrap().state, ToolState::Unknown);
+        assert_eq!(shown.tool.as_ref().unwrap().state, ToolState::Completed);
         assert_eq!(shown.tool.as_ref().unwrap().target, "cargo test");
         assert_eq!(shown.body, "tests passed");
         assert_eq!(message.body, "Command: cargo test\nExit: 0\ntests passed");
+        let failed = with_legacy_tool(Message {
+            body: "Command: cargo test\nExit: 101\nfailures".into(),
+            ..message.clone()
+        });
+        assert_eq!(failed.tool.as_ref().unwrap().state, ToolState::Failed);
+        assert_eq!(failed.tool.as_ref().unwrap().exit_code, Some(101));
+        // No recorded exit code: the outcome stays unknown, never guessed.
+        let unknown = with_legacy_tool(Message {
+            body: "Command: cargo test\ntests passed".into(),
+            ..message.clone()
+        });
+        assert_eq!(unknown.tool.as_ref().unwrap().state, ToolState::Unknown);
+        let change = with_legacy_tool(Message {
+            kind: "file_change".into(),
+            body: "src/lib.rs".into(),
+            ..message
+        });
+        assert_eq!(change.tool.as_ref().unwrap().state, ToolState::Unknown);
     }
 }
