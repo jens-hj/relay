@@ -1785,6 +1785,15 @@ fn caret_with_margin(origin: Vector2, caret: Rect) -> Rect {
     )
 }
 
+// Custom editor surfaces must shape with the same metrics during measurement,
+// selection and painting. Inherited leading at paint time can overflow a field
+// that was measured with TextStyle's default leading.
+fn buffer_text_style() -> TextStyle {
+    TextStyle::new(px(13.0))
+        .family(mosaic::text::FontFamily::Monospace)
+        .line_height(mosaic::text::LineHeight::Scale(1.7))
+}
+
 #[component]
 pub(crate) fn BufferText(
     model: Model,
@@ -1796,6 +1805,7 @@ pub(crate) fn BufferText(
     let field = view! {
         el width:fill height:min-content shrink:0 font-size:{px(13.0)}px {}
     };
+    field.text_style(buffer_text_style());
     let key = match &location {
         Location::Source { message, start, .. } => format!("source-{message}-{start}"),
         Location::Draft(id) => format!("{}-{id}", if mirror { "inline" } else { "draft" }),
@@ -1807,7 +1817,7 @@ pub(crate) fn BufferText(
     });
     field.role(mosaic::widgets::a11y::Role::TextInput);
     let fonts = model.ui.get_untracked().fonts();
-    let editor = Rc::new(RefCell::new(EditBuffer::new(TextStyle::new(px(13.0)))));
+    let editor = Rc::new(RefCell::new(EditBuffer::new(buffer_text_style())));
     editor
         .borrow_mut()
         .set_text(&mut fonts.borrow_mut(), &current_text(model, &location));
@@ -1891,10 +1901,7 @@ pub(crate) fn BufferText(
     field.measure(move |available| {
         let mut fonts = measure_fonts.borrow_mut();
         let mut buffer = measured.borrow_mut();
-        buffer.set_style(
-            &mut fonts,
-            TextStyle::new(px(13.0)).family(mosaic::text::FontFamily::Monospace),
-        );
+        buffer.set_style(&mut fonts, buffer_text_style());
         buffer.set_wrap_width(&mut fonts, available.width.definite());
         let size = buffer.metrics(&mut fonts).size;
         Size::new(size.width.max(1.0), size.height.max(px(24.0)))
@@ -1932,7 +1939,7 @@ pub(crate) fn BufferText(
     field.paint(move |ctx| {
         let mut fonts = paint_fonts.borrow_mut();
         let mut buffer = painted.borrow_mut();
-        buffer.set_style(&mut fonts, ctx.text_style.clone());
+        buffer.set_style(&mut fonts, buffer_text_style());
         buffer.set_wrap_width(&mut fonts, Some(ctx.rect.size.width));
         let origin = ctx.rect.origin;
         let shared = paint_controller
@@ -1955,7 +1962,7 @@ pub(crate) fn BufferText(
                 fonts
                     .shape(
                         &buffer.display_text(),
-                        &ctx.text_style,
+                        &buffer_text_style(),
                         Some(ctx.rect.size.width),
                     )
                     .selection_rects(start, end)
@@ -2634,5 +2641,160 @@ mod tests {
             delete_boundary(&mut vec![left.clone(), right], &left.id, false),
             Some((left.id, 9))
         );
+    }
+}
+
+#[cfg(test)]
+mod layout_regression {
+    use super::*;
+    use mosaic::core::reactive::flush;
+    use std::time::Duration;
+
+    #[test]
+    fn transcript_text_fits_panels_after_wrapping_streaming_and_resize() {
+        mosaic::core::builtins::install();
+        install_theme(&relay_ui::tokens::theme(
+            relay_ui::tokens::ThemeVariant::Dark,
+            1.0,
+        ));
+        install_theme(&relay_ui::icons::icons());
+        let scope = Scope::new(|| {});
+        let ui = scope.run(Ui::new);
+        let mut fonts = mosaic::text::FontContext::embedded_only();
+        relay_ui::fonts::install(&mut fonts);
+        ui.set_fonts(fonts);
+        relay_ui::attach(&ui);
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let model = scope.run(|| Model::new(&ui, sender));
+        let journal = format!(
+            "journalctl --user\n{}",
+            format!(
+                "Oct 10 systemd: /nix/store/{} /home/user/workspace/deploy.py\n",
+                "long-unbroken-path".repeat(15)
+            )
+            .repeat(10)
+        );
+        model.snapshot.update(|s| {
+            for (id, kind, body) in [
+                ("journal", "prompt", journal),
+                (
+                    "context",
+                    "issue-context",
+                    "Source context follows the pasted journal".into(),
+                ),
+                (
+                    "fence",
+                    "assistant",
+                    "Completed.\n```bash\njournalctl --user -fu relay\n```".into(),
+                ),
+                (
+                    "reply",
+                    "assistant",
+                    "Completion is reported after checks pass.".into(),
+                ),
+            ] {
+                s.messages.push(Message {
+                    id: id.into(),
+                    session_id: "layout".into(),
+                    author: "Relay".into(),
+                    kind: kind.into(),
+                    parts: if id == "fence" {
+                        vec![Part::text(&body)]
+                    } else {
+                        vec![]
+                    },
+                    body,
+                    tool: None,
+                });
+            }
+        });
+        let controller = scope.run(|| State::new(Rc::new(RefCell::new(Controller::default()))));
+        scope.run(|| {
+            let _ambient = ui.enter();
+            ui.mount(&view! {
+                col height:min-content gap:28px font-family:monospace {
+                    TranscriptMessage model:(model) message-id:"journal" controller:(controller)
+                    TranscriptMessage model:(model) message-id:"context" controller:(controller)
+                    TranscriptMessage model:(model) message-id:"fence" controller:(controller)
+                    TranscriptMessage model:(model) message-id:"reply" controller:(controller)
+                }
+            });
+        });
+        for width in [480.0, 1100.0, 480.0, 848.0] {
+            model.snapshot.update(|s| {
+                s.messages
+                    .iter_mut()
+                    .find(|m| m.id == "reply")
+                    .unwrap()
+                    .body
+                    .push_str("\nStreamed reply line.")
+            });
+            for _ in 0..12 {
+                flush();
+                ui.tick(Duration::from_millis(16));
+                ui.frame(Size::new(width, 8000.0), 1.0);
+            }
+            let state = controller.get_untracked();
+            let state = state.borrow();
+            let inspection = ui.inspection_snapshot();
+            let mut previous_bottom = 0.0;
+            for id in ["journal", "context", "fence", "reply"] {
+                let panel = state.messages[id].layout_rect();
+                assert!(
+                    panel.origin.y >= previous_bottom - 0.5,
+                    "overlapping row {id} at {width}"
+                );
+                previous_bottom = panel.origin.y + panel.size.height;
+                let mut descendants = vec![state.messages[id].id()];
+                while let Some(node_id) = descendants.pop() {
+                    let node = inspection
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == node_id)
+                        .unwrap();
+                    descendants.extend(node.children.iter().copied());
+                    if matches!(
+                        node.role,
+                        mosaic::widgets::a11y::Role::Label | mosaic::widgets::a11y::Role::TextInput
+                    ) {
+                        let rect = node.rect;
+                        assert!(
+                            rect.origin.x >= panel.origin.x - 0.5
+                                && rect.origin.y >= panel.origin.y - 0.5
+                                && rect.origin.x + rect.size.width
+                                    <= panel.origin.x + panel.size.width + 0.5
+                                && rect.origin.y + rect.size.height <= previous_bottom + 0.5,
+                            "text node outside {id} panel at {width}: {:?}",
+                            node.label
+                        );
+                    }
+                }
+                for (key, (field, buffer)) in &state.surfaces {
+                    if !key.starts_with(&format!("source-{id}-")) {
+                        continue;
+                    }
+                    let rect = field.layout_rect();
+                    let metrics = buffer
+                        .borrow_mut()
+                        .metrics(&mut ui.fonts().borrow_mut())
+                        .size;
+                    assert!(
+                        metrics.height <= rect.size.height + 0.5,
+                        "{id} at {width}: painted height {} exceeds measured {}",
+                        metrics.height,
+                        rect.size.height
+                    );
+                    assert!(
+                        metrics.width <= rect.size.width + 0.5,
+                        "text spills horizontally: {id}"
+                    );
+                    assert!(
+                        rect.origin.y + metrics.height <= previous_bottom + 0.5,
+                        "text outside panel: {id}"
+                    );
+                }
+            }
+        }
+        scope.dispose();
     }
 }
