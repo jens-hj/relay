@@ -102,7 +102,9 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
             &model.catalogs.get(),
         )
     });
-    let usage = Derived::new(move || adapt::harness_usage(&model.snapshot.get(), unix_now()));
+    let usage = Derived::new(move || {
+        adapt::harness_usage(&model.snapshot.get(), &model.harnesses.get(), unix_now())
+    });
     let open: Rc<dyn Fn(String)> = Rc::new(move |id| model.open_session(id));
     let toggle: Rc<dyn Fn(String, bool)> = Rc::new(move |id, open| {
         model.collapsed_agents.update(|ids| {

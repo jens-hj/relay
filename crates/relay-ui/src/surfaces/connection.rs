@@ -227,9 +227,15 @@ fn phase(
     }
     (elapsed, visible)
 }
-fn ring(state: Connection, latency: Option<u32>, sending: bool, motion: Rc<Cell<f32>>) -> Element {
+fn ring(
+    state: Connection,
+    latency: Option<u32>,
+    sending: bool,
+    motion: Rc<Cell<f32>>,
+    size: f32,
+) -> Element {
     let glyph = view! {
-        el width:{px(20.0)}px height:{px(20.0)}px shrink:0 nohit {}
+        el width:{px(size)}px height:{px(size)}px shrink:0 nohit {}
     };
     let (time, visible) = phase(
         &glyph,
@@ -542,7 +548,7 @@ fn panel(
     copy: Option<OnPress>,
     motion: &ConnectionMotion,
 ) -> Element {
-    let glyph = ring(state, latency, false, motion.ring.clone());
+    let glyph = ring(state, latency, false, motion.ring.clone(), 20.0);
     let drawing = topology(state, info, telemetry, motion.socket.clone());
     let info = info.clone();
     let telemetry = telemetry.clone();
@@ -727,7 +733,7 @@ pub fn ConnectionStatus(
     );
     host.adopt(&details);
     let glyph = view! {
-        col width:{px(20.0)}px height:{px(20.0)}px shrink:0 {}
+        col width:{px(12.0)}px height:{px(12.0)}px shrink:0 {}
     };
     let (glyph_state, glyph_latency, glyph_sending) =
         (state.clone(), latency.clone(), sending.clone());
@@ -735,7 +741,13 @@ pub fn ConnectionStatus(
     glyph.switch(
         move || (glyph_state.get(), glyph_latency.get(), glyph_sending.get()),
         move |parent, (state, latency, sending)| {
-            parent.adopt(&ring(*state, *latency, *sending, banner_motion.clone()));
+            parent.adopt(&ring(
+                *state,
+                *latency,
+                *sending,
+                banner_motion.clone(),
+                12.0,
+            ));
         },
     );
     let word_state = state.clone();
@@ -766,7 +778,7 @@ pub fn ConnectionStatus(
             .label(state.get(), latency.get(), open.get())
     });
     host.adopt(&view! {
-        button @click:{open.set(!open.get_untracked())} width:fill height:{px(44.0)}px shrink:0
+        button @click:{open.set(!open.get_untracked())} width:fill height:{px(32.0)}px shrink:0
             radius:0px pad:(horizontal:{px(18.0)}px vertical:0px) gap:{px(10.0)}px align:center
             fill:(Color::TRANSPARENT) label:{label.get()}
             stroke:(width:{px(1.0)} color:ground.rule edges:top) hover { fill:ground.hover }

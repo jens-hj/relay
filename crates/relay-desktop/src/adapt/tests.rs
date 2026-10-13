@@ -176,9 +176,33 @@ fn model_identity_splits_family_version_and_vendor() {
             ModelHue::Haiku,
         ),
         ("sonnet[1m]", "Sonnet", "", "CLAUDE", ModelHue::Sonnet),
-        ("gpt-5.1-codex-max", "GPT", "5.1", "GPT", ModelHue::Sol),
+        (
+            "gpt-5.1-codex-max",
+            "Codex Max",
+            "5.1",
+            "GPT",
+            ModelHue::Sol,
+        ),
+        ("gpt-6-luna", "Luna", "6", "GPT", ModelHue::Sol),
+        ("gpt-6.1-sol", "Sol", "6.1", "GPT", ModelHue::Sol),
+        ("gpt-6-astra", "Astra", "6", "GPT", ModelHue::Sol),
+        (
+            "gpt-7-new-variant",
+            "New Variant",
+            "7",
+            "GPT",
+            ModelHue::Sol,
+        ),
+        ("gpt-5.4-mini", "Mini", "5.4", "GPT", ModelHue::Sol),
+        (
+            "claude-sonnet-4-5-fast",
+            "Sonnet Fast",
+            "4.5",
+            "CLAUDE",
+            ModelHue::Sonnet,
+        ),
         ("gpt5", "GPT", "5", "GPT", ModelHue::Sol),
-        ("codex-mini-latest", "Codex", "", "GPT", ModelHue::Sol),
+        ("codex-mini-latest", "Codex Mini", "", "GPT", ModelHue::Sol),
         ("sol-6.1", "Sol", "6.1", "GPT", ModelHue::Sol),
         ("llama-3.1-70b", "llama-3.1-70b", "", "", ModelHue::Neutral),
     ];
@@ -196,6 +220,7 @@ fn model_identity_splits_family_version_and_vendor() {
         );
     }
     assert_eq!(model_identity("claude-opus-5-5").short_name(), "Opus 5.5");
+    assert_eq!(model_identity("gpt-6-luna").short_name(), "Luna 6");
 }
 
 fn catalog_model(efforts: &[&str]) -> HarnessModel {
@@ -387,10 +412,10 @@ fn fingerprint_counts_every_tool_kind_once_in_first_seen_order() {
 #[test]
 fn usage_hides_missing_and_reset_windows_and_forecasts_the_rest() {
     let mut snapshot = demo();
-    assert!(harness_usage(&snapshot, 1_000_000).is_empty());
+    assert!(harness_usage(&snapshot, &[], 1_000_000).is_empty());
     let now = 2_000_000;
     demo_usage(&mut snapshot, now);
-    let usage = harness_usage(&snapshot, now);
+    let usage = harness_usage(&snapshot, &[], now);
     assert_eq!(usage.len(), 2);
     let claude = &usage[1];
     let session = claude.session.as_ref().unwrap();
@@ -401,7 +426,7 @@ fn usage_hides_missing_and_reset_windows_and_forecasts_the_rest() {
     assert_eq!(claude.insight.heaviest[0].0, "Profile design");
     assert!(claude.insight.suggestion.is_none());
     // An observation from a window that has since reset is dropped.
-    let later = harness_usage(&snapshot, now + 4 * 3600);
+    let later = harness_usage(&snapshot, &[], now + 4 * 3600);
     assert!(later[1].session.is_none());
     assert!(later[1].week.is_some());
 }

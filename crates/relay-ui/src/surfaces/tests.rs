@@ -39,7 +39,7 @@ fn connection_cell_states_and_embedded_details() {
             .rect("Connection: Connected, 42 ms. Show details")
             .size
             .height,
-        44.0
+        32.0
     );
     mounted.click_label("Connection: Connected, 42 ms. Show details");
     assert!(mounted.has("relay.local:7171"));

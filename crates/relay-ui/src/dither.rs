@@ -2,26 +2,36 @@
 //! colour. Density is the value, so it appears only where something is
 //! happening or filling up.
 //!
-//! The noise is the SVG `feTurbulence` fractal-noise algorithm (the
+//! Animated fills are fields of small grains emitted at the dense edge.
+//! Each grain travels toward the sparse edge and fades over its lifetime;
+//! there is no stationary texture underneath. Seeds keep the emission
+//! pattern deterministic, and particle counts are bounded for large surfaces.
+//!
+//! The static fallback is the SVG `feTurbulence` fractal-noise algorithm (the
 //! reference lattice, gradients and seeded generator), so a seed draws the
 //! same grain as the design boards. Each pixel is on when
 //! `gradient_alpha + 2·noise − 1 ≥ ½`, the boards' arithmetic composite
 //! followed by a two-step discrete transfer.
 //!
-//! Masks are generated on the CPU at physical pixel size (the image sampler
+//! Static masks are generated on the CPU at physical pixel size (the image sampler
 //! is linear-only, so drawing at device resolution is what keeps the grain
 //! crisp), cached per element by size, seed, gradient and colour, and
 //! regenerated when any of those change.
 
 use crate::Live;
-use crate::motion::{Breath, breathe};
+mod flow;
+#[cfg(test)]
+mod preview;
+
+use crate::motion::Breath;
 use crate::tokens::{Signal, ground, srgb_alpha};
 use mosaic::core::theme::color;
 use mosaic::prelude::*;
 use mosaic::render::ImageData;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// How the dither's density falls off across its reach.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -286,8 +296,8 @@ impl DitherSpec {
     }
 }
 
-/// The last generated mask of a dither element.
-type CachedMask = (CacheKey, Arc<ImageData>);
+/// The last generated static mask or animated particle field of a dither element.
+type CachedMask = (CacheKey, Option<Arc<ImageData>>, Option<Rc<flow::Flow>>);
 
 #[derive(Clone, Copy, PartialEq)]
 struct CacheKey {
@@ -323,11 +333,23 @@ pub fn Dither(
     /// Breathes the opacity (the model glow).
     #[prop(optional)]
     breath: Option<Breath>,
+    /// All grains spawn at the dense edge, drift, and fade over their lifetime.
+    #[prop(default = true)]
+    flowing: bool,
 ) -> Element {
     let wash = view! {
         el width:fill height:fill nohit {}
     };
-    let level = breath.map(|breath| breathe(&wash, breath));
+    let elapsed = Rc::new(Cell::new(0.0f64));
+    if flowing || breath.is_some() {
+        let elapsed = elapsed.clone();
+        let target = wash.clone();
+        wash.animate(move |dt| {
+            elapsed.set(elapsed.get() + dt.as_secs_f64());
+            target.paint_dirty();
+            mosaic::widgets::Tick::Sleep(Duration::from_millis(33))
+        });
+    }
     {
         let target = wash.clone();
         let reach = reach.clone();
@@ -359,27 +381,32 @@ pub fn Dither(
         if key.pixels.0 == 0 || key.pixels.1 == 0 {
             return;
         }
-        let image = {
+        let (image, flow) = {
             let mut slot = cache.borrow_mut();
             match slot.as_ref() {
-                Some((cached, image)) if *cached == key => image.clone(),
+                Some((cached, image, flow)) if *cached == key => (image.clone(), flow.clone()),
                 _ => {
-                    let image = Arc::new(spec.image(tint, opacity));
-                    *slot = Some((key, image.clone()));
-                    image
+                    let image = (!flowing).then(|| Arc::new(spec.image(tint, opacity)));
+                    let flow = flowing.then(|| Rc::new(flow::Flow::new(&spec)));
+                    *slot = Some((key, image.clone(), flow.clone()));
+                    (image, flow)
                 }
             }
         };
         let source = Rect::from_xywh(0.0, 0.0, key.pixels.0 as f32, key.pixels.1 as f32);
-        match &level {
-            Some(level) => {
-                ctx.scene.push_layer(srgb_alpha(tint, under, level.get()));
-                ctx.scene.image(image, source, rect);
-                ctx.scene.pop_layer();
-            }
-            None => {
-                ctx.scene.image(image, source, rect);
-            }
+        let seconds = elapsed.get();
+        if let Some(breath) = breath {
+            let level = breath.at((seconds % f64::from(breath.period)) as f32);
+            ctx.scene.push_layer(srgb_alpha(tint, under, level));
+        }
+        if let Some(image) = image {
+            ctx.scene.image(image, source, rect);
+        }
+        if let Some(flow) = flow {
+            flow.paint(ctx.scene, rect, seconds, tint, opacity);
+        }
+        if breath.is_some() {
+            ctx.scene.pop_layer();
         }
     });
     wash

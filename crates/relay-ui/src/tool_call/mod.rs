@@ -53,11 +53,11 @@ fn call(vm: ToolCallView, on_opening: OnOpening, actions: ToolActions) -> (Eleme
     let colour = vm.kind.token();
     let active = matches!(vm.status, AgentStatus::Working | AgentStatus::Waiting);
     let edge = match vm.status {
-        AgentStatus::Working => status.live,
+        AgentStatus::Working => colour,
         AgentStatus::Waiting => status.needs_you,
         _ => colour,
     };
-    let embedded = opening_indicator(vm.opening);
+    let embedded = opening_indicator(vm.opening, colour);
     let opening = vm.opening;
     let target = match &vm.detail {
         Some(ToolDetail::Message { target, .. }) => {
@@ -76,8 +76,8 @@ fn call(vm: ToolCallView, on_opening: OnOpening, actions: ToolActions) -> (Eleme
     let header = view! {
         stack height:{px(36.0)}px shrink:0 clip {
             if active {
-                Wash
-                    signal:(if vm.status == AgentStatus::Waiting { Signal::NeedsYou } else { Signal::Live })
+                Dither colour:(edge)
+                    gradient:(if vm.status == AgentStatus::Waiting { Gradient::Amber } else { Gradient::Horizontal })
                     opacity:0.24
             }
             row align:center {
@@ -146,12 +146,17 @@ fn call(vm: ToolCallView, on_opening: OnOpening, actions: ToolActions) -> (Eleme
     };
     (frame, control)
 }
-fn opening_indicator(opening: Opening) -> Element {
+fn opening_indicator(opening: Opening, colour: ColorToken) -> Element {
+    let subdued = move || {
+        let mut tint = mosaic::core::color::Oklch::from_color(mosaic::core::theme::color(colour));
+        tint.c *= 0.65;
+        tint.to_color()
+    };
     view! {
         row width:{px(36.0)}px shrink:0 {
             { for i in 0..3 { parent.adopt(&view! {
                 el width:1fr height:fill
-                    fill:{if i < opening.marks() { mosaic::core::theme::color(ground.outline) } else { Color::TRANSPARENT }}
+                    fill:{if i < opening.marks() { subdued() } else { Color::TRANSPARENT }}
                     stroke:(width:{px(1.0)} color:ground.hairline edges:left) {}
             }); } }
         }

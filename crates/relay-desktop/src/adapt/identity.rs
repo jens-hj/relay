@@ -41,20 +41,23 @@ pub fn model_identity(id: &str) -> ModelIdentity {
             _ => ModelHue::Haiku,
         };
         (capitalize(name), "CLAUDE", hue, vec![index])
-    } else if let Some(index) = family_of("sol") {
-        ("Sol".to_string(), "GPT", ModelHue::Sol, vec![index])
     } else if words.first().is_some_and(|word| word.starts_with("gpt")) {
         // "gpt5" spells its version inside the family word.
         let first = words[0];
         let rest = first.trim_start_matches("gpt");
-        let mut identity = ModelIdentity::new("GPT", "", ModelHue::Sol).vendor("GPT");
-        identity.version = number(
-            &std::iter::once(rest)
-                .filter(|rest| !rest.is_empty())
-                .chain(words[1..].iter().copied())
-                .collect::<Vec<_>>(),
-        );
-        return identity;
+        let rest = std::iter::once(rest)
+            .filter(|rest| !rest.is_empty())
+            .chain(words[1..].iter().copied())
+            .collect::<Vec<_>>();
+        let variants = variant_name(&rest);
+        let family = if variants.is_empty() {
+            "GPT".into()
+        } else {
+            variants
+        };
+        return ModelIdentity::new(family, number(&rest), ModelHue::Sol).vendor("GPT");
+    } else if let Some(index) = family_of("sol") {
+        ("Sol".to_string(), "GPT", ModelHue::Sol, vec![index])
     } else if let Some(index) = family_of("codex") {
         ("Codex".to_string(), "GPT", ModelHue::Sol, vec![index])
     } else {
@@ -66,7 +69,22 @@ pub fn model_identity(id: &str) -> ModelIdentity {
         .filter(|(index, word)| !skip.contains(index) && **word != "claude")
         .map(|(_, word)| *word)
         .collect();
+    let variants = variant_name(&rest);
+    let family = if variants.is_empty() {
+        family
+    } else {
+        format!("{family} {variants}")
+    };
     ModelIdentity::new(family, number(&rest), hue).vendor(vendor)
+}
+
+fn variant_name(words: &[&str]) -> String {
+    words
+        .iter()
+        .filter(|word| !word.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .map(|word| capitalize(word))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn capitalize(word: &str) -> String {
@@ -78,8 +96,7 @@ fn capitalize(word: &str) -> String {
 }
 
 /// The version a family is shown with: its numbers, "4", "5" → "4.5" and
-/// "5.1" → "5.1". Variant words ("codex", "max", "mini") stay in the
-/// reported model id, which provenance shows in full.
+/// "5.1" → "5.1". Variant words are kept in the display family.
 fn number(words: &[&str]) -> String {
     words
         .iter()

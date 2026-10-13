@@ -1,7 +1,7 @@
 //! Harness rate-limit windows and the weekly usage ledger.
 
 use super::identity::{harness, model_identity};
-use relay_core::{Harness, Snapshot, UsageLimit, UsageWindow as Window};
+use relay_core::{Harness, HarnessStatus, Snapshot, UsageLimit, UsageWindow as Window};
 use relay_ui::usage::{HarnessUsage, ModelShare, UsageInsight, UsageWindow};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -104,9 +104,13 @@ fn insight(snapshot: &Snapshot, which: Harness, now: u64) -> UsageInsight {
     }
 }
 
-/// Usage of every harness with a reported limit window, in harness order.
+/// Connected harnesses and harnesses with reported limit windows, in harness order.
 /// `now` is Unix seconds.
-pub fn harness_usage(snapshot: &Snapshot, now: u64) -> Vec<HarnessUsage> {
+pub fn harness_usage(
+    snapshot: &Snapshot,
+    statuses: &[HarnessStatus],
+    now: u64,
+) -> Vec<HarnessUsage> {
     [Harness::Codex, Harness::ClaudeCode]
         .into_iter()
         .filter_map(|which| {
@@ -118,7 +122,10 @@ pub fn harness_usage(snapshot: &Snapshot, now: u64) -> Vec<HarnessUsage> {
                     .and_then(|l| window(l, now))
             };
             let (session, week) = (find(Window::FiveHour), find(Window::Weekly));
-            if session.is_none() && week.is_none() {
+            let connected = statuses
+                .iter()
+                .any(|status| status.harness == which && status.state == "ready");
+            if !connected && session.is_none() && week.is_none() {
                 return None;
             }
             Some(HarnessUsage {

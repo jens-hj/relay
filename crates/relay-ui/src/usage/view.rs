@@ -52,7 +52,7 @@ fn dithered_bar(
     });
     let fill = view! {
         el height:fill nohit clip {
-            Dither colour:(tint) gradient:(Gradient::Usage) opacity:1.0 seed:19
+            Dither colour:(tint) gradient:(Gradient::Usage) opacity:1.0 seed:19 flowing:true
         }
     };
     fill.style_dyn(move || {
@@ -256,6 +256,11 @@ pub fn UsageRow(
     if let Some(week) = &usage.week {
         bars.adopt(&bar_line("wk", week));
     }
+    if usage.session.is_none() && usage.week.is_none() {
+        bars.adopt(&view! {
+            Label text:"No usage data" role:(TextRole::Label) tone:(Tone::Muted)
+        });
+    }
     view! {
         button @click:{on_press()} width:fill height:min-content radius:0px
             pad:(horizontal:{px(18.0)}px vertical:{px(5.0)}px) gap:{px(10.0)}px align:center
@@ -425,6 +430,11 @@ fn stats_block(insight: &UsageInsight) -> Option<Element> {
 /// not supply are hidden.
 #[component]
 pub fn UsageDetail(usage: HarnessUsage, #[prop(optional)] on_apply: Option<OnApply>) -> Element {
+    let bottom_padding = if usage.insight.suggestion.is_none() {
+        px(14.0)
+    } else {
+        px(0.0)
+    };
     let body = view! {
         col height:min-content gap:{px(14.0)}px pad:(horizontal:{px(18.0)}px vertical:0px) {}
     };
@@ -445,7 +455,8 @@ pub fn UsageDetail(usage: HarnessUsage, #[prop(optional)] on_apply: Option<OnApp
         body.adopt(&part);
     }
     let detail = view! {
-        col height:min-content shrink:0 gap:{px(14.0)}px pad:(top:{px(6.0)}px) fill:ground.code
+        col height:min-content shrink:0 gap:{px(14.0)}px
+            pad:(top:{px(6.0)}px bottom:{bottom_padding}px) fill:ground.code
             stroke:(width:{px(1.0)} color:ground.hairline edges:(top bottom)) {}
     };
     detail.adopt(&body);
@@ -521,8 +532,7 @@ pub fn UsageFoot(
         },
     );
     view! {
-        col height:min-content shrink:0 pad:(bottom:{px(8.0)}px) fill:ground.panel
-            label:"Usage foot" {
+        col height:min-content shrink:0 fill:ground.panel label:"Usage foot" {
             el width:fill height:{px(1.0)}px shrink:0 fill:ground.rule label:"Usage boundary"
                 nohit {}
             row height:min-content gap:{px(8.0)}px align:end

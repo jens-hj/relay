@@ -75,7 +75,7 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
                     stack width:{px(44.0)}px clip {
                         Dither colour:(colour) gradient:(Gradient::Corner)
                             reach:(MODEL_GLOW_COLLAPSED_REACH) opacity:(MODEL_GLOW_OPACITY) seed:3
-                            breath:(Some(Breath::GLOW))
+                            breath:(Some(Breath::GLOW)) flowing:true
                         CellButton label:(label) on-press:(toggle.clone()) horizontal-inset:0.0 {
                             col width:max-content align:center justify:between
                                 pad:(vertical:{px(10.0)}px horizontal:0px) gap:{px(5.0)}px {
@@ -117,7 +117,7 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
                     stack width:1fr min-width:0px clip {
                         Dither colour:(colour) gradient:(Gradient::Corner)
                             reach:(MODEL_GLOW_OPEN_REACH) opacity:(MODEL_GLOW_OPACITY) seed:3
-                            breath:(Some(Breath::GLOW))
+                            breath:(Some(Breath::GLOW)) flowing:true
                         CellButton label:(format!("Model: {}. Change model", vm.model.name()))
                             on-press:(actions.change_model) horizontal-inset:0.0 {
                             row height:min-content align:end gap:{px(7.0)}px

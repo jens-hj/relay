@@ -5050,7 +5050,7 @@ fn board_chrome_aligns_with_the_sidebar_and_frames_cards() {
         near(summary.origin.y, connection.origin.y),
         "{summary:?} {connection:?}"
     );
-    assert!(near(summary.size.height, 44.0));
+    assert!(near(summary.size.height, 32.0));
     // Card previews are clipped to three laid-out lines.
     for node in mounted.ui.inspection_snapshot().nodes {
         if node.label.as_deref() == Some("Task preview") {
@@ -7610,6 +7610,70 @@ fn header_status(mounted: &Mounted) -> String {
         .filter_map(|n| n.label)
         .find(|l| ["Working", "Waiting", "Failed", "Queued", "Done"].contains(&l.as_str()))
         .unwrap_or_default()
+}
+
+#[test]
+fn sidebar_usage_includes_connected_harnesses_before_first_run() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = live_snapshot();
+    snapshot.usage_limits.clear();
+    snapshot.usage_ledger.clear();
+    let statuses = [Harness::Codex, Harness::ClaudeCode]
+        .map(|harness| HarnessStatus {
+            harness,
+            executable: String::new(),
+            version: None,
+            state: "ready".into(),
+            detail: String::new(),
+            checked_at: 1,
+        })
+        .to_vec();
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        harnesses: statuses.clone(),
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(has_label(&mounted, "Codex. Show details"));
+    assert!(has_label(&mounted, "Claude Code. Show details"));
+    assert!(has_label(&mounted, "No usage data"));
+    let usage = crate::adapt::harness_usage(&snapshot, &statuses, 1_000_000);
+    assert_eq!(usage.len(), 2);
+    assert!(
+        usage
+            .iter()
+            .all(|u| u.session.is_none() && u.week.is_none() && u.insight.stats.is_empty())
+    );
+    let mut statuses = statuses;
+    statuses[1].state = "signed_out".into();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        harnesses: statuses,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(has_label(&mounted, "Codex. Show details"));
+    assert!(!has_label(&mounted, "Claude Code. Show details"));
+}
+
+#[test]
+fn session_model_control_preserves_gpt_variant() {
+    let mounted = mount(false, 2400.0);
+    let mut snapshot = live_snapshot();
+    let mut run = worker_run(WorkerStatus::Completed);
+    run.model = Some("gpt-6-luna".into());
+    snapshot.sessions[0].worker = Some(run);
+    let id = snapshot.sessions[0].id.clone();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(id);
+    mounted.settle();
+    assert!(has_label(&mounted, "Model: GPT Luna 6. Change model"));
 }
 
 #[test]
