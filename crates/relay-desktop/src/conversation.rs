@@ -996,10 +996,15 @@ pub fn Conversation(model: Model) -> Element {
                                 let choose: Rc<dyn Fn(usize)> = Rc::new(move |slot: usize| {
                                     model.submit(Command::SetWorkerExecution{session_id:choose_session.clone(),execution:Some(ExecutionSettings{approval:ApprovalMode::ALL[slot]})},model.snapshot.get_untracked().revision,crate::model::Saved::Action);
                                 });
-                                Segments name:("Worker approval".to_string())
-                                    options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
-                                    selected:(relay_ui::Live::from(mode_index)) on-select:(choose)
-                                    disabled:(relay_ui::Live::from(Derived::new(move || !model.connected.get() || model.busy.get())))
+                                row height:{px(40.0)}px min-width:0px {
+                                    Segments name:("Worker approval".to_string())
+                                        options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
+                                        icons:(crate::controls::approval_icons())
+                                        tones:(crate::controls::approval_tones())
+                                        selected:(relay_ui::Live::from(mode_index))
+                                        on-select:(choose)
+                                        disabled:(relay_ui::Live::from(Derived::new(move || !model.connected.get() || model.busy.get())))
+                                }
                                 {
                                     let inherit_session = session_id.clone();
                                     parent.adopt(&action_cell("Inherit worker execution settings", "Inherit", move || !model.connected.get() || model.busy.get(), move || model.submit(Command::SetWorkerExecution { session_id: inherit_session.clone(), execution: None }, model.snapshot.get_untracked().revision, crate::model::Saved::Action)));

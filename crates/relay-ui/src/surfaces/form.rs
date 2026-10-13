@@ -1,6 +1,7 @@
 //! Form primitives in ruled cells: a text field, single-choice segments, a
 //! stepper, a toggle and a select.
 
+use crate::icons::icon_mark;
 use crate::marks::{Mark, mark};
 use crate::prelude::*;
 use crate::tokens::{ground, px};
@@ -65,24 +66,39 @@ pub fn Field(
     row
 }
 
-/// Single choice as ruled cells; the chosen cell is highlighted in ink
-/// over the selected ground, the rest muted.
+/// Single choice as cells that fill their parent cell: the options divide
+/// its width equally and take its full height, separated by single
+/// hairlines, with no frame of their own (the parent cell's rules frame
+/// them). The chosen cell sits on the selected ground with its text, icon
+/// and a 2px bar under it in its tone; the rest are muted.
+///
+/// Colour follows the status family, one meaning each: a choice that
+/// blocks or risks harm (Deny, Unrestricted Access) takes `status.failed`,
+/// one that waits on you (Ask) `status.needs-you`, one that lets work run
+/// on its own (Allow, Automatic) `status.full-steam`. Neutral choices
+/// (theme) stay ink; violet stays reserved for live work.
 #[component]
 pub fn Segments(
     options: Vec<String>,
     selected: Live<usize>,
     on_select: OnIndex,
-    /// Colours the chosen cell's text, for choices that carry a signal.
+    /// Colours the chosen cell, for choices that carry a signal.
     #[prop(optional)]
     chosen_tone: Option<ColorToken>,
+    /// The chosen colour per option, overriding `chosen_tone`; missing
+    /// entries fall back to it.
+    #[prop(optional)]
+    tones: Vec<ColorToken>,
+    /// An icon per option, left of its text; none when empty.
+    #[prop(optional)]
+    icons: Vec<SvgToken>,
     /// Names the choice; each cell is then labelled "{name}: {option}".
     #[prop(optional)]
     name: Option<String>,
     #[prop(default = Live::fixed(false))] disabled: Live<bool>,
 ) -> Element {
     let row = view! {
-        row width:max-content height:{px(32.0)}px shrink:0 role:list
-            stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {}
+        row min-width:0px role:list {}
     };
     if let Some(name) = &name {
         row.label(name.clone());
@@ -90,25 +106,42 @@ pub fn Segments(
     let count = options.len();
     let cells = Rc::new(std::cell::RefCell::new(Vec::<Element>::new()));
     for (index, option) in options.into_iter().enumerate() {
+        let tone = tones
+            .get(index)
+            .copied()
+            .or(chosen_tone)
+            .unwrap_or(ground.ink);
         let pick = on_select.clone();
-        let shown_text = option.clone();
         let current = selected.clone();
-        let looks = selected.clone();
         let off = disabled.clone();
+        let content = view! {
+            row height:1fr min-width:0px align:center justify:center gap:{px(8.0)}px
+                pad:(horizontal:{px(10.0)}px vertical:0px) {}
+        };
+        if let Some(token) = icons.get(index) {
+            content.adopt(&icon_mark(*token, 14.0));
+        }
+        content.adopt(&view! {
+            row width:max-content min-width:0px height:min-content clip {
+                text text-wrap:none (option.clone())
+            }
+        });
+        let bar = view! {
+            el width:fill height:{px(2.0)}px shrink:0
+                fill:{if current.get() == index { color(tone) } else { Color::TRANSPARENT }} {}
+        };
         let cell = view! {
-            button @click:{pick(index)} width:max-content height:fill radius:0px
-                pad:(horizontal:{px(12.0)}px vertical:0px)
+            button @click:{pick(index)} width:1fr min-width:0px height:fill radius:0px pad:0px
                 label:(name.as_ref().map_or_else(|| option.clone(), |name| format!("{name}: {option}")))
                 disabled:{off.get()} font-family:monospace font-size:{px(11.5)}px font-weight:500
                 disabled { opacity:0.45 } {
-                text
-                    {
-                    let _ = current.get();
-                    shown_text.clone()
+                col {
+                    { parent.adopt(&content); parent.adopt(&bar); }
                 }
             }
         };
         let interaction = cell.interaction();
+        let looks = selected.clone();
         cell.visual_dyn(move || {
             let chosen = looks.get() == index;
             let fill = if chosen {
@@ -135,7 +168,7 @@ pub fn Segments(
         let tone_of = selected.clone();
         cell.font_color_dyn(move || {
             if tone_of.get() == index {
-                color(chosen_tone.unwrap_or(ground.ink))
+                color(tone)
             } else {
                 color(ground.muted)
             }
@@ -206,7 +239,10 @@ pub fn TextInput(
     }
 }
 
-/// A number with − and + cells, clamped to `min..=max`.
+/// A number with − and + cells, clamped to `min..=max`. It fills its
+/// parent cell: the − and + cells are square-ish ends at the cell's full
+/// height, the value takes the rest, and one hairline divides each pair;
+/// the parent cell's own rules frame it.
 #[component]
 pub fn Stepper(
     value: Live<i64>,
@@ -236,7 +272,7 @@ pub fn Stepper(
     // The value is a spin button: Up and Down step it.
     let (keyed_down, keyed_up) = (decrease.clone(), increase.clone());
     let spin = view! {
-        row width:{px(48.0)}px height:min-content justify:center label:(label.clone())
+        row width:max-content height:min-content justify:center label:(label.clone())
             description:{named.get().to_string()} {
             text font-family:monospace font-size:{px(12.5)}px font-weight:500
                 {format!("{}{suffix}", shown.get())}
@@ -256,21 +292,19 @@ pub fn Stepper(
         ctx.stop_propagation();
     });
     view! {
-        row width:max-content height:{px(32.0)}px shrink:0
-            stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {
-            row width:max-content {
-                row width:{px(32.0)}px shrink:0 {
-                    CellButton label:(decrease_label) on-press:(decrease) {
-                        text font-family:monospace font-size:{px(13.0)}px "−"
-                    }
+        row min-width:0px {
+            row width:{px(40.0)}px shrink:0 {
+                CellButton label:(decrease_label) on-press:(decrease) horizontal-inset:(0.0) {
+                    text font-family:monospace font-size:{px(13.0)}px "−"
                 }
-                Cell rule:(Rule::Left) {
-                    { parent.adopt(&spin); }
-                }
-                row width:{px(32.0)}px shrink:0 {
-                    CellButton label:(increase_label) on-press:(increase) rule:(Rule::Left) {
-                        text font-family:monospace font-size:{px(13.0)}px "+"
-                    }
+            }
+            row width:1fr min-width:0px align:center justify:center
+                stroke:(width:{px(1.0)} color:ground.hairline edges:(left right)) {
+                { parent.adopt(&spin); }
+            }
+            row width:{px(40.0)}px shrink:0 {
+                CellButton label:(increase_label) on-press:(increase) horizontal-inset:(0.0) {
+                    text font-family:monospace font-size:{px(13.0)}px "+"
                 }
             }
         }
@@ -334,15 +368,17 @@ pub fn Toggle(label: String, on: Live<bool>, on_toggle: OnSwitch) -> Element {
     host
 }
 
-/// One choice from a list: a ruled cell showing the current option and a
-/// chevron, opening a popover list.
+/// One choice from a list: a control filling its parent cell (no frame of
+/// its own) showing the current option and a chevron, opening a popover
+/// list.
 #[component]
 pub fn Select(
     label: String,
     options: Vec<String>,
     selected: Live<usize>,
     on_select: OnIndex,
-    /// Width in logical pixels before UI scale.
+    /// Width of the option list in logical pixels before UI scale; the
+    /// control itself fills its cell.
     #[prop(default = 200.0)]
     width: f32,
 ) -> Element {
@@ -381,12 +417,10 @@ pub fn Select(
     };
     let toggle = move || open.set(!open.get_untracked());
     let host = view! {
-        stack width:{px(width)}px height:{px(32.0)}px shrink:0 {
+        stack min-width:0px {
             button @click:{toggle()} width:fill height:fill radius:0px
                 pad:(horizontal:{px(12.0)}px vertical:0px) gap:{px(8.0)}px align:center
-                fill:(Color::TRANSPARENT) label:(label.clone())
-                stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)})
-                hover { fill:ground.hover }
+                fill:(Color::TRANSPARENT) label:(label.clone()) hover { fill:ground.hover }
                 focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
                 row width:1fr min-width:0px height:min-content {
                     text font-family:monospace font-size:{px(12.0)}px font-color:ground.ink

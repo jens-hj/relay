@@ -3,6 +3,7 @@
 //! the design boards' example data. The data lives only here.
 
 use mosaic::prelude::*;
+use relay_ui::icons::command;
 use relay_ui::prelude::*;
 use relay_ui::tokens::{ground, px};
 use std::rc::Rc;
@@ -404,11 +405,25 @@ fn surfaces_section() -> Element {
     );
     let query = State::new(String::new());
     let commands = vec![
-        Command::new("new", "New agent").keys("N"),
-        Command::new("focus", "Focus branch").keys("F"),
-        Command::new("pause", "Pause session").keys("P"),
-        Command::new("stop", "Stop session").keys("⇧S"),
-        Command::new("theme", "Switch theme"),
+        Command::new("new", "New agent")
+            .keys("N")
+            .detail("Create")
+            .icon(command.create),
+        Command::new("focus", "Focus branch")
+            .keys("F")
+            .detail("Navigate")
+            .icon(command.navigate),
+        Command::new("pause", "Pause session")
+            .keys("P")
+            .detail("Worker")
+            .icon(command.worker),
+        Command::new("stop", "Stop session")
+            .keys("⇧S")
+            .detail("Worker")
+            .icon(command.worker),
+        Command::new("theme", "Switch theme")
+            .detail("Settings")
+            .icon(command.settings),
     ];
     let run: Rc<dyn Fn(String)> = Rc::new(|_| {});
     let issues = [
@@ -465,16 +480,29 @@ fn surfaces_section() -> Element {
                     col width:1fr height:min-content {
                         Module title:"Workspace" {
                             Field label:"Repository" value:(repository) placeholder:"owner/name"
-                            col height:min-content gap:{px(10.0)}px pad:{px(14.0)}px {
+                            row height:{px(40.0)}px
+                                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                                 Segments
                                     options:(vec!["Dark".to_string(), "Light".to_string(), "High contrast".to_string()])
                                     selected:(theme) on-select:(pick)
-                                Stepper value:(workers) on-change:(step) min:1i64 max:12i64
-                                    label:"Workers"
-                                Toggle label:"Compact rows" on:(compact) on-toggle:(flip)
-                                Select label:"Default model"
-                                    options:(vec!["Sol 6.1".to_string(), "Opus 5.5".to_string(), "Sonnet 5.5".to_string()])
-                                    selected:(model) on-select:(choose)
+                            }
+                            row height:{px(40.0)}px
+                                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                                row width:{px(150.0)}px shrink:0
+                                    stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
+                                    Stepper value:(workers) on-change:(step) min:1i64 max:12i64
+                                        label:"Workers"
+                                }
+                                row width:{px(220.0)}px shrink:0
+                                    stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
+                                    Select label:"Default model"
+                                        options:(vec!["Sol 6.1".to_string(), "Opus 5.5".to_string(), "Sonnet 5.5".to_string()])
+                                        selected:(model) on-select:(choose)
+                                }
+                                row width:1fr align:center
+                                    pad:(horizontal:{px(14.0)}px vertical:0px) {
+                                    Toggle label:"Compact rows" on:(compact) on-toggle:(flip)
+                                }
                             }
                         }
                         Module title:"Permissions" caps:true {

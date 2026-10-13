@@ -11,6 +11,7 @@ use relay_ui::surfaces::{
     OnPermission, PermissionMatrix, PermissionMatrixProps, PermissionRow, ReadoutCell,
     ReadoutCellProps, Stepper, StepperProps, TextInput, TextInputProps,
 };
+use relay_ui::tokens::Signal;
 
 /// The seven profile fields a director can override, each as a whole.
 const OVERRIDE_FIELDS: usize = 7;
@@ -197,7 +198,8 @@ fn ProfileHeader(model: Model) -> Element {
             }
             if readings.get() {
                 ReadoutCell key:"Profile fields"
-                    value:(Derived::new(move || if model.editor_profile.get().validate().is_ok() {"Valid".to_string()} else {"Invalid".to_string()})) {
+                    value:(Derived::new(move || if model.editor_profile.get().validate().is_ok() {"Valid".to_string()} else {"Invalid".to_string()}))
+                    tone:(relay_ui::Live::from(Derived::new(move || if model.editor_profile.get().validate().is_ok() {Tone::Signal(Signal::FullSteam)} else {Tone::Signal(Signal::Failed)}))) {
                     Tooltip text:(validity) {
                         Label text:"?" role:(TextRole::Caption) tone:(Tone::Muted)
                     }
@@ -295,9 +297,7 @@ fn field_origin(
         row width:max-content shrink:0 gap:0px align:center {
             row width:max-content height:min-content pad:(horizontal:{px(12.0)}px vertical:0px) {
                 Tooltip text:(detail) {
-                    Label
-                        text:(Derived::new(move || if overridden.get() {"Override".to_string()} else {"Default".to_string()}))
-                        role:(TextRole::Caption) tone:(Tone::Muted)
+                    OriginWord overridden:(overridden)
                 }
             }
             if overridden.get() {
@@ -476,9 +476,7 @@ fn field_cell(
                 pad:(horizontal:{px(12.0)}px vertical:0px) {
                 Label text:(short) role:(TextRole::Caption) tone:(Tone::Muted) weight:500 caps:true
                 Tooltip text:(detail) {
-                    Label
-                        text:(Derived::new(move || if overridden.get() {"Override".to_string()} else {"Default".to_string()}))
-                        role:(TextRole::Caption)
+                    OriginWord overridden:(overridden)
                 }
             }
             if overridden.get() {
@@ -594,10 +592,12 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
         None,
         view! {
             col height:min-content gap:0px {
-                row height:{px(40.0)}px
+                row height:{px(48.0)}px
                     stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                     Segments name:("Execution approval".to_string())
                         options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
+                        icons:(crate::controls::approval_icons())
+                        tones:(crate::controls::approval_tones())
                         selected:(relay_ui::Live::from(approval_index)) on-select:(choose_approval)
                 }
                 row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px) {
@@ -823,3 +823,20 @@ fn ScopeChip(model: Model, issue: Issue) -> Element {
 
 pub(crate) const PERMISSIONS: [Permission; 3] =
     [Permission::Deny, Permission::Ask, Permission::Allow];
+
+/// Where a field's value comes from: "Override" in amber, because the
+/// director's own value is the user's hand (as Ask and the primary action
+/// are), or "Default" muted when it is inherited.
+#[component]
+fn OriginWord(overridden: Derived<bool>) -> Element {
+    view! {
+        row width:max-content height:min-content {
+            if overridden.get() {
+                Label text:"Override" role:(TextRole::Caption) weight:500
+                    tone:(Tone::Signal(Signal::NeedsYou))
+            } else {
+                Label text:"Default" role:(TextRole::Caption) tone:(Tone::Muted)
+            }
+        }
+    }
+}

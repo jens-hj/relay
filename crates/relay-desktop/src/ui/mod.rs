@@ -232,6 +232,22 @@ const PALETTE_ACTIONS: [(&str, &str); 11] = [
     ("Publish board", "Board"),
 ];
 
+/// The icon of a palette category.
+fn category_icon(category: &str) -> SvgToken {
+    use relay_ui::icons::command;
+    match category {
+        "Navigate" => command.navigate,
+        "Profile" => command.profile,
+        "Create" => command.create,
+        "Search" => command.search,
+        "Sync" => command.sync,
+        "Worker" => command.worker,
+        "Settings" => command.settings,
+        "Project" => command.project,
+        _ => command.board,
+    }
+}
+
 /// The command palette: relay-ui's palette over a scrim that dismisses it.
 /// Closing returns focus to where it was.
 #[component]
@@ -243,7 +259,9 @@ fn Palette(model: Model) -> Element {
         .iter()
         .enumerate()
         .map(|(index, (label, category))| {
-            relay_ui::surfaces::Command::new(index.to_string(), *label).detail(*category)
+            relay_ui::surfaces::Command::new(index.to_string(), *label)
+                .detail(*category)
+                .icon(category_icon(category))
         })
         .collect();
     let run: relay_ui::surfaces::OnCommand = std::rc::Rc::new(move |id: String| {
