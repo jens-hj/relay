@@ -623,3 +623,50 @@ fn opened_tool_body_does_not_cycle_the_header() {
     mounted.click(header.origin + Vector2::new(90.0, 65.0));
     assert_eq!(state.get_untracked().opening, Opening::Summary);
 }
+#[test]
+fn tool_rows_hover_in_their_own_tool_colour() {
+    let specimens = gallery::d2::specimens();
+    let read = specimens
+        .iter()
+        .find(|s| s.kind == ToolKind::Read)
+        .unwrap()
+        .clone();
+    let edit = specimens
+        .iter()
+        .find(|s| s.kind == ToolKind::Edit)
+        .unwrap()
+        .clone();
+    let hover_fill = |view: crate::prelude::ToolCallView| {
+        let mounted = crate::testing::mount(Size::new(720.0, 120.0), move || {
+            view! {
+                col {
+                    ToolCallRow data:(view) on-opening:(Rc::new(|_| {}) as OnOpening)
+                }
+            }
+        });
+        let node = |m: &crate::testing::Mounted| {
+            m.ui.inspection_snapshot()
+                .nodes
+                .into_iter()
+                .find(|n| n.label.as_deref() == Some(Opening::Collapsed.label()))
+                .unwrap()
+        };
+        let fill = |m: &crate::testing::Mounted| {
+            let id = node(m).id;
+            m.ui.inspection_details(id)
+                .unwrap()
+                .attributes
+                .into_iter()
+                .find(|a| a.name == "fill")
+                .map(|a| a.value)
+        };
+        let rest = fill(&mounted);
+        mounted.hover(node(&mounted).rect.center());
+        mounted.settle();
+        (rest, fill(&mounted))
+    };
+    let (read_rest, read_hover) = hover_fill(read);
+    let (_, edit_hover) = hover_fill(edit);
+    assert_ne!(read_rest, read_hover, "hover changes the fill");
+    assert_ne!(read_hover, edit_hover, "each tool hovers in its own colour");
+}
