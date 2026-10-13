@@ -158,7 +158,7 @@ fn breathing_runs_only_while_working() {
 
 #[test]
 fn ledger_steps_grow_and_max_appears_only_when_offered() {
-    let plain = ledger_marks(5, 4, false, 158.0);
+    let plain = ledger_marks(5, 4, 0, 158.0);
     assert_eq!(plain.len(), 5);
     assert!(plain.iter().all(|mark| mark.shape == MarkShape::Square));
     assert!(plain.windows(2).all(|pair| pair[1].size > pair[0].size));
@@ -167,19 +167,47 @@ fn ledger_steps_grow_and_max_appears_only_when_offered() {
     assert_eq!(plain[4].at, 146.0);
     assert!(plain[4].current && plain.iter().all(|mark| mark.filled));
 
-    let high = ledger_marks(5, 3, true, 158.0);
+    let high = ledger_marks(5, 3, 1, 158.0);
     assert_eq!(high.len(), 6);
     assert_eq!(high[5].shape, MarkShape::Diamond);
     assert!(!high[5].filled && !high[5].current);
     assert!(high[3].current && high[3].filled && !high[4].filled);
     assert!(high[..5].windows(2).all(|pair| pair[1].size > pair[0].size));
 
-    let max = ledger_marks(5, 5, true, 158.0);
+    let max = ledger_marks(5, 5, 1, 158.0);
     assert!(max[5].filled && max[5].current);
     assert_eq!(max.iter().filter(|mark| mark.current).count(), 1);
 
-    assert_eq!(effort_label(5, 4, false), "Effort 5 of 5");
-    assert_eq!(effort_label(5, 5, true), "Effort max");
+    assert_eq!(effort_label(5, 4, 0), "Effort 5 of 5");
+    assert_eq!(effort_label(5, 5, 1), "Effort max");
+}
+
+#[test]
+fn each_top_step_is_a_diamond_after_the_ordinary_steps() {
+    // A model offering low … xhigh, then max and ultra, at its default low.
+    let low = ledger_marks(4, 0, 2, 158.0);
+    assert_eq!(low.len(), 6);
+    assert!(low[..4].iter().all(|mark| mark.shape == MarkShape::Square));
+    assert!(low[4..].iter().all(|mark| mark.shape == MarkShape::Diamond));
+    assert!(low[0].current && low[0].filled);
+    assert!(low[1..].iter().all(|mark| !mark.filled));
+
+    let ultra = ledger_marks(4, 5, 2, 158.0);
+    assert!(ultra.iter().all(|mark| mark.filled));
+    assert!(ultra[5].current && !ultra[4].current);
+    assert_eq!(effort_label(4, 4, 2), "Effort max");
+    assert_eq!(effort_label(4, 5, 2), "Effort ultra");
+
+    let effort = Effort::new(4, 0).starting_at(1).with_tiers(2, 5);
+    assert_eq!(effort.caption(), "effort · ultra · 06/06");
+    assert!(effort.at_max());
+    assert_eq!(
+        effort.step_names(),
+        ["low", "medium", "high", "xhigh", "max", "ultra"]
+    );
+    let default = Effort::new(4, 0).starting_at(1).with_tiers(2, 0);
+    assert_eq!(default.caption(), "effort · low · 01/06");
+    assert!(default.has_max() && !default.at_max());
 }
 
 #[test]
@@ -192,7 +220,7 @@ fn effort_buttons_offer_max_only_when_the_model_does() {
             col {
                 EffortTrack levels:5u8 current:2u8 colour:(ModelFamily::Sol.token())
                     on-select:(Some(five))
-                EffortTrack levels:5u8 current:2u8 has-max:true colour:(ModelFamily::Opus.token())
+                EffortTrack levels:5u8 current:2u8 tiers:1u8 colour:(ModelFamily::Opus.token())
                     on-select:(Some(select))
             }
         }

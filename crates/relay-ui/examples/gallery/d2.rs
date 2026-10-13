@@ -18,8 +18,7 @@ pub fn effort() -> Effort {
     Effort {
         levels: 5,
         current: 4,
-        has_max: false,
-        at_max: false,
+        tiers: 0,
         first: 0,
     }
 }
@@ -118,7 +117,6 @@ pub fn conversation() -> Element {
         set_effort: Rc::new(move |level| {
             ledger.update(|s| {
                 s.effort.current = level;
-                s.effort.at_max = s.effort.has_max && level == s.effort.levels;
             })
         }),
         toggle: Rc::new(move || ledger.update(|s| s.collapsed = !s.collapsed)),
@@ -266,8 +264,7 @@ pub fn composer_states() -> Element {
                 vendor: "CLAUDE".into(),
                 hue: ModelHue::Opus,
             };
-            initial.effort.has_max = true;
-            initial.effort.at_max = max;
+            initial.effort = initial.effort.with_max(max);
         }
         let state = State::new(initial);
         let actions = LedgerActions {
@@ -276,7 +273,6 @@ pub fn composer_states() -> Element {
             set_effort: Rc::new(move |level| {
                 state.update(|s| {
                     s.effort.current = level;
-                    s.effort.at_max = s.effort.has_max && level == s.effort.levels;
                 })
             }),
             toggle: Rc::new(move || state.update(|s| s.collapsed = !s.collapsed)),

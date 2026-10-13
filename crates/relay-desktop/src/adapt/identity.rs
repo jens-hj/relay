@@ -1,7 +1,7 @@
 //! Harness, model and effort identity.
 
 use relay_core::{HarnessCatalog, HarnessModel, HarnessSelection, Session};
-use relay_ui::effort::EFFORT_NAMES;
+use relay_ui::effort::{EFFORT_NAMES, TIER_NAMES};
 use relay_ui::prelude::{Effort, Harness, ModelHue, ModelIdentity};
 use std::collections::BTreeMap;
 
@@ -89,63 +89,65 @@ fn number(words: &[&str]) -> String {
         .join(".")
 }
 
-/// The ordinary efforts a model offers and whether it offers max.
-fn offered(model: &HarnessModel) -> (Vec<&str>, bool) {
-    let ordinary = model
-        .efforts
-        .iter()
-        .map(String::as_str)
-        .filter(|effort| *effort != "max")
-        .collect();
-    (ordinary, model.efforts.iter().any(|effort| effort == "max"))
+/// How a model's offered efforts map onto the track, in catalog order:
+/// ordinary steps (a consecutive run of [`EFFORT_NAMES`] starting at
+/// `first`), then top steps (a prefix of [`TIER_NAMES`]: max, ultra) drawn
+/// as diamonds. `None` when the names do not fit that scale, so the track
+/// would misname a step.
+struct Scale {
+    first: u8,
+    levels: u8,
+    tiers: u8,
 }
 
-/// The effort track of `selection` on a catalog model: one step per offered
-/// effort except max, and the max diamond only when max is offered. Hidden
-/// when the model offers no efforts, no effort is selected or defaulted, or
-/// the offered names are not consecutive steps the track can name.
-pub fn effort(selection: &HarnessSelection, model: &HarnessModel) -> Option<Effort> {
-    let (ordinary, has_max) = offered(model);
-    if ordinary.is_empty() && !has_max {
-        return None;
-    }
+fn scale(model: &HarnessModel) -> Option<Scale> {
+    let names: Vec<&str> = model.efforts.iter().map(String::as_str).collect();
+    let levels = names
+        .iter()
+        .take_while(|name| EFFORT_NAMES.contains(name))
+        .count();
+    let (ordinary, top) = names.split_at(levels);
     let first = match ordinary.first() {
         Some(name) => EFFORT_NAMES.iter().position(|known| known == name)?,
         None => 0,
     };
-    if EFFORT_NAMES.get(first..first + ordinary.len()) != Some(&ordinary[..]) {
+    if EFFORT_NAMES.get(first..first + levels) != Some(ordinary)
+        || TIER_NAMES.get(..top.len()) != Some(top)
+        || names.is_empty()
+    {
         return None;
     }
+    Some(Scale {
+        first: first as u8,
+        levels: levels as u8,
+        tiers: top.len() as u8,
+    })
+}
+
+/// The effort track of `selection` on a catalog model: one growing step per
+/// ordinary effort, then a diamond per top effort (max, ultra) the model
+/// offers. Shows the selected effort, or the model's default. Hidden when
+/// the model offers no efforts, none is selected or defaulted, or the
+/// offered names do not fit the track's scale.
+pub fn effort(selection: &HarnessSelection, model: &HarnessModel) -> Option<Effort> {
+    let scale = scale(model)?;
     let current = selection
         .effort
         .as_deref()
         .or(model.default_effort.as_deref())?;
-    let levels = ordinary.len() as u8;
-    let effort = if current == "max" && has_max {
-        Effort::new(levels, levels.saturating_sub(1)).with_max(true)
-    } else {
-        let step = ordinary.iter().position(|name| *name == current)? as u8;
-        let effort = Effort::new(levels, step);
-        if has_max {
-            effort.with_max(false)
-        } else {
-            effort
-        }
-    };
-    Some(effort.starting_at(first as u8))
+    let step = model.efforts.iter().position(|name| name == current)? as u8;
+    Some(
+        Effort::new(scale.levels, 0)
+            .starting_at(scale.first)
+            .with_tiers(scale.tiers, step),
+    )
 }
 
-/// The effort name a track step selects on `model`.
+/// The effort name a track step selects on `model`: steps follow the
+/// catalog's order.
 pub fn effort_choice(model: &HarnessModel, step: u8) -> Option<String> {
-    let (ordinary, has_max) = offered(model);
-    let step = usize::from(step);
-    if step < ordinary.len() {
-        Some(ordinary[step].to_string())
-    } else if step == ordinary.len() && has_max {
-        Some("max".into())
-    } else {
-        None
-    }
+    scale(model)?;
+    model.efforts.get(usize::from(step)).cloned()
 }
 
 /// The model a session reports, or else the one it selected, with its

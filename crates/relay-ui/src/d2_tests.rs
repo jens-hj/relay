@@ -13,7 +13,6 @@ fn actions(state: State<LedgerView>) -> LedgerActions {
         set_effort: Rc::new(move |level| {
             state.update(|s| {
                 s.effort.current = level;
-                s.effort.at_max = s.effort.has_max && level == s.effort.levels;
             })
         }),
         toggle: Rc::new(move || state.update(|s| s.collapsed = !s.collapsed)),
@@ -238,8 +237,8 @@ fn lane_normalization_and_effort_capability_are_truthful() {
     let ordinary = gallery::d2::effort();
     assert_eq!(ordinary.caption(), "effort · xhigh · 05/05");
     let max = Effort {
-        has_max: true,
-        at_max: true,
+        tiers: 1,
+        current: ordinary.levels,
         ..ordinary
     };
     assert_eq!(max.caption(), "effort · max · 06/06");

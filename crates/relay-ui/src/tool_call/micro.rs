@@ -175,7 +175,7 @@ pub(super) fn micrographic(vm: &ToolCallView) -> Element {
                 row.adopt(&label(m.short_name()));
                 if let Some(e) = effort {
                     row.adopt(&view! {
-                        EffortTrack levels:(e.levels) current:(e.selected()) has-max:(e.has_max)
+                        EffortTrack levels:(e.levels) current:(e.selected()) tiers:(e.tiers)
                             colour:(m.hue.token()) size:(TrackSize::Compact)
                     });
                 }

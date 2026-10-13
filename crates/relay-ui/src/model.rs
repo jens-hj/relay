@@ -82,27 +82,28 @@ impl ModelIdentity {
     }
 }
 
-/// A model's effort setting: `levels` ordinary steps, the zero-based
-/// `current` step, and whether a max step exists and is selected.
+/// A model's effort setting: `levels` ordinary steps, then `tiers` top
+/// steps (max, ultra, …) drawn as diamonds, and the zero-based `current`
+/// step across both.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Effort {
     pub levels: u8,
     pub current: u8,
-    pub has_max: bool,
-    pub at_max: bool,
+    /// Top steps beyond the ordinary levels, named by
+    /// [`crate::effort::TIER_NAMES`]; zero when the model offers none.
+    pub tiers: u8,
     /// Index in [`crate::effort::EFFORT_NAMES`] of the first ordinary
     /// step, for models whose steps start above "minimal".
     pub first: u8,
 }
 
 impl Effort {
-    /// Step `current` (zero-based) of `levels`, without a max step.
+    /// Step `current` (zero-based) of `levels`, without top steps.
     pub fn new(levels: u8, current: u8) -> Self {
         Effort {
             levels,
             current: current.min(levels.saturating_sub(1)),
-            has_max: false,
-            at_max: false,
+            tiers: 0,
             first: 0,
         }
     }
@@ -114,40 +115,59 @@ impl Effort {
         self
     }
 
-    /// Every step's name, ordinary steps first, then max.
-    pub fn step_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = (0..self.levels)
-            .map(|step| {
-                crate::effort::EFFORT_NAMES
-                    .get(usize::from(self.first) + usize::from(step))
-                    .copied()
-                    .unwrap_or("level")
-                    .to_string()
-            })
-            .collect();
-        if self.has_max {
-            names.push("max".to_string());
-        }
-        names
-    }
-
-    /// Offers a max step, selected when `at_max`.
-    pub fn with_max(mut self, at_max: bool) -> Self {
-        self.has_max = true;
-        self.at_max = at_max;
+    /// Offers `tiers` top steps after the ordinary levels; `current` may
+    /// then select one of them.
+    pub fn with_tiers(mut self, tiers: u8, current: u8) -> Self {
+        self.tiers = tiers;
+        self.current = current.min((self.levels + tiers).saturating_sub(1));
         self
     }
 
-    /// The step a track draws as current: `levels` at max.
-    pub fn track_step(&self) -> u8 {
-        if self.has_max && self.at_max {
-            self.levels
+    /// Offers a single max step, selected when `at_max`.
+    pub fn with_max(self, at_max: bool) -> Self {
+        let current = if at_max { self.levels } else { self.current };
+        self.with_tiers(self.tiers.max(1), current)
+    }
+
+    /// Whether the model offers any top step.
+    pub fn has_max(&self) -> bool {
+        self.tiers > 0
+    }
+
+    /// Whether a top step is selected.
+    pub fn at_max(&self) -> bool {
+        self.tiers > 0 && self.current >= self.levels
+    }
+
+    /// Every step's name: ordinary steps first, then the top steps.
+    pub fn step_names(&self) -> Vec<String> {
+        (0..self.levels + self.tiers)
+            .map(|step| self.step_name(step).to_string())
+            .collect()
+    }
+
+    /// The name of one step.
+    pub fn step_name(&self, step: u8) -> &'static str {
+        if step < self.levels {
+            crate::effort::EFFORT_NAMES
+                .get(usize::from(self.first) + usize::from(step))
+                .copied()
+                .unwrap_or("level")
         } else {
-            self.current
+            crate::effort::TIER_NAMES
+                .get(usize::from(step - self.levels))
+                .copied()
+                .unwrap_or("top")
         }
     }
 
-    /// The 1-based level that sets a live wash's reach: max counts as one
+    /// The step a track draws as current.
+    pub fn track_step(&self) -> u8 {
+        self.current
+            .min((self.levels + self.tiers).saturating_sub(1))
+    }
+
+    /// The 1-based level that sets a live wash's reach: top steps count
     /// past the last ordinary level.
     pub fn level(&self) -> u8 {
         self.track_step() + 1

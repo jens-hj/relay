@@ -1,5 +1,6 @@
 //! The effort step track: squares that grow per level on a hairline, the
-//! current step framed, and a max diamond only for models that offer it.
+//! current step framed, and a diamond per top step (max, ultra, …) only for
+//! models that offer them.
 
 use crate::Live;
 use crate::tokens::{ground, px};
@@ -28,8 +29,12 @@ pub enum TrackSize {
     Compact,
 }
 
-/// Default step names, lowest first. A max step is named "max".
+/// Default ordinary step names, lowest first.
 pub const EFFORT_NAMES: [&str; 5] = ["minimal", "low", "medium", "high", "xhigh"];
+
+/// Names of the top steps after the ordinary ones, lowest first. Each is
+/// drawn as a diamond.
+pub const TIER_NAMES: [&str; 2] = ["max", "ultra"];
 
 /// The shape of one step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,16 +62,15 @@ const END_INSET: f32 = 12.0;
 /// The smallest step's side, and how much each level adds.
 const FIRST_SIDE: f32 = 3.0;
 const SIDE_STEP: f32 = 2.0;
-/// Half-diagonal of the max diamond.
+/// Half-diagonal of a top-step diamond.
 const DIAMOND_HALF: f32 = 6.8;
 /// How far the frame sits outside the current step.
 const FRAME_GAP: f32 = 2.5;
 
-/// Lays out a ledger track `length` units long. `current` is the zero-based
-/// step; it equals `levels` when max is selected (only valid with
-/// `has_max`).
-pub fn ledger_marks(levels: u8, current: u8, has_max: bool, length: f32) -> Vec<TrackMark> {
-    let count = levels as usize + usize::from(has_max);
+/// Lays out a ledger track `length` units long: `levels` growing squares,
+/// then `tiers` diamonds. `current` is the zero-based step across both.
+pub fn ledger_marks(levels: u8, current: u8, tiers: u8, length: f32) -> Vec<TrackMark> {
+    let count = levels as usize + tiers as usize;
     let span = (length - 2.0 * END_INSET).max(0.0);
     let pitch = if count > 1 {
         span / (count - 1) as f32
@@ -75,7 +79,7 @@ pub fn ledger_marks(levels: u8, current: u8, has_max: bool, length: f32) -> Vec<
     };
     (0..count)
         .map(|index| {
-            let diamond = has_max && index == levels as usize;
+            let diamond = index >= levels as usize;
             TrackMark {
                 at: END_INSET + pitch * index as f32,
                 size: if diamond {
@@ -96,9 +100,13 @@ pub fn ledger_marks(levels: u8, current: u8, has_max: bool, length: f32) -> Vec<
 }
 
 /// The accessible name of a track position.
-pub fn effort_label(levels: u8, current: u8, has_max: bool) -> String {
-    if has_max && current >= levels {
-        "Effort max".to_string()
+pub fn effort_label(levels: u8, current: u8, tiers: u8) -> String {
+    if tiers > 0 && current >= levels {
+        let name = TIER_NAMES
+            .get(usize::from(current - levels))
+            .copied()
+            .unwrap_or("top");
+        format!("Effort {name}")
     } else {
         format!("Effort {} of {}", current as u32 + 1, levels)
     }
@@ -108,18 +116,19 @@ pub fn effort_label(levels: u8, current: u8, has_max: bool) -> String {
 pub type OnEffort = Rc<dyn Fn(u8)>;
 
 /// An effort step track in a model's colour. Ledger tracks grow per level
-/// and frame the current step; a max diamond appears only when `has-max`
-/// is true, and fills and takes the frame when selected. Compact tracks
-/// show 3px squares for tree rows. With `on-select`, each step is a button.
+/// and frame the current step; one diamond per top step (max, ultra, …)
+/// follows only when `tiers` is above zero, and fills and takes the frame
+/// when selected. Compact tracks show 3px squares for tree rows. With
+/// `on-select`, each step is a button.
 #[component]
 pub fn EffortTrack(
     /// Number of ordinary levels (five for most models).
     levels: Live<u8>,
-    /// The zero-based current step; equal to `levels` at max.
+    /// The zero-based current step across ordinary and top steps.
     current: Live<u8>,
-    /// Whether the model offers a max step.
-    #[prop(default = Live::fixed(false))]
-    has_max: Live<bool>,
+    /// How many top steps the model offers after its ordinary levels.
+    #[prop(default = Live::fixed(0))]
+    tiers: Live<u8>,
     /// The model's colour token.
     colour: ColorToken,
     /// Horizontal (default) or vertical.
@@ -138,9 +147,9 @@ pub fn EffortTrack(
 ) -> Element {
     let vertical = orientation == Orientation::Vertical;
     let compact = size == TrackSize::Compact;
-    let (lv, cur, max) = (levels.clone(), current.clone(), has_max.clone());
+    let (lv, cur, max) = (levels.clone(), current.clone(), tiers.clone());
     let length = Derived::new(move || {
-        let count = lv.get() as f32 + if max.get() { 1.0 } else { 0.0 };
+        let count = lv.get() as f32 + max.get() as f32;
         if compact {
             px((count - 1.0).max(0.0) * 5.0 + 3.0)
         } else {
@@ -148,7 +157,7 @@ pub fn EffortTrack(
         }
     });
     let thickness = move || if compact { px(3.0) } else { px(20.0) };
-    let (lv, max) = (levels.clone(), has_max.clone());
+    let (lv, max) = (levels.clone(), tiers.clone());
     let track = view! {
         stack shrink:0 role:image width:{if vertical { thickness() } else { length.get() }}px
             height:{if vertical { length.get() } else { thickness() }}px
@@ -156,19 +165,19 @@ pub fn EffortTrack(
     };
     {
         let target = track.clone();
-        let (a, b, c) = (levels.clone(), current.clone(), has_max.clone());
+        let (a, b, c) = (levels.clone(), current.clone(), tiers.clone());
         Effect::new(move || {
             let _ = (a.get(), b.get(), c.get());
             target.paint_dirty();
         });
     }
     {
-        let (levels, current, has_max) = (levels.clone(), current.clone(), has_max.clone());
+        let (levels, current, tiers) = (levels.clone(), current.clone(), tiers.clone());
         track.paint(move |ctx| {
             let (n, c, m) = (
                 levels.get_untracked(),
                 current.get_untracked(),
-                has_max.get_untracked(),
+                tiers.get_untracked(),
             );
             if compact {
                 paint_compact(ctx.scene, ctx.rect, n, c, m, colour, vertical);
@@ -184,11 +193,16 @@ pub fn EffortTrack(
         if vertical {
             buttons.style(Style::column().size(Dimension::Fill, Dimension::Fill));
         }
-        let count = levels.get_untracked() as usize + usize::from(has_max.get_untracked());
+        let count = levels.get_untracked() as usize + usize::from(tiers.get_untracked());
         for index in 0..count {
             let name = names.get(index).cloned().unwrap_or_else(|| {
-                if index == levels.get_untracked() as usize {
-                    "max".to_string()
+                let levels = levels.get_untracked() as usize;
+                if index >= levels {
+                    TIER_NAMES
+                        .get(index - levels)
+                        .copied()
+                        .unwrap_or("top")
+                        .to_string()
                 } else {
                     EFFORT_NAMES
                         .get(index)
@@ -220,7 +234,7 @@ pub fn paint_ledger(
     rect: Rect,
     levels: u8,
     current: u8,
-    has_max: bool,
+    tiers: u8,
     colour: ColorToken,
     vertical: bool,
 ) {
@@ -237,7 +251,7 @@ pub fn paint_ledger(
     let empty_fill = color(ground.panel);
     let empty_edge = color(ground.rule_strong);
     let base = color(ground.outline);
-    let marks = ledger_marks(levels, current, has_max, length / unit);
+    let marks = ledger_marks(levels, current, tiers, length / unit);
     let point = |along: f32, across: f32| {
         if vertical {
             Vector2::new(rect.origin.x + across * unit, rect.origin.y + along * unit)
@@ -329,13 +343,13 @@ fn paint_diamond(
 }
 
 /// Paints a compact track: 3-unit squares at a 5-unit pitch, unfilled
-/// steps in the track grey, the max step as a small diamond.
+/// steps in the track grey, each top step as a small diamond.
 pub fn paint_compact(
     scene: &mut Scene,
     rect: Rect,
     levels: u8,
     current: u8,
-    has_max: bool,
+    tiers: u8,
     colour: ColorToken,
     vertical: bool,
 ) {
@@ -346,7 +360,7 @@ pub fn paint_compact(
     };
     let tint = color(colour);
     let empty = color(ground.track);
-    let count = levels as usize + usize::from(has_max);
+    let count = levels as usize + tiers as usize;
     for index in 0..count {
         let offset = index as f32 * 5.0 * unit;
         let (x, y) = if vertical {
@@ -360,7 +374,7 @@ pub fn paint_compact(
             empty
         };
         let cell = Rect::from_xywh(x, y, 3.0 * unit, 3.0 * unit);
-        if has_max && index == levels as usize {
+        if index >= levels as usize {
             let half = 2.0 * unit;
             let centre = cell.center();
             paint_diamond(scene, centre, half, Some(fill), fill, 0.0);
