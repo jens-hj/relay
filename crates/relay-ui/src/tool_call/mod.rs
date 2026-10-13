@@ -57,8 +57,8 @@ fn call(vm: ToolCallView, on_opening: OnOpening, actions: ToolActions) -> (Eleme
         AgentStatus::Waiting => status.needs_you,
         _ => colour,
     };
-    let control = opening_button(vm.opening, on_opening);
-    let embedded = control.clone();
+    let embedded = opening_indicator(vm.opening);
+    let opening = vm.opening;
     let target = match &vm.detail {
         Some(ToolDetail::Message { target, .. }) => {
             vm.target.clone().or_else(|| target.clone()).map(|target| {
@@ -73,15 +73,16 @@ fn call(vm: ToolCallView, on_opening: OnOpening, actions: ToolActions) -> (Eleme
         _ => vm.target.clone(),
     }
     .unwrap_or_default();
-    let content = view! {
-        col height:min-content min-width:0px {
-            stack height:{px(36.0)}px shrink:0 clip {
-                if active {
-                    Wash
-                        signal:(if vm.status == AgentStatus::Waiting { Signal::NeedsYou } else { Signal::Live })
-                        opacity:0.24
-                }
-                row align:center gap:{px(8.0)}px pad:(left:{px(11.0)}px right:{px(8.0)}px) {
+    let header = view! {
+        stack height:{px(36.0)}px shrink:0 clip {
+            if active {
+                Wash
+                    signal:(if vm.status == AgentStatus::Waiting { Signal::NeedsYou } else { Signal::Live })
+                    opacity:0.24
+            }
+            row align:center {
+                row width:1fr min-width:0px align:center gap:{px(8.0)}px
+                    pad:(left:{px(11.0)}px right:{px(8.0)}px) {
                     StatusSquare status:(vm.status)
                     ToolIcon kind:(vm.kind)
                     Label text:(vm.verb.clone()) role:(TextRole::Label) weight:600
@@ -90,11 +91,23 @@ fn call(vm: ToolCallView, on_opening: OnOpening, actions: ToolActions) -> (Eleme
                         Ellipsis text:(target) role:(TextRole::Label)
                     }
                     micro::micrographic(&vm)
-                    { parent.adopt(&embedded); }
                 }
+                micro::status_cell(&vm)
+                { parent.adopt(&embedded); }
             }
         }
     };
+    let control = view! {
+        button @click:{on_opening(opening.next())} width:fill height:{px(36.0)}px shrink:0
+            radius:0px pad:0px fill:(Color::TRANSPARENT) label:(opening.label())
+            focused { stroke:+(width:1px color:ground.ink offset:-1px) } {
+            { parent.adopt(&header); }
+        }
+    };
+    let content = view! {
+        col height:min-content min-width:0px {}
+    };
+    content.adopt(&control);
     if vm.opening != Opening::Collapsed {
         content.adopt(&body::body(&vm, actions));
     }
@@ -122,19 +135,14 @@ fn call(vm: ToolCallView, on_opening: OnOpening, actions: ToolActions) -> (Eleme
     };
     (frame, control)
 }
-fn opening_button(opening: Opening, on_opening: OnOpening) -> Element {
+fn opening_indicator(opening: Opening) -> Element {
     view! {
-        button @click:{on_opening(opening.next())} width:{px(26.0)}px height:{px(26.0)}px shrink:0
-            radius:0px pad:0px fill:(Color::TRANSPARENT) align:center justify:center
-            label:(opening.label()) stroke:(width:{px(1.0)} color:ground.hairline edges:left)
-            focused { stroke:+(width:1px color:ground.ink offset:-1px) } {
-            row width:max-content height:min-content gap:{px(2.0)}px {
-                { for i in 0..3 { parent.adopt(&view! {
-                    el width:{px(5.0)}px height:{px(5.0)}px
-                        fill:{if i < opening.marks() { mosaic::core::theme::color(ground.ink) } else { Color::TRANSPARENT }}
-                        stroke:(width:{px(1.0)} color:ground.outline) {}
-                }); } }
-            }
+        row width:{px(36.0)}px shrink:0 {
+            { for i in 0..3 { parent.adopt(&view! {
+                el width:1fr height:fill
+                    fill:{if i < opening.marks() { mosaic::core::theme::color(ground.outline) } else { Color::TRANSPARENT }}
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:left) {}
+            }); } }
         }
     }
 }

@@ -7533,3 +7533,47 @@ fn window_controls_are_one_ruled_group_apart_from_page_controls() {
         }
     }
 }
+
+#[test]
+fn project_sidebar_children_have_one_outer_tree_indent() {
+    let mounted = mount(false, 1380.0);
+    mounted.click("Toggle project Relay · demo");
+    let project = mounted.rect("Select project Relay · demo");
+    let director = mounted.rect("Director row Project director");
+    assert!((director.origin.x - project.origin.x - 14.0).abs() < 0.1);
+    assert!(director.origin.y >= project.origin.y + project.size.height);
+    let new_project = mounted.rect("New Project");
+    assert!(
+        (mounted.rect("New agent").origin.y - new_project.origin.y - new_project.size.height).abs()
+            < 1.0
+    );
+    let root = tree_row(&mounted, "Profile design");
+    // The tree keeps its normal 12px row padding plus the project's elbow.
+    assert!(root.origin.x >= project.origin.x);
+    let snapshot = mounted.ui.inspection_snapshot();
+    let title = snapshot
+        .nodes
+        .iter()
+        .find(|n| {
+            n.label.as_deref() == Some("Profile design")
+                && n.role == Role::Label
+                && root.contains(n.rect.center())
+        })
+        .unwrap();
+    let indented_x = title.rect.origin.x;
+    assert!(indented_x >= project.origin.x + 14.0);
+    mounted.model.agent_focus.set(Some("session-plan".into()));
+    mounted.settle();
+    let root = tree_row(&mounted, "Profile design");
+    let snapshot = mounted.ui.inspection_snapshot();
+    let focused_title = snapshot
+        .nodes
+        .iter()
+        .find(|n| {
+            n.label.as_deref() == Some("Profile design")
+                && n.role == Role::Label
+                && root.contains(n.rect.center())
+        })
+        .unwrap();
+    assert!((indented_x - focused_title.rect.origin.x - 14.0).abs() < 0.1);
+}

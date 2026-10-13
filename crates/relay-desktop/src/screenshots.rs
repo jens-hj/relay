@@ -181,7 +181,7 @@ fn shell_screenshots() {
             ui.frame(logical, 1.0);
         }
     };
-    let shots: [(&str, &dyn Fn()); 8] = [
+    let shots: [(&str, &dyn Fn()); 10] = [
         ("conversation", &|| {
             model.open_session("session-plan".into())
         }),
@@ -203,6 +203,75 @@ fn shell_screenshots() {
         ("palette", &|| {
             model.open_session("session-plan".into());
             model.palette.set(true);
+        }),
+        ("transcript-wrap", &|| {
+            model.snapshot.update(|snapshot| {
+                snapshot.messages.retain(|m| m.session_id != "session-plan");
+                for (id, kind, body) in [
+                    (
+                        "wrap-journal",
+                        "prompt",
+                        format!(
+                            "journalctl --user\n{}",
+                            format!(
+                                "Oct 10 systemd: /nix/store/{} /home/user/workspace/deploy.py\n",
+                                "long-unbroken-path".repeat(7)
+                            )
+                            .repeat(3)
+                        ),
+                    ),
+                    (
+                        "wrap-context",
+                        "issue-context",
+                        "Source context follows the journal.".into(),
+                    ),
+                    (
+                        "wrap-fence",
+                        "assistant",
+                        "Completed.\n```bash\njournalctl --user -fu relay\n```".into(),
+                    ),
+                    (
+                        "wrap-reply",
+                        "assistant",
+                        "Completion is reported after checks pass.".into(),
+                    ),
+                ] {
+                    snapshot.messages.push(Message {
+                        id: id.into(),
+                        session_id: "session-plan".into(),
+                        author: "Relay".into(),
+                        kind: kind.into(),
+                        body,
+                        parts: vec![],
+                        tool: None,
+                    });
+                }
+            });
+            model.open_session("session-plan".into());
+        }),
+        ("projects", &|| {
+            model.open_session("session-plan".into());
+            settle();
+            let position = ui
+                .inspection_snapshot()
+                .nodes
+                .iter()
+                .find(|n| n.label.as_deref() == Some("Toggle project Relay · demo"))
+                .unwrap()
+                .rect
+                .center();
+            for kind in [
+                PointerEventKind::Down(PointerButton::Primary),
+                PointerEventKind::Up(PointerButton::Primary),
+            ] {
+                ui.dispatch_pointer(PointerEvent {
+                    kind,
+                    position,
+                    pointer_type: PointerType::Mouse,
+                    modifiers: Modifiers::default(),
+                    timestamp: Duration::ZERO,
+                });
+            }
         }),
     ];
     for (name, open) in shots {
