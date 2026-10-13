@@ -105,7 +105,13 @@ fn form_controls_report_choices() {
         }
     });
     assert!(mounted.has("Repository"));
-    assert_eq!(mounted.rect("Repository").size.height, 40.0);
+    // The input fills the 40px row; the label cell names it visibly.
+    assert!(
+        mounted
+            .rects("Repository")
+            .iter()
+            .any(|r| r.size.height == 40.0)
+    );
     mounted.click_label("Dark");
     assert_eq!(picked.borrow().as_slice(), [0]);
     assert!(mounted.has("Workers"));
@@ -292,6 +298,7 @@ fn surfaces_take_the_slots_and_names_applications_need() {
                 CommandPalette commands:(commands) query:(query) on-run:(on_run)
                     title:(Some("Command palette".to_string())) on-close:(Some(close))
                     close-label:"Close command palette" field-label:"Command search" footer:true
+                Field label:"Root" name:(Some("Absolute project root".to_string())) value:(value)
                 TextInput value:(value) label:"Worker prompt" multiline:true
                 Stepper value:100i64 on-change:(on_step) label:"Interface scale percent"
                     decrease-label:"Decrease interface scale"

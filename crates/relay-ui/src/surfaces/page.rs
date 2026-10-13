@@ -516,7 +516,11 @@ pub fn ReadoutCell(key: String, value: UiText, #[prop(optional)] children: Child
             Label text:(key.clone()) role:(TextRole::Caption) tone:(Tone::Muted) weight:500
                 caps:true
             row height:min-content gap:{px(8.0)}px align:center {
-                Ellipsis text:(value) role:(TextRole::Body) weight:500
+                row width:max-content min-width:0px height:min-content clip {
+                    text text-wrap:none font-family:monospace
+                        font-size:{px(TextRole::Body.size())}px font-weight:500
+                        font-color:ground.ink {value.get()}
+                }
                 children
             }
         }

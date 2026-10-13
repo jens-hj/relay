@@ -41,9 +41,14 @@ pub fn Field(
     #[prop(default = 140.0)]
     label_width: f32,
     #[prop(optional)] editor: Option<Element>,
+    /// Accessible name of the input when it should say more than the
+    /// visible label.
+    #[prop(optional)]
+    name: Option<String>,
 ) -> Element {
+    let name = name.unwrap_or_else(|| label.clone());
     let row = view! {
-        row height:{px(40.0)}px shrink:0 align:center label:(label.clone())
+        row height:{px(40.0)}px shrink:0 align:center
             stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {}
     };
     row.adopt(&label_cell(&label, label_width));
@@ -52,8 +57,8 @@ pub fn Field(
         None => view! {
             input width:1fr height:fill radius:0px pad:(horizontal:{px(14.0)}px vertical:0px)
                 fill:(Color::TRANSPARENT) stroke:(width:0px color:ground.rule) font-family:monospace
-                font-size:{px(12.5)}px font-color:ground.ink label:(label.clone())
-                placeholder:(placeholder) focused { fill:ground.hover } value
+                font-size:{px(12.5)}px font-color:ground.ink label:(name) placeholder:(placeholder)
+                focused { fill:ground.hover } value
         },
     };
     row.adopt(&input);
