@@ -15,6 +15,8 @@ mod panels;
 mod platform;
 mod project_network;
 mod projects;
+#[cfg(not(target_arch = "wasm32"))]
+mod render_probe;
 mod settings;
 mod sidebar;
 mod styles;
@@ -29,6 +31,9 @@ use mosaic::prelude::*;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), String> {
+    if let Ok(workload) = std::env::var("RELAY_RENDER_PROBE") {
+        return render_probe::run(&workload);
+    }
     run(network::Config::from_env()?)
 }
 #[cfg(target_arch = "wasm32")]

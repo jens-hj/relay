@@ -7089,17 +7089,24 @@ fn native_fixture_gpu_cost() {
         ..Default::default()
     }))
     .unwrap();
-    for [width, height] in [[2560u32, 1440u32], [800, 650]] {
-        let mut mounted = mount(false, width as f32);
-        mounted.size = Size::new(width as f32, height as f32);
-        mounted.settle();
+    for [width, height] in [[3771u32, 2141u32], [1123, 848]] {
+        let scale = 1.25;
+        let mut mounted = mount(false, width as f32 / scale);
+        mounted.size = Size::new(width as f32 / scale, height as f32 / scale);
+        flush();
+        for _ in 0..12 {
+            mounted.ui.tick(Duration::from_millis(16));
+            flush();
+            mounted.ui.frame(mounted.size, scale);
+        }
         let scene = mounted.ui.scene().clone();
         let mut renderer = mosaic::render_wgpu::WgpuRenderer::from_device(
             device.clone(),
             queue.clone(),
             wgpu::TextureFormat::Rgba8UnormSrgb,
-            mounted.size,
+            Size::new(width as f32, height as f32),
         );
+        renderer.set_scale_factor(f64::from(scale));
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
@@ -7115,41 +7122,90 @@ fn native_fixture_gpu_cost() {
             view_formats: &[],
         });
         let view = target.create_view(&Default::default());
-        let mut durations = vec![];
-        for frame in 0..128 {
-            let commands = renderer.encode_into(
-                &scene,
-                &view,
-                mosaic::render_wgpu::TargetLoad::Clear(scene.clear),
-            );
-            queue.submit([commands]);
-            renderer.map_timings();
-            device
-                .poll(wgpu::PollType::Wait {
-                    submission_index: None,
-                    timeout: None,
-                })
-                .unwrap();
-            if frame >= 64
-                && let Some(gpu) = renderer.stats().gpu
-            {
-                durations.push(f64::from(gpu.total));
+        // Ablations retain structural commands; isolation bounds may shrink,
+        // so report raster work and do not interpret deltas as additive costs.
+        let mut no_glyphs = scene.clone();
+        no_glyphs
+            .cmds
+            .retain(|cmd| !matches!(cmd, mosaic::render::PaintCmd::Glyphs(_)));
+        let mut no_shapes = scene.clone();
+        no_shapes
+            .cmds
+            .retain(|cmd| !matches!(cmd, mosaic::render::PaintCmd::Shape(_)));
+        for (workload, scene) in [
+            ("clear", mosaic::render::Scene::new(scene.clear)),
+            ("solid", {
+                let mut solid = mosaic::render::Scene::new(scene.clear);
+                solid.shape(
+                    mosaic::render::Shape::new(Rect::from_xywh(40.0, 40.0, 256.0, 256.0))
+                        .fill(Color::WHITE),
+                );
+                solid
+            }),
+            ("fixture", scene.clone()),
+            ("fixture-no-glyphs", no_glyphs),
+            ("fixture-no-shapes", no_shapes),
+        ] {
+            for depth in [1, 3] {
+                let mut pending = std::collections::VecDeque::new();
+                let mut durations = vec![];
+                // Warm up pipelines and fonts before measuring throughput.
+                for _ in 0..64 {
+                    queue.submit([renderer.encode_into(
+                        &scene,
+                        &view,
+                        mosaic::render_wgpu::TargetLoad::Clear(scene.clear),
+                    )]);
+                    renderer.map_timings();
+                    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                }
+                let started = std::time::Instant::now();
+                for _ in 0..192 {
+                    let commands = renderer.encode_into(
+                        &scene,
+                        &view,
+                        mosaic::render_wgpu::TargetLoad::Clear(scene.clear),
+                    );
+                    pending.push_back(queue.submit([commands]));
+                    renderer.map_timings();
+                    if pending.len() >= depth {
+                        device
+                            .poll(wgpu::PollType::Wait {
+                                submission_index: pending.pop_front(),
+                                timeout: None,
+                            })
+                            .unwrap();
+                    }
+                    if depth == 1
+                        && let Some(gpu) = renderer.stats().gpu
+                    {
+                        durations.push(f64::from(gpu.total));
+                    }
+                }
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                let seconds = started.elapsed().as_secs_f64();
+                durations.sort_by(f64::total_cmp);
+                let percentile = |percent: usize| {
+                    durations
+                        .get((durations.len().saturating_sub(1) * percent) / 100)
+                        .copied()
+                };
+                eprintln!(
+                    "Relay GPU probe: workload={workload} physical={width}x{height} logical={:?} scale={scale} depth={depth} fps={:.1} median_gpu={:?}ms p95_gpu={:?}ms stats={:?}",
+                    mounted.size,
+                    192.0 / seconds,
+                    percentile(50),
+                    percentile(95),
+                    renderer.stats()
+                );
+                if workload == "fixture" {
+                    assert_eq!(
+                        renderer.stats().render_passes,
+                        3,
+                        "masked fixture should share one isolation target"
+                    );
+                }
             }
         }
-        assert_eq!(
-            renderer.stats().render_passes,
-            3,
-            "masked fixture should share one isolation target"
-        );
-        assert!(
-            !durations.is_empty(),
-            "GPU timestamp queries are required for this probe"
-        );
-        durations.sort_by(f64::total_cmp);
-        eprintln!(
-            "Relay fixture {width}x{height}: stats={:?} median_gpu={:.3}ms",
-            renderer.stats(),
-            durations[durations.len() / 2]
-        );
     }
 }
