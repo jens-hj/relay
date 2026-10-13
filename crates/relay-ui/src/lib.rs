@@ -89,11 +89,12 @@ pub mod prelude {
     pub use crate::status::{AgentStatus, StatusSquare, StatusSquareProps};
     pub use crate::surfaces::{
         BoardColumn, BoardColumnProps, CommandPalette, CommandPaletteProps, ConnectionStatus,
-        ConnectionStatusProps, Field, FieldProps, HarnessCard, HarnessCardProps, HeaderCell,
-        HeaderCellProps, IssueCard, IssueCardProps, IssueInspector, IssueInspectorProps, Module,
-        ModuleProps, Notice, NoticeProps, PageHeader, PageHeaderProps, PermissionMatrix,
-        PermissionMatrixProps, ReadoutCell, ReadoutCellProps, Segments, SegmentsProps, Select,
-        SelectProps, Stepper, StepperProps, TextInput, TextInputProps, Toggle, ToggleProps,
+        ConnectionStatusProps, Field, FieldProps, HarnessCard, HarnessCardProps, HarnessChoices,
+        HarnessChoicesProps, HarnessOption, HeaderCell, HeaderCellProps, IssueCard, IssueCardProps,
+        IssueInspector, IssueInspectorProps, Module, ModuleProps, Notice, NoticeProps, PageHeader,
+        PageHeaderProps, PermissionMatrix, PermissionMatrixProps, ReadoutCell, ReadoutCellProps,
+        Segments, SegmentsProps, Select, SelectProps, Stepper, StepperProps, TextInput,
+        TextInputProps, Toggle, ToggleProps,
     };
     pub use crate::text::{
         Ellipsis, EllipsisProps, Label, LabelProps, SerifSize, SerifTitle, SerifTitleProps,

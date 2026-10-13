@@ -17,7 +17,7 @@ pub type PopoverContent = Rc<dyn Fn() -> Element>;
 /// and escaping ancestor clips. Place it in a `stack` over its trigger: it
 /// fills the stack without hit-testing, so the trigger stays clickable.
 ///
-/// Escape closes it, and so does a click outside it and outside the
+/// Escape closes it, and so does a press outside it and outside the
 /// trigger area when a [`Ui`] is attached (see [`crate::install`]). The
 /// panel takes focus when it opens.
 #[component]
@@ -34,6 +34,10 @@ pub fn Popover(
     /// Alignment along that side.
     #[prop(default = OverlayAlign::Start)]
     align: OverlayAlign,
+    /// Takes focus back when Escape closes the panel, usually the control
+    /// that opened it.
+    #[prop(optional)]
+    trigger: Option<Element>,
     /// Gap between anchor and panel in logical pixels.
     #[prop(default = 6.0)]
     gap: f32,
@@ -68,20 +72,27 @@ pub fn Popover(
                     .gap(px(gap))
             });
             panel.on_pointer(|event, ctx| {
-                if matches!(event.kind, PointerEventKind::Click(_)) {
+                if matches!(
+                    event.kind,
+                    PointerEventKind::Down(_) | PointerEventKind::Click(_)
+                ) {
                     ctx.stop_propagation();
                 }
             });
+            let trigger = trigger.clone();
             panel.on_key(move |event, ctx| {
                 if matches!(event.kind, KeyEventKind::Down { .. }) && event.key == Key::Escape {
                     open.set(false);
+                    if let Some(trigger) = &trigger {
+                        trigger.focus();
+                    }
                     ctx.stop_propagation();
                 }
             });
             if let Some(ui) = attached() {
                 let trigger = anchor_handle.clone();
                 ui.root().on_pointer_for(&panel, move |event, _| {
-                    if matches!(event.kind, PointerEventKind::Click(PointerButton::Primary))
+                    if matches!(event.kind, PointerEventKind::Down(PointerButton::Primary))
                         && !trigger.layout_rect().contains(event.position)
                         && open.get_untracked()
                     {

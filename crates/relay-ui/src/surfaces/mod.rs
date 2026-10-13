@@ -13,8 +13,9 @@ mod tests;
 
 pub use board::{
     BoardColumn, BoardColumnProps, FlagColumn, HarnessAuth, HarnessCard, HarnessCardProps,
-    IssueCard, IssueCardProps, IssueInspector, IssueInspectorProps, IssueView, OnFlag,
-    OnPermission, Permission, PermissionMatrix, PermissionMatrixProps, PermissionRow,
+    HarnessChoices, HarnessChoicesProps, HarnessOption, IssueCard, IssueCardProps, IssueInspector,
+    IssueInspectorProps, IssueView, OnFlag, OnPermission, Permission, PermissionMatrix,
+    PermissionMatrixProps, PermissionRow,
 };
 pub use connection::{
     Connection, ConnectionInfo, ConnectionStatus, ConnectionStatusProps, latency_bars,

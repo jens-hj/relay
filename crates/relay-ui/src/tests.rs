@@ -455,13 +455,17 @@ fn popover_opens_and_dismisses_on_escape_and_outside_clicks() {
                 }
             }
         });
+        let button = view! {
+            CellButton label:"Open" on-press:(toggle) {
+                Label text:"Open"
+            }
+        };
+        let focus = button.clone();
         view! {
             col {
                 stack width:{100.0}px height:{40.0}px {
-                    CellButton label:"Open" on-press:(toggle) {
-                        Label text:"Open"
-                    }
-                    Popover open:(open) label:"Details" content:(content)
+                    { parent.adopt(&button); }
+                    Popover open:(open) label:"Details" content:(content) trigger:(Some(focus))
                 }
             }
         }
@@ -475,6 +479,15 @@ fn popover_opens_and_dismisses_on_escape_and_outside_clicks() {
     assert!(open.get_untracked(), "clicks inside keep it open");
     mounted.key(Key::Escape);
     assert!(!open.get_untracked());
+    let focused = mounted.ui.focused().map(|e| e.id());
+    let trigger_id = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some("Open") && n.role == mosaic::widgets::Role::Button)
+        .map(|n| n.id);
+    assert_eq!(focused, trigger_id, "Escape returns focus to the trigger");
     mounted.click(trigger);
     assert!(open.get_untracked());
     mounted.click(trigger);

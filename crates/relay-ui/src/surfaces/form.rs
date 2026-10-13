@@ -194,9 +194,8 @@ pub fn TextInput(
         view! {
             input width:fill height:{px(tall)}px shrink:0 radius:0px
                 pad:(horizontal:{px(12.0)}px vertical:0px) fill:ground.code
-                stroke:(width:(edge) color:ground.hairline offset:{px(-1.0)})
-                font-family:monospace font-size:{px(12.5)}px font-color:ground.ink label:(label)
-                placeholder:{hint.get()}
+                stroke:(width:(edge) color:ground.hairline offset:{px(-1.0)}) font-family:monospace
+                font-size:{px(12.5)}px font-color:ground.ink label:(label) placeholder:{hint.get()}
                 focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } value
         }
     }

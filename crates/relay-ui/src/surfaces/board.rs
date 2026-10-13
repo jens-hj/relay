@@ -152,15 +152,21 @@ pub fn IssueCard(issue: IssueView, #[prop(optional)] on_open: Option<OnPress>) -
         issue.label.clone()
     };
     let about = issue.description.clone();
+    // A press that travels (a swipe across the board) does not open the card.
+    let grab: Rc<std::cell::Cell<Option<Vector2>>> = Rc::default();
+    let swiped = Rc::new(std::cell::Cell::new(false));
+    let tapped = swiped.clone();
     let card = view! {
-        button @click:{press()} width:fill height:min-content radius:0px
-            pad:(horizontal:{px(14.0)}px vertical:{px(12.0)}px) label:(name) description:(about)
+        button @click:{if !tapped.replace(false) { press() }} width:fill height:min-content
+            radius:0px pad:(horizontal:{px(14.0)}px vertical:{px(12.0)}px) label:(name)
+            description:(about)
             fill:{if issue.selected {
                 mosaic::core::theme::color(ground.selected)
             } else {
                 Color::TRANSPARENT
             }}
             stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) hover { fill:ground.hover }
+            pressed { fill:ground.pressed }
             focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
             col height:min-content gap:{px(8.0)}px {
                 {
@@ -175,6 +181,21 @@ pub fn IssueCard(issue: IssueView, #[prop(optional)] on_open: Option<OnPress>) -
             }
         }
     };
+    card.on_pointer(move |event, _| match event.kind {
+        PointerEventKind::Down(_) => {
+            grab.set(Some(event.position));
+            swiped.set(false);
+        }
+        PointerEventKind::Move => {
+            if let Some(start) = grab.get() {
+                let travel = event.position - start;
+                if travel.x * travel.x + travel.y * travel.y > 64.0 {
+                    swiped.set(true);
+                }
+            }
+        }
+        _ => {}
+    });
     card
 }
 
@@ -194,6 +215,9 @@ pub fn IssueInspector(
     /// Accessible name of the head.
     #[prop(optional)]
     head_label: Option<String>,
+    /// Before the titles in the head, such as a navigation toggle.
+    #[prop(optional)]
+    head_start: Option<Element>,
     /// Under the title in the head, such as label chips.
     #[prop(optional)]
     head_extra: Option<Element>,
@@ -211,6 +235,9 @@ pub fn IssueInspector(
     };
     if let Some(label) = head_label {
         head.label(label);
+    }
+    if let Some(start) = &head_start {
+        head.adopt(start);
     }
     let named = title.clone();
     let titles = view! {
@@ -311,16 +338,32 @@ pub type OnFlag = Rc<dyn Fn(usize, usize, bool)>;
 /// Called with a row index and its new choice.
 pub type OnPermission = Rc<dyn Fn(usize, Permission)>;
 
+crate::value::live_value!(Vec<PermissionRow>);
+
 /// Capabilities against allow / ask / deny segments, one row each, with
 /// optional on/off columns before the choice (a head row names them).
 #[component]
 pub fn PermissionMatrix(
-    entries: Vec<PermissionRow>,
+    /// The rows; a reactive value updates choices and flags in place, so
+    /// keyboard focus stays on the control that changed them.
+    entries: Live<Vec<PermissionRow>>,
     on_change: OnPermission,
     #[prop(optional)] flag_columns: Vec<FlagColumn>,
     #[prop(optional)] on_flag: Option<OnFlag>,
     #[prop(default = "Permissions".to_string())] label: String,
+    /// The segments in order with their words; allow, ask, deny by default.
+    #[prop(optional)]
+    choices: Vec<(Permission, String)>,
 ) -> Element {
+    let choices: Vec<(Permission, String)> = if choices.is_empty() {
+        Permission::ALL
+            .iter()
+            .map(|each| (*each, each.word().to_string()))
+            .collect()
+    } else {
+        choices
+    };
+    let order: Rc<Vec<Permission>> = Rc::new(choices.iter().map(|(each, _)| *each).collect());
     let host = view! {
         col height:min-content role:list label:(label) {}
     };
@@ -351,18 +394,21 @@ pub fn PermissionMatrix(
         });
         host.adopt(&head);
     }
-    for (index, row) in entries.into_iter().enumerate() {
+    for (index, row) in entries.get_untracked().into_iter().enumerate() {
         let change = on_change.clone();
-        let pick: OnIndex = Rc::new(move |choice| change(index, Permission::ALL[choice]));
-        let selected = Permission::ALL
-            .iter()
-            .position(|each| *each == row.choice)
-            .unwrap_or(0);
+        let order = order.clone();
+        let pick: OnIndex = Rc::new(move |choice| change(index, order[choice]));
+        let rows = entries.clone();
+        let words: Vec<Permission> = choices.iter().map(|(each, _)| *each).collect();
+        let selected = Live::from(Derived::new(move || {
+            let choice = rows.get().get(index).map(|row| row.choice);
+            words
+                .iter()
+                .position(|each| Some(*each) == choice)
+                .unwrap_or(0)
+        }));
         let tone = (row.pending && row.choice == Permission::Ask).then(|| Signal::NeedsYou.token());
-        let options: Vec<String> = Permission::ALL
-            .iter()
-            .map(|each| each.word().to_string())
-            .collect();
+        let options: Vec<String> = choices.iter().map(|(_, word)| word.clone()).collect();
         let group = if row.name.is_empty() {
             row.action.clone()
         } else {
@@ -378,27 +424,41 @@ pub fn PermissionMatrix(
             }
         };
         for (column, header) in flag_columns.iter().enumerate() {
-            let on = row.flags.get(column).copied().unwrap_or(false);
+            let rows = entries.clone();
+            let on = Derived::new(move || {
+                rows.get()
+                    .get(index)
+                    .and_then(|row| row.flags.get(column).copied())
+                    .unwrap_or(false)
+            });
             let flip = on_flag.clone();
             let press: OnPress = Rc::new(move || {
                 if let Some(flip) = &flip {
-                    flip(index, column, !on);
+                    flip(index, column, !on.get_untracked());
                 }
             });
-            let cell = view! {
-                row width:{px(60.0)}px height:fill shrink:0 {
-                    CellButton label:(format!("{} {}", row.action, header.name)) on-press:(press)
-                        rule:(Rule::Left) {
-                        el width:{px(12.0)}px height:{px(12.0)}px
-                            fill:{mosaic::core::theme::color(if on { ground.ink } else { ground.panel })}
-                            stroke:(width:{px(1.0)} color:{mosaic::core::theme::color(if on { ground.ink } else { ground.rule })} offset:{px(-0.5)}) {}
-                    }
+            let toggle = view! {
+                CellButton label:(format!("{} {}", row.action, header.name)) on-press:(press)
+                    rule:(Rule::Left) {
+                    el width:{px(12.0)}px height:{px(12.0)}px
+                        fill:{mosaic::core::theme::color(if on.get() { ground.ink } else { ground.panel })}
+                        stroke:(width:{px(1.0)} color:{mosaic::core::theme::color(if on.get() { ground.ink } else { ground.rule })} offset:{px(-0.5)}) {}
                 }
             };
+            toggle.role(mosaic::widgets::Role::Checkbox);
+            let semantic = toggle.clone();
+            let effect = Effect::new(move || {
+                semantic.toggled(on.get());
+            });
+            toggle.__hot_on_remove(move || effect.dispose());
+            let cell = view! {
+                row width:{px(60.0)}px shrink:0 {}
+            };
+            cell.adopt(&toggle);
             line.adopt(&cell);
         }
         line.adopt(&view! {
-            row width:max-content height:fill shrink:0 align:center pad:(horizontal:{px(12.0)}px vertical:0px)
+            row width:max-content shrink:0 align:center pad:(horizontal:{px(12.0)}px vertical:0px)
                 stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
                 Segments options:(options) selected:(selected) on-select:(pick) chosen-tone:(tone)
                     name:(group)
@@ -418,42 +478,30 @@ pub enum HarnessAuth {
     Unknown,
 }
 
-/// A connected harness: glyph, name, version, and whether it is signed in.
-#[component]
-pub fn HarnessCard(
+/// What one harness card shows.
+#[derive(Clone)]
+struct CardFace {
     harness: Harness,
-    /// Hidden when empty.
-    #[prop(optional)]
     version: String,
-    #[prop(default = HarnessAuth::Unknown)] auth: HarnessAuth,
-    #[prop(optional)] on_press: Option<OnPress>,
-    /// A state square and word under the name, such as an availability
-    /// check; hidden without it.
-    #[prop(optional)]
+    auth: HarnessAuth,
     status: Option<(AgentStatus, String)>,
-    /// The current choice among several cards.
-    #[prop(default = false)]
-    selected: bool,
-    /// Accessible name; the harness name by default.
-    #[prop(optional)]
-    label: Option<String>,
-    #[prop(optional)] description: Option<UiText>,
-    /// Action cells at the right (label, handler), outside the card's
-    /// own control.
-    #[prop(optional)]
-    actions: Vec<(String, OnPress)>,
-) -> Element {
-    let name = harness.name().to_string();
-    let press = on_press.unwrap_or_else(|| Rc::new(|| {}));
+    selected: Live<bool>,
+    label: String,
+    description: Option<UiText>,
+}
+
+/// The pressable card: glyph, name, version, status and sign-in state.
+fn card_button(face: CardFace, press: OnPress) -> Element {
+    let name = face.harness.name().to_string();
     let details = view! {
         col width:1fr min-width:0px height:min-content gap:{px(4.0)}px {
             text font-family:monospace font-size:{px(12.5)}px font-weight:600 (name.clone())
         }
     };
-    if !version.is_empty() {
-        details.adopt(&sized_text(version.into(), 11.0, 400, ground.muted));
+    if !face.version.is_empty() {
+        details.adopt(&sized_text(face.version.into(), 11.0, 400, ground.muted));
     }
-    if let Some((state, word)) = status {
+    if let Some((state, word)) = face.status {
         let tone = match state {
             AgentStatus::Failed => Tone::Signal(Signal::Failed),
             AgentStatus::Waiting => Tone::Signal(Signal::NeedsYou),
@@ -466,9 +514,7 @@ pub fn HarnessCard(
             }
         });
     }
-    let named = label.unwrap_or_else(|| name.clone());
-    let about = description.clone();
-    let state = match auth {
+    let state = match face.auth {
         HarnessAuth::SignedIn => Some(view! {
             row width:max-content height:min-content gap:{px(6.0)}px align:center {
                 {
@@ -485,12 +531,15 @@ pub fn HarnessCard(
         }),
         HarnessAuth::Unknown => None,
     };
-    let card = view! {
-        button @click:{press()} width:fill height:min-content min-height:{px(56.0)}px radius:0px
+    let about = face.description.clone();
+    let selected = face.selected.clone();
+    let harness = face.harness;
+    view! {
+        button @click:{press()} width:fill height:fill min-height:{px(56.0)}px radius:0px
             pad:(horizontal:{px(14.0)}px vertical:{px(10.0)}px) gap:{px(12.0)}px align:center
-            fill:{if selected { mosaic::core::theme::color(ground.selected) } else { Color::TRANSPARENT }}
-            label:(named) description:{about.as_ref().map(|d| d.get()).unwrap_or_default()}
-            hover { fill:ground.hover }
+            fill:{if selected.get() { mosaic::core::theme::color(ground.selected) } else { Color::TRANSPARENT }}
+            label:(face.label) description:{about.as_ref().map(|d| d.get()).unwrap_or_default()}
+            hover { fill:ground.hover } pressed { fill:ground.pressed }
             focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
             HarnessGlyph harness:(harness) size:20.0
             {
@@ -500,19 +549,152 @@ pub fn HarnessCard(
                 }
             }
         }
+    }
+}
+
+/// A connected harness: glyph, name, version, and whether it is signed in.
+#[component]
+pub fn HarnessCard(
+    harness: Harness,
+    /// Hidden when empty.
+    #[prop(optional)]
+    version: String,
+    #[prop(default = HarnessAuth::Unknown)] auth: HarnessAuth,
+    #[prop(optional)] on_press: Option<OnPress>,
+    /// A state square and word under the name, such as an availability
+    /// check; hidden without it.
+    #[prop(optional)]
+    status: Option<(AgentStatus, String)>,
+    /// The current choice among several cards.
+    #[prop(default = Live::fixed(false))]
+    selected: Live<bool>,
+    /// Accessible name; the harness name by default.
+    #[prop(optional)]
+    label: Option<String>,
+    #[prop(optional)] description: Option<UiText>,
+    /// Action cells at the right (label, handler), outside the card's
+    /// own control.
+    #[prop(optional)]
+    actions: Vec<(String, OnPress)>,
+    /// Accessible names of the actions in order; their text by default.
+    #[prop(optional)]
+    action_labels: Vec<String>,
+) -> Element {
+    let face = CardFace {
+        harness,
+        version,
+        auth,
+        status,
+        selected,
+        label: label.unwrap_or_else(|| harness.name().to_string()),
+        description,
     };
+    let card = card_button(face, on_press.unwrap_or_else(|| Rc::new(|| {})));
     let host = view! {
-        row height:min-content shrink:0 stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {}
+        row height:min-content shrink:0
+            stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {}
     };
     host.adopt(&card);
-    for (label, press) in actions {
+    for (index, (text, press)) in actions.into_iter().enumerate() {
+        let name = action_labels
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| text.clone());
         host.adopt(&view! {
-            row width:max-content height:fill shrink:0 {
-                CellButton label:(label.clone()) on-press:(press) rule:(Rule::Left) {
-                    Label text:(label) role:(TextRole::Label) weight:500
+            row width:max-content shrink:0 {
+                CellButton label:(name) on-press:(press) rule:(Rule::Left) {
+                    Label text:(text) role:(TextRole::Label) weight:500
                 }
             }
         });
     }
     host
+}
+
+/// One card of a [`HarnessChoices`] group.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct HarnessOption {
+    pub harness: Harness,
+    /// Accessible name; the harness name when empty.
+    pub label: String,
+    /// Accessible description, such as the availability word.
+    pub description: String,
+    pub status: Option<(AgentStatus, String)>,
+}
+
+/// A single choice among harness cards: radio semantics, cells side by
+/// side when there is room (stacked otherwise) divided by hairlines, and
+/// arrow, Home and End keys moving the choice and focus.
+#[component]
+pub fn HarnessChoices(
+    options: Vec<HarnessOption>,
+    selected: Live<usize>,
+    on_select: OnIndex,
+    /// Accessible name of the group.
+    #[prop(default = "Harness".to_string())]
+    label: String,
+    /// Narrowest card before the cards stack, in logical pixels.
+    #[prop(default = 180.0)]
+    min_width: f32,
+) -> Element {
+    let count = options.len();
+    let grid = view! {
+        grid height:min-content gap:0px label:(label) role:group
+            cols:{GridTracks::auto_fit(GridTrack::minmax(px(min_width).into(), GridTrack::fr(1.0)))} {}
+    };
+    let cards: Rc<std::cell::RefCell<Vec<Element>>> = Rc::default();
+    for (index, option) in options.into_iter().enumerate() {
+        let current = selected.clone();
+        let chosen = Live::from(Derived::new(move || current.get() == index));
+        let face = CardFace {
+            harness: option.harness,
+            version: String::new(),
+            auth: HarnessAuth::Unknown,
+            status: option.status,
+            selected: chosen.clone(),
+            label: if option.label.is_empty() {
+                option.harness.name().to_string()
+            } else {
+                option.label
+            },
+            description: (!option.description.is_empty()).then(|| option.description.into()),
+        };
+        let pick = on_select.clone();
+        let card = card_button(face, Rc::new(move || pick(index)));
+        card.role(mosaic::widgets::Role::Radio);
+        let semantic = card.clone();
+        let effect = Effect::new(move || {
+            semantic.toggled(chosen.get());
+        });
+        card.__hot_on_remove(move || effect.dispose());
+        let pick = on_select.clone();
+        let focus = cards.clone();
+        let current = selected.clone();
+        card.on_key(move |event, ctx| {
+            if !matches!(event.kind, KeyEventKind::Down { .. }) || count == 0 {
+                return;
+            }
+            let now = current.get_untracked();
+            let next = match event.key {
+                Key::ArrowRight | Key::ArrowDown => (now + 1) % count,
+                Key::ArrowLeft | Key::ArrowUp => (now + count - 1) % count,
+                Key::Home => 0,
+                Key::End => count - 1,
+                _ => return,
+            };
+            pick(next);
+            let target = focus.borrow().get(next).cloned();
+            if let Some(target) = target {
+                target.focus();
+            }
+            ctx.stop_propagation();
+        });
+        cards.borrow_mut().push(card.clone());
+        let cell = view! {
+            row min-width:0px stroke:(width:{px(1.0)} color:ground.hairline edges:(right bottom)) {}
+        };
+        cell.adopt(&card);
+        grid.adopt(&cell);
+    }
+    grid
 }

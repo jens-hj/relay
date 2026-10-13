@@ -48,6 +48,14 @@ pub fn PageHeader(
     /// Height in logical pixels before UI scale.
     #[prop(default = 72.0)]
     height: f32,
+    /// Keeps `height` as given rather than scaling it, for strips level
+    /// with native window chrome.
+    #[prop(default = true)]
+    scaled: bool,
+    #[prop(default = SerifSize::Large)] title_size: SerifSize,
+    /// Accessible name; the title by default.
+    #[prop(optional)]
+    label: Option<String>,
     /// A cell before the titles, such as a navigation toggle.
     #[prop(optional)]
     leading: Option<Element>,
@@ -71,13 +79,14 @@ pub fn PageHeader(
     }
     let named = title.clone();
     titles.adopt(&view! {
-        SerifTitle text:(named) size:(SerifSize::Large)
+        SerifTitle text:(named) size:(title_size)
     });
     let has_leading = leading.is_some();
     view! {
-        row height:{px(height)}px shrink:0 gap:{px(12.0)}px align:center
+        row height:{if scaled { px(height) } else { height }}px shrink:0 gap:{px(12.0)}px
+            align:center
             pad:(left:{px(if has_leading { 0.0 } else { 32.0 })}px right:0px top:0px bottom:0px)
-            label:{title.get()}
+            label:{label.clone().unwrap_or_else(|| title.get())}
             stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
             {
                 if let Some(leading) = &leading {
@@ -106,6 +115,9 @@ pub fn Module(
     /// Controls at the head's right end, after the note.
     #[prop(optional)]
     head_end: Option<Element>,
+    /// Accessible name of the head.
+    #[prop(optional)]
+    head_label: Option<String>,
     #[prop(optional)] children: Children,
 ) -> Element {
     let head = if caps {
@@ -126,15 +138,14 @@ pub fn Module(
             row height:{if caps { Dimension::Px(px(40.0)) } else { Dimension::MinContent }}
                 gap:{px(12.0)}px align:{if caps { Align::Center } else { Align::End }}
                 pad:(left:{px(18.0)}px right:{px(if has_end { 0.0 } else { 18.0 })}px top:{px(if caps { 0.0 } else { 16.0 })}px bottom:{px(if caps { 0.0 } else { 8.0 })}px)
+                label:(head_label.clone().unwrap_or_default())
                 stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                row width:max-content height:min-content align:center
-                    {
+                row width:max-content height:min-content align:center {
                     {
                         parent.adopt(&head);
                     }
                 }
-                row width:1fr min-width:0px height:min-content justify:end
-                    {
+                row width:1fr min-width:0px height:min-content justify:end {
                     {
                         if let Some(note) = &note {
                             parent.adopt(&view! {
@@ -186,7 +197,8 @@ pub fn Notice(
         NoticeTone::Failure => Tone::Signal(Signal::Failed),
     };
     let body = view! {
-        col height:min-content gap:{px(4.0)}px pad:(horizontal:{px(18.0)}px vertical:{px(11.0)}px) {}
+        col height:min-content gap:{px(4.0)}px
+            pad:(horizontal:{px(18.0)}px vertical:{px(11.0)}px) {}
     };
     let line = view! {
         row height:min-content gap:{px(8.0)}px align:center {}
@@ -303,11 +315,17 @@ pub fn CommandPalette(
     field_label: String,
     #[prop(default = "Type a command".to_string())] placeholder: String,
     /// The list scrolls past this height (logical pixels before UI scale).
-    #[prop(default = 420.0)]
-    max_height: f32,
+    #[prop(default = Live::fixed(420.0))]
+    max_height: Live<f32>,
     /// A foot with the match count and the keys.
     #[prop(default = false)]
     footer: bool,
+    /// Accessible name of the panel.
+    #[prop(optional)]
+    label: Option<String>,
+    /// Focuses the query field when built.
+    #[prop(default = false)]
+    autofocus: bool,
 ) -> Element {
     let highlighted = State::new(0usize);
     let shown = {
@@ -374,8 +392,8 @@ pub fn CommandPalette(
     let field = view! {
         input width:fill height:{px(44.0)}px radius:0px pad:(horizontal:{px(16.0)}px vertical:0px)
             fill:(Color::TRANSPARENT) stroke:(width:0px color:ground.rule) font-family:monospace
-            font-size:{px(13.0)}px font-color:ground.ink label:(field_label) placeholder:(placeholder)
-            focused { fill:ground.hover } query
+            font-size:{px(13.0)}px font-color:ground.ink label:(field_label)
+            placeholder:(placeholder) focused { fill:ground.hover } query
     };
     let escape = on_close.clone();
     field.on_key(move |event, ctx| {
@@ -411,18 +429,22 @@ pub fn CommandPalette(
         col width:{px(width)}px max-width:100% height:min-content shrink:0 fill:ground.panel-raised
             stroke:(width:{px(1.0)} color:ground.rule offset:{px(-1.0)}) {}
     };
+    if let Some(label) = label {
+        panel.label(label);
+    }
     if let Some(title) = title {
         let head = view! {
             row height:{px(40.0)}px shrink:0 align:center
                 stroke:(width:{px(1.0)} color:ground.rule edges:bottom) {
-                row width:1fr min-width:0px height:min-content pad:(horizontal:{px(16.0)}px vertical:0px) {
+                row width:1fr min-width:0px height:min-content
+                    pad:(horizontal:{px(16.0)}px vertical:0px) {
                     SerifTitle text:(title.clone()) size:(SerifSize::Small)
                 }
             }
         };
         if let Some(close) = on_close.clone() {
             head.adopt(&view! {
-                row width:{px(52.0)}px height:fill shrink:0 {
+                row width:{px(52.0)}px shrink:0 {
                     CellButton label:(close_label.clone()) on-press:(close) rule:(Rule::Left) {
                         Kbd keys:"Esc"
                     }
@@ -444,31 +466,37 @@ pub fn CommandPalette(
     list.on_layout(move |rect| extent.set(rect.size.height));
     let scroller = view! {
         col height:min-content shrink:0 {
-        scroll label:"Command results" {
-            { parent.adopt(&list); }
-        } as results
-        {
-            results.root().style_dyn(move || {
-                Style::stack()
-                    .width(Dimension::Fill)
-                    .height(extent.get().min(px(max_height)))
-                    .basis(Dimension::Auto)
-                    .grow(0.0)
-                    .shrink(0.0)
-            });
-        }
+            scroll {
+                { parent.adopt(&list); }
+            } as results
+            {
+                results.root().label("Command results");
+                results.root().style_dyn(move || {
+                    Style::stack()
+                        .width(Dimension::Fill)
+                        .height(extent.get().min(px(max_height.get())))
+                        .basis(Dimension::Auto)
+                        .grow(0.0)
+                        .shrink(0.0)
+                });
+            }
         }
     };
     panel.adopt(&scroller);
+    if autofocus {
+        field.focus();
+    }
     if footer {
         panel.adopt(&view! {
             row height:{px(30.0)}px shrink:0 align:center justify:between
                 pad:(horizontal:{px(16.0)}px vertical:0px)
                 stroke:(width:{px(1.0)} color:ground.rule edges:top) {
-                Label text:(Derived::new(move || {
+                Label
+                    text:(Derived::new(move || {
                     let n = shown.get().len();
                     format!("{n} {}", if n == 1 { "command" } else { "commands" })
-                })) role:(TextRole::Caption) tone:(Tone::Muted)
+                }))
+                    role:(TextRole::Caption) tone:(Tone::Muted)
                 Label text:"↑ ↓ move · Enter run · Esc close" role:(TextRole::Caption)
                     tone:(Tone::Muted)
             }
@@ -482,9 +510,9 @@ pub fn CommandPalette(
 #[component]
 pub fn ReadoutCell(key: String, value: UiText, #[prop(optional)] children: Children) -> Element {
     view! {
-        col width:max-content max-width:{px(320.0)}px min-width:0px height:fill shrink:0
-            justify:center gap:{px(4.0)}px pad:(horizontal:{px(14.0)}px vertical:0px)
-            label:(key.clone()) stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
+        col width:max-content max-width:{px(320.0)}px min-width:0px shrink:0 justify:center
+            gap:{px(4.0)}px pad:(horizontal:{px(14.0)}px vertical:0px) label:(key.clone())
+            stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
             Label text:(key.clone()) role:(TextRole::Caption) tone:(Tone::Muted) weight:500
                 caps:true
             row height:min-content gap:{px(8.0)}px align:center {
