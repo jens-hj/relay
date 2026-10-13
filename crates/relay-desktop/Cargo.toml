@@ -26,6 +26,7 @@ targets = ["desktop", "web"]
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio.workspace = true
 tokio-tungstenite.workspace = true
+jiff = "0.2.38"
 arboard = { version = "3.6.1", features = ["image-data", "wayland-data-control"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -19,7 +19,7 @@ use relay_ui::prelude::{
     CellButton, CellButtonProps, Ellipsis, EllipsisProps, Label, LabelProps, Rule, TextRole, Tone,
     UiText, Weight,
 };
-use relay_ui::surfaces::{Connection, ConnectionInfo};
+use relay_ui::surfaces::{Connection, ConnectionInfo, ConnectionTelemetry};
 use relay_ui::tokens::{ground, px};
 use relay_ui::tree::Guide;
 use std::rc::Rc;
@@ -369,7 +369,10 @@ fn ServerFoot(model: Model) -> Element {
     let state = Derived::new(move || {
         if model.connected.get() {
             Connection::Connected
-        } else if model.status.get().starts_with("Connecting") {
+        } else if model.status.get().starts_with("Connecting")
+            || model.connection_telemetry.get().2.is_some()
+            || model.status.get().contains("retrying")
+        {
             Connection::Connecting
         } else {
             Connection::Offline
@@ -403,20 +406,76 @@ fn ServerFoot(model: Model) -> Element {
             ),
         }
     });
+    let clock = State::new(unix_now());
+    let telemetry = Derived::new(move || {
+        let (samples, since, retry) = model.connection_telemetry.get();
+        let connected = model.connected.get();
+        let incompatible = model
+            .status
+            .get()
+            .contains("Incompatible Relay server protocol")
+            || model.snapshot.get().protocol_version != PROTOCOL_VERSION;
+        ConnectionTelemetry {
+            samples: samples
+                .into_iter()
+                .map(|ms| ms.min(u64::from(u32::MAX)) as u32)
+                .collect(),
+            client_revision: BuildInfo::current().short_revision(),
+            server_revision: model
+                .server_build
+                .get()
+                .map(|build| build.short_revision())
+                .unwrap_or_else(|| "unknown".into()),
+            offline_since: since.map(connection_time),
+            retry_in: retry.map(|deadline| {
+                deadline
+                    .saturating_sub(unix_now().max(clock.get()))
+                    .min(u64::from(u32::MAX)) as u32
+            }),
+            compatible: if incompatible {
+                Some(false)
+            } else if connected || model.server_build.get().is_some() {
+                Some(true)
+            } else {
+                None
+            },
+            warning: incompatible.then(|| "client and server protocols incompatible".into()),
+        }
+    });
     let host = view! {
         col height:min-content shrink:0 label:"Server connection details"
             description:{format!("{} · {}", server_identity(&model.server_endpoint.get()), model.status.get())} {}
     };
-    host.switch(
-        move || info.get(),
-        move |parent, info| {
-            parent.adopt(&view! {
-                ConnectionStatus state:(relay_ui::Live::from(state))
-                    latency:(relay_ui::Live::from(latency)) info:(info.clone())
-            });
-        },
-    );
+    let countdown = host.clone();
+    host.animate(move |_| {
+        if model.connection_telemetry.get_untracked().2.is_some() {
+            clock.set(unix_now());
+            countdown.paint_dirty();
+        }
+        mosaic::widgets::Tick::Sleep(std::time::Duration::from_secs(1))
+    });
+    host.adopt(&view! {
+        ConnectionStatus state:(relay_ui::Live::from(state)) latency:(relay_ui::Live::from(latency))
+            info:(relay_ui::Live::from(info)) telemetry:(relay_ui::Live::from(telemetry))
+            on-copy:(Some(press(move || model.ui.get_untracked().set_clipboard_text(model.server_endpoint.get_untracked()))))
+    });
     host
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn connection_time(seconds: u64) -> String {
+    jiff::Timestamp::from_second(seconds.min(i64::MAX as u64) as i64)
+        .map(|time| {
+            time.to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| "unknown".into())
+}
+#[cfg(target_arch = "wasm32")]
+fn connection_time(seconds: u64) -> String {
+    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(seconds as f64 * 1000.0));
+    format!("{:02}:{:02}", date.get_hours(), date.get_minutes())
 }
 
 /// Running, occupied (running or queued) and allowed workers for a director.
