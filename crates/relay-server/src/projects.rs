@@ -1024,6 +1024,9 @@ fn start(
         .title
         .clone();
     snapshot.sessions.push(Session {
+        parent_session_id: None,
+        spawn: None,
+        compactions: vec![],
         id: session_id.clone(),
         project_id: project.id,
         issue_id: Some(issue_id),

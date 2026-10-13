@@ -16,6 +16,7 @@ mod browser;
 mod tool_activity;
 mod transport;
 pub use browser::{BrowserConfig, initialize_setup_code};
+mod agent_tools;
 mod claude;
 mod commands;
 mod conversation;
@@ -25,6 +26,7 @@ mod process;
 mod projects;
 mod providers;
 mod runtime;
+pub use agent_tools::stdio as mcp_stdio;
 pub use runtime::{RemoteConfig, RuntimeConfig};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::collections::HashMap;
@@ -85,6 +87,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 struct Store {
+    agent_capabilities: HashMap<String, agent_tools::Capability>,
     defaults: DirectorProfile,
     connection: Connection,
     controls: HashMap<String, watch::Sender<bool>>,
@@ -104,7 +107,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 11 {
+        if version > 12 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -124,10 +127,16 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 11;"
+             PRAGMA user_version = 12;"
         ).map_err(Error::internal)?;
-        let seed =
-            serde_json::to_string(&demo_snapshot(defaults.clone())).map_err(Error::internal)?;
+        let mut seed = demo_snapshot(defaults.clone());
+        // The isolated demo shows an example orchestration and usage; a live
+        // workspace shows only what its agents and harnesses report.
+        if std::env::var("RELAY_DEMO").as_deref() == Ok("1") {
+            demo_orchestration(&mut seed);
+            demo_usage(&mut seed, now());
+        }
+        let seed = serde_json::to_string(&seed).map_err(Error::internal)?;
         let inserted = connection
             .execute(
                 "INSERT OR IGNORE INTO workspace(id, snapshot) VALUES (1, ?1)",
@@ -188,10 +197,28 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
+        if version < 12 {
+            // Protocol 5: sub-agent links, compactions, tool details, and usage records
+            // default to empty. Rewriting normalizes legacy tool kinds.
+            let json: String = connection
+                .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+                    r.get(0)
+                })
+                .map_err(Error::internal)?;
+            let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
+            snapshot.protocol_version = PROTOCOL_VERSION;
+            connection
+                .execute(
+                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                    [serde_json::to_string(&snapshot).map_err(Error::internal)?],
+                )
+                .map_err(Error::internal)?;
+        }
         connection
             .execute_batch("COMMIT;")
             .map_err(Error::internal)?;
         Ok(Self {
+            agent_capabilities: HashMap::new(),
             defaults,
             connection,
             controls: HashMap::new(),
@@ -432,7 +459,8 @@ impl Store {
             | Command::PromoteTurn { .. }
             | Command::CancelTurn { .. }
             | Command::EditQueuedTurn { .. }
-            | Command::ResumeQueue { .. }) => {
+            | Command::ResumeQueue { .. }
+            | Command::PauseQueue { .. }) => {
                 action = conversation::apply(
                     &transaction,
                     &mut snapshot,
@@ -484,6 +512,9 @@ impl Store {
                     .harness;
                 let session_id = format!("session-{}", envelope.request_id);
                 snapshot.sessions.push(Session {
+                    parent_session_id: None,
+                    spawn: None,
+                    compactions: vec![],
                     workspaces: vec![],
                     selection: Default::default(),
                     conversations: vec![],
@@ -552,17 +583,7 @@ impl Store {
                         "Worker has no recorded thread/worktree to resume",
                     ));
                 }
-                runtime::authorize_session(
-                    &snapshot,
-                    session
-                        .issue_id
-                        .as_deref()
-                        .ok_or_else(|| Error::invalid("Session has no issue"))?,
-                    &session.director_id,
-                    approve_implementation,
-                    &session.role,
-                    config,
-                )?;
+                agent_tools::authorize_session(&snapshot, session, approve_implementation, config)?;
                 let worker = snapshot
                     .sessions
                     .iter_mut()
@@ -589,10 +610,12 @@ impl Store {
                     .find(|s| s.id == session_id)
                     .and_then(|s| s.worker.as_ref())
                     .ok_or_else(|| Error::invalid("Worker session not found"))?;
-                if !runtime::active(&worker.status) {
+                if !runtime::active(&worker.status)
+                    && snapshot.subtree_status(&session_id).active() == 0
+                {
                     return Err(Error::invalid("Worker has no active turn"));
                 }
-                if !self.controls.contains_key(&session_id) {
+                if runtime::active(&worker.status) && !self.controls.contains_key(&session_id) {
                     return Err(Error::invalid(
                         "Worker process is unavailable; restart to classify interrupted runs",
                     ));
@@ -602,6 +625,18 @@ impl Store {
                     &session_id,
                     "Queue paused after stopping the agent",
                 );
+                let descendants = snapshot
+                    .descendants(&session_id)
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect::<Vec<_>>();
+                for id in descendants {
+                    conversation::pause(
+                        &mut snapshot,
+                        &id,
+                        "Queue paused after stopping an ancestor",
+                    );
+                }
                 action = Some(Action::Stop(session_id));
             }
             command => {
@@ -647,6 +682,7 @@ impl Store {
 
 #[derive(Clone)]
 struct Workspace {
+    agent_endpoint: Arc<Mutex<Option<String>>>,
     browser: Arc<browser::BrowserAuth>,
     harness_status: Arc<Mutex<Vec<HarnessStatus>>>,
     harness_probe: Arc<tokio::sync::Mutex<()>>,
@@ -763,6 +799,7 @@ impl Workspace {
             .ok_or_else(|| Error::invalid("Revision exhausted"))?;
         store.save(&snapshot)?;
         store.controls.remove(session);
+        store.agent_capabilities.remove(session);
         self.snapshots.send_replace(snapshot);
         Ok(())
     }
@@ -803,6 +840,7 @@ impl Workspace {
             .is_some_and(|w| !runtime::active(&w.status))
         {
             store.controls.remove(session);
+            store.agent_capabilities.remove(session);
             interrupt_tools(&mut snapshot, session, Some(run));
             harness::expire(&mut snapshot, session, run);
         }
@@ -991,11 +1029,16 @@ pub struct Shutdown {
     workspace: Workspace,
 }
 impl Shutdown {
+    /// Set the reachable HTTP endpoint after binding the listener.
+    pub fn set_agent_endpoint(&self, endpoint: String) {
+        *self.workspace.agent_endpoint.lock().unwrap() = Some(endpoint);
+    }
     pub async fn shutdown(&self) -> Result<(), Error> {
         self.workspace.transport_shutdown.send_replace(true);
         {
             let mut store = self.workspace.store.lock().map_err(Error::internal)?;
             store.closing = true;
+            store.agent_capabilities.clear();
             let mut snapshot = store.snapshot()?;
             let changed = projects::interrupt_operations(
                 &mut snapshot,
@@ -1115,8 +1158,17 @@ pub fn router_with_browser(
         .connection
         .execute("DELETE FROM processes", [])
         .map_err(Error::internal)?;
+    // Fixture sessions never own a process: their recorded states are
+    // examples, not runs this restart interrupted.
+    let fixtures: std::collections::BTreeSet<String> = initial
+        .sessions
+        .iter()
+        .filter(|s| s.fixture)
+        .map(|s| s.id.clone())
+        .collect();
     for session in &mut initial.sessions {
         if let Some(w) = &mut session.worker
+            && !session.fixture
             && runtime::active(&w.status)
         {
             w.status = WorkerStatus::Interrupted;
@@ -1128,6 +1180,7 @@ pub fn router_with_browser(
     for message in &mut initial.messages {
         if let Some(tool) = &mut message.tool
             && tool.state == ToolState::Running
+            && !fixtures.contains(&message.session_id)
         {
             tool.state = ToolState::Interrupted;
             changed = true;
@@ -1217,7 +1270,10 @@ pub fn router_with_browser(
         }
     }
     for permission in &mut initial.tool_permissions {
-        if permission.decision.is_none() && !permission.expired {
+        if permission.decision.is_none()
+            && !permission.expired
+            && !fixtures.contains(&permission.session_id)
+        {
             permission.expired = true;
             changed = true;
         }
@@ -1270,6 +1326,7 @@ pub fn router_with_browser(
     }
     let (snapshots, _) = watch::channel(initial);
     let workspace = Workspace {
+        agent_endpoint: Arc::new(Mutex::new(None)),
         browser,
         harness_status: Arc::new(Mutex::new(vec![])),
         harness_probe: Arc::new(tokio::sync::Mutex::new(())),
@@ -1334,6 +1391,10 @@ pub fn router_with_browser(
                 workspace.clone(),
                 authorize,
             ))
+            .route(
+                "/v1/agent-tools/{tool}",
+                post(agent_tools::route).layer(DefaultBodyLimit::max(64 * 1024)),
+            )
             .merge(browser::routes(workspace.clone()))
             .layer(axum::middleware::from_fn(browser::response_headers))
             .with_state(workspace),
@@ -1573,7 +1634,20 @@ async fn command(
                 ));
             }
             Some(Action::Stop(session_id)) => {
-                store.controls.get(&session_id).unwrap().send_replace(true);
+                let snapshot = store.snapshot()?;
+                let mut ids = vec![session_id.clone()];
+                ids.extend(
+                    snapshot
+                        .descendants(&session_id)
+                        .iter()
+                        .map(|s| s.id.clone()),
+                );
+                for id in ids {
+                    store.agent_capabilities.remove(&id);
+                    if let Some(control) = store.controls.get(&id) {
+                        control.send_replace(true);
+                    }
+                }
             }
             Some(Action::Promote(session_id)) => {
                 if let Some(control) = store.controls.get(&session_id) {

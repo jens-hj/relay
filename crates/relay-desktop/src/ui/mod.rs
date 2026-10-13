@@ -6,22 +6,16 @@ mod chrome;
 pub(crate) mod navigation;
 mod preferences;
 mod profile;
+mod status;
 
-use crate::styles::*;
+use crate::window_chrome::{WindowControls, WindowControlsProps};
 use crate::{
-    controls::{
-        AppearanceSegments, AppearanceSegmentsProps, ButtonStyle, button, stepper_with_options,
-    },
+    controls::button,
     conversation::{Conversation, ConversationProps},
-    labels::{
-        DirectorMark, DirectorMarkProps, LabelStrip, LabelStripProps, Readout, ReadoutProps,
-        RunState, SlidingSegments, SlidingSegmentsProps, SlotMeter, SlotMeterProps, StatusGlyph,
-        StatusGlyphProps, Tag, TagProps,
-    },
+    icons::*,
     model::{EditTarget, Model, Page},
     projects::*,
     sidebar::{Sidebar, SidebarProps},
-    theme::*,
 };
 pub(crate) use board::*;
 pub(crate) use chrome::*;
@@ -33,6 +27,10 @@ use preferences::*;
 pub(crate) use profile::overridden_fields;
 use profile::*;
 use relay_core::*;
+use relay_ui::prelude::{AgentStatus, Chip, ChipProps, Segments, SegmentsProps};
+use relay_ui::surfaces::{CommandPalette, CommandPaletteProps};
+use relay_ui::tokens::{ground, px};
+pub(crate) use status::*;
 
 pub fn shell(model: Model) -> Element {
     let width = State::new(1280.0f32);
@@ -46,7 +44,7 @@ pub fn shell(model: Model) -> Element {
     let root = view! {
         stack width:{model.browser_viewport.get().map_or(Dimension::Fill, |size| Dimension::Px(size.width))}
             height:{model.browser_viewport.get().map_or(Dimension::Fill, |size| Dimension::Px(size.height))}
-            fill:surface.base safe-area:all pad:(top:{model.browser_top_clearance.get()}px) clip font-family:monospace font-color:ink.fg font-size:{px(14.0)}px {
+            fill:ground.page safe-area:all pad:(top:{model.browser_top_clearance.get()}px) clip font-family:monospace font-color:ground.ink font-size:{px(14.0)}px {
             row @layout:{ move |rect: Rect| width.set(rect.size.width) } {
                 col width:{if mobile.get() {Dimension::Px(0.0)} else {Dimension::MaxContent}} shrink:0 {
                     if !mobile.get() {
@@ -79,8 +77,8 @@ pub fn shell(model: Model) -> Element {
                                 col height:min-content pad:{px(32.0)}px gap:{px(12.0)}px {
                                     text font-family:sans-serif font-size:{px(18.0)}px
                                         "Waiting for your workspace"
-                                    text font-color:{color(ink.muted)} { model.status.get() }
-                                    text font-color:ink.muted
+                                    text font-color:{color(ground.muted)} { model.status.get() }
+                                    text font-color:ground.muted
                                         "Start relay-server and connect with its workspace token."
                                 }
                             } else {
@@ -103,6 +101,12 @@ pub fn shell(model: Model) -> Element {
                     }
                 }
             }
+            if crate::window_chrome::DRAWS_WINDOW_BUTTONS {
+                row width:max-content height:min-content
+                    translate:(x:{width.get() - crate::window_chrome::window_controls_width()}px y:0px) {
+                    WindowControls model:(model)
+                }
+            }
             if mobile.get() && (model.sidebar_open.get() || drawer_drag.get().is_some()) {
                 Drawer model:(model) width:(width) drag:(drawer_drag)
             }
@@ -121,7 +125,7 @@ pub fn shell(model: Model) -> Element {
         }
     });
     #[cfg(target_arch = "wasm32")]
-    Effect::new(move || crate::browser::surface_color(color(surface.base)));
+    Effect::new(move || crate::browser::surface_color(color(ground.page)));
     crate::window_chrome::install(&root, model);
     root.on_key(move |event, ctx| {
         if !matches!(event.kind, KeyEventKind::Down { .. }) {
@@ -155,6 +159,18 @@ pub fn shell(model: Model) -> Element {
                     && model.page.get_untracked() == Page::Sessions =>
             {
                 model.searching.set(true);
+                ctx.stop_propagation();
+            }
+            // P pauses or resumes the open session's queue, as its header
+            // cell shows, unless a text field takes the key.
+            Key::Character(key)
+                if !command
+                    && !event.modifiers.alt
+                    && key.eq_ignore_ascii_case("p")
+                    && model.page.get_untracked() == Page::Sessions
+                    && !typing(model) =>
+            {
+                model.toggle_queue();
                 ctx.stop_propagation();
             }
             Key::Character(key) if command && key == "," => {
@@ -202,7 +218,7 @@ fn Sessions(model: Model) -> Element {
     }
 }
 
-const PALETTE_ACTIONS: [(&str, &str); 12] = [
+const PALETTE_ACTIONS: [(&str, &str); 11] = [
     ("Open board", "Navigate"),
     ("Open sessions", "Navigate"),
     ("Edit project defaults", "Profile"),
@@ -214,107 +230,53 @@ const PALETTE_ACTIONS: [(&str, &str); 12] = [
     ("Project Connections", "Project"),
     ("New Project", "Create"),
     ("Publish board", "Board"),
-    ("Reset sidebar width", "Layout"),
 ];
 
+/// The command palette: relay-ui's palette over a scrim that dismisses it.
+/// Closing returns focus to where it was.
 #[component]
 fn Palette(model: Model) -> Element {
-    let query = model.palette_query;
     let previous_focus = model.ui.get_untracked().focused();
     let ui = model.ui.get_untracked();
     let available_height = State::new(900.0f32);
-    let selected = State::new(0usize);
-    let matches = Derived::new(move || {
-        PALETTE_ACTIONS
-            .iter()
-            .enumerate()
-            .filter(|(_, (label, _))| label.to_lowercase().contains(&query.get().to_lowercase()))
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>()
+    let commands: Vec<relay_ui::surfaces::Command> = PALETTE_ACTIONS
+        .iter()
+        .enumerate()
+        .map(|(index, (label, category))| {
+            relay_ui::surfaces::Command::new(index.to_string(), *label).detail(*category)
+        })
+        .collect();
+    let run: relay_ui::surfaces::OnCommand = std::rc::Rc::new(move |id: String| {
+        if let Ok(index) = id.parse() {
+            palette_action(model, index);
+        }
     });
-    let current = Derived::new(move || {
-        let matches = matches.get();
-        matches
-            .iter()
-            .copied()
-            .find(|index| *index == selected.get())
-            .or_else(|| matches.first().copied())
+    // The list keeps the panel inside the window: head, field and foot take
+    // 114px, the scrim's padding 80px.
+    let list_height =
+        Derived::new(move || ((available_height.get() / px(1.0)) - 194.0).clamp(80.0, 420.0));
+    let panel = view! {
+        CommandPalette commands:(commands) query:(model.palette_query) on-run:(run)
+            title:(Some("Command palette".to_string()))
+            on-close:(Some(press(move || model.palette.set(false))))
+            close-label:"Close command palette" field-label:"Command search"
+            placeholder:"Find an action…" footer:true autofocus:true
+            max-height:(relay_ui::Live::from(list_height))
+            label:(Some("Command palette panel".to_string()))
+    };
+    panel.on_pointer(|event, ctx| {
+        if matches!(
+            event.kind,
+            PointerEventKind::Down(_) | PointerEventKind::Click(_)
+        ) {
+            ctx.stop_propagation();
+        }
     });
     let view = view! {
-        col fill:scrim align:center pad:(horizontal:{px(16.0)}px vertical:{px(40.0)}px)
+        col fill:{mosaic::core::theme::color(ground.page).alpha(0.72)} align:center
+            pad:(horizontal:{px(16.0)}px vertical:{px(40.0)}px)
             @layout:{move |rect:Rect| available_height.set(rect.size.height)} {
-            col width:{px(560.0)} max-width:100% height:1fr
-                max-height:{px(120.0 + if matches.get().is_empty() {60.0} else {40.0 * matches.get().len() as f32}).min(px(640.0)).min((available_height.get()-px(80.0)).max(px(160.0)))}
-                fill:surface.panel stroke:(width:{px(1.0)} color:rule.line offset:{px(0.5)}) pad:0px
-                gap:0px label:"Command palette panel" {
-                row height:{px(44.0)}px shrink:0 gap:0px align:center
-                    stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
-                    row width:1fr min-width:0px align:center gap:{px(9.0)}px
-                        pad:(horizontal:{px(14.0)}px vertical:0px) {
-                        icon size:{px(16.0)}px command-icon
-                        text font-size:{px(15.0)}px font-weight:650 font-family:sans-serif
-                            "Command palette"
-                    }
-                    button #relay.header-action @click:{model.palette.set(false);}
-                        stroke:(width:{px(1.0)} color:rule.hair edges:left)
-                        label:"Close command palette" "Esc"
-                }
-                input #relay.field placeholder:"Find an action…" label:"Command search"
-                    height:{px(46.0)}px shrink:0 pad:(horizontal:{px(14.0)}px vertical:{px(10.0)}px)
-                    stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
-                    focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) } query
-                    as command_search
-                {command_search.focus();}
-                scroll height:1fr min-height:0px label:"Command results" {
-                    col height:min-content gap:0px {
-                        for (_, index) in {matches.get().into_iter().map(|index| (index, index))} {
-                            let index = *index;
-                            let (label, category) = PALETTE_ACTIONS[index];
-                            button #relay.tree-control @click:{palette_action(model, index);}
-                                width:fill height:{px(40.0)}px justify:start gap:{px(12.0)}px
-                                pad:(horizontal:{px(14.0)}px vertical:0px) label:(label)
-                                font-color:{color(if current.get() == Some(index) {ink.on_inverse} else {ink.fg})}
-                                font-size:{px(13.0)}px
-                                fill:{if current.get() == Some(index) {color(ink.inverse)} else {Color::TRANSPARENT}}
-                                stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
-                                hover {
-                                    fill:{color(if current.get() == Some(index) {ink.inverse_hover} else {surface.raised})}
-                                }
-                                focused { stroke:(width:{px(3.0)} color:accent.focus edges:left) } {
-                                icon size:{px(16.0)}px
-                                    {match index {0|10 => board_icon, 1|6 => worker_icon, 2 => sliders_icon, 3 => director_icon, 5|11 => reset_icon, 7 => gear_icon, 8 => connections_icon, 9 => plus_icon, _ => command_icon}}
-                                row width:1fr min-width:0px height:min-content {
-                                    text text-wrap:none (label)
-                                }
-                                row width:max-content height:min-content opacity:0.65
-                                    font-size:{px(10.0)}px {
-                                    text text-transform:uppercase letter-spacing:{px(0.5)}px
-                                        (category)
-                                }
-                                row width:{px(16.0)}px height:min-content
-                                    opacity:{if current.get() == Some(index) {1.0} else {0.0}}
-                                    font-size:{px(13.0)}px {
-                                    text "↵"
-                                }
-                            }
-                        }
-                        if matches.get().is_empty() {
-                            row height:{px(60.0)}px pad:{px(14.0)}px align:center
-                                label:"No matching commands" font-color:ink.muted {
-                                text "No matching commands"
-                            }
-                        }
-                    }
-                }
-                row height:{px(30.0)}px shrink:0 align:center justify:between
-                    pad:(horizontal:{px(14.0)}px vertical:0px)
-                    stroke:(width:{px(1.0)} color:rule.hair edges:top) font-color:ink.muted
-                    font-size:{px(10.0)}px {
-                    text {format!("{} actions", matches.get().len())}
-                    text "↑ ↓ Navigate · Enter Run · Esc Close"
-                }
-            } as panel
-            {panel.on_pointer(|event, ctx| {if matches!(event.kind, PointerEventKind::Down(_) | PointerEventKind::Click(_)) {ctx.stop_propagation();}});}
+            { parent.adopt(&panel); }
         }
     };
     view.on_pointer(move |event, ctx| {
@@ -331,65 +293,6 @@ fn Palette(model: Model) -> Element {
         }
     });
     view.label("Command palette");
-    let root_id = view.id();
-    view.on_key(move |event, ctx| {
-        if !matches!(event.kind, KeyEventKind::Down { .. }) {
-            return;
-        }
-        let ui = model.ui.get_untracked();
-        match event.key {
-            Key::Enter => {
-                let focused_label = ui.focused().and_then(|focused| {
-                    ui.inspection_snapshot()
-                        .node(focused.id())
-                        .and_then(|node| node.label.clone())
-                });
-                let index = focused_label
-                    .and_then(|label| {
-                        PALETTE_ACTIONS
-                            .iter()
-                            .position(|(action, _)| *action == label)
-                    })
-                    .or_else(|| current.get_untracked());
-                if let Some(index) = index {
-                    palette_action(model, index);
-                }
-                ctx.stop_propagation();
-            }
-            Key::Tab | Key::ArrowDown | Key::ArrowUp => {
-                let snapshot = ui.inspection_snapshot();
-                for _ in 0..snapshot.nodes.len() {
-                    if event.key == Key::ArrowUp || (event.key == Key::Tab && event.modifiers.shift)
-                    {
-                        ui.focus_prev();
-                    } else {
-                        ui.focus_next();
-                    }
-                    let mut ancestor = ui.focused().map(|element| element.id());
-                    while let Some(id) = ancestor {
-                        if id == root_id {
-                            if let Some(focused) = ui.focused() {
-                                if let Some(node) = snapshot.node(focused.id())
-                                    && let Some(index) =
-                                        PALETTE_ACTIONS.iter().position(|(label, _)| {
-                                            node.label.as_deref() == Some(*label)
-                                        })
-                                {
-                                    selected.set(index);
-                                }
-                                focused.reveal();
-                            }
-                            ctx.stop_propagation();
-                            return;
-                        }
-                        ancestor = snapshot.node(id).and_then(|node| node.parent);
-                    }
-                }
-                ctx.stop_propagation();
-            }
-            _ => {}
-        }
-    });
     view
 }
 
@@ -405,7 +308,6 @@ fn palette_action(model: Model, index: usize) {
         8 => model.page.set(Page::Connections),
         9 => model.page.set(Page::NewProject),
         10 => model.page.set(Page::Publish),
-        11 => crate::settings::reset_sidebar(model),
         _ => {
             model.page.set(Page::Sessions);
             model.searching.set(true);
@@ -425,5 +327,43 @@ fn page_label(page: Page) -> &'static str {
         Page::Connections => "Project Connections",
         Page::Publish => "Publish board",
         Page::DirectorStart => "Director conversation",
+    }
+}
+
+/// Whether keyboard focus is in a text field.
+fn typing(model: Model) -> bool {
+    let ui = model.ui.get_untracked();
+    ui.focused().is_some_and(|focused| {
+        ui.inspection_snapshot()
+            .node(focused.id())
+            .is_some_and(|node| node.role == mosaic::widgets::Role::TextInput)
+    })
+}
+
+/// An activation handler for relay-ui controls.
+pub(crate) fn press(handler: impl Fn() + 'static) -> relay_ui::prelude::OnPress {
+    std::rc::Rc::new(handler)
+}
+
+/// A relay-ui cell action for ruled grids and strips: the control fills a
+/// 36px cell closed by hairlines on its right and bottom, so neighbours
+/// share one rule. `disabled` is read reactively.
+pub(crate) fn action_cell(
+    label: impl Into<String>,
+    text: impl Into<String>,
+    disabled: impl Fn() -> bool + 'static,
+    handler: impl Fn() + 'static,
+) -> Element {
+    use relay_ui::prelude::{CellButton, CellButtonProps, Label, LabelProps, TextRole};
+    let label = label.into();
+    let text = text.into();
+    let blocked = Derived::new(disabled);
+    view! {
+        row height:{px(36.0)}px min-width:0px shrink:0
+            stroke:(width:{px(1.0)} color:ground.hairline edges:(right bottom)) {
+            CellButton label:(label) on-press:(press(handler)) disabled:(blocked) {
+                Label text:(text) role:(TextRole::Label) weight:500
+            }
+        }
     }
 }

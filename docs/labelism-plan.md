@@ -1,5 +1,7 @@
 # Labelism interface plan
 
+> Superseded by the [Orchestrator UI plan](orchestrator-ui-plan.md). Kept for history.
+
 Tracked in [#9](https://github.com/jens-hj/relay/issues/9). This summarizes the accepted plan (revision 3) for bringing the Labelism concept designs into the native Mosaic client. The HTML concept files are design references only and are not part of the repository.
 
 ## Scope

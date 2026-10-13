@@ -70,7 +70,8 @@ pub struct Model {
     pub buffer: State<crate::buffer::BufferState>,
     pub buffer_requests: State<Option<UnboundedSender<crate::buffer_network::Request>>>,
     pub preferences: State<crate::settings::Preferences>,
-    pub sidebar_reset: State<u64>,
+    pub collapsed_agents: State<BTreeSet<String>>,
+    pub agent_focus: State<Option<String>>,
     pub mobile_navigation: State<bool>,
     pub browser_top_clearance: State<f32>,
     pub browser_viewport: State<Option<Size>>,
@@ -160,7 +161,8 @@ impl Model {
             buffer: State::new(crate::buffer::BufferState::default()),
             buffer_requests: State::new(None),
             preferences: State::new(crate::settings::Preferences::default()),
-            sidebar_reset: State::new(0),
+            collapsed_agents: State::new(BTreeSet::new()),
+            agent_focus: State::new(None),
             mobile_navigation: State::new(false),
             browser_top_clearance: State::new(crate::platform::top_clearance()),
             browser_viewport: State::new(None),
@@ -1167,6 +1169,27 @@ impl Model {
             self.snapshot.get_untracked().revision,
             Saved::Action,
         );
+    }
+    /// Holds the open session's queued turns, or resumes held ones.
+    pub fn toggle_queue(&self) {
+        let snapshot = self.snapshot.get_untracked();
+        let session_id = self.session.get_untracked();
+        let held = snapshot
+            .submissions
+            .iter()
+            .any(|s| s.session_id == session_id && s.state == SubmissionState::Paused);
+        let queued = snapshot
+            .submissions
+            .iter()
+            .any(|s| s.session_id == session_id && s.state == SubmissionState::Queued);
+        let command = if held {
+            Command::ResumeQueue { session_id }
+        } else if queued {
+            Command::PauseQueue { session_id }
+        } else {
+            return;
+        };
+        self.submit(command, snapshot.revision, Saved::Action);
     }
     pub fn stop_worker(&self) {
         if !self.snapshot.get_untracked().sessions.iter().any(|s| {

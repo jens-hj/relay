@@ -354,17 +354,7 @@ fn authorize(
             "This worker has no resumable thread; start a new linked worker",
         ));
     }
-    runtime::authorize_session(
-        &candidate,
-        session
-            .issue_id
-            .as_deref()
-            .ok_or_else(|| Error::invalid("Session has no linked issue"))?,
-        &session.director_id,
-        approved,
-        &session.role,
-        config,
-    )
+    crate::agent_tools::authorize_session(snapshot, &session, approved, config)
 }
 
 pub(super) fn apply(
@@ -586,7 +576,42 @@ pub(super) fn apply(
             submission.approve_implementation = approve_implementation;
             submission.last_edit_request = Some(request.into());
         }
+        Command::PauseQueue { session_id } => {
+            if !snapshot
+                .submissions
+                .iter()
+                .any(|s| s.session_id == session_id && s.state == SubmissionState::Queued)
+            {
+                return Err(Error::invalid("Nothing is queued to pause"));
+            }
+            pause(snapshot, &session_id, "Queue paused; resume to continue");
+        }
         Command::ResumeQueue { session_id } => {
+            // While a turn runs, resuming only releases the held turns; they
+            // follow the current turn as queued turns do.
+            let running = snapshot
+                .sessions
+                .iter()
+                .find(|s| s.id == session_id)
+                .and_then(|s| s.worker.as_ref())
+                .is_some_and(|w| runtime::active(&w.status));
+            if running {
+                let mut released = false;
+                for item in snapshot
+                    .submissions
+                    .iter_mut()
+                    .filter(|s| s.session_id == session_id && s.state == SubmissionState::Paused)
+                {
+                    item.state = SubmissionState::Queued;
+                    item.error = None;
+                    released = true;
+                }
+                if !released {
+                    return Err(Error::invalid("Agent is already running"));
+                }
+                snapshot.revision += 1;
+                return Ok(None);
+            }
             let next = snapshot
                 .submissions
                 .iter()
@@ -690,13 +715,20 @@ pub(super) fn advance(workspace: &Workspace, session: &str, run: &str) -> Result
             _ => SubmissionState::Failed,
         };
     }
+    // A held queue launches nothing until it is resumed, except a turn
+    // promoted to replace this run.
+    let held = snapshot
+        .submissions
+        .iter()
+        .any(|s| s.session_id == session && s.state == SubmissionState::Paused);
     let next = snapshot
         .submissions
         .iter()
         .find(|s| {
             s.session_id == session
                 && s.state == SubmissionState::Queued
-                && (status == WorkerStatus::Completed || s.interrupts_run.as_deref() == Some(run))
+                && ((status == WorkerStatus::Completed && !held)
+                    || s.interrupts_run.as_deref() == Some(run))
         })
         .cloned();
     if store.closing || next.is_none() {

@@ -26,6 +26,43 @@ pub(super) fn target(input: &Value) -> String {
     .unwrap_or_default()
 }
 
+pub(super) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// A new running call observed now. Details and exit codes are filled in on completion.
+pub(super) fn call(
+    run: &str,
+    name: &str,
+    kind: ToolKind,
+    input: String,
+    target: String,
+) -> ToolCall {
+    ToolCall {
+        run_id: run.into(),
+        name: name.into(),
+        kind,
+        state: ToolState::Running,
+        input,
+        target,
+        directory: None,
+        exit_code: None,
+        started_ms: Some(now_ms()),
+        finished_ms: None,
+        detail: None,
+    }
+}
+
+/// Record a terminal state once, preserving the first observed finish time.
+pub(super) fn finish(message: &mut Message, state: ToolState) {
+    if let Some(tool) = &mut message.tool {
+        tool.state = state;
+        tool.finished_ms.get_or_insert_with(now_ms);
+    }
+}
+
 pub(super) fn start(
     snapshot: &mut Snapshot,
     session: &str,
@@ -40,6 +77,11 @@ pub(super) fn start(
             .as_ref()
             .is_none_or(|t| t.state == ToolState::Running)
         {
+            let mut tool = tool;
+            if let Some(old) = &message.tool {
+                tool.started_ms = old.started_ms.or(tool.started_ms);
+                tool.detail = tool.detail.or_else(|| old.detail.clone());
+            }
             message.tool = Some(tool);
         }
         return;

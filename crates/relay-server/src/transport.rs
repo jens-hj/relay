@@ -883,8 +883,136 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            11
+            12
         );
+    }
+
+    #[test]
+    fn schema_eleven_migration_loads_protocol_four_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("db");
+        let store = Store::open(&path, DirectorProfile::default()).unwrap();
+        let mut value = serde_json::to_value(archive()).unwrap();
+        value["protocol_version"] = 4.into();
+        value.as_object_mut().unwrap().remove("usage_limits");
+        value.as_object_mut().unwrap().remove("usage_ledger");
+        for session in value["sessions"].as_array_mut().unwrap() {
+            for field in ["parent_session_id", "spawn", "compactions"] {
+                session.as_object_mut().unwrap().remove(field);
+            }
+        }
+        value["messages"][0]["tool"] = serde_json::json!({"run_id":"r","name":"Bash","kind":"terminal","state":"completed","input":"ls","target":"ls","directory":null,"exit_code":0});
+        value["messages"][1]["tool"] = serde_json::json!({"run_id":"r","name":"WebSearch","kind":"web","state":"completed","input":"{}","target":"q","directory":null,"exit_code":null});
+        store
+            .connection
+            .execute(
+                "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                [value.to_string()],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute_batch(
+                "PRAGMA user_version=11; INSERT INTO receipts VALUES('preserved','request');",
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path, DirectorProfile::default()).unwrap();
+        let migrated = store.snapshot().unwrap();
+        assert_eq!(migrated.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(migrated.messages.len(), 1000);
+        assert_eq!(
+            migrated.messages[0].tool.as_ref().unwrap().kind,
+            ToolKind::Run
+        );
+        assert_eq!(
+            migrated.messages[1].tool.as_ref().unwrap().kind,
+            ToolKind::Fetch
+        );
+        assert!(migrated.messages[0].tool.as_ref().unwrap().detail.is_none());
+        assert!(migrated.usage_limits.is_empty() && migrated.usage_ledger.is_empty());
+        assert!(
+            migrated
+                .sessions
+                .iter()
+                .all(|s| s.parent_session_id.is_none()
+                    && s.spawn.is_none()
+                    && s.compactions.is_empty())
+        );
+        let stored: String = store
+            .connection
+            .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(!stored.contains("\"terminal\""));
+        let receipts: u32 = store
+            .connection
+            .query_row("SELECT COUNT(*) FROM receipts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(receipts, 1);
+        assert_eq!(
+            store
+                .connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            12
+        );
+    }
+
+    #[test]
+    fn usage_records_are_published_as_record_deltas() {
+        let mut old = metadata(&archive());
+        old.protocol_version = PROTOCOL_VERSION;
+        let mut new = old.clone();
+        new.revision += 1;
+        new.record_usage_limit(UsageLimit::new(
+            Harness::Codex,
+            UsageWindow::FiveHour,
+            12.5,
+            300,
+            Some(100),
+            1,
+        ));
+        new.record_usage(
+            UsageEntry {
+                id: "run".into(),
+                session_id: "session-plan".into(),
+                harness: Harness::ClaudeCode,
+                model: Some("model".into()),
+                input_tokens: 10,
+                cached_input_tokens: 2,
+                output_tokens: 3,
+                completed_at: 1,
+            },
+            1,
+        );
+        let projected = metadata(&new);
+        assert_eq!(projected.usage_limits, new.usage_limits);
+        assert_eq!(projected.usage_ledger, new.usage_ledger);
+        let delta = relay_core::Delta::between(
+            &serde_json::to_value(&old).unwrap(),
+            &serde_json::to_value(&projected).unwrap(),
+        );
+        let text = serde_json::to_string(&delta).unwrap();
+        assert!(
+            text.contains("\"usage_limits\":{\"op\":\"records\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("\"usage_ledger\":{\"op\":\"records\""),
+            "{text}"
+        );
+        let mut client = old.clone();
+        relay_core::StreamEvent::Update {
+            base_revision: old.revision,
+            revision: new.revision,
+            delta,
+            history: Default::default(),
+        }
+        .apply(&mut client)
+        .unwrap();
+        assert_eq!(client, projected);
     }
 
     #[tokio::test]

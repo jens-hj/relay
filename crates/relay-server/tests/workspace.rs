@@ -89,6 +89,17 @@ async fn protocol_guard_and_multiple_local_projects_round_trip_without_remote_cr
         "protocol_mismatch"
     );
     assert_eq!(snapshot(&server).await, initial);
+    assert_eq!(PROTOCOL_VERSION, 5);
+    let previous = reqwest::Client::new()
+        .post(format!("{}/v1/commands", server.endpoint))
+        .bearer_auth(TOKEN)
+        .header("x-relay-protocol", "4")
+        .json(&envelope(initial.revision, comment()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(previous.status(), 409);
+    assert_eq!(snapshot(&server).await, initial);
     let mut current = initial;
     for name in ["One", "Two"] {
         let request = envelope(
