@@ -344,3 +344,26 @@ fn typing(model: Model) -> bool {
 pub(crate) fn press(handler: impl Fn() + 'static) -> relay_ui::prelude::OnPress {
     std::rc::Rc::new(handler)
 }
+
+/// A relay-ui cell action for ruled grids and strips: the control fills a
+/// 36px cell closed by hairlines on its right and bottom, so neighbours
+/// share one rule. `disabled` is read reactively.
+pub(crate) fn action_cell(
+    label: impl Into<String>,
+    text: impl Into<String>,
+    disabled: impl Fn() -> bool + 'static,
+    handler: impl Fn() + 'static,
+) -> Element {
+    use relay_ui::prelude::{CellButton, CellButtonProps, Label, LabelProps, TextRole};
+    let label = label.into();
+    let text = text.into();
+    let blocked = Derived::new(disabled);
+    view! {
+        row height:{px(36.0)}px min-width:0px shrink:0
+            stroke:(width:{px(1.0)} color:ground.hairline edges:(right bottom)) {
+            CellButton label:(label) on-press:(press(handler)) disabled:(blocked) {
+                Label text:(text) role:(TextRole::Label) weight:500
+            }
+        }
+    }
+}

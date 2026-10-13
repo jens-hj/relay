@@ -1,6 +1,7 @@
 //! The conversation's relay-ui parts: the session header, tool calls, spawn
 //! and approval blocks, queued turns, and the ledger's settings.
 
+use crate::ui::press;
 use crate::ui::{NavigationButton, NavigationButtonProps};
 use crate::window_chrome::{WindowControlsSpace, WindowControlsSpaceProps};
 use crate::{adapt, buffer, icons::*, model::Model};
@@ -11,7 +12,7 @@ use relay_ui::prelude::{
     ModelHue, ModelIdentity, OnPress, Opening, SessionHeader, SessionHeaderProps, SpawnBlock,
     SpawnBlockProps, SpawnChild, ToolCallRow, ToolCallRowProps, ToolCallView, ToolDetail,
 };
-use relay_ui::style::*;
+use relay_ui::prelude::{CellButton, CellButtonProps, Label, LabelProps, Rule, TextRole, Tone};
 use relay_ui::tokens::{ToolKind as UiKind, ground, px};
 use std::rc::Rc;
 
@@ -125,10 +126,11 @@ pub(crate) fn SessionHead(model: Model, menu: State<bool>, compact: Derived<bool
             @pointer:{move |event, ctx| crate::window_chrome::drag_header(model, event, ctx)} {
             NavigationButton model:(model)
             { parent.adopt(&host); }
-            button #relay.header-action @click:{menu.set(!menu.get_untracked());} width:{px(44.0)}px
-                pad:0px label:"Session actions"
-                stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
-                icon size:{px(16.0)}px more-icon
+            row width:{px(44.0)}px shrink:0 {
+                CellButton label:"Session actions" rule:(Rule::Left) horizontal-inset:(0.0)
+                    selected:(menu) on-press:(press(move || menu.set(!menu.get_untracked()))) {
+                    icon size:{px(16.0)}px more-icon
+                }
             }
             WindowControlsSpace
         }
@@ -295,29 +297,27 @@ pub(crate) fn QueuedTurn(model: Model, submission: String) -> Element {
                 stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {
                 col width:{px(34.0)}px shrink:0 align:center pad:(top:{px(9.0)}px)
                     stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
-                    row #relay.eyebrow height:min-content width:max-content {
-                        text {position.get()}
-                    }
+                    Label text:(position) role:(TextRole::Caption) tone:(Tone::Muted) weight:500
                 }
-                col width:1fr min-width:0px height:min-content gap:{px(8.0)}px
-                    pad:(horizontal:{px(12.0)}px vertical:{px(9.0)}px) {
-                    row height:min-content font-size:{px(12.5)}px {
-                        text {current.get().map(|s| plain_text(&s.parts)).unwrap_or_default()}
-                    }
-                    if current.get().is_some_and(|s| s.error.is_some()) {
-                        row #relay.caption height:min-content {
-                            text {current.get().and_then(|s| s.error).unwrap_or_default()}
+                col width:1fr min-width:0px height:min-content gap:0px {
+                    col height:min-content gap:{px(8.0)}px
+                        pad:(horizontal:{px(12.0)}px vertical:{px(9.0)}px) {
+                        Label
+                            text:(Derived::new(move || current.get().map(|s| plain_text(&s.parts)).unwrap_or_default()))
+                            role:(TextRole::Body)
+                        if current.get().is_some_and(|s| s.error.is_some()) {
+                            Label
+                                text:(Derived::new(move || current.get().and_then(|s| s.error).unwrap_or_default()))
+                                role:(TextRole::Caption) tone:(Tone::Muted)
                         }
                     }
-                    row height:min-content gap:{px(6.0)}px {
-                        button #relay.action
-                            @click:{model.submit(Command::CancelTurn{submission_id:id.get_untracked()},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
-                            label:"Cancel queued message" "Cancel"
-                        button #relay.action
-                            @click:{buffer::edit_queued(model,&id.get_untracked());}
-                            label:"Edit queued message" "Edit"
-                        button #relay.action @click:{buffer::promote(model,&id.get_untracked());}
-                            label:"Send queued message now" "Send now"
+                    row height:{px(32.0)}px gap:0px
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
+                        {
+                            parent.adopt(&queued_action("Cancel queued message", "Cancel", true, move || model.submit(Command::CancelTurn { submission_id: id.get_untracked() }, model.snapshot.get_untracked().revision, crate::model::Saved::Action)));
+                            parent.adopt(&queued_action("Edit queued message", "Edit", false, move || buffer::edit_queued(model, &id.get_untracked())));
+                            parent.adopt(&queued_action("Send queued message now", "Send now", false, move || buffer::promote(model, &id.get_untracked())));
+                        }
                     }
                 }
             }
@@ -399,4 +399,21 @@ pub(crate) fn choose_effort(model: Model, step: u8) {
         snapshot.revision,
         crate::model::Saved::Action,
     );
+}
+
+/// An action cell of a queued message, divided from the one before it.
+fn queued_action(
+    label: &'static str,
+    text: &'static str,
+    first: bool,
+    handler: impl Fn() + 'static,
+) -> Element {
+    let rule = if first { Rule::None } else { Rule::Left };
+    view! {
+        row width:max-content shrink:0 {
+            CellButton label:(label) rule:(rule) horizontal-inset:(12.0) on-press:(press(handler)) {
+                Label text:(text) role:(TextRole::Label) weight:500
+            }
+        }
+    }
 }

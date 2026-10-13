@@ -5239,7 +5239,8 @@ fn wide_sessions_turn_narrow_at_double_scale_without_rebuilding_the_draft() {
 /// and after a theme switch.
 #[test]
 fn live_text_typography_survives_content_and_theme_updates() {
-    use relay_ui::{style::relay, tokens::ground};
+    use relay_ui::prelude::{Label, LabelProps, TextRole};
+    use relay_ui::tokens::ground;
     mosaic::core::builtins::install();
     install_theme(&theme(ThemeVariant::Dark, 1.0));
     let scope = Scope::new(|| {});
@@ -5256,9 +5257,11 @@ fn live_text_typography_survives_content_and_theme_updates() {
                     text {format!("container {}", value.get())}
                 }
                 text font-size:13px {format!("leaf {}", value.get())}
-                text #relay.caption {format!("class {}", value.get())}
-                row #relay.caption {
-                    text {format!("parent class {}", value.get())}
+                Label text:(Derived::new(move || format!("class {}", value.get())))
+                    role:(TextRole::Label)
+                row font-size:24px {
+                    Label text:(Derived::new(move || format!("parent class {}", value.get())))
+                        role:(TextRole::Label)
                 }
                 text font-color:ground.muted {format!("leaf color {}", value.get())}
                 row font-color:ground.muted {

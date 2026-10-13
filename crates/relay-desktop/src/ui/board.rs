@@ -240,22 +240,13 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                     NewTaskForm model:(model) open:(creating) draft:(draft)
                 }
                 if managing.get() {
-                    col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
-                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                        Columns model:(model) open:(managing)
-                    }
+                    Columns model:(model) open:(managing)
                 }
                 if model.snapshot.get().operations.iter().any(|o| o.project_id == model.project.get() && o.state != OperationState::Completed) {
-                    col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
-                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                        Operations model:(model)
-                    }
+                    Operations model:(model)
                 }
                 if history.get() {
-                    col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
-                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                        OperationHistory model:(model) open:(history)
-                    }
+                    OperationHistory model:(model) open:(history)
                 }
             }
             if stacked.get() {

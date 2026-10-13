@@ -1,16 +1,15 @@
+use crate::model::{Model, Page, Saved};
 use crate::panels::{BoundedPanel, BoundedPanelProps};
-use crate::ui::{Readout, ReadoutProps};
-use crate::{
-    controls::{ButtonStyle, button},
-    model::{Model, Page, Saved},
-};
-use mosaic::core::theme::color;
+use crate::ui::{Readout, ReadoutProps, press};
 use mosaic::prelude::*;
 use relay_core::*;
-use relay_ui::prelude::{Segments, SegmentsProps};
-use relay_ui::style::*;
-use relay_ui::surfaces::{Module, ModuleProps};
-use relay_ui::tokens::{ground, px, status};
+use relay_ui::Live;
+use relay_ui::prelude::{
+    CellButton, CellButtonProps, Label, LabelProps, OnPress, PrimaryButton, PrimaryButtonProps,
+    Rule, Segments, SegmentsProps, TextRole, Tone, UiText,
+};
+use relay_ui::surfaces::{Field, FieldProps, Module, ModuleProps, TextInput, TextInputProps};
+use relay_ui::tokens::{ground, px};
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ProjectDraft {
@@ -66,11 +65,69 @@ impl Default for PublishDraft {
     }
 }
 
+/// A full-width action cell over a hairline; `selected` marks the current
+/// choice of a list.
+#[component]
+pub(crate) fn ActionCell(
+    label: UiText,
+    on_press: OnPress,
+    /// The visible text; the label by default.
+    #[prop(optional)]
+    text: Option<UiText>,
+    #[prop(default = Live::fixed(false))] disabled: Live<bool>,
+    #[prop(default = Live::fixed(false))] selected: Live<bool>,
+) -> Element {
+    let text = text.unwrap_or_else(|| label.clone());
+    view! {
+        row height:{px(36.0)}px shrink:0
+            stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+            CellButton label:(label) on-press:(on_press) disabled:(disabled) selected:(selected)
+                start:true horizontal-inset:(18.0) {
+                Label text:(text) role:(TextRole::Label) weight:500
+            }
+        }
+    }
+}
+
+/// A muted note in a padded cell, over a hairline unless it ends its
+/// section.
+#[component]
+pub(crate) fn Caption(
+    text: UiText,
+    #[prop(default = true)] rule: bool,
+    #[prop(default = Tone::Muted)] tone: Tone,
+) -> Element {
+    view! {
+        row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px)
+            stroke:(width:{px(if rule {1.0} else {0.0})} color:ground.hairline edges:bottom) {
+            Label text:(text) role:(TextRole::Caption) tone:(tone)
+        }
+    }
+}
+
+/// A text input filling its ruled cell.
+#[component]
+pub(crate) fn InputCell(
+    value: State<String>,
+    label: String,
+    #[prop(default = UiText::fixed(String::new()))] placeholder: UiText,
+    #[prop(default = false)] multiline: bool,
+    #[prop(optional)] height: Option<f32>,
+) -> Element {
+    view! {
+        row height:min-content shrink:0
+            stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+            TextInput value:(value) label:(label) placeholder:(placeholder) multiline:(multiline)
+                height:(height) framed:false
+        }
+    }
+}
+
 #[component]
 pub fn ProjectPage(model: Model) -> Element {
     view! {
         scroll {
-            col height:min-content pad:{px(28.0)}px gap:{px(24.0)}px {
+            col height:min-content gap:0px {
                 if model.page.get() == Page::NewProject {
                     ProjectSetup model:(model)
                 } else if model.page.get() == Page::Connections {
@@ -105,68 +162,73 @@ fn ProjectSetup(model: Model) -> Element {
             d.root = root.get();
         })
     });
+    let blocked = Derived::new(move || model.busy.get() || !model.connected.get());
+    let create = press(move || {
+        let draft = model.project_draft.get_untracked();
+        if draft.name.trim().is_empty() || !std::path::Path::new(draft.root.trim()).is_absolute() {
+            model
+                .notice
+                .set("Enter a name and an absolute root on the server.".into());
+        } else {
+            model.submit(
+                Command::CreateProject {
+                    name: draft.name.trim().into(),
+                    root: draft.root.trim().into(),
+                    connections: draft.connections.clone(),
+                },
+                model.snapshot.get_untracked().revision,
+                Saved::CreatedProject(draft),
+            );
+        }
+    });
+    let form_label = Derived::new(move || {
+        if connections_open.get() {
+            "Hide connection form".to_string()
+        } else {
+            "Add connection".to_string()
+        }
+    });
     view! {
-        col #relay.module max-width:{px(760.0)}px gap:0px {
-            row #relay.module-head {
-                row #relay.eyebrow height:min-content {
-                    text "Project"
-                }
+        col height:min-content gap:0px {
+            Module title:"Project" caps:true {
+                Field label:"Name" name:(Some("Project name".to_string())) value:(name)
+                    placeholder:"Project name"
+                Field label:"Root on server"
+                    name:(Some("Absolute project root on server".to_string())) value:(root)
+                    placeholder:"/home/you/projects/project"
+                Caption
+                    text:"The root is on the connected server. A local board is created automatically."
+                    rule:false
             }
-            row #relay.eyebrow height:min-content pad:{px(12.0)}px {
-                text text-transform:uppercase letter-spacing:{px(0.6)}px "Name"
-            }
-            input #relay.field width:fill label:"Project name" placeholder:"Project name"
-                stroke:(width:{px(1.0)} color:ground.rule edges:bottom) name
-            row #relay.eyebrow height:min-content pad:{px(12.0)}px {
-                text text-transform:uppercase letter-spacing:{px(0.6)}px "Absolute root on server"
-            }
-            input #relay.field width:fill label:"Absolute project root on server"
-                stroke:(width:{px(1.0)} color:ground.rule edges:bottom)
-                placeholder:"/home/you/projects/project" root
-            row #relay.caption height:min-content pad:{px(12.0)}px
-                stroke:(width:{px(1.0)} color:ground.rule edges:bottom) {
-                text "The root is on the connected server. A local board is created automatically."
-            }
-            row #relay.module-head {
-                row #relay.eyebrow height:min-content {
-                    text "Connections"
-                }
-            }
-            for (index, _connection) in {model.project_draft.get().connections.into_iter().enumerate()} {
-                let index = *index;
-                let connection = Derived::new(move || model.project_draft.get().connections.get(index).cloned());
-                row height:min-content align:center gap:0px
-                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                    row #relay.value width:1fr min-width:0px height:min-content pad:{px(12.0)}px {
-                        text {connection.get().as_ref().map(connection_label).unwrap_or_default()}
-                    }
-                    button #relay.header-action
-                        @click:{model.project_draft.update(|d| {d.connections.remove(index);});}
-                        stroke:(width:{px(1.0)} color:ground.hairline edges:left)
-                        label:"Remove initial connection" "Remove"
-                }
-            }
-            button #relay.action @click:{connections_open.set(!connections_open.get_untracked());}
-                width:fill justify:start stroke:(width:{px(1.0)} color:ground.rule edges:bottom)
-                label:{if connections_open.get(){"Hide connection form"}else{"Add connection"}}
-                focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
-                {if connections_open.get(){"Hide connection form"}else{"Add connection"}}
-            if connections_open.get() {
-                ConnectionForm model:(model) initial:true
-            }
-            button #relay.primary
-                @click:{
-                        let draft = model.project_draft.get_untracked();
-                        if draft.name.trim().is_empty() || !std::path::Path::new(draft.root.trim()).is_absolute() {
-                            model.notice.set("Enter a name and an absolute root on the server.".into());
-                        } else {
-                            model.submit(Command::CreateProject {name:draft.name.trim().into(),root:draft.root.trim().into(),connections:draft.connections.clone()},model.snapshot.get_untracked().revision,Saved::CreatedProject(draft));
+            Module title:"Connections" caps:true {
+                for (index, _connection) in {model.project_draft.get().connections.into_iter().enumerate()} {
+                    let index = *index;
+                    let connection = Derived::new(move || model.project_draft.get().connections.get(index).cloned());
+                    row height:{px(40.0)}px align:center gap:0px
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                        row width:1fr min-width:0px height:min-content
+                            pad:(horizontal:{px(18.0)}px vertical:0px) {
+                            Label
+                                text:(Derived::new(move || connection.get().as_ref().map(connection_label).unwrap_or_default()))
+                                role:(TextRole::Body)
+                        }
+                        row width:max-content shrink:0 {
+                            CellButton label:"Remove initial connection" rule:(Rule::Left)
+                                on-press:(press(move || model.project_draft.update(|d| { d.connections.remove(index); }))) {
+                                Label text:"Remove" role:(TextRole::Label) weight:500
+                            }
                         }
                     }
-                width:fill label:"Create project"
-                disabled:{model.busy.get() || !model.connected.get()}
-                focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
-                "Create project"
+                }
+                ActionCell label:(form_label)
+                    on-press:(press(move || connections_open.set(!connections_open.get_untracked())))
+                if connections_open.get() {
+                    ConnectionForm model:(model) initial:true
+                }
+            }
+            row height:{px(44.0)}px {
+                PrimaryButton text:"Create project" on-press:(create) disabled:(blocked) fill:true
+            }
         }
     }
 }
@@ -221,49 +283,175 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
     }
     let select: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot| kind.set(slot));
     let picker_width = State::new(0.0f32);
+    let add = press(move || {
+        let address = address.get_untracked().trim().to_owned();
+        let connection = match kind.get_untracked() {
+            0 if !address.is_empty() => Some(ConnectionInput::Repository { remote: address }),
+            1 if std::path::Path::new(&address).is_absolute() => {
+                Some(ConnectionInput::Directory { path: address })
+            }
+            2 | 3 if !address.is_empty() => number
+                .get_untracked()
+                .parse::<u64>()
+                .ok()
+                .filter(|n| *n > 0)
+                .map(|number| ConnectionInput::Board {
+                    source: if kind.get_untracked() == 2 {
+                        BoardSource::Github {
+                            owner: address,
+                            number,
+                            url: String::new(),
+                        }
+                    } else {
+                        BoardSource::Gitlab {
+                            host: host.get_untracked(),
+                            path: address,
+                            group: group.get_untracked(),
+                            number,
+                            url: String::new(),
+                        }
+                    },
+                }),
+            _ => None,
+        };
+        if let Some(connection) = connection {
+            if initial {
+                model
+                    .project_draft
+                    .update(|d| d.connections.push(connection));
+            } else {
+                model.action(Command::AddConnection {
+                    project_id: model.project.get_untracked(),
+                    connection,
+                });
+            }
+        } else {
+            model
+                .notice
+                .set("Enter a valid connection address and existing board number.".into());
+        }
+    });
+    let blocked = Derived::new(move || !initial && (model.busy.get() || !model.connected.get()));
     view! {
         col height:min-content gap:0px {
-            row height:{px(34.0)}px @layout:{move |rect:Rect| picker_width.set(rect.size.width)} {
+            row height:{px(40.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
+                @layout:{move |rect:Rect| picker_width.set(rect.size.width)} {
                 scroll width:fill {
                     Segments name:("Connection type".to_string())
                         options:(vec!["Repository".into(),"Directory".into(),"GitHub board".into(),"GitLab board".into()])
                         selected:(relay_ui::Live::from(Derived::new(move || kind.get())))
                         on-select:(select)
                 } as picker_scroll
-                { picker_scroll.content().style_dyn(move || Style::column().width(picker_width.get().max(px(448.0))).height(px(34.0)).shrink(0.0)); }
+                { picker_scroll.content().style_dyn(move || Style::column().width(picker_width.get().max(px(448.0))).height(px(40.0)).shrink(0.0)); }
             }
-            input #relay.field width:fill label:"Connection address"
-                placeholder:{match kind.get(){0=>"Repository URL or SSH remote",1=>"Absolute directory on server",2=>"GitHub user or organization",_=>"GitLab project or group path"}}
-                address
+            InputCell value:(address) label:"Connection address"
+                placeholder:(Derived::new(move || match kind.get() {0=>"Repository URL or SSH remote",1=>"Absolute directory on server",2=>"GitHub user or organization",_=>"GitLab project or group path"}.to_string()))
             if kind.get() == 3 {
-                input #relay.field width:fill label:"GitLab host" host
-                button #relay.action @click:{group.set(!group.get_untracked());} width:fill
-                    focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
-                    {if group.get(){"Group board"}else{"Project board"}}
+                InputCell value:(host) label:"GitLab host"
+                ActionCell
+                    label:(Derived::new(move || if group.get() {"Group board".to_string()} else {"Project board".to_string()}))
+                    on-press:(press(move || group.set(!group.get_untracked())))
             }
             if kind.get() >= 2 {
-                input #relay.field width:fill label:"Board number"
-                    placeholder:"Existing board number" number
+                InputCell value:(number) label:"Board number" placeholder:"Existing board number"
             }
-            row #relay.caption height:min-content pad:{px(12.0)}px {
-                text
-                    {if kind.get()==0 {"Repositories are cloned by the server."} else if kind.get()==1 {"Directory access follows the session execution mode."} else {"Connect an existing remote board."}}
-            }
-            button #relay.action
-                @click:{
-                    let address = address.get_untracked().trim().to_owned();
-                    let connection = match kind.get_untracked() {
-                        0 if !address.is_empty() => Some(ConnectionInput::Repository {remote:address}),
-                        1 if std::path::Path::new(&address).is_absolute() => Some(ConnectionInput::Directory {path:address}),
-                        2 | 3 if !address.is_empty() => number.get_untracked().parse::<u64>().ok().filter(|n| *n>0).map(|number| ConnectionInput::Board {source:if kind.get_untracked()==2 {BoardSource::Github{owner:address,number,url:String::new()}} else {BoardSource::Gitlab{host:host.get_untracked(),path:address,group:group.get_untracked(),number,url:String::new()}}}),
-                        _ => None,
-                    };
-                    if let Some(connection)=connection {if initial {model.project_draft.update(|d|d.connections.push(connection));} else {model.action(Command::AddConnection{project_id:model.project.get_untracked(),connection});}} else {model.notice.set("Enter a valid connection address and existing board number.".into());}
+            Caption
+                text:(Derived::new(move || if kind.get()==0 {"Repositories are cloned by the server.".to_string()} else if kind.get()==1 {"Directory access follows the session execution mode.".to_string()} else {"Connect an existing remote board.".to_string()}))
+            ActionCell label:"Add connection" on-press:(add) disabled:(blocked)
+        }
+    }
+}
+
+/// One project connection: its name and state, where it points, its error
+/// and its actions.
+#[component]
+fn ConnectionRow(model: Model, connection: ProjectConnection) -> Element {
+    let id = connection.id.clone();
+    let fallback = connection.clone();
+    let current_id = id.clone();
+    let connection = Derived::new(move || {
+        model
+            .snapshot
+            .get()
+            .connections
+            .into_iter()
+            .find(|c| c.id == current_id)
+            .unwrap_or_else(|| fallback.clone())
+    });
+    let blocked = Derived::new(move || model.busy.get() || !model.connected.get());
+    let retry_id = id.clone();
+    let retry = press(move || {
+        model.action(Command::RetryConnection {
+            connection_id: retry_id.clone(),
+        })
+    });
+    let remove = press(move || {
+        model.action(Command::RemoveConnection {
+            connection_id: id.clone(),
+        })
+    });
+    let where_to = Derived::new(move || match &connection.get().kind {
+        ConnectionKind::Repository {
+            remote, checkout, ..
+        } => format!(
+            "{remote}\n{}",
+            checkout.as_deref().unwrap_or("Clone pending")
+        ),
+        ConnectionKind::Directory { path } => path.clone(),
+        ConnectionKind::Board { board_id } => model
+            .snapshot
+            .get()
+            .boards
+            .iter()
+            .find(|b| &b.id == board_id)
+            .map(|b| source_label(&b.source))
+            .unwrap_or_else(|| "Board unavailable".into()),
+    });
+    view! {
+        col height:min-content gap:0px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+            col height:min-content gap:{px(6.0)}px
+                pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px) {
+                row height:min-content align:center gap:{px(8.0)}px {
+                    row width:1fr min-width:0px height:min-content {
+                        Label text:(Derived::new(move || connection.get().name))
+                            role:(TextRole::Label) weight:600
+                    }
+                    Label
+                        text:(Derived::new(move || format!("{:?}{}", connection.get().state, if connection.get().enabled {""} else {" · disabled"})))
+                        role:(TextRole::Caption) tone:(Tone::Muted)
                 }
-                width:fill label:"Add connection"
-                disabled:{!initial && (model.busy.get() || !model.connected.get())}
-                focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
-                "Add connection"
+                Label text:(where_to) role:(TextRole::Caption) tone:(Tone::Muted)
+                if connection.get().error.is_some() {
+                    Label text:(Derived::new(move || connection.get().error.unwrap_or_default()))
+                        role:(TextRole::Caption)
+                        tone:(Tone::Signal(relay_ui::tokens::Signal::Failed))
+                }
+            }
+            if !connection.get().enabled {
+                row height:{px(36.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
+                    CellButton
+                        label:(Derived::new(move || format!("Restore connection {}", connection.get().name)))
+                        on-press:(retry.clone()) disabled:(blocked) start:true
+                        horizontal-inset:(18.0) {
+                        Label text:"Restore connection" role:(TextRole::Label) weight:500
+                    }
+                }
+            } else if matches!(connection.get().state, ConnectionState::Failed | ConnectionState::Interrupted) {
+                row height:{px(36.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
+                    CellButton label:"Retry connection" on-press:(retry.clone()) disabled:(blocked)
+                        start:true horizontal-inset:(18.0) {
+                        Label text:"Retry connection" role:(TextRole::Label) weight:500
+                    }
+                }
+            }
+            if connection.get().enabled {
+                row height:{px(36.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
+                    CellButton label:"Remove connection" on-press:(remove.clone())
+                        disabled:(blocked) start:true horizontal-inset:(18.0) {
+                        Label text:"Remove connection" role:(TextRole::Label) weight:500
+                    }
+                }
+            }
         }
     }
 }
@@ -271,57 +459,13 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
 #[component]
 fn Connections(model: Model) -> Element {
     view! {
-        col height:min-content max-width:{px(760.0)}px gap:{px(24.0)}px {
-            Module title:("Connections".to_string()) caps:true {
+        col height:min-content gap:0px {
+            Module title:"Connections" caps:true {
                 for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && match &c.kind { ConnectionKind::Board{board_id} => model.snapshot.get().canonical_board_id(board_id) == board_id, _ => true }).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
-                    let id = State::new(connection.id.clone());
-                    let fallback=connection.clone();
-                    let connection = Derived::new(move || model.snapshot.get().connections.into_iter().find(|c|c.id==id.get()).unwrap_or_else(||fallback.clone()));
-                    col height:min-content gap:{px(6.0)}px pad:(bottom:{px(10.0)}px)
-                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                        row height:min-content align:center gap:{px(8.0)}px {
-                            row #relay.title width:1fr min-width:0px height:min-content
-                                font-size:{px(14.0)}px {
-                                text {connection.get().name}
-                            }
-                            row #relay.caption height:min-content width:max-content {
-                                text
-                                    {format!("{:?}{}",connection.get().state,if connection.get().enabled {""}else{" · disabled"})}
-                            }
-                        }
-                        row #relay.caption height:min-content {
-                            text
-                                {match &connection.get().kind {ConnectionKind::Repository{remote,checkout,..}=>format!("{remote}\n{}",checkout.as_deref().unwrap_or("Clone pending")),ConnectionKind::Directory{path}=>path.clone(),ConnectionKind::Board{board_id}=>model.snapshot.get().boards.iter().find(|b| &b.id==board_id).map(|b|source_label(&b.source)).unwrap_or_else(||"Board unavailable".into())}}
-                        }
-                        if connection.get().error.is_some() {
-                            row height:min-content font-size:{px(12.0)}px font-color:status.failed {
-                                text {connection.get().error.unwrap_or_default()}
-                            }
-                        }
-                        row height:min-content gap:{px(8.0)}px {
-                            if !connection.get().enabled {
-                                button #relay.action
-                                    @click:{model.action(Command::RetryConnection{connection_id:id.get_untracked()});}
-                                    label:{format!("Restore connection {}",connection.get().name)}
-                                    disabled:{model.busy.get() || !model.connected.get()}
-                                    "Restore connection"
-                            } else if matches!(connection.get().state,ConnectionState::Failed|ConnectionState::Interrupted) {
-                                button #relay.action
-                                    @click:{model.action(Command::RetryConnection{connection_id:id.get_untracked()});}
-                                    disabled:{model.busy.get() || !model.connected.get()}
-                                    "Retry connection"
-                            }
-                            if connection.get().enabled {
-                                button #relay.action
-                                    @click:{model.action(Command::RemoveConnection{connection_id:id.get_untracked()});}
-                                    disabled:{model.busy.get() || !model.connected.get()}
-                                    "Remove connection"
-                            }
-                        }
-                    }
+                    ConnectionRow model:(model) connection:(connection.clone())
                 }
             }
-            Module title:("New connection".to_string()) caps:true {
+            Module title:"New connection" caps:true {
                 ConnectionForm model:(model) initial:false
             }
             Operations model:(model)
@@ -339,35 +483,32 @@ pub fn TaskEditor(model: Model) -> Element {
     let title = State::new(issue.as_ref().map(|i| i.title.clone()).unwrap_or_default());
     let body = State::new(issue.map(|i| task_body(&i.body)).unwrap_or_default());
     let editing = State::new(false);
+    let blocked = Derived::new(move || model.busy.get() || !model.connected.get());
+    let save_blocked = Derived::new(move || blocked.get() || title.get().trim().is_empty());
+    let save = press(move || {
+        if let Some(issue_id) = model.issue.get_untracked() {
+            model.action(Command::UpdateTask {
+                issue_id,
+                title: title.get_untracked(),
+                body: body.get_untracked(),
+            });
+        }
+    });
     view! {
         col height:min-content gap:0px {
-            button #relay.action @click:{editing.set(!editing.get_untracked());} width:fill
-                justify:start stroke:(width:{px(1.0)} color:ground.rule edges:bottom)
-                focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) } "Edit task"
+            ActionCell label:"Edit task"
+                on-press:(press(move || editing.set(!editing.get_untracked()))) selected:(editing)
             if editing.get() {
-                input #relay.field width:fill label:"Task title"
-                    stroke:(width:{px(1.0)} color:ground.rule edges:bottom) title
-                input #relay.area multiline width:fill label:"Task body" height:{px(120.0)}px
-                    stroke:(width:{px(1.0)} color:ground.rule edges:bottom) body
-                button #relay.action
-                    @click:{if let Some(issue_id)=model.issue.get_untracked(){model.action(Command::UpdateTask{issue_id,title:title.get_untracked(),body:body.get_untracked()});}}
-                    width:fill
-                    disabled:{model.busy.get() || !model.connected.get() || title.get().trim().is_empty()}
-                    stroke:(width:{px(1.0)} color:ground.rule edges:bottom)
-                    focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
-                    "Save task"
-            }
-            if editing.get() {
+                InputCell value:(title) label:"Task title"
+                InputCell value:(body) label:"Task body" multiline:true height:(Some(120.0))
+                ActionCell label:"Save task" on-press:(save.clone()) disabled:(save_blocked)
                 for (_, column) in {model.board_columns().into_iter().map(|c|(c.id.clone(),c))} {
-                    let id = State::new(column.id.clone());
-                    let column_title = State::new(column.title.clone());
-                    button #relay.action
-                        @click:{if let (Some(board),Some(issue_id))=(model.selected_board(),model.issue.get_untracked()){model.action(Command::MoveTask{board_id:board.id,issue_id,column_id:id.get_untracked()});}}
-                        width:fill label:{format!("Move task to {}",column_title.get())}
-                        disabled:{model.busy.get() || !model.connected.get()}
-                        stroke:(width:{px(1.0)} color:ground.rule edges:bottom)
-                        focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
-                        {format!("Move to {}",column_title.get())}
+                    let id = column.id.clone();
+                    let column_title = column.title.clone();
+                    ActionCell label:(format!("Move task to {column_title}"))
+                        text:(Some(UiText::from(format!("Move to {column_title}"))))
+                        disabled:(blocked)
+                        on-press:(press(move || if let (Some(board), Some(issue_id)) = (model.selected_board(), model.issue.get_untracked()) { model.action(Command::MoveTask { board_id: board.id, issue_id, column_id: id.clone() }); }))
                 }
             }
         }
@@ -377,16 +518,31 @@ pub fn TaskEditor(model: Model) -> Element {
 #[component]
 pub(crate) fn Columns(model: Model, open: State<bool>) -> Element {
     let name = State::new(String::new());
+    let blocked = Derived::new(move || {
+        name.get().trim().is_empty() || model.busy.get() || !model.connected.get()
+    });
+    let add = move || {
+        if let Some(board) = model.selected_board() {
+            let mut columns = board.columns;
+            columns.push(BoardColumn {
+                id: uuid::Uuid::new_v4().to_string(),
+                title: name.get_untracked(),
+            });
+            model.action(Command::UpdateBoardColumns {
+                board_id: board.id,
+                columns,
+            });
+        }
+    };
     view! {
-        col height:min-content gap:{px(8.0)}px {
+        col height:min-content gap:0px {
             if open.get() && model.selected_board().is_some_and(|b|b.source==BoardSource::Local) {
-                input #relay.field label:"New column name" name
-                button #relay.action
-                    @click:{if let Some(board)=model.selected_board(){let mut columns=board.columns;columns.push(BoardColumn{id:uuid::Uuid::new_v4().to_string(),title:name.get_untracked()});model.action(Command::UpdateBoardColumns{board_id:board.id,columns});}}
-                    disabled:{name.get().trim().is_empty() || model.busy.get() || !model.connected.get()}
-                    "Add column"
-                for (_, column) in {model.board_columns().into_iter().map(|c|(c.id.clone(),c))} {
-                    ColumnEditor model:(model) column:(column.clone())
+                Module title:"Columns" caps:true {
+                    InputCell value:(name) label:"New column name" placeholder:"Column name"
+                    ActionCell label:"Add column" on-press:(press(add)) disabled:(blocked)
+                    for (_, column) in {model.board_columns().into_iter().map(|c|(c.id.clone(),c))} {
+                        ColumnEditor model:(model) column:(column.clone())
+                    }
                 }
             }
         }
@@ -405,20 +561,59 @@ fn ColumnEditor(model: Model, column: BoardColumn) -> Element {
             .iter()
             .any(|i| model.task_in_column(i, &id.get()))
     });
+    let rename_blocked = Derived::new(move || {
+        title.get().trim().is_empty() || model.busy.get() || !model.connected.get()
+    });
+    let delete_blocked = Derived::new(move || {
+        occupied.get()
+            || model.board_columns().len() < 2
+            || model.busy.get()
+            || !model.connected.get()
+    });
+    let rename = press(move || {
+        if let Some(mut board) = model.selected_board() {
+            if let Some(c) = board
+                .columns
+                .iter_mut()
+                .find(|c| c.id == id.get_untracked())
+            {
+                c.title = title.get_untracked();
+            }
+            model.action(Command::UpdateBoardColumns {
+                board_id: board.id,
+                columns: board.columns,
+            });
+        }
+    });
+    let delete = press(move || {
+        if let Some(mut board) = model.selected_board() {
+            board.columns.retain(|c| c.id != id.get_untracked());
+            model.action(Command::UpdateBoardColumns {
+                board_id: board.id,
+                columns: board.columns,
+            });
+        }
+    });
     view! {
-        col height:min-content gap:{px(6.0)}px {
-            input #relay.field label:"Column title" title
-            button #relay.action
-                @click:{if let Some(mut board)=model.selected_board(){if let Some(c)=board.columns.iter_mut().find(|c|c.id==id.get_untracked()){c.title=title.get_untracked();}model.action(Command::UpdateBoardColumns{board_id:board.id,columns:board.columns});}}
-                disabled:{title.get().trim().is_empty() || model.busy.get() || !model.connected.get()}
-                "Rename column"
-            button #relay.action
-                @click:{if let Some(mut board)=model.selected_board(){board.columns.retain(|c|c.id!=id.get_untracked());model.action(Command::UpdateBoardColumns{board_id:board.id,columns:board.columns});}}
-                disabled:{occupied.get() || model.board_columns().len()<2 || model.busy.get() || !model.connected.get()}
-                "Delete empty column"
+        col height:min-content gap:0px {
+            InputCell value:(title) label:"Column title"
+            grid height:min-content gap:0px
+                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
+                cols:{GridTracks::new([GridTrack::fr(1.0), GridTrack::fr(1.0)])} {
+                row height:{px(36.0)}px {
+                    CellButton label:"Rename column" on-press:(rename) disabled:(rename_blocked) {
+                        Label text:"Rename column" role:(TextRole::Label) weight:500
+                    }
+                }
+                row height:{px(36.0)}px {
+                    CellButton label:"Delete empty column" on-press:(delete)
+                        disabled:(delete_blocked) rule:(Rule::Left) {
+                        Label text:"Delete empty column" role:(TextRole::Label) weight:500
+                    }
+                }
+            }
             if occupied.get() {
-                text font-size:{px(12.0)}px font-color:ground.muted
-                    "Move the tasks to another column before deleting this column."
+                Caption text:"Move the tasks to another column before deleting this column."
             }
         }
     }
@@ -428,7 +623,7 @@ fn ColumnEditor(model: Model, column: BoardColumn) -> Element {
 pub fn Operations(model: Model) -> Element {
     view! {
         BoundedPanel limit:(Derived::new(|| px(200.0))) {
-            col height:min-content gap:{px(8.0)}px {
+            col height:min-content gap:0px {
                 for (_, operation) in {model.snapshot.get().operations.into_iter().filter(|o|o.project_id==model.project.get() && o.state!=OperationState::Completed).map(|o|(o.id.clone(),o)).collect::<Vec<_>>()} {
                     OperationCard model:(model) operation:(operation.clone())
                 }
@@ -439,23 +634,24 @@ pub fn Operations(model: Model) -> Element {
 /// Completed operations for the project, opened from the board actions menu.
 #[component]
 pub fn OperationHistory(model: Model, open: State<bool>) -> Element {
-    view! {
-        col height:min-content gap:{px(8.0)}px label:"Completed operations" {
-            row height:min-content align:center justify:between {
-                row #relay.eyebrow height:min-content width:max-content {
-                    text text-transform:uppercase letter-spacing:{px(0.6)}px "Operation history"
-                }
-                button #relay.action @click:{open.set(false);} label:"Close operation history"
-                    "Close"
+    let close = view! {
+        row width:max-content shrink:0 {
+            CellButton label:"Close operation history" on-press:(press(move || open.set(false)))
+                rule:(Rule::Left) {
+                Label text:"Close" role:(TextRole::Label) weight:500
             }
-            BoundedPanel limit:(Derived::new(|| px(180.0))) {
-                col height:min-content gap:{px(8.0)}px {
-                    for (_, operation) in {model.snapshot.get().operations.into_iter().filter(|o|o.project_id==model.project.get() && o.state==OperationState::Completed).map(|o|(o.id.clone(),o)).collect::<Vec<_>>()} {
-                        OperationCard model:(model) operation:(operation.clone())
-                    }
-                    if !model.snapshot.get().operations.iter().any(|o|o.project_id==model.project.get() && o.state==OperationState::Completed) {
-                        row #relay.caption height:min-content {
-                            text "No completed operations"
+        }
+    };
+    view! {
+        col height:min-content gap:0px label:"Completed operations" {
+            Module title:"Operation history" caps:true head-end:(Some(close)) {
+                BoundedPanel limit:(Derived::new(|| px(180.0))) {
+                    col height:min-content gap:0px {
+                        for (_, operation) in {model.snapshot.get().operations.into_iter().filter(|o|o.project_id==model.project.get() && o.state==OperationState::Completed).map(|o|(o.id.clone(),o)).collect::<Vec<_>>()} {
+                            OperationCard model:(model) operation:(operation.clone())
+                        }
+                        if !model.snapshot.get().operations.iter().any(|o|o.project_id==model.project.get() && o.state==OperationState::Completed) {
+                            Caption text:"No completed operations" rule:false
                         }
                     }
                 }
@@ -573,30 +769,81 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
             })
         })
     });
+    let failed = Tone::Signal(relay_ui::tokens::Signal::Failed);
+    let blocked = Derived::new(move || model.busy.get() || !model.connected.get());
+    let check_blocked = Derived::new(move || blocked.get() || url.get().trim().is_empty());
+    let check = move || {
+        let request = crate::project_network::RecoveryRequest {
+            input: ReconciliationInput {
+                operation_id: id.get_untracked(),
+                url: url.get_untracked().trim().into(),
+            },
+            pending: key.get_untracked(),
+            id: uuid::Uuid::new_v4().to_string(),
+        };
+        requested.set(Some(request.clone()));
+        model.recovery.set(crate::project_network::RecoveryUpdate {
+            request: Some(request.clone()),
+            result: None,
+        });
+        if model
+            .recovery_requests
+            .get_untracked()
+            .is_none_or(|sender| sender.send(request.clone()).is_err())
+        {
+            model.recovery.set(crate::project_network::RecoveryUpdate {
+                request: Some(request),
+                result: Some(Err(
+                    "Cannot check the provider result. Reconnect and try again.".into(),
+                )),
+            });
+        }
+    };
+    let reconcile = move || {
+        if let Some(Ok(result)) = lookup.get_untracked() {
+            model.action(Command::ReconcileOperation {
+                operation_id: id.get_untracked(),
+                key: result.key,
+                result: result.result,
+            });
+            requested.set(None);
+        }
+    };
+    let retry = press(move || {
+        model.action(Command::RetryOperation {
+            operation_id: id.get_untracked(),
+        })
+    });
+    let details = view! {
+        row width:max-content shrink:0 {
+            CellButton label:(Derived::new(move || format!("Operation details {}", id.get())))
+                on-press:(press(move || expanded.set(!expanded.get_untracked()))) rule:(Rule::Left)
+                selected:(expanded) {
+                Label text:"Details" role:(TextRole::Label) weight:500
+            }
+        }
+    };
     view! {
-        col height:min-content gap:{px(6.0)}px pad:{px(10.0)}px
-            stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
+        col height:min-content gap:0px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
             label:{format!("Operation {}", id.get())} {
-            grid height:min-content gap:{px(8.0)}px
-                cols:{GridTracks::new([GridTrack::fr(1.0), GridTrack::MaxContent])} {
-                col height:min-content min-width:0px gap:{px(3.0)}px {
-                    row #relay.value height:min-content {
-                        text
-                            {format!("{} · {:?}",match operation.get().kind{OperationKind::Clone{..}=>"Clone",OperationKind::Sync{..}=>"Sync",OperationKind::Publish{..}=>"Publish",OperationKind::CreateTask{..}=>"Create task",OperationKind::MoveTask{..}=>"Move task",OperationKind::EditTask{..}=>"Edit task"},operation.get().state)}
-                    }
-                    row #relay.caption height:min-content {
-                        text {operation_subject(&model.snapshot.get(), &operation.get())}
-                    }
+            row height:min-content gap:0px {
+                col width:1fr height:min-content min-width:0px gap:{px(3.0)}px
+                    pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px) {
+                    Label
+                        text:(Derived::new(move || format!("{} · {:?}", match operation.get().kind { OperationKind::Clone{..} => "Clone", OperationKind::Sync{..} => "Sync", OperationKind::Publish{..} => "Publish", OperationKind::CreateTask{..} => "Create task", OperationKind::MoveTask{..} => "Move task", OperationKind::EditTask{..} => "Edit task" }, operation.get().state)))
+                        role:(TextRole::Body)
+                    Label
+                        text:(Derived::new(move || operation_subject(&model.snapshot.get(), &operation.get())))
+                        role:(TextRole::Caption) tone:(Tone::Muted)
                 }
-                button #relay.action @click:{expanded.set(!expanded.get_untracked());}
-                    pad:(horizontal:{px(8.0)}px vertical:{px(3.0)}px)
-                    label:{format!("Operation details {}", id.get())} "Details"
+                { parent.adopt(&details); }
             }
             if expanded.get() {
-                col height:min-content gap:{px(6.0)}px selectable {
-                    row #relay.caption height:min-content {
-                        text {format!("Operation: {}", id.get())}
-                    }
+                col height:min-content gap:{px(6.0)}px
+                    pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px)
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:top) selectable {
+                    Label text:(Derived::new(move || format!("Operation: {}", id.get())))
+                        role:(TextRole::Caption) tone:(Tone::Muted)
                     for (_, result) in {operation_results(&operation.get()).into_iter().map(|r| (r.0.clone(), r))} {
                         let key = State::new(result.0.clone());
                         Readout key:(result.1.clone())
@@ -605,41 +852,47 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
                 }
             }
             if operation.get().error.is_some_and(|e| !e.is_empty()) {
-                row height:min-content font-color:status.failed {
-                    text {operation.get().error.unwrap_or_default()}
-                }
+                Caption text:(Derived::new(move || operation.get().error.unwrap_or_default()))
+                    tone:(failed) rule:false
             }
             if matches!(operation.get().state,OperationState::Failed|OperationState::Interrupted) {
-                button #relay.action
-                    @click:{model.action(Command::RetryOperation{operation_id:id.get_untracked()});}
-                    disabled:{model.busy.get() || !model.connected.get()} "Retry operation"
+                row height:{px(36.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
+                    CellButton label:"Retry operation" on-press:(retry.clone()) disabled:(blocked)
+                        start:true horizontal-inset:(18.0) {
+                        Label text:"Retry operation" role:(TextRole::Label) weight:500
+                    }
+                }
             }
             if operation.get().state==OperationState::NeedsReconciliation {
-                text font-size:{px(12.0)}px
-                    "Confirm the provider result before continuing. Inspect the remote board or issue; do not repeat an unknown write."
-                text font-size:{px(12.0)}px font-color:{color(ground.muted)}
-                    {reconciliation_instruction(&key.get())}
-                text font-size:{px(12.0)}px font-color:{color(ground.muted)}
-                    {key.get().split_once('/').and_then(|(_,id)|model.snapshot.get().issues.into_iter().find(|i|i.id==id)).map(|i|format!("{}\n{}",i.title,i.reference.map(|r|r.url).or_else(||operation.get().results.get(&format!("issue/{}",i.id)).and_then(|json|serde_json::from_str::<IssueRef>(json).ok()).map(|r|r.url)).unwrap_or_default())).unwrap_or_default()}
-                if key.get()=="board" || key.get().starts_with("issue/") {
-                    input #relay.field label:"Created board or issue URL" url
-                    button #relay.action
-                        @click:{let request=crate::project_network::RecoveryRequest{input:ReconciliationInput{operation_id:id.get_untracked(),url:url.get_untracked().trim().into()},pending:key.get_untracked(),id:uuid::Uuid::new_v4().to_string()};requested.set(Some(request.clone()));model.recovery.set(crate::project_network::RecoveryUpdate{request:Some(request.clone()),result:None});if model.recovery_requests.get_untracked().is_none_or(|sender|sender.send(request.clone()).is_err()){model.recovery.set(crate::project_network::RecoveryUpdate{request:Some(request),result:Some(Err("Cannot check the provider result. Reconnect and try again.".into()))});}}
-                        disabled:{model.busy.get() || !model.connected.get() || url.get().trim().is_empty()}
-                        "Check result"
-                    if lookup.get().is_some() {
-                        text font-size:{px(12.0)}px
-                            {match lookup.get().unwrap(){Ok(result)=>result.description,Err(error)=>error}}
+                col height:min-content gap:0px
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
+                    Caption
+                        text:"Confirm the provider result before continuing. Inspect the remote board or issue; do not repeat an unknown write."
+                        tone:(Tone::Ink) rule:false
+                    Caption
+                        text:(Derived::new(move || reconciliation_instruction(&key.get()).to_string()))
+                        rule:false
+                    Caption
+                        text:(Derived::new(move || key.get().split_once('/').and_then(|(_,id)|model.snapshot.get().issues.into_iter().find(|i|i.id==id)).map(|i|format!("{}\n{}",i.title,i.reference.map(|r|r.url).or_else(||operation.get().results.get(&format!("issue/{}",i.id)).and_then(|json|serde_json::from_str::<IssueRef>(json).ok()).map(|r|r.url)).unwrap_or_default())).unwrap_or_default()))
+                    if key.get()=="board" || key.get().starts_with("issue/") {
+                        InputCell value:(url) label:"Created board or issue URL"
+                            placeholder:"https://…"
+                        ActionCell label:"Check result" on-press:(press(check))
+                            disabled:(check_blocked)
+                        if lookup.get().is_some() {
+                            Caption
+                                text:(Derived::new(move || match lookup.get() { Some(Ok(result)) => result.description, Some(Err(error)) => error, None => String::new() }))
+                                tone:(Tone::Ink)
+                        }
+                        if lookup.get().is_some_and(|r|r.is_ok()) {
+                            ActionCell label:"Use this result and continue"
+                                on-press:(press(reconcile)) disabled:(blocked)
+                        }
+                    } else {
+                        Caption
+                            text:"This recovery step does not support URL lookup. Ask the server administrator to inspect the provider result before continuing."
+                            rule:false
                     }
-                    if lookup.get().is_some_and(|r|r.is_ok()) {
-                        button #relay.action
-                            @click:{if let Some(Ok(result))=lookup.get_untracked(){model.action(Command::ReconcileOperation{operation_id:id.get_untracked(),key:result.key,result:result.result});requested.set(None);}}
-                            disabled:{model.busy.get() || !model.connected.get()}
-                            "Use this result and continue"
-                    }
-                } else {
-                    text font-size:{px(12.0)}px font-color:ground.muted
-                        "This recovery step does not support URL lookup. Ask the server administrator to inspect the provider result before continuing."
                 }
             }
         }
@@ -739,106 +992,178 @@ fn Publish(model: Model) -> Element {
             previous.set(current);
         }
     });
+    let destination_index = Derived::new(move || usize::from(!github.get()));
+    let choose_destination: std::rc::Rc<dyn Fn(usize)> =
+        std::rc::Rc::new(move |slot| github.set(slot == 0));
+    let discover_blocked = Derived::new(move || {
+        !model.connected.get() || path.get().trim().is_empty() || source.get().is_none()
+    });
+    let discover = press(move || {
+        if let Some(source) = source.get_untracked() {
+            model.discover_destination(source);
+        }
+    });
+    let publish_blocked = Derived::new(move || {
+        model.busy.get()
+            || !model.connected.get()
+            || model
+                .selected_board()
+                .is_none_or(|b| b.source != BoardSource::Local)
+            || model.snapshot.get().operations.iter().any(|o| {
+                matches!(&o.kind, OperationKind::Publish { board_id: id, .. } if id == &board_id.get())
+                    && matches!(
+                        o.state,
+                        OperationState::Pending
+                            | OperationState::Running
+                            | OperationState::NeedsReconciliation
+                    )
+            })
+    });
+    let publish = press(move || {
+        if let (Some(board), Ok(number)) = (
+            model.selected_board(),
+            number.get_untracked().parse::<u64>(),
+        ) {
+            let columns: Vec<_> = board
+                .columns
+                .iter()
+                .map(|c| ColumnMapping {
+                    local_id: c.id.clone(),
+                    remote_id: mappings
+                        .get_untracked()
+                        .get(&c.id)
+                        .cloned()
+                        .unwrap_or_default(),
+                })
+                .collect();
+            let tasks: Vec<_> = model
+                .snapshot
+                .get_untracked()
+                .issues
+                .iter()
+                .filter(|i| board.columns.iter().any(|c| model.task_in_column(i, &c.id)))
+                .map(|i| TaskPublication {
+                    issue_id: i.id.clone(),
+                    repository_connection_id: repositories
+                        .get_untracked()
+                        .get(&i.id)
+                        .cloned()
+                        .unwrap_or_default(),
+                })
+                .collect();
+            if path.get_untracked().trim().is_empty()
+                || title.get_untracked().trim().is_empty()
+                || columns.iter().any(|c| {
+                    !choices
+                        .get_untracked()
+                        .iter()
+                        .any(|choice| choice.id == c.remote_id)
+                })
+                || tasks.iter().any(|t| t.repository_connection_id.is_empty())
+            {
+                model.notice.set(
+                    "Choose a destination, column mappings and a repository for every task.".into(),
+                );
+            } else {
+                let source = if github.get_untracked() {
+                    BoardSource::Github {
+                        owner: path.get_untracked(),
+                        number,
+                        url: String::new(),
+                    }
+                } else {
+                    BoardSource::Gitlab {
+                        host: host.get_untracked(),
+                        group: group.get_untracked(),
+                        path: path.get_untracked(),
+                        number,
+                        url: String::new(),
+                    }
+                };
+                model.action(Command::PublishBoard {
+                    board_id: board.id,
+                    target: PublishTarget {
+                        source,
+                        name: title.get_untracked(),
+                    },
+                    columns,
+                    tasks,
+                });
+            }
+        } else {
+            model
+                .notice
+                .set("Enter a destination board number, or 0 for a new board.".into());
+        }
+    });
     view! {
-        col #relay.module max-width:{px(760.0)}px gap:{px(12.0)}px pad:{px(12.0)}px {
-            grid cols:{GridTracks::auto_fit(GridTrack::minmax(px(120.0).into(),GridTrack::fr(1.0)))}
-                height:min-content gap:{px(8.0)}px {
-                button #relay.action @click:{github.set(true);} width:fill
-                    fill:if github.get() {ground.selected} else {ground.panel}
-                    font-color:{color(ground.ink)} font-weight:{if github.get() {700} else {400}}
-                    hover { fill:ground.hover }
-                    pressed { fill:if github.get() {ground.pressed} else {ground.hover} }
-                    "GitHub project"
-                button #relay.action @click:{github.set(false);} width:fill
-                    fill:if github.get() {ground.panel} else {ground.selected}
-                    font-color:{color(ground.ink)} font-weight:{if github.get() {400} else {700}}
-                    hover { fill:ground.hover }
-                    pressed { fill:if github.get() {ground.hover} else {ground.pressed} }
-                    "GitLab board"
-            }
-            text font-size:{px(12.0)}px font-color:ground.muted
-                "Use 0 to create a new destination, or enter an existing board number."
-            if !github.get() {
-                input #relay.field label:"Publish GitLab host" host
-                button #relay.action @click:{group.set(!group.get_untracked());}
-                    {if group.get(){"Group"}else{"Project"}}
-            }
-            input #relay.field label:"Destination owner or path" path
-            input #relay.field label:"Destination number (0 creates new)" number
-            input #relay.field label:"Destination title" title
-            col height:min-content gap:{px(8.0)}px {
-                button #relay.action
-                    @click:{if let Some(source)=source.get_untracked(){model.discover_destination(source);}}
-                    label:"Read destination statuses"
-                    disabled:{!model.connected.get() || path.get().trim().is_empty() || source.get().is_none()}
-                    "Read destination statuses"
+        col height:min-content gap:0px {
+            Module title:"Destination" caps:true {
+                row height:{px(40.0)}px
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                    Segments name:("Destination".to_string())
+                        options:(vec!["GitHub project".to_string(), "GitLab board".to_string()])
+                        selected:(relay_ui::Live::from(destination_index))
+                        on-select:(choose_destination)
+                }
+                Caption text:"Use 0 to create a new destination, or enter an existing board number."
+                if !github.get() {
+                    InputCell value:(host) label:"Publish GitLab host"
+                    ActionCell
+                        label:(Derived::new(move || if group.get() {"Group".to_string()} else {"Project".to_string()}))
+                        on-press:(press(move || group.set(!group.get_untracked())))
+                }
+                InputCell value:(path) label:"Destination owner or path"
+                InputCell value:(number) label:"Destination number (0 creates new)"
+                InputCell value:(title) label:"Destination title"
+                ActionCell label:"Read destination statuses" on-press:(discover.clone())
+                    disabled:(discover_blocked)
                 if discovered.get().is_some() {
-                    text font-size:{px(12.0)}px font-color:{color(ground.muted)}
-                        {match discovered.get().unwrap(){Ok(metadata)=>format!("Destination: {}",metadata.name),Err(error)=>error.clone()}}
+                    Caption
+                        text:(Derived::new(move || match discovered.get() { Some(Ok(metadata)) => format!("Destination: {}", metadata.name), Some(Err(error)) => error, None => String::new() }))
                 }
                 if model.discovery.get().source==source.get() && model.discovery.get().result.is_none() {
-                    text font-size:{px(12.0)}px font-color:ground.muted
-                        "Reading destination statuses…"
+                    Caption text:"Reading destination statuses…"
                 }
             }
-            text font-size:{px(12.0)}px font-color:ground.muted
-                "Map each local column to a destination status or list."
-            for (_, column) in {model.board_columns().into_iter().map(|c|(c.id.clone(),c))} {
-                let id = State::new(column.id.clone());
-                let column_title = State::new(column.title.clone());
-                text font-family:{FontFamily::SansSerif} {column_title.get()}
-                for (_, choice) in {choices.get().into_iter().map(|c|(c.id.clone(),c))} {
-                    let choice_id=State::new(choice.id.clone());
-                    let choice_title=Derived::new(move || choices.get().iter().find(|c|c.id==choice_id.get()).map(|c|c.title.clone()).unwrap_or_default());
-                    button #relay.action
-                        @click:{mappings.update(|m|{m.insert(id.get_untracked(),choice_id.get_untracked());});}
-                        label:{format!("Map {} to {}",column_title.get(),choice_title.get())}
-                        fill:if mappings.get().get(&id.get())==Some(&choice_id.get()) {ground.selected} else {ground.panel}
-                        font-color:{color(ground.ink)}
-                        font-weight:{if mappings.get().get(&id.get())==Some(&choice_id.get()) {700} else {400}}
-                        hover { fill:ground.hover }
-                        pressed {
-                            fill:if mappings.get().get(&id.get())==Some(&choice_id.get()) {ground.pressed} else {ground.hover}
-                        }
-                        {choice_title.get()}
-                }
-            }
-            for (_, issue) in {model.snapshot.get().issues.into_iter().filter(|i|model.board_columns().iter().any(|c|model.task_in_column(i,&c.id))).map(|i|(i.id.clone(),i)).collect::<Vec<_>>()} {
-                let issue_id = State::new(issue.id.clone());
-                let issue_title = State::new(issue.title.clone());
-                col height:min-content gap:{px(6.0)}px {
-                    text {issue_title.get()}
-                    for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && c.enabled && c.state==ConnectionState::Ready && matches!(c.kind,ConnectionKind::Repository{..})).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
-                        let connection_id = State::new(connection.id.clone());
-                        let connection_name = State::new(connection.name.clone());
-                        button #relay.action
-                            @click:{repositories.update(|r|{r.insert(issue_id.get_untracked(),connection_id.get_untracked());});}
-                            label:{format!("Issue repository {} for {}",connection_name.get(),issue_title.get())}
-                            fill:if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {ground.selected} else {ground.panel}
-                            font-color:{color(ground.ink)}
-                            font-weight:{if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {700} else {400}}
-                            hover { fill:ground.hover }
-                            pressed {
-                                fill:if repositories.get().get(&issue_id.get())==Some(&connection_id.get()) {ground.pressed} else {ground.hover}
-                            }
-                            {connection_name.get()}
+            Module title:"Columns" caps:true
+                note:(Some(UiText::from("Map each local column to a destination status or list."))) {
+                for (_, column) in {model.board_columns().into_iter().map(|c|(c.id.clone(),c))} {
+                    let id = State::new(column.id.clone());
+                    let column_title = State::new(column.title.clone());
+                    Caption text:(column_title.get()) tone:(Tone::Ink)
+                    for (_, choice) in {choices.get().into_iter().map(|c|(c.id.clone(),c))} {
+                        let choice_id=State::new(choice.id.clone());
+                        let choice_title=Derived::new(move || choices.get().iter().find(|c|c.id==choice_id.get()).map(|c|c.title.clone()).unwrap_or_default());
+                        ActionCell
+                            label:(Derived::new(move || format!("Map {} to {}", column_title.get(), choice_title.get())))
+                            text:(Some(UiText::from(choice_title)))
+                            selected:(Derived::new(move || mappings.get().get(&id.get()) == Some(&choice_id.get())))
+                            on-press:(press(move || mappings.update(|m| { m.insert(id.get_untracked(), choice_id.get_untracked()); })))
                     }
                 }
             }
-            button #relay.action
-                @click:{
-                    if let (Some(board),Ok(number))=(model.selected_board(),number.get_untracked().parse::<u64>()) {
-                        let columns:Vec<_>=board.columns.iter().map(|c|ColumnMapping{local_id:c.id.clone(),remote_id:mappings.get_untracked().get(&c.id).cloned().unwrap_or_default()}).collect();
-                        let tasks:Vec<_>=model.snapshot.get_untracked().issues.iter().filter(|i|board.columns.iter().any(|c|model.task_in_column(i,&c.id))).map(|i|TaskPublication{issue_id:i.id.clone(),repository_connection_id:repositories.get_untracked().get(&i.id).cloned().unwrap_or_default()}).collect();
-                        if path.get_untracked().trim().is_empty() || title.get_untracked().trim().is_empty() || columns.iter().any(|c|!choices.get_untracked().iter().any(|choice|choice.id==c.remote_id)) || tasks.iter().any(|t|t.repository_connection_id.is_empty()) {model.notice.set("Choose a destination, column mappings and a repository for every task.".into());} else {
-                            let source=if github.get_untracked(){BoardSource::Github{owner:path.get_untracked(),number,url:String::new()}}else{BoardSource::Gitlab{host:host.get_untracked(),group:group.get_untracked(),path:path.get_untracked(),number,url:String::new()}};
-                            model.action(Command::PublishBoard{board_id:board.id,target:PublishTarget{source,name:title.get_untracked()},columns,tasks});
-                        }
-                    } else {model.notice.set("Enter a destination board number, or 0 for a new board.".into());}
+            Module title:"Issue repositories" caps:true {
+                for (_, issue) in {model.snapshot.get().issues.into_iter().filter(|i|model.board_columns().iter().any(|c|model.task_in_column(i,&c.id))).map(|i|(i.id.clone(),i)).collect::<Vec<_>>()} {
+                    let issue_id = State::new(issue.id.clone());
+                    let issue_title = State::new(issue.title.clone());
+                    Caption text:(issue_title.get()) tone:(Tone::Ink)
+                    for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && c.enabled && c.state==ConnectionState::Ready && matches!(c.kind,ConnectionKind::Repository{..})).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
+                        let connection_id = State::new(connection.id.clone());
+                        let connection_name = State::new(connection.name.clone());
+                        ActionCell
+                            label:(Derived::new(move || format!("Issue repository {} for {}", connection_name.get(), issue_title.get())))
+                            text:(Some(UiText::from(Derived::new(move || connection_name.get()))))
+                            selected:(Derived::new(move || repositories.get().get(&issue_id.get()) == Some(&connection_id.get())))
+                            on-press:(press(move || repositories.update(|r| { r.insert(issue_id.get_untracked(), connection_id.get_untracked()); })))
+                    }
                 }
-                label:"Confirm board publication"
-                disabled:{model.busy.get() || !model.connected.get() || model.selected_board().is_none_or(|b|b.source!=BoardSource::Local) || model.snapshot.get().operations.iter().any(|o|matches!(&o.kind,OperationKind::Publish{board_id:id,..} if id==&board_id.get()) && matches!(o.state,OperationState::Pending|OperationState::Running|OperationState::NeedsReconciliation))}
-                "Publish board"
+            }
+            row height:{px(44.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                PrimaryButton text:"Publish board"
+                    label:(Some(UiText::from("Confirm board publication"))) on-press:(publish)
+                    disabled:(publish_blocked) fill:true
+            }
             Operations model:(model)
         }
     }
@@ -847,49 +1172,71 @@ fn Publish(model: Model) -> Element {
 #[component]
 pub fn WorkspaceChoices(model: Model, #[prop(default = false)] flush: bool) -> Element {
     let open = State::new(false);
+    let _ = flush;
+    let ready = move || {
+        model
+            .snapshot
+            .get()
+            .connections
+            .into_iter()
+            .filter(|c| {
+                c.project_id == model.project.get()
+                    && c.enabled
+                    && c.state == ConnectionState::Ready
+                    && !matches!(c.kind, ConnectionKind::Board { .. })
+            })
+            .collect::<Vec<_>>()
+    };
     view! {
-        col height:min-content gap:{px(if flush {0.0} else {6.0})}px {
-            button #relay.action @click:{open.set(!open.get_untracked());}
-                width:{if flush {Dimension::Fill} else {Dimension::MaxContent}}
-                label:"Choose session resources"
-                focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
-                "Workspace resources"
+        col height:min-content gap:0px {
+            ActionCell label:"Choose session resources"
+                text:(Some(UiText::from("Workspace resources")))
+                on-press:(press(move || open.set(!open.get_untracked()))) selected:(open)
             if open.get() {
-                row #relay.caption height:min-content pad:{px(if flush {12.0} else {0.0})}px {
-                    text
-                        "Automatic selects all ready repositories and directories on the server. Selection is fixed for subsequent turns."
-                }
-                button #relay.action @click:{model.workspace_selection.set(None);}
-                    width:{if flush {Dimension::Fill} else {Dimension::MaxContent}}
-                    fill:if model.workspace_selection.get().is_none() {ground.selected} else {ground.panel}
-                    font-color:{color(ground.ink)}
-                    font-weight:{if model.workspace_selection.get().is_none() {700} else {400}}
-                    focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
-                    hover { fill:ground.hover }
-                    pressed {
-                        fill:if model.workspace_selection.get().is_none() {ground.pressed} else {ground.hover}
-                    }
-                    "Automatic resources"
-                for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && c.enabled && c.state==ConnectionState::Ready && !matches!(c.kind,ConnectionKind::Board{..})).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
-                    let id=State::new(connection.id.clone());
-                    let name=State::new(connection.name.clone());
-                    button #relay.action
-                        @click:{let all=model.snapshot.get_untracked().connections.iter().filter(|c|c.project_id==model.project.get_untracked() && c.enabled && c.state==ConnectionState::Ready && !matches!(c.kind,ConnectionKind::Board{..})).map(|c|c.id.clone()).collect();model.workspace_selection.update(|selected|{let ids=selected.get_or_insert(all);if ids.contains(&id.get_untracked()){ids.retain(|c|c!=&id.get_untracked());}else{ids.push(id.get_untracked());}});}
-                        width:{if flush {Dimension::Fill} else {Dimension::MaxContent}}
-                        label:{format!("Workspace resource {}",name.get())}
-                        fill:if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {ground.selected} else {ground.panel}
-                        font-color:{color(ground.ink)}
-                        font-weight:{if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {700} else {400}}
-                        focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
-                        hover { fill:ground.hover }
-                        pressed {
-                            fill:if model.workspace_selection.get().is_none_or(|ids|ids.contains(&id.get())) {ground.pressed} else {ground.hover}
-                        }
-                        {name.get()}
+                Caption
+                    text:"Automatic selects all ready repositories and directories on the server. Selection is fixed for subsequent turns."
+                ActionCell label:"Automatic resources"
+                    selected:(Derived::new(move || model.workspace_selection.get().is_none()))
+                    on-press:(press(move || model.workspace_selection.set(None)))
+                for (_, connection) in {ready().into_iter().map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
+                    let id = State::new(connection.id.clone());
+                    let name = State::new(connection.name.clone());
+                    ActionCell
+                        label:(Derived::new(move || format!("Workspace resource {}", name.get())))
+                        text:(Some(UiText::from(Derived::new(move || name.get()))))
+                        selected:(Derived::new(move || model.workspace_selection.get().is_none_or(|ids| ids.contains(&id.get()))))
+                        on-press:(press(move || {
+                            let all = ready_ids(model);
+                            model.workspace_selection.update(|selected| {
+                                let ids = selected.get_or_insert(all);
+                                if ids.contains(&id.get_untracked()) {
+                                    ids.retain(|c| c != &id.get_untracked());
+                                } else {
+                                    ids.push(id.get_untracked());
+                                }
+                            });
+                        }))
                 }
             }
         }
     }
+}
+
+/// The ready repository and directory connections of the open project.
+fn ready_ids(model: Model) -> Vec<String> {
+    model
+        .snapshot
+        .get_untracked()
+        .connections
+        .iter()
+        .filter(|c| {
+            c.project_id == model.project.get_untracked()
+                && c.enabled
+                && c.state == ConnectionState::Ready
+                && !matches!(c.kind, ConnectionKind::Board { .. })
+        })
+        .map(|c| c.id.clone())
+        .collect()
 }
 
 fn task_markers(body: &str) -> Vec<&str> {

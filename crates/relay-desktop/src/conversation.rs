@@ -6,10 +6,9 @@ use crate::transcript::{
     SessionHeadProps, ToolMessage, ToolMessageProps, choose_effort, ledger_view,
 };
 use crate::ui::{Notice, NoticeProps};
-use crate::ui::{Readout, ReadoutProps, UsageReadout, UsageReadoutProps};
+use crate::ui::{Readout, ReadoutProps, UsageReadout, UsageReadoutProps, action_cell, press};
 use crate::{
     buffer,
-    controls::{ButtonStyle, button},
     model::{EditTarget, Model},
 };
 use mosaic::core::theme::color;
@@ -24,7 +23,11 @@ use relay_ui::prelude::{
     LedgerActions, MessageRow, MessageRowProps, Segments, SegmentsProps, ThinkingLine,
     ThinkingLineProps, UserMessage, UserMessageProps,
 };
-use relay_ui::style::*;
+use relay_ui::prelude::{
+    CellButton, CellButtonProps, Ellipsis, EllipsisProps, IconCell, IconCellProps, Label,
+    LabelProps, LinkButton, LinkButtonProps, Rule, TextRole, Tone,
+};
+use relay_ui::surfaces::{TextInput, TextInputProps};
 use relay_ui::tokens::{ground, px, status};
 use std::{
     cell::{Cell, RefCell},
@@ -786,9 +789,9 @@ pub fn Conversation(model: Model) -> Element {
                 text font-size:{px(12.0)}px
                     {discovery_feedback.get().unwrap_or_default()}
                 if model.catalogs.get().get(&model.session.get()).is_some_and(|c| c.is_err()) {
-                    button #relay.action
-                        @click:{crate::command_ui::refresh(model,true);}
-                        label:"Retry command discovery" "Retry"
+                    row width:{px(120.0)}px height:min-content {
+                        { parent.adopt(&action_cell("Retry command discovery", "Retry", || false, move || crate::command_ui::refresh(model, true))); }
+                    }
                 }
             }
         }
@@ -800,22 +803,21 @@ pub fn Conversation(model: Model) -> Element {
                 for (key, choice) in {model.completion.get().map(|c|c.choices.into_iter().map(|choice|((choice.label.clone(),choice.description.clone()),choice)).collect::<Vec<_>>()).unwrap_or_default()} {
                     let picked_label=key.0.clone();
                     let choice=State::new(choice.clone());
-                    button #relay.action
-                        @click:{
-                            if let Some(index)=model.completion.get_untracked().and_then(|c|c.choices.iter().position(|c|c.label==picked_label)) {
-                                accept_completion(model,&controller.get_untracked(),index,false);
-                            }
+                    row height:{px(32.0)}px min-width:0px shrink:0
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                        {
+                            let picked = picked_label.clone();
+                            let current = Derived::new(move || model.completion.get().is_some_and(|c| c.choices.get(c.index).is_some_and(|c| c.label == choice.get().label)));
+                            parent.adopt(&view! {
+                                CellButton label:(Derived::new(move || choice.get().label)) start:true selected:(current)
+                                    horizontal-inset:(12.0)
+                                    on-press:(press(move || if let Some(index) = model.completion.get_untracked().and_then(|c| c.choices.iter().position(|c| c.label == picked)) { accept_completion(model, &controller.get_untracked(), index, false); })) {
+                                    Ellipsis text:(Derived::new(move || format!("{} · {}", choice.get().label, choice.get().description.split_whitespace().collect::<Vec<_>>().join(" "))))
+                                        role:(TextRole::Label)
+                                }
+                            });
                         }
-                        width:fill min-width:0px height:{px(32.0)}px justify:start
-                        pad:(horizontal:{px(12.0)}px vertical:0px)
-                        stroke:(width:{px(1.0)} color:ground.rule edges:bottom offset:{px(-1.0)})
-                        fill:{color(if model.completion.get().is_some_and(|c|c.choices.get(c.index).is_some_and(|c|c.label==choice.get().label)){ground.selected}else{ground.panel})}
-                        focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
-                        label:{choice.get().label} {
-                        text width:fill text-wrap:none
-                            {format!("{} · {}",choice.get().label,choice.get().description.split_whitespace().collect::<Vec<_>>().join(" "))}
-                    } as suggestion
-                    { suggestion.clips(true); }
+                    }
                 }
             }
         }
@@ -943,38 +945,29 @@ pub fn Conversation(model: Model) -> Element {
             }
             if menu.get() {
                 BoundedPanel limit:(auxiliary_limit) {
-                    col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
-                        gap:{px(10.0)}px shrink:0
+                    col height:min-content gap:0px shrink:0
                         stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                         if compact.get() && session.get().and_then(|s|s.worker).is_some_and(|w|matches!(w.status,WorkerStatus::Running|WorkerStatus::Queued)) {
-                            row height:min-content {
-                                button #relay.action @click:{model.stop_worker();}
-                                    label:"Stop worker"
-                                    disabled:{!model.connected.get() || model.busy.get()}
-                                    "Stop worker"
-                            }
+                            { parent.adopt(&action_cell("Stop worker", "Stop worker", move || !model.connected.get() || model.busy.get(), move || model.stop_worker())); }
                         }
-                        grid height:min-content gap:{px(8.0)}px
+                        grid height:min-content gap:0px
                             cols:{GridTracks::auto_fit(GridTrack::minmax(px(90.0).into(), GridTrack::fr(1.0)))} {
                             if cfg!(target_arch = "wasm32") {
-                                button #relay.action @click:{crate::platform::pick_files(model);}
-                                    label:"Add files to draft" "Add files"
+                                { parent.adopt(&action_cell("Add files to draft", "Add files", || false, move || crate::platform::pick_files(model))); }
                             }
-                            button #relay.action @click:{model.open_worker_issue();}
-                                disabled:{session.get().is_none()} label:"Linked issue" "Issue"
-                            button #relay.action
-                                @click:{model.open_profile(EditTarget::Director(session.get_untracked().map(|s|s.director_id).unwrap_or_else(||model.worker_director.get_untracked())));}
-                                label:"Director profile" "Profile"
-                            button #relay.action
-                                @click:{if details.get_untracked()!="changes" {model.request_history(relay_core::StreamRequest::Review{session_id:model.session.get_untracked()});}details.set(if details.get_untracked()=="changes" {String::new()}else{"changes".into()});}
-                                disabled:{session.get().is_none()} label:"Toggle change review"
-                                "Changes"
-                            button #relay.action
-                                @click:{details.set(if details.get_untracked()=="usage" {String::new()}else{"usage".into()});}
-                                disabled:{session.get().is_none()}
-                                label:"Session usage and provenance" "Details"
-                            button #relay.action @click:{model.searching.set(true);menu.set(false);}
-                                disabled:{session.get().is_none()} label:"Search transcript" "Find"
+                            {
+                                let none = move || session.get().is_none();
+                                parent.adopt(&action_cell("Linked issue", "Issue", none, move || model.open_worker_issue()));
+                                parent.adopt(&action_cell("Director profile", "Profile", || false, move || model.open_profile(EditTarget::Director(session.get_untracked().map(|s| s.director_id).unwrap_or_else(|| model.worker_director.get_untracked())))));
+                                parent.adopt(&action_cell("Toggle change review", "Changes", none, move || {
+                                    if details.get_untracked() != "changes" {
+                                        model.request_history(relay_core::StreamRequest::Review { session_id: model.session.get_untracked() });
+                                    }
+                                    details.set(if details.get_untracked() == "changes" { String::new() } else { "changes".into() });
+                                }));
+                                parent.adopt(&action_cell("Session usage and provenance", "Details", none, move || details.set(if details.get_untracked() == "usage" { String::new() } else { "usage".into() })));
+                                parent.adopt(&action_cell("Search transcript", "Find", none, move || { model.searching.set(true); menu.set(false); }));
+                            }
                         }
                         if session.get().is_some_and(|s| !s.fixture && s.worker.is_some()) {
                             let current = session.get_untracked().unwrap();
@@ -982,9 +975,14 @@ pub fn Conversation(model: Model) -> Element {
                             let snapshot = model.snapshot.get();
                             let inherited = snapshot.directors.iter().find(|d| d.id == current.director_id).and_then(|d|snapshot.effective_profile(d).ok()).map(|p|p.execution.approval).unwrap_or_default();
                             let worker = current.worker.unwrap();
-                            text font-size:{px(12.0)}px font-color:{color(ground.muted)}
-                                {format!("{} · {} · {}",match worker.harness{Harness::Codex=>"Codex",Harness::ClaudeCode=>"Claude Code"},worker.execution.as_ref().map(|e|e.approval).unwrap_or(inherited).label(),if worker.execution.is_some(){"Worker override"}else{"Inherited from director"})}
-                            grid height:min-content gap:{px(8.0)}px align:center
+                            row height:min-content
+                                pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px) {
+                                Label
+                                    text:(format!("{} · {} · {}",match worker.harness{Harness::Codex=>"Codex",Harness::ClaudeCode=>"Claude Code"},worker.execution.as_ref().map(|e|e.approval).unwrap_or(inherited).label(),if worker.execution.is_some(){"Worker override"}else{"Inherited from director"}))
+                                    role:(TextRole::Caption) tone:(Tone::Muted)
+                            }
+                            grid height:min-content gap:0px align:center
+                                stroke:(width:{px(1.0)} color:ground.hairline edges:top)
                                 cols:{if compact.get() {GridTracks::new([GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0),GridTrack::MaxContent])}} {
                                 let mode_session = session_id.clone();
                                 let mode_index = Derived::new(move || {
@@ -1002,13 +1000,16 @@ pub fn Conversation(model: Model) -> Element {
                                     options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
                                     selected:(relay_ui::Live::from(mode_index)) on-select:(choose)
                                     disabled:(relay_ui::Live::from(Derived::new(move || !model.connected.get() || model.busy.get())))
-                                button #relay.action
-                                    @click:{model.submit(Command::SetWorkerExecution{session_id:session_id.clone(),execution:None},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
-                                    disabled:{!model.connected.get() || model.busy.get()}
-                                    label:"Inherit worker execution settings" "Inherit"
+                                {
+                                    let inherit_session = session_id.clone();
+                                    parent.adopt(&action_cell("Inherit worker execution settings", "Inherit", move || !model.connected.get() || model.busy.get(), move || model.submit(Command::SetWorkerExecution { session_id: inherit_session.clone(), execution: None }, model.snapshot.get_untracked().revision, crate::model::Saved::Action)));
+                                }
                             }
-                            text font-size:{px(11.0)}px font-color:ground.muted
-                                "Execution changes apply to the next turn."
+                            row height:min-content
+                                pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px) {
+                                Label text:"Execution changes apply to the next turn."
+                                    role:(TextRole::Caption) tone:(Tone::Muted)
+                            }
                         }
                     }
                 }
@@ -1028,8 +1029,7 @@ pub fn Conversation(model: Model) -> Element {
                             pad:(horizontal:{px(24.0)}px vertical:0px) shrink:0 {
                             text width:1fr label:"Worker cannot continue" font-size:{px(12.0)}px
                                 {session.get().and_then(|s|s.worker).and_then(|w|w.error).unwrap_or_else(||"No resumable thread was recorded".into())}
-                            button #relay.action @click:{model.open_worker_issue();}
-                                label:"Start new worker from linked issue" "Open issue"
+                            { parent.adopt(&action_cell("Start new worker from linked issue", "Open issue", || false, move || model.open_worker_issue())); }
                         }
                     } else {
                         col height:min-content shrink:0 {
@@ -1063,9 +1063,8 @@ pub fn Conversation(model: Model) -> Element {
                             let block = Derived::new(move || session.get().map(|s| provenance(&model.snapshot.get(), &s, details.get() == "changes")).unwrap_or_default().into_iter().find(|g| g.key == key).unwrap_or_else(|| fallback.clone()));
                             col height:min-content gap:{px(8.0)}px pad:(top:{px(10.0)}px)
                                 stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
-                                row #relay.title height:min-content font-size:{px(13.0)}px {
-                                    text {block.get().title}
-                                }
+                                Label text:(Derived::new(move || block.get().title))
+                                    role:(TextRole::Label) weight:600
                                 grid
                                     cols:{GridTracks::auto_fit(GridTrack::minmax(px(160.0).into(), GridTrack::fr(1.0)))}
                                     height:min-content gap:{px(10.0)}px {
@@ -1090,18 +1089,38 @@ pub fn Conversation(model: Model) -> Element {
                 }
             }
             if model.searching.get() {
-                row height:min-content pad:(horizontal:{px(24.0)}px vertical:0px) shrink:0 {
-                    input #relay.field placeholder:"Find in conversation…" model.search as search
-                    {search.focus();}
-                    button #relay.tree-control
-                        @click:{find_next(model,&controller.get_untracked(),-1);}
-                        label:"Previous search match" "↑"
-                    button #relay.tree-control
-                        @click:{find_next(model,&controller.get_untracked(),1);}
-                        label:"Next search match" "↓"
-                    button #relay.tree-control
-                        @click:{model.searching.set(false);model.search.set(String::new());}
-                        label:"Close search" "×"
+                row height:{px(40.0)}px shrink:0 align:center
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                    row width:1fr min-width:0px {
+                        {
+                            let field = view! {
+                                TextInput value:(model.search) label:"Find in conversation"
+                                    placeholder:"Find in conversation…" height:(Some(40.0)) framed:false
+                            };
+                            parent.adopt(&field);
+                            field.focus();
+                        }
+                    }
+                    {
+                        for (label, text, step) in [("Previous search match", "↑", -1), ("Next search match", "↓", 1)] {
+                            parent.adopt(&view! {
+                                row width:{px(40.0)}px height:fill shrink:0 {
+                                    CellButton label:(label) rule:(Rule::Left) horizontal-inset:(0.0)
+                                        on-press:(press(move || find_next(model, &controller.get_untracked(), step))) {
+                                        Label text:(text) role:(TextRole::Label)
+                                    }
+                                }
+                            });
+                        }
+                        parent.adopt(&view! {
+                            row width:{px(40.0)}px height:fill shrink:0 {
+                                CellButton label:"Close search" rule:(Rule::Left) horizontal-inset:(0.0)
+                                    on-press:(press(move || { model.searching.set(false); model.search.set(String::new()); })) {
+                                    Label text:"×" role:(TextRole::Label)
+                                }
+                            }
+                        });
+                    }
                 }
             }
             scroll {
@@ -1120,8 +1139,9 @@ pub fn Conversation(model: Model) -> Element {
                                 text font-size:{px(12.0)}px font-color:ground.muted
                                     {if !model.history_error.get().is_empty() {model.history_error.get()} else if model.history_loading.get() {"Loading conversation…".into()} else {String::new()}}
                                 if !model.history_error.get().is_empty() {
-                                    button #relay.action @click:{model.retry_history();}
-                                        label:"Retry loading history" "Retry"
+                                    row width:{px(100.0)}px height:min-content {
+                                        { parent.adopt(&action_cell("Retry loading history", "Retry", || false, move || model.retry_history())); }
+                                    }
                                 }
                             }
                         }
@@ -1147,9 +1167,9 @@ pub fn Conversation(model: Model) -> Element {
                         }
                         if model.snapshot.get().submissions.iter().any(|s|s.session_id==model.session.get() && s.state==SubmissionState::Paused) && session.get().and_then(|s|s.worker).is_some_and(|w|!matches!(w.status,WorkerStatus::Queued|WorkerStatus::Running)) {
                             row height:min-content pad:(left:{px(128.0)}px) {
-                                button #relay.action
-                                    @click:{model.submit(Command::ResumeQueue{session_id:model.session.get_untracked()},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
-                                    label:"Resume paused queue" "Resume queue"
+                                row width:{px(160.0)}px height:min-content {
+                                    { parent.adopt(&action_cell("Resume paused queue", "Resume queue", || false, move || model.submit(Command::ResumeQueue { session_id: model.session.get_untracked() }, model.snapshot.get_untracked().revision, crate::model::Saved::Action))); }
+                                }
                             }
                         }
                     }
@@ -1209,34 +1229,34 @@ pub fn Conversation(model: Model) -> Element {
             }
             if model.buffer.get().approval_needed {
                 BoundedPanel limit:(auxiliary_limit) {
-                    grid height:min-content gap:{px(10.0)}px align:center
-                        pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
+                    grid height:min-content gap:0px align:center
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:top)
                         cols:{if compact.get() {GridTracks::new([GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0), GridTrack::MaxContent])}} {
-                        row #relay.caption height:min-content min-width:0px {
-                            text "This director requires approval to implement this turn."
+                        row height:min-content min-width:0px
+                            pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px) {
+                            Label text:"This director requires approval to implement this turn."
+                                role:(TextRole::Caption) tone:(Tone::Muted)
                         }
-                        button #relay.action
-                            @click:{model.worker_approval.set(true);buffer::send(model);}
-                            label:"Approve this turn and send" "Approve and send"
+                        { parent.adopt(&action_cell("Approve this turn and send", "Approve and send", || false, move || { model.worker_approval.set(true); buffer::send(model); })); }
                     }
                 }
             }
             if recovery.get() {
                 BoundedPanel limit:(auxiliary_limit) {
-                    col height:min-content gap:{px(8.0)}px
-                        pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px) {
-                        row #relay.caption height:min-content {
-                            text
-                                {model.buffer.get().documents.get(&model.session.get()).map(|d| if d.error.is_empty() {"Recovered draft available".into()} else {d.error.clone()}).unwrap_or_default()}
+                    col height:min-content gap:0px
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
+                        row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px) {
+                            Label
+                                text:(Derived::new(move || model.buffer.get().documents.get(&model.session.get()).map(|d| if d.error.is_empty() {"Recovered draft available".into()} else {d.error.clone()}).unwrap_or_default()))
+                                role:(TextRole::Caption) tone:(Tone::Muted)
                         }
-                        grid height:min-content gap:{px(8.0)}px
+                        grid height:min-content gap:0px
                             cols:{GridTracks::auto_fit(GridTrack::minmax(px(90.0).into(), GridTrack::fr(1.0)))} {
-                            button #relay.action @click:{buffer::resolve(model,false);}
-                                label:"Load shared draft" "Load shared"
-                            button #relay.action @click:{buffer::resolve(model,true);}
-                                label:"Restore local draft" "Restore local"
-                            button #relay.action @click:{buffer::retry_save(model);}
-                                label:"Retry draft save" "Retry"
+                            {
+                                parent.adopt(&action_cell("Load shared draft", "Load shared", || false, move || buffer::resolve(model, false)));
+                                parent.adopt(&action_cell("Restore local draft", "Restore local", || false, move || buffer::resolve(model, true)));
+                                parent.adopt(&action_cell("Retry draft save", "Retry", || false, move || buffer::retry_save(model)));
+                            }
                         }
                     }
                 }
@@ -1424,18 +1444,21 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
         col height:min-content min-width:0px gap:0px {
             if model.history.get().preview_ids.contains(&message_id.get()) {
                 row height:min-content align:center gap:{px(8.0)}px {
-                    text font-size:{px(12.0)}px font-color:ground.muted "Message preview"
-                    button #relay.action @click:{model.load_message(message_id.get_untracked());}
-                        label:"Load full message" "Load full message"
+                    Label text:"Message preview" role:(TextRole::Caption) tone:(Tone::Muted)
+                    LinkButton text:"Load full message"
+                        on-press:(press(move || model.load_message(message_id.get_untracked())))
                 }
             }
             if detail && message.get().is_none_or(|m|m.tool.is_none()) {
                 col height:min-content {
-                    row height:min-content pad:(bottom:{px(8.0)}px) {
-                        button #relay.action @click:{expanded.set(!expanded.get_untracked());}
-                            pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
-                            label:"Toggle tool activity"
-                            {message.get().map(|m|match m.kind.as_str(){"issue-context"=>"Source context","file_change"=>"File changes","reasoning"=>"Reasoning",_=>"Tool activity"}.to_owned()).unwrap_or_default()}
+                    row width:max-content height:{px(28.0)}px pad:(bottom:{px(8.0)}px) {
+                        CellButton label:"Toggle tool activity" selected:(expanded)
+                            horizontal-inset:(8.0)
+                            on-press:(press(move || expanded.set(!expanded.get_untracked()))) {
+                            Label
+                                text:(Derived::new(move || message.get().map(|m|match m.kind.as_str(){"issue-context"=>"Source context","file_change"=>"File changes","reasoning"=>"Reasoning",_=>"Tool activity"}.to_owned()).unwrap_or_default()))
+                                role:(TextRole::Label) weight:500
+                        }
                     }
                 }
             }
@@ -1468,9 +1491,7 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
             for (_, comment) in {model.snapshot.get().comments.into_iter().filter(|c|c.message_id==message_id.get()).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
                 col height:min-content pad:(left:{px(14.0)}px top:{px(8.0)}px) gap:{px(5.0)}px
                     selectable stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
-                    row #relay.caption height:min-content {
-                        text (comment.author.clone())
-                    }
+                    Label text:(comment.author.clone()) role:(TextRole::Caption) tone:(Tone::Muted)
                     row height:min-content font-size:{px(14.0)}px {
                         text (comment.body.clone())
                     }
@@ -1603,9 +1624,10 @@ fn DraftPart(model: Model, controller: ControllerState, part: Part, mirror: bool
             view! {
                 row height:min-content align:center gap:{px(6.0)}px {
                     text font-color:{color(ground.ink)} {format!("${}",skill.name)}
-                    button #relay.action
-                        @click:{remove_draft_part(model,&controller.get_untracked(),&id.get_untracked(),mirror);}
-                        label:"Remove skill" "×"
+                    IconCell label:"Remove skill"
+                        on-press:(press(move || remove_draft_part(model, &controller.get_untracked(), &id.get_untracked(), mirror))) {
+                        Label text:"×" role:(TextRole::Label)
+                    }
                 }
             }
         }
@@ -1638,14 +1660,19 @@ fn DraftPart(model: Model, controller: ControllerState, part: Part, mirror: bool
             view! {
                 col height:min-content gap:{px(6.0)}px pad:(left:{px(14.0)}px)
                     stroke:(width:{px(2.0)} color:ground.rule edges:left) {
-                    row height:min-content gap:{px(8.0)}px {
-                        button #relay.tree-control
-                            @click:{go_to_source(model,&source_controller.get_untracked(),&anchor.get_untracked());}
-                            label:"Go to reply source"
-                            {format!("↩ {}",anchor.get().quote.chars().take(80).collect::<String>())}
-                        button #relay.tree-control
-                            @click:{remove_draft_part(model,&source_controller.get_untracked(),&remove.get_untracked(),false);}
-                            label:"Remove draft reply" "×"
+                    row height:{px(32.0)}px gap:{px(8.0)}px {
+                        row width:1fr min-width:0px {
+                            CellButton label:"Go to reply source" start:true horizontal-inset:(0.0)
+                                on-press:(press(move || go_to_source(model, &source_controller.get_untracked(), &anchor.get_untracked()))) {
+                                Ellipsis
+                                    text:(Derived::new(move || format!("↩ {}", anchor.get().quote.chars().take(80).collect::<String>())))
+                                    role:(TextRole::Label) tone:(Tone::Muted)
+                            }
+                        }
+                        IconCell label:"Remove draft reply"
+                            on-press:(press(move || remove_draft_part(model, &source_controller.get_untracked(), &remove.get_untracked(), false))) {
+                            Label text:"×" role:(TextRole::Label)
+                        }
                     }
                     for (_, nested) in {parts.get().into_iter().map(|p|(p.id.clone(),p)).collect::<Vec<_>>()} {
                         col height:min-content {
@@ -1689,15 +1716,21 @@ fn InlineAsset(
     let part_id = State::new(part_id);
     let root = view! {
         col height:min-content gap:{px(6.0)}px {
-            row height:min-content gap:{px(8.0)}px align:center {
-                button #relay.tree-control
-                    @click:{buffer::fetch(model,&asset.get_untracked());preview.set(!preview.get_untracked());}
-                    label:(format!("Preview {}",asset.get().name))
-                    {format!("{} · {} KiB",asset.get().name,asset.get().size.div_ceil(1024))}
+            row height:{px(32.0)}px gap:{px(8.0)}px align:center {
+                row width:max-content {
+                    CellButton label:(format!("Preview {}", asset.get_untracked().name))
+                        selected:(preview) horizontal-inset:(8.0)
+                        on-press:(press(move || { buffer::fetch(model, &asset.get_untracked()); preview.set(!preview.get_untracked()); })) {
+                        Label
+                            text:(Derived::new(move || format!("{} · {} KiB", asset.get().name, asset.get().size.div_ceil(1024))))
+                            role:(TextRole::Label)
+                    }
+                }
                 if part_id.get().is_some() {
-                    button #relay.tree-control
-                        @click:{if let Some(controller)=controller {remove_draft_part(model,&controller.get_untracked(),part_id.get_untracked().as_ref().unwrap(),mirror);}}
-                        label:"Remove inline file" "×"
+                    IconCell label:"Remove inline file"
+                        on-press:(press(move || if let Some(controller) = controller { remove_draft_part(model, &controller.get_untracked(), part_id.get_untracked().as_ref().unwrap(), mirror); })) {
+                        Label text:"×" role:(TextRole::Label)
+                    }
                 }
             }
             if preview.get() {

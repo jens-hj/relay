@@ -3,6 +3,7 @@
 //! its foot.
 
 use crate::icons::*;
+use crate::ui::press;
 use crate::{
     adapt,
     model::{EditTarget, Model, Page},
@@ -14,7 +15,10 @@ use relay_ui::prelude::{
     AgentNode, AgentSidebar, AgentSidebarProps, ConnectionStatus, ConnectionStatusProps, OnPress,
     UsageFoot, UsageFootProps,
 };
-use relay_ui::style::*;
+use relay_ui::prelude::{
+    CellButton, CellButtonProps, Ellipsis, EllipsisProps, Label, LabelProps, Rule, TextRole, Tone,
+    UiText, Weight,
+};
 use relay_ui::surfaces::{Connection, ConnectionInfo};
 use relay_ui::tokens::{ground, px};
 use std::rc::Rc;
@@ -152,54 +156,94 @@ fn NavigationHead(model: Model, menu: State<bool>) -> Element {
             .map(|p| p.name.clone())
             .unwrap_or_else(|| "No project".into())
     });
+    let side = Derived::new(crate::window_chrome::sidebar_header_height);
+    let close = view! {
+        CellButton label:"Close navigation" rule:(Rule::Left) horizontal-inset:(0.0)
+            on-press:(press(move || model.sidebar_open.set(false))) {
+            icon size:{px(16.0)}px window-close
+        }
+    };
+    let focus_close = close.clone();
     view! {
         row height:{crate::window_chrome::sidebar_header_height()}px shrink:0 align:center
             label:"Sidebar header" stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
             @pointer:{move |event, ctx| crate::window_chrome::drag_header(model, event, ctx)} {
-            button #relay.tree-control @click:{menu.set(!menu.get_untracked());} width:1fr
-                height:fill justify:start gap:{px(10.0)}px
-                pad:(left:{crate::window_chrome::sidebar_title_inset().max(px(18.0))}px right:{px(12.0)}px)
-                label:{format!("Toggle project {}", name.get())}
-                description:{if menu.get() {"Expanded"} else {"Collapsed"}} font-color:ground.ink {
-                col width:1fr min-width:0px height:min-content gap:{px(3.0)}px {
-                    row #relay.eyebrow height:min-content {
-                        text "Project"
-                    }
-                    row #relay.title height:min-content clip font-size:{px(13.0)}px {
-                        text text-wrap:none {name.get()}
+            row width:1fr min-width:0px {
+                CellButton label:(Derived::new(move || format!("Toggle project {}", name.get())))
+                    description:(Some(UiText::from(Derived::new(move || if menu.get() {"Expanded".to_string()} else {"Collapsed".to_string()}))))
+                    on-press:(press(move || menu.set(!menu.get_untracked()))) start:true
+                    horizontal-inset:(0.0) {
+                    row width:1fr min-width:0px align:center gap:{px(10.0)}px
+                        pad:(left:{crate::window_chrome::sidebar_title_inset().max(px(18.0))}px right:{px(12.0)}px) {
+                        col width:1fr min-width:0px height:min-content gap:{px(3.0)}px {
+                            Label text:"Project" role:(TextRole::Caption) tone:(Tone::Muted)
+                                weight:500
+                            Ellipsis text:(name) role:(TextRole::Label) weight:(Weight::SEMIBOLD)
+                        }
+                        icon size:{px(13.0)}px shrink:0
+                            {if menu.get() {tree_chevron_down} else {tree_chevron_right}}
                     }
                 }
-                icon size:{px(13.0)}px shrink:0
-                    {if menu.get() {tree_chevron_down} else {tree_chevron_right}}
             }
-            button #relay.tree-control
-                @click:{let id = model.project.get_untracked(); model.select_project(id);}
-                width:{crate::window_chrome::sidebar_header_height()}px height:fill
-                label:{format!("Open board for {}", name.get())}
-                stroke:(width:{px(1.0)} color:ground.hairline edges:left)
-                fill:{if model.page.get() == Page::Board {color(ground.selected)} else {Color::TRANSPARENT}}
-                font-color:{color(if model.page.get() == Page::Board {ground.ink} else {ground.muted})} {
-                icon size:{px(16.0)}px board-icon
+            row width:{side.get()}px shrink:0 {
+                CellButton label:(Derived::new(move || format!("Open board for {}", name.get())))
+                    rule:(Rule::Left) horizontal-inset:(0.0)
+                    selected:(Derived::new(move || model.page.get() == Page::Board))
+                    on-press:(press(move || { let id = model.project.get_untracked(); model.select_project(id); })) {
+                    icon size:{px(16.0)}px board-icon
+                }
             }
-            button #relay.tree-control
-                @click:{model.sidebar_open.set(false); model.page.set(Page::Settings);}
-                width:{crate::window_chrome::sidebar_header_height()}px height:fill label:"Settings"
-                stroke:(width:{px(1.0)} color:ground.hairline edges:left)
-                fill:{if model.page.get() == Page::Settings {color(ground.selected)} else {Color::TRANSPARENT}}
-                font-color:{color(if model.page.get() == Page::Settings {ground.ink} else {ground.muted})} {
-                icon size:{px(16.0)}px gear-icon
+            row width:{side.get()}px shrink:0 {
+                CellButton label:"Settings" rule:(Rule::Left) horizontal-inset:(0.0)
+                    selected:(Derived::new(move || model.page.get() == Page::Settings))
+                    on-press:(press(move || { model.sidebar_open.set(false); model.page.set(Page::Settings); })) {
+                    icon size:{px(16.0)}px gear-icon
+                }
             }
             if model.mobile_navigation.get() {
-                button #relay.tree-control @click:{model.sidebar_open.set(false);}
-                    width:{crate::window_chrome::sidebar_header_height()}px height:fill
-                    label:"Close navigation"
-                    stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
-                    icon size:{px(16.0)}px window-close
-                } as close_navigation
-                {close_navigation.focus();}
+                row width:{side.get()}px shrink:0 {
+                    { parent.adopt(&close); focus_close.focus(); }
+                }
             }
         }
     }
+}
+
+/// One full-height cell of a project menu row.
+fn menu_cell(
+    label: Derived<String>,
+    press_handler: relay_ui::prelude::OnPress,
+    main: bool,
+    content: Element,
+    description: Option<Derived<String>>,
+) -> Element {
+    let about = description.map(UiText::from);
+    let cell = if main {
+        view! {
+            row width:1fr min-width:0px {}
+        }
+    } else {
+        view! {
+            row width:{px(34.0)}px shrink:0 {}
+        }
+    };
+    let button = if main {
+        view! {
+            CellButton label:(label) on-press:(press_handler) start:true horizontal-inset:(18.0)
+                description:(about) {
+                { parent.adopt(&content); }
+            }
+        }
+    } else {
+        view! {
+            CellButton label:(label) on-press:(press_handler) rule:(Rule::Left)
+                horizontal-inset:(0.0) {
+                { parent.adopt(&content); }
+            }
+        }
+    };
+    cell.adopt(&button);
+    cell
 }
 
 /// The project menu: every project, then the selected project's directors,
@@ -217,19 +261,21 @@ fn ProjectMenu(model: Model, menu: State<bool>) -> Element {
                         label:{format!("Project row {}", name.get())}
                         fill:{if model.project.get() == id.get() {color(ground.selected)} else {Color::TRANSPARENT}}
                         stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                        button #relay.tree-control
-                            @click:{menu.set(false); model.select_project(id.get_untracked());}
-                            width:1fr height:fill justify:start
-                            pad:(horizontal:{px(18.0)}px vertical:0px)
-                            label:{format!("Select project {}", name.get())} font-color:ground.ink {
-                            text text-wrap:none {name.get()}
-                        }
-                        button #relay.tree-control
-                            @click:{menu.set(false); model.select_project(id.get_untracked()); model.page.set(Page::Connections);}
-                            width:{px(34.0)}px height:fill
-                            label:{format!("Project Connections for {}", name.get())}
-                            stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
-                            icon size:{px(14.0)}px connections-icon
+                        {
+                            parent.adopt(&menu_cell(
+                                Derived::new(move || format!("Select project {}", name.get())),
+                                press(move || { menu.set(false); model.select_project(id.get_untracked()); }),
+                                true,
+                                view! { Ellipsis text:(name) role:(TextRole::Label) },
+                                None,
+                            ));
+                            parent.adopt(&menu_cell(
+                                Derived::new(move || format!("Project Connections for {}", name.get())),
+                                press(move || { menu.set(false); model.select_project(id.get_untracked()); model.page.set(Page::Connections); }),
+                                false,
+                                view! { icon size:{px(14.0)}px connections-icon },
+                                None,
+                            ));
                         }
                     }
                 }
@@ -239,50 +285,52 @@ fn ProjectMenu(model: Model, menu: State<bool>) -> Element {
                     row height:{px(34.0)}px role:list-item
                         label:{format!("Director row {}", name.get())}
                         stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                        button #relay.tree-control
-                            @click:{menu.set(false); model.open_director(id.get_untracked());}
-                            width:1fr height:fill justify:start gap:{px(8.0)}px
-                            pad:(horizontal:{px(18.0)}px vertical:0px)
-                            label:{format!("Open director {}", name.get())}
-                            description:{capacity_label(director_capacity(&model.snapshot.get(), &id.get()))}
-                            font-color:ground.ink {
-                            icon size:{px(13.0)}px director-icon
-                            text text-wrap:none {name.get()}
-                        }
-                        button #relay.tree-control
-                            @click:{menu.set(false); model.open_director_profile(id.get_untracked());}
-                            width:{px(34.0)}px height:fill
-                            label:{format!("Profile for {}", name.get())}
-                            stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
-                            icon size:{px(14.0)}px sliders-icon
+                        {
+                            let open = menu_cell(
+                                Derived::new(move || format!("Open director {}", name.get())),
+                                press(move || { menu.set(false); model.open_director(id.get_untracked()); }),
+                                true,
+                                view! {
+                                    row width:1fr min-width:0px height:min-content gap:{px(8.0)}px align:center {
+                                        icon size:{px(13.0)}px director-icon
+                                        Ellipsis text:(name) role:(TextRole::Label)
+                                    }
+                                },
+                                Some(Derived::new(move || capacity_label(director_capacity(&model.snapshot.get(), &id.get())))),
+                            );
+                            parent.adopt(&open);
+                            parent.adopt(&menu_cell(
+                                Derived::new(move || format!("Profile for {}", name.get())),
+                                press(move || { menu.set(false); model.open_director_profile(id.get_untracked()); }),
+                                false,
+                                view! { icon size:{px(14.0)}px sliders-icon },
+                                None,
+                            ));
                         }
                     }
                 }
                 row height:{px(34.0)}px
                     stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                    button #relay.tree-control
-                        @click:{menu.set(false); model.open_profile(EditTarget::New);} width:1fr
-                        height:fill justify:start gap:{px(8.0)}px
-                        pad:(horizontal:{px(18.0)}px vertical:0px) label:"Create director" {
-                        icon size:{px(13.0)}px plus-icon
-                        text "New director"
+                    row width:1fr min-width:0px {
+                        CellButton label:"Create director" start:true horizontal-inset:(18.0)
+                            on-press:(press(move || { menu.set(false); model.open_profile(EditTarget::New); })) {
+                            icon size:{px(13.0)}px plus-icon
+                            Label text:"New director" role:(TextRole::Label)
+                        }
                     }
-                    button #relay.tree-control
-                        @click:{menu.set(false); model.open_profile(EditTarget::Defaults);}
-                        width:max-content height:fill gap:{px(8.0)}px
-                        pad:(horizontal:{px(14.0)}px vertical:0px) label:"Project defaults"
-                        stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
-                        icon size:{px(14.0)}px sliders-icon
-                        text "Defaults"
+                    row width:max-content shrink:0 {
+                        CellButton label:"Project defaults" rule:(Rule::Left)
+                            on-press:(press(move || { menu.set(false); model.open_profile(EditTarget::Defaults); })) {
+                            icon size:{px(14.0)}px sliders-icon
+                            Label text:"Defaults" role:(TextRole::Label)
+                        }
                     }
                 }
                 row height:{px(34.0)}px {
-                    button #relay.tree-control
-                        @click:{menu.set(false); model.sidebar_open.set(false); model.page.set(Page::NewProject);}
-                        width:1fr height:fill justify:start gap:{px(8.0)}px
-                        pad:(horizontal:{px(18.0)}px vertical:0px) label:"New Project" {
+                    CellButton label:"New Project" start:true horizontal-inset:(18.0)
+                        on-press:(press(move || { menu.set(false); model.sidebar_open.set(false); model.page.set(Page::NewProject); })) {
                         icon size:{px(13.0)}px plus-icon
-                        text "New project"
+                        Label text:"New project" role:(TextRole::Label)
                     }
                 }
             }

@@ -2,7 +2,7 @@
 use crate::{icons::*, model::Model};
 use mosaic::prelude::*;
 use mosaic::widgets::{CursorIcon, InspectionNode, input::EventCtx};
-use relay_ui::style::*;
+use relay_ui::prelude::{CellButton, CellButtonProps};
 use relay_ui::tokens::{ground, px};
 
 pub(crate) const NATIVE_HEADER_HEIGHT: f32 = 60.0;
@@ -169,10 +169,23 @@ pub(crate) fn WindowControls(model: Model) -> Element {
 
 #[component]
 fn WindowButton(source: SvgToken, label: &'static str, action: impl Fn() + 'static) -> Element {
-    view! {
-        button #relay.header-action @click.stop:{(action)()} @pointer-down.stop:{}
-            width:{px(WINDOW_BUTTON)}px height:fill shrink:0 pad:0px label:(label) {
+    let button = view! {
+        CellButton label:(label) horizontal-inset:(0.0) on-press:(action) {
             icon size:{px(13.0)}px stroke:ground.ink (source)
+        }
+    };
+    // Presses stay with the button rather than starting a window drag.
+    button.on_pointer(|event, ctx| {
+        if matches!(
+            event.kind,
+            PointerEventKind::Down(_) | PointerEventKind::Click(_)
+        ) {
+            ctx.stop_propagation();
+        }
+    });
+    view! {
+        row width:{px(WINDOW_BUTTON)}px shrink:0 {
+            { parent.adopt(&button); }
         }
     }
 }
