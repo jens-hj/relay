@@ -37,7 +37,6 @@ pub mod motion;
 pub mod overlay;
 pub mod session_header;
 pub mod status;
-pub mod style;
 pub mod surfaces;
 pub mod text;
 pub mod tokens;
