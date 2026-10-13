@@ -331,8 +331,9 @@ fn field_module(
 ) -> Element {
     let end = field_origin(model, title, field, extra);
     let module = view! {
-        Module title:(title.to_string()) caps:true head-end:(Some(end))
-            head-label:(Some(format!("{title} field header")))
+        Module title:(title.to_string())
+            icon:(Some(match field { "harness" => relay_ui::icons::harness.codex, "execution" => relay_ui::icons::call.approval, "scope" => relay_ui::icons::section.scope, "max_workers" => relay_ui::icons::call.spawn, _ => relay_ui::icons::section.permissions }))
+            head-end:(Some(end)) head-label:(Some(format!("{title} field header")))
     };
     module.adopt(&body);
     module
@@ -442,7 +443,7 @@ pub(crate) fn ActionMatrix(model: Model) -> Element {
     };
     view! {
         col height:min-content min-width:0px label:"Action matrix" {
-            Module title:"Actions" caps:true {
+            Module title:"Actions" icon:(Some(relay_ui::icons::section.permissions)) {
                 { parent.adopt(&origins); parent.adopt(&matrix); }
                 row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px) {
                     Label
@@ -511,7 +512,8 @@ fn ProfileToml(model: Model) -> Element {
         }
     };
     view! {
-        Module title:"Effective profile · TOML" caps:true head-end:(Some(toggle)) {
+        Module title:"Effective profile · TOML" icon:(Some(relay_ui::icons::call.read))
+            head-end:(Some(toggle)) {
             if model.advanced.get() {
                 col height:min-content gap:0px {
                     row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px)

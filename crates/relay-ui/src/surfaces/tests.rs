@@ -232,7 +232,7 @@ fn page_header_cells_sit_flush_right() {
                 PageHeader title:"Settings" path:(vec!["Relay".to_string()]) {
                     HeaderCell label:"Save" on-press:(press) keys:(Some("⌘S".to_string()))
                 }
-                Module title:"Harnesses" caps:true {
+                Module title:"Harnesses" icon:(Some(crate::icons::harness.codex)) {
                     Label text:"Body"
                 }
             }
@@ -242,7 +242,138 @@ fn page_header_cells_sit_flush_right() {
     assert_eq!(save.origin.x + save.size.width, 900.0);
     assert_eq!(save.size.height, 72.0);
     assert!(mounted.has("Relay /"));
-    assert!(mounted.has("HARNESSES"));
+    assert!(mounted.has("Harnesses"));
+}
+
+#[test]
+fn module_heading_has_serif_icon_and_strong_raised_boundary() {
+    use crate::tokens::ground;
+    let mounted = mount(Size::new(600.0, 200.0), || {
+        view! {
+            col {
+                Module title:"Harnesses" icon:(Some(crate::icons::harness.codex)) {
+                    Label text:"Field label"
+                }
+            }
+        }
+    });
+    let nodes = mounted.ui.inspection_snapshot().nodes;
+    let attribute = |id, name: &str| {
+        mounted
+            .ui
+            .inspection_details(id)
+            .unwrap()
+            .attributes
+            .into_iter()
+            .find(|a| a.name == name)
+            .map(|a| a.value)
+    };
+    let title = nodes
+        .iter()
+        .find(|n| {
+            n.label.as_deref() == Some("Harnesses")
+                && attribute(n.id, "font-family").as_deref() == Some("Serif")
+        })
+        .unwrap();
+    assert_eq!(attribute(title.id, "font-size").as_deref(), Some("17.0"));
+    let icon = nodes
+        .iter()
+        .find(|n| n.parent == title.parent && n.id != title.id)
+        .unwrap();
+    assert_eq!(icon.rect.size, Size::new(16.0, 16.0));
+    assert!(icon.rect.origin.x < title.rect.origin.x);
+    let strong = format!("{:?}", mosaic::render::PaintSpec::from(ground.rule_strong));
+    let boundary = nodes
+        .iter()
+        .find(|n| attribute(n.id, "fill").as_deref() == Some(&strong))
+        .unwrap();
+    assert_eq!(boundary.rect.size, Size::new(600.0, 1.0));
+    let raised = format!("{:?}", mosaic::render::PaintSpec::from(ground.panel_raised));
+    assert!(
+        nodes
+            .iter()
+            .any(|n| attribute(n.id, "fill").as_deref() == Some(&raised)
+                && n.rect.size.height == 42.0)
+    );
+    let field = nodes
+        .iter()
+        .find(|n| n.label.as_deref() == Some("Field label"))
+        .unwrap();
+    assert_ne!(attribute(field.id, "font-family").as_deref(), Some("Serif"));
+}
+
+#[test]
+fn remove_cell_tints_text_and_fill_on_hover_and_press() {
+    use crate::tokens::{ground, srgb_alpha, status};
+    use mosaic::core::theme::color;
+    let mounted = mount(Size::new(600.0, 80.0), || {
+        view! {
+            row height:80px {
+                el width:1fr {}
+                RemoveCell label:"Remove connection" on-press:(Rc::new(|| {}) as OnPress)
+            }
+        }
+    });
+    let cell = mounted.rect("Remove connection");
+    assert_eq!(cell.size.height, 80.0);
+    assert_eq!(cell.origin.x + cell.size.width, 600.0);
+    let attribute = |name: &str| {
+        let id = mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .find(|n| n.label.as_deref() == Some("Remove connection"))
+            .unwrap()
+            .id;
+        mounted
+            .ui
+            .inspection_details(id)
+            .unwrap()
+            .attributes
+            .into_iter()
+            .find(|a| a.name == name)
+            .unwrap()
+            .value
+    };
+    mounted.hover(cell.center());
+    let red = color(status.failed);
+    let expected = |amount| {
+        format!(
+            "{:?}",
+            mosaic::render::PaintSpec::solid(red.alpha(srgb_alpha(
+                red,
+                color(ground.page),
+                amount
+            )))
+        )
+    };
+    assert_eq!(attribute("fill"), expected(0.08));
+    let nodes = mounted.ui.inspection_snapshot().nodes;
+    let word = nodes
+        .iter()
+        .rev()
+        .find(|n| n.label.as_deref() == Some("Remove connection"))
+        .unwrap();
+    let details = mounted.ui.inspection_details(word.id).unwrap();
+    assert_eq!(
+        details
+            .attributes
+            .iter()
+            .find(|a| a.name == "text-color")
+            .unwrap()
+            .value,
+        format!("{:?}", mosaic::render::PaintSpec::solid(red))
+    );
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Down(PointerButton::Primary),
+        position: cell.center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: std::time::Duration::ZERO,
+    });
+    mounted.settle();
+    assert_eq!(attribute("fill"), expected(0.16));
 }
 
 #[test]
@@ -302,8 +433,8 @@ fn surfaces_take_the_slots_and_names_applications_need() {
                 PageHeader title:"Board" eyebrow:(Some("Project board".into())) height:(60.0) {
                     ReadoutCell key:"Source" value:"Local board"
                 }
-                Module title:"Harnesses" caps:true note:(Some("On the server".into()))
-                    head-end:(Some(tail))
+                Module title:"Harnesses" icon:(Some(crate::icons::harness.codex))
+                    note:(Some("On the server".into())) head-end:(Some(tail))
                 BoardColumn name:"Backlog" count:2usize fill:true
                     head-label:("Column backlog".to_string()) {
                     IssueCard issue:(issue)
