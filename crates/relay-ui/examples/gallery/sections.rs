@@ -20,7 +20,7 @@ pub fn gallery(set_theme: SetTheme) -> Element {
     view! {
         col fill:ground.page font-color:ground.ink font-family:monospace {
             theme_bar(set_theme.clone())
-            scroll width:fill height:1fr {
+            scroll {
                 col height:min-content shrink:0 gap:{px(28.0)}px
                     pad:(horizontal:{px(36.0)}px vertical:{px(28.0)}px) {
                     col height:min-content gap:{px(6.0)}px {
