@@ -758,3 +758,39 @@ fn approval_wash_thins_to_the_right_like_the_boards() {
         assert!(bands.windows(2).all(|p| p[1] <= p[0] + 0.02), "{bands:?}");
     }
 }
+
+#[test]
+fn gallery_sections_stack_without_overlap_in_a_window() {
+    // A desktop window, not the tall offscreen screenshot viewport: the page
+    // scrolls, and every section keeps its own height.
+    let mounted = mount(Size::new(1280.0, 960.0), || {
+        gallery::gallery(std::rc::Rc::new(|variant| {
+            install_theme(&theme(variant, 1.0));
+        }))
+    });
+    let headings = [
+        "TYPE",
+        "STATUS SQUARES AND HARNESS GLYPHS",
+        "EFFORT TRACKS",
+        "CUT CORNERS",
+        "DITHER",
+        "CELLS, RULES AND CONTROLS",
+        "OVERLAYS",
+        "AGENT TREE",
+        "USAGE",
+        "SESSION HEADER, CONTEXT AND FINGERPRINT",
+        "SURFACES IN THE SAME LANGUAGE",
+    ];
+    let tops: Vec<(&str, f32)> = headings
+        .iter()
+        .map(|heading| (*heading, mounted.rect(heading).origin.y))
+        .collect();
+    for pair in tops.windows(2) {
+        assert!(
+            pair[1].1 > pair[0].1 + 60.0,
+            "{} must sit well below {}: {tops:?}",
+            pair[1].0,
+            pair[0].0
+        );
+    }
+}
