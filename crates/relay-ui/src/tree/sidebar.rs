@@ -245,6 +245,9 @@ pub fn AgentSidebar(
     /// default.
     #[prop(optional)]
     fold_depth: Option<usize>,
+    /// Give roots one outer elbow column when embedded under a parent row.
+    #[prop(default = false)]
+    root_indent: bool,
     /// The focused branch, initially.
     #[prop(default = Live::fixed(None))]
     focus: Live<Option<String>>,
@@ -302,13 +305,32 @@ pub fn AgentSidebar(
         fold_depth.unwrap_or_else(|| mosaic::core::theme::scalar(shape.fold_depth).round() as usize)
     };
     let lines = Derived::new(move || {
-        flatten(
+        let mut lines = flatten(
             &scoped.get(),
             Flatten {
                 fold_depth: fold(),
                 filter: filter.get(),
             },
-        )
+        );
+        if root_indent && focused.get().is_none() {
+            let mut later_root = false;
+            for line in lines.iter_mut().rev() {
+                let guides = match line {
+                    TreeLine::Agent(agent) => &mut agent.guides,
+                    TreeLine::Folded(folded) => &mut folded.guides,
+                };
+                let root = guides.is_empty();
+                let guide = match (root, later_root) {
+                    (true, true) => super::Guide::Branch,
+                    (true, false) => super::Guide::Last,
+                    (false, true) => super::Guide::Pass,
+                    (false, false) => super::Guide::Blank,
+                };
+                guides.insert(0, guide);
+                later_root |= root;
+            }
+        }
+        lines
     });
 
     let set_filter: OnFilter = {

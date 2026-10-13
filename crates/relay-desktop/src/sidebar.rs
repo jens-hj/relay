@@ -12,8 +12,8 @@ use mosaic::core::theme::color;
 use mosaic::prelude::*;
 use relay_core::*;
 use relay_ui::prelude::{
-    AgentNode, AgentSidebar, AgentSidebarProps, ConnectionStatus, ConnectionStatusProps, OnPress,
-    UsageFoot, UsageFootProps,
+    AgentNode, AgentSidebar, AgentSidebarProps, ConnectionStatus, ConnectionStatusProps, Elbows,
+    ElbowsProps, OnPress, UsageFoot, UsageFootProps,
 };
 use relay_ui::prelude::{
     CellButton, CellButtonProps, Ellipsis, EllipsisProps, Label, LabelProps, Rule, TextRole, Tone,
@@ -21,6 +21,7 @@ use relay_ui::prelude::{
 };
 use relay_ui::surfaces::{Connection, ConnectionInfo};
 use relay_ui::tokens::{ground, px};
+use relay_ui::tree::Guide;
 use std::rc::Rc;
 
 /// Logical sidebar width before UI scale.
@@ -120,9 +121,9 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     let focused: relay_ui::Live<Option<String>> =
         Derived::new(move || model.agent_focus.get()).into();
     let agents = view! {
-        AgentSidebar roots:(roots) width:(width) focus:(focused) on-new:(Some(new_agent))
-            on-open:(Some(open)) on-toggle:(Some(toggle)) on-focus:(Some(focus))
-            on-approve:(Some(approve)) on-review:(Some(review)) {
+        AgentSidebar roots:(roots) width:(width) focus:(focused) root-indent:true
+            on-new:(Some(new_agent)) on-open:(Some(open)) on-toggle:(Some(toggle))
+            on-focus:(Some(focus)) on-approve:(Some(approve)) on-review:(Some(review)) {
             if !usage.get().is_empty() {
                 UsageFoot harnesses:(relay_ui::Live::from(usage))
             }
@@ -246,91 +247,114 @@ fn menu_cell(
     cell
 }
 
-/// The project menu: every project, then the selected project's directors,
-/// defaults, and a new project, one ruled row each.
+/// The project menu: each project with its directors, then defaults and a
+/// new project, one ruled row each.
 #[component]
 fn ProjectMenu(model: Model, menu: State<bool>) -> Element {
+    // Scroll attributes style its content, not its viewport. Bound the viewport
+    // explicitly to the fixed-height menu rows so short lists leave room for agents.
+    let height = Derived::new(move || {
+        let snapshot = model.snapshot.get();
+        let directors = snapshot
+            .directors
+            .iter()
+            .filter(|director| {
+                snapshot
+                    .projects
+                    .iter()
+                    .any(|project| project.id == director.project_id)
+            })
+            .count();
+        (34.0 * (snapshot.projects.len() + directors + 2) as f32).min(360.0)
+    });
     view! {
-        scroll max-height:{px(360.0)}px shrink:0
+        col height:{px(height.get())}px shrink:0
             stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-            col height:min-content role:list label:"Projects" {
-                for (_, project) in {model.snapshot.get().projects.into_iter().map(|p| (p.id.clone(), p))} {
-                    let id = State::new(project.id.clone());
-                    let name = State::new(project.name.clone());
-                    row height:{px(34.0)}px role:list-item
-                        label:{format!("Project row {}", name.get())}
-                        fill:{if model.project.get() == id.get() {color(ground.selected)} else {Color::TRANSPARENT}}
-                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                        {
-                            parent.adopt(&menu_cell(
-                                Derived::new(move || format!("Select project {}", name.get())),
-                                press(move || { menu.set(false); model.select_project(id.get_untracked()); }),
-                                true,
-                                view! { Ellipsis text:(name) role:(TextRole::Label) },
-                                None,
-                            ));
-                            parent.adopt(&menu_cell(
-                                Derived::new(move || format!("Project Connections for {}", name.get())),
-                                press(move || { menu.set(false); model.select_project(id.get_untracked()); model.page.set(Page::Connections); }),
-                                false,
-                                view! { icon size:{px(14.0)}px connections-icon },
-                                None,
-                            ));
+            scroll {
+                col height:min-content role:list label:"Projects" {
+                    for (_, project) in {model.snapshot.get().projects.into_iter().map(|p| (p.id.clone(), p))} {
+                        let id = State::new(project.id.clone());
+                        let name = State::new(project.name.clone());
+                        row height:{px(34.0)}px role:list-item
+                            label:{format!("Project row {}", name.get())}
+                            fill:{if model.project.get() == id.get() {color(ground.selected)} else {Color::TRANSPARENT}}
+                            stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                            {
+                                parent.adopt(&menu_cell(
+                                    Derived::new(move || format!("Select project {}", name.get())),
+                                    press(move || { menu.set(false); model.select_project(id.get_untracked()); }),
+                                    true,
+                                    view! { Ellipsis text:(name) role:(TextRole::Label) },
+                                    None,
+                                ));
+                                parent.adopt(&menu_cell(
+                                    Derived::new(move || format!("Project Connections for {}", name.get())),
+                                    press(move || { menu.set(false); model.select_project(id.get_untracked()); model.page.set(Page::Connections); }),
+                                    false,
+                                    view! { icon size:{px(14.0)}px connections-icon },
+                                    None,
+                                ));
+                            }
                         }
-                    }
-                }
-                for (_, director) in {model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>()} {
-                    let id = State::new(director.id.clone());
-                    let name = State::new(director.name.clone());
-                    row height:{px(34.0)}px role:list-item
-                        label:{format!("Director row {}", name.get())}
-                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                        {
-                            let open = menu_cell(
-                                Derived::new(move || format!("Open director {}", name.get())),
-                                press(move || { menu.set(false); model.open_director(id.get_untracked()); }),
-                                true,
-                                view! {
-                                    row width:1fr min-width:0px height:min-content gap:{px(8.0)}px align:center {
-                                        icon size:{px(13.0)}px director-icon
-                                        Ellipsis text:(name) role:(TextRole::Label)
+                        for (_, director) in {model.snapshot.get().directors.into_iter().filter(|d| d.project_id == id.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>()} {
+                            let id = State::new(director.id.clone());
+                            let name = State::new(director.name.clone());
+                            let project_id = State::new(director.project_id.clone());
+                            row height:{px(34.0)}px
+                                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                                Elbows
+                                    guides:(vec![if model.snapshot.get().directors.iter().rev().find(|d| d.project_id == project_id.get()).is_some_and(|d| d.id == id.get()) { Guide::Last } else { Guide::Branch }])
+                                row width:1fr min-width:0px role:list-item
+                                    label:{format!("Director row {}", name.get())} {
+                                    {
+                                        let open = menu_cell(
+                                            Derived::new(move || format!("Open director {}", name.get())),
+                                            press(move || { menu.set(false); model.open_director(id.get_untracked()); }),
+                                            true,
+                                            view! {
+                                                row width:1fr min-width:0px height:min-content gap:{px(8.0)}px align:center {
+                                                    icon size:{px(13.0)}px director-icon
+                                                    Ellipsis text:(name) role:(TextRole::Label)
+                                                }
+                                            },
+                                            Some(Derived::new(move || capacity_label(director_capacity(&model.snapshot.get(), &id.get())))),
+                                        );
+                                        parent.adopt(&open);
+                                        parent.adopt(&menu_cell(
+                                            Derived::new(move || format!("Profile for {}", name.get())),
+                                            press(move || { menu.set(false); model.open_director_profile(id.get_untracked()); }),
+                                            false,
+                                            view! { icon size:{px(14.0)}px sliders-icon },
+                                            None,
+                                        ));
                                     }
-                                },
-                                Some(Derived::new(move || capacity_label(director_capacity(&model.snapshot.get(), &id.get())))),
-                            );
-                            parent.adopt(&open);
-                            parent.adopt(&menu_cell(
-                                Derived::new(move || format!("Profile for {}", name.get())),
-                                press(move || { menu.set(false); model.open_director_profile(id.get_untracked()); }),
-                                false,
-                                view! { icon size:{px(14.0)}px sliders-icon },
-                                None,
-                            ));
+                                }
+                            }
                         }
                     }
-                }
-                row height:{px(34.0)}px
-                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                    row width:1fr min-width:0px {
-                        CellButton label:"Create director" start:true horizontal-inset:(18.0)
-                            on-press:(press(move || { menu.set(false); model.open_profile(EditTarget::New); })) {
+                    row height:{px(34.0)}px
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                        row width:1fr min-width:0px {
+                            CellButton label:"Create director" start:true horizontal-inset:(18.0)
+                                on-press:(press(move || { menu.set(false); model.open_profile(EditTarget::New); })) {
+                                icon size:{px(13.0)}px plus-icon
+                                Label text:"New director" role:(TextRole::Label)
+                            }
+                        }
+                        row width:max-content shrink:0 {
+                            CellButton label:"Project defaults" rule:(Rule::Left)
+                                on-press:(press(move || { menu.set(false); model.open_profile(EditTarget::Defaults); })) {
+                                icon size:{px(14.0)}px sliders-icon
+                                Label text:"Defaults" role:(TextRole::Label)
+                            }
+                        }
+                    }
+                    row height:{px(34.0)}px {
+                        CellButton label:"New Project" start:true horizontal-inset:(18.0)
+                            on-press:(press(move || { menu.set(false); model.sidebar_open.set(false); model.page.set(Page::NewProject); })) {
                             icon size:{px(13.0)}px plus-icon
-                            Label text:"New director" role:(TextRole::Label)
+                            Label text:"New project" role:(TextRole::Label)
                         }
-                    }
-                    row width:max-content shrink:0 {
-                        CellButton label:"Project defaults" rule:(Rule::Left)
-                            on-press:(press(move || { menu.set(false); model.open_profile(EditTarget::Defaults); })) {
-                            icon size:{px(14.0)}px sliders-icon
-                            Label text:"Defaults" role:(TextRole::Label)
-                        }
-                    }
-                }
-                row height:{px(34.0)}px {
-                    CellButton label:"New Project" start:true horizontal-inset:(18.0)
-                        on-press:(press(move || { menu.set(false); model.sidebar_open.set(false); model.page.set(Page::NewProject); })) {
-                        icon size:{px(13.0)}px plus-icon
-                        Label text:"New project" role:(TextRole::Label)
                     }
                 }
             }

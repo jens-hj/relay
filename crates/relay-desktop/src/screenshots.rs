@@ -163,7 +163,7 @@ fn shell_screenshots() {
             ui.frame(logical, 1.0);
         }
     };
-    let shots: [(&str, &dyn Fn()); 8] = [
+    let shots: [(&str, &dyn Fn()); 9] = [
         ("conversation", &|| {
             model.open_session("session-plan".into())
         }),
@@ -227,6 +227,30 @@ fn shell_screenshots() {
                 }
             });
             model.open_session("session-plan".into());
+        }),
+        ("projects", &|| {
+            model.open_session("session-plan".into());
+            settle();
+            let position = ui
+                .inspection_snapshot()
+                .nodes
+                .iter()
+                .find(|n| n.label.as_deref() == Some("Toggle project Relay · demo"))
+                .unwrap()
+                .rect
+                .center();
+            for kind in [
+                PointerEventKind::Down(PointerButton::Primary),
+                PointerEventKind::Up(PointerButton::Primary),
+            ] {
+                ui.dispatch_pointer(PointerEvent {
+                    kind,
+                    position,
+                    pointer_type: PointerType::Mouse,
+                    modifiers: Modifiers::default(),
+                    timestamp: Duration::ZERO,
+                });
+            }
         }),
     ];
     for (name, open) in shots {
