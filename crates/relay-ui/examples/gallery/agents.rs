@@ -163,6 +163,7 @@ pub fn sections() -> Element {
             usage_section()
             header_section()
             surfaces_section()
+            connections()
         }
     }
 }
@@ -552,4 +553,44 @@ fn surfaces_section() -> Element {
             }
         }
     }
+}
+
+/// Round 08 connection footer, all states and embedded details.
+pub fn connections() -> Element {
+    use relay_ui::surfaces::{Connection, ConnectionInfo, ConnectionTelemetry};
+    let board = view! {
+        col height:min-content gap:24px pad:24px {}
+    };
+    for expanded in [false, true] {
+        let row = view! {
+            row height:min-content gap:24px {}
+        };
+        for state in [
+            Connection::Connected,
+            Connection::Connecting,
+            Connection::Offline,
+        ] {
+            let telemetry = ConnectionTelemetry {
+                samples: vec![
+                    57, 62, 55, 68, 81, 60, 59, 52, 74, 110, 63, 55, 62, 72, 59, 65, 54, 81, 67, 67,
+                ],
+                client_revision: "413e226".into(),
+                server_revision: "9c1f0a2".into(),
+                offline_since: Some("21:42".into()),
+                retry_in: Some(4),
+                compatible: Some(true),
+                warning: None,
+            };
+            row.adopt(&view! {
+                col width:380px height:min-content fill:ground.panel {
+                    ConnectionStatus state:(state)
+                        latency:(if state==Connection::Connected {Some(67u32)} else {None})
+                        telemetry:(telemetry) initially-open:(expanded)
+                        info:(ConnectionInfo {endpoint:"https://mosaic-preview.example.app/api".into(),protocol:"v5".into(),transport:"HTTP + WebSocket".into(),revision:String::new()})
+                }
+            });
+        }
+        board.adopt(&row);
+    }
+    board
 }

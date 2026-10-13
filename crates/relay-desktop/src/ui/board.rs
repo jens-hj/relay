@@ -1102,7 +1102,7 @@ fn BoardFooter(model: Model) -> Element {
         }
     });
     view! {
-        row height:{px(40.0)}px shrink:0 stroke:(width:{px(1.0)} color:ground.rule edges:top)
+        row height:{px(44.0)}px shrink:0 stroke:(width:{px(1.0)} color:ground.rule edges:top)
             @layout:{move |rect: Rect| width.set(rect.size.width)} label:"Board summary" {
             if compact.get() {
                 ReadoutCell key:"Board" value:(summary)

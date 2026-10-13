@@ -10,6 +10,8 @@ use mosaic::widgets::Visual;
 /// Size of the 45° cut.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Cut {
+    /// 6px: compact protocol tags.
+    Tiny,
     /// 10px: labels and small tabs.
     Small,
     /// 12px: cards such as Needs you.
@@ -23,6 +25,7 @@ impl Cut {
     /// Leg length of the cut in logical pixels, before UI scale.
     pub fn size(self) -> f32 {
         match self {
+            Cut::Tiny => 6.0,
             Cut::Small => 10.0,
             Cut::Card => 12.0,
             Cut::Block => 14.0,
@@ -64,7 +67,7 @@ pub fn inset_leg(leg: f32, inset: f32) -> f32 {
 /// cut. Children sit in the inner panel.
 #[component]
 pub fn CutCorner(
-    /// Cut size: small 10, card 12 (default), block 14.
+    /// Cut size: tiny 6, small 10, card 12 (default), block 14.
     #[prop(default = Cut::Card)]
     cut: Cut,
     /// The cut corner or opposing pair; top-right by default.

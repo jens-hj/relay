@@ -18,7 +18,8 @@ pub use board::{
     PermissionMatrixProps, PermissionRow,
 };
 pub use connection::{
-    Connection, ConnectionInfo, ConnectionStatus, ConnectionStatusProps, latency_bars,
+    Connection, ConnectionInfo, ConnectionStatus, ConnectionStatusProps, ConnectionTelemetry,
+    latency_bars, ping_p95,
 };
 pub use form::{
     Field, FieldProps, OnIndex, OnNumber, OnSwitch, Segments, SegmentsProps, Select, SelectProps,

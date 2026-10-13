@@ -595,6 +595,7 @@ fn gallery_screenshots() {
         .unwrap_or(1.0f32);
     let specimen = std::env::var("RELAY_UI_SPECIMEN").unwrap_or_default();
     let logical = match specimen.as_str() {
+        "connection" => Size::new(1280.0, 700.0),
         "agents" => Size::new(1280.0, 6800.0),
         "tools" => Size::new(1332.0, 3800.0),
         "conversation" => Size::new(960.0, 1400.0),
@@ -603,6 +604,7 @@ fn gallery_screenshots() {
     };
     let mounted = mount(logical, || {
         let content = match specimen.as_str() {
+            "connection" => gallery::agents::connections(),
             "agents" => gallery::agents::sections(),
             "tools" => gallery::d2::tool_board(),
             "conversation" => gallery::d2::conversation(),
