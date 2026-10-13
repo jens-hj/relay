@@ -392,7 +392,11 @@ impl Palette {
     }
 
     pub fn tool(&self, kind: ToolKind) -> Color {
-        self.tool[kind as usize]
+        if kind == ToolKind::Other {
+            self.ground.muted
+        } else {
+            self.tool[kind as usize]
+        }
     }
 
     pub fn context(&self, part: ContextPart) -> Color {
@@ -463,7 +467,7 @@ impl ModelFamily {
     }
 }
 
-/// The thirteen tool categories, in fingerprint order.
+/// The thirteen designed tool categories, followed by a neutral fallback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ToolKind {
     Plan,
@@ -479,10 +483,11 @@ pub enum ToolKind {
     Wait,
     Result,
     Approval,
+    Other,
 }
 
 impl ToolKind {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Plan,
         Self::Create,
         Self::Edit,
@@ -496,6 +501,7 @@ impl ToolKind {
         Self::Wait,
         Self::Result,
         Self::Approval,
+        Self::Other,
     ];
 
     pub fn name(self) -> &'static str {
@@ -513,6 +519,7 @@ impl ToolKind {
             Self::Wait => "Wait",
             Self::Result => "Result",
             Self::Approval => "Approval",
+            Self::Other => "Other",
         }
     }
 
@@ -531,6 +538,7 @@ impl ToolKind {
             Self::Wait => tool.wait,
             Self::Result => tool.result,
             Self::Approval => tool.approval,
+            Self::Other => ground.muted,
         }
     }
 }
