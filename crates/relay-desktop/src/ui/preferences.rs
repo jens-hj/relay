@@ -113,7 +113,7 @@ pub(crate) fn Settings(model: Model) -> Element {
                 Module title:"Interface scale" caps:true
                     note:(Some(UiText::from("Display scaling follows the operating system"))) {
                     row height:{px(40.0)}px gap:0px align:center label:"Interface scale" {
-                        row width:{px(220.0)}px shrink:0
+                        row width:max-content shrink:0
                             stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
                             Stepper value:(relay_ui::Live::from(percent)) on-change:(set_percent)
                                 min:80i64 max:200i64 step:10i64 label:"Interface scale percent"
