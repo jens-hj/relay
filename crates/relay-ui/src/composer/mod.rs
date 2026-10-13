@@ -13,6 +13,11 @@ pub struct LedgerActions {
     pub set_effort: OnEffort,
     pub toggle: OnPress,
 }
+// The corner radius is relative to cell width, including in the narrow strip.
+// Keep identity visible throughout the same 3.6-second breathing cycle.
+pub(crate) const MODEL_GLOW_OPEN_REACH: f32 = 0.62;
+pub(crate) const MODEL_GLOW_COLLAPSED_REACH: f32 = 1.7;
+pub(crate) const MODEL_GLOW_OPACITY: f32 = 0.8;
 fn quiet_send(fill: bool) -> Color {
     let dark = mosaic::core::theme::color(ground.page).to_srgb8()[0] < 128;
     if dark {
@@ -68,8 +73,9 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
             col {
                 row height:1fr {
                     stack width:{px(44.0)}px clip {
-                        Dither colour:(colour) gradient:(Gradient::Corner) reach:0.9f32 opacity:0.5
-                            seed:3 breath:(Some(Breath::GLOW))
+                        Dither colour:(colour) gradient:(Gradient::Corner)
+                            reach:(MODEL_GLOW_COLLAPSED_REACH) opacity:(MODEL_GLOW_OPACITY) seed:3
+                            breath:(Some(Breath::GLOW))
                         CellButton label:(label) on-press:(toggle.clone()) horizontal-inset:0.0 {
                             col width:max-content align:center justify:between
                                 pad:(vertical:{px(10.0)}px horizontal:0px) gap:{px(5.0)}px {
@@ -109,8 +115,9 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
             col width:1fr min-width:0px {
                 row height:{if tall { Dimension::Fill } else { Dimension::Px(px(40.0)) }} shrink:0 {
                     stack width:1fr min-width:0px clip {
-                        Dither colour:(colour) gradient:(Gradient::Corner) reach:0.43f32 opacity:0.5
-                            seed:3 breath:(Some(Breath::GLOW))
+                        Dither colour:(colour) gradient:(Gradient::Corner)
+                            reach:(MODEL_GLOW_OPEN_REACH) opacity:(MODEL_GLOW_OPACITY) seed:3
+                            breath:(Some(Breath::GLOW))
                         CellButton label:(format!("Model: {}. Change model", vm.model.name()))
                             on-press:(actions.change_model) horizontal-inset:0.0 {
                             row height:min-content align:end gap:{px(7.0)}px
@@ -167,6 +174,32 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
         }
     }
 }
+/// A quoted source and remove action embedded in one strongly ruled strip.
+#[component]
+pub fn ReplyStrip(quote: UiText, on_source: OnPress, on_remove: OnPress) -> Element {
+    view! {
+        row height:{px(32.0)}px min-width:0px shrink:0 gap:0px
+            stroke:(width:{px(1.0)} color:ground.rule-strong) label:"Draft reply strip" {
+            col width:1fr min-width:0px {
+                CellButton label:"Go to reply source" start:true horizontal-inset:(12.0)
+                    on-press:(on_source) {
+                    row width:1fr min-width:0px height:min-content align:center gap:{px(8.0)}px
+                        font-color:ground.muted {
+                        { parent.adopt(&crate::icons::icon_mark(crate::icons::mark.reply, 16.0)); }
+                        Ellipsis text:(quote) role:(TextRole::Label) tone:(Tone::Muted)
+                    }
+                }
+            }
+            col width:{px(32.0)}px shrink:0
+                stroke:(width:{px(1.0)} color:ground.rule-strong edges:left) {
+                CellButton label:"Remove draft reply" on-press:(on_remove) horizontal-inset:(0.0) {
+                    Label text:"×" role:(TextRole::Label)
+                }
+            }
+        }
+    }
+}
+
 /// A composer never rebuilds its editor when the ledger changes. Supply `value`
 /// to read the plain editor's draft; injected editors may instead report
 /// `has-content` and retain their own buffer and submission logic.

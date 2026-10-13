@@ -526,6 +526,69 @@ fn harness_command_panel_is_attached_bounded_and_escape_restores_draft_focus() {
 }
 
 #[test]
+fn draft_reply_strip_removes_only_the_reply_and_keeps_shared_edges() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    let original = mounted.model.snapshot.get_untracked().messages;
+    let source = original.iter().find(|m| m.id == "m1").unwrap();
+    let other = Part::text("Unrelated draft");
+    crate::buffer::edit(
+        mounted.model,
+        "session-plan",
+        vec![
+            Part {
+                id: "reply-strip-test".into(),
+                kind: PartKind::Reply {
+                    anchor: relay_core::Anchor {
+                        message_id: source.id.clone(),
+                        start: 0,
+                        end: source.body.len(),
+                        quote: source.body.clone(),
+                    },
+                    parts: vec![Part::text("Reply draft")],
+                },
+            },
+            other.clone(),
+        ],
+    );
+    mounted.settle();
+    let snapshot = mounted.ui.inspection_snapshot();
+    // The final instance is the composer; the source transcript also mirrors it.
+    let rect = |label| {
+        snapshot
+            .nodes
+            .iter()
+            .rev()
+            .find(|n| n.label.as_deref() == Some(label))
+            .unwrap()
+            .rect
+    };
+    let quote = rect("Go to reply source");
+    let remove = rect("Remove draft reply");
+    assert!((quote.max_x() - remove.origin.x).abs() < 0.1);
+    assert_eq!(quote.origin.y, remove.origin.y);
+    assert_eq!(quote.size.height, remove.size.height);
+    for kind in [
+        PointerEventKind::Down(PointerButton::Primary),
+        PointerEventKind::Up(PointerButton::Primary),
+    ] {
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind,
+            position: remove.center(),
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+    }
+    mounted.settle();
+    assert_eq!(
+        crate::buffer::parts(mounted.model, "session-plan"),
+        vec![other]
+    );
+    assert_eq!(mounted.model.snapshot.get_untracked().messages, original);
+}
+
+#[test]
 fn command_completion_escape_and_ime_keep_normal_editing() {
     let mounted = mount(false, 1380.0);
     mounted.model.open_session("session-plan".into());

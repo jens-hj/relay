@@ -21,8 +21,8 @@ use relay_core::*;
 use relay_ui::composer::ComposerHandle;
 use relay_ui::prelude::{
     AgentText, AgentTextProps, Composer, ComposerProps, FingerprintStrip, FingerprintStripProps,
-    LedgerActions, MessageRow, MessageRowProps, Segments, SegmentsProps, ThinkingLine,
-    ThinkingLineProps, UserMessage, UserMessageProps,
+    LedgerActions, MessageRow, MessageRowProps, ReplyStrip, ReplyStripProps, Segments,
+    SegmentsProps, ThinkingLine, ThinkingLineProps, UserMessage, UserMessageProps,
 };
 use relay_ui::prelude::{
     CellButton, CellButtonProps, Ellipsis, EllipsisProps, IconCell, IconCellProps, Label,
@@ -1701,20 +1701,10 @@ fn DraftPart(model: Model, controller: ControllerState, part: Part, mirror: bool
             view! {
                 col height:min-content gap:{px(6.0)}px pad:(left:{px(14.0)}px)
                     stroke:(width:{px(2.0)} color:ground.rule edges:left) {
-                    row height:{px(32.0)}px gap:{px(8.0)}px {
-                        row width:1fr min-width:0px {
-                            CellButton label:"Go to reply source" start:true horizontal-inset:(0.0)
-                                on-press:(press(move || go_to_source(model, &source_controller.get_untracked(), &anchor.get_untracked()))) {
-                                Ellipsis
-                                    text:(Derived::new(move || format!("↩ {}", anchor.get().quote.chars().take(80).collect::<String>())))
-                                    role:(TextRole::Label) tone:(Tone::Muted)
-                            }
-                        }
-                        IconCell label:"Remove draft reply"
-                            on-press:(press(move || remove_draft_part(model, &source_controller.get_untracked(), &remove.get_untracked(), false))) {
-                            Label text:"×" role:(TextRole::Label)
-                        }
-                    }
+                    ReplyStrip
+                        quote:(Derived::new(move || anchor.get().quote.split_whitespace().collect::<Vec<_>>().join(" ")))
+                        on-source:(press(move || go_to_source(model, &source_controller.get_untracked(), &anchor.get_untracked())))
+                        on-remove:(press(move || remove_draft_part(model, &source_controller.get_untracked(), &remove.get_untracked(), false)))
                     for (_, nested) in {parts.get().into_iter().map(|p|(p.id.clone(),p)).collect::<Vec<_>>()} {
                         col height:min-content {
                             DraftPart model:(model) controller:(controller) part:(nested.clone())

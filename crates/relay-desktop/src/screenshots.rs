@@ -181,7 +181,13 @@ fn shell_screenshots() {
             ui.frame(logical, 1.0);
         }
     };
-    let shots: [(&str, &dyn Fn()); 15] = [
+    let shots: [(&str, &dyn Fn()); 17] = [
+        ("composer-reply", &|| {
+            composer_reply_shot(model, &ui, false, &settle)
+        }),
+        ("composer-reply-collapsed", &|| {
+            composer_reply_shot(model, &ui, true, &settle)
+        }),
         ("command-model", &|| {
             model.open_session("session-plan".into());
             crate::command_ui::open(model, "model");
@@ -300,11 +306,111 @@ fn shell_screenshots() {
         scope.run(open);
         settle();
         render(&ui, logical, 1.0, &format!("{directory}/{name}.png"));
+        if name.starts_with("composer-reply") {
+            let snapshot = ui.inspection_snapshot();
+            let source = image::open(format!("{directory}/{name}.png")).unwrap();
+            for (suffix, rect) in [
+                (
+                    "reply",
+                    snapshot
+                        .nodes
+                        .iter()
+                        .rev()
+                        .find(|n| n.label.as_deref() == Some("Draft reply strip"))
+                        .unwrap()
+                        .rect,
+                ),
+                (
+                    "glow",
+                    snapshot
+                        .nodes
+                        .iter()
+                        .find(|n| {
+                            n.label.as_deref().is_some_and(|label| {
+                                label.starts_with("Model:") || label.starts_with("Agent settings:")
+                            })
+                        })
+                        .unwrap()
+                        .rect,
+                ),
+            ] {
+                source
+                    .crop_imm(
+                        rect.origin.x.floor() as u32,
+                        rect.origin.y.floor() as u32,
+                        rect.size.width.ceil() as u32,
+                        rect.size.height.ceil() as u32,
+                    )
+                    .save(format!("{directory}/{name}-{suffix}.png"))
+                    .unwrap();
+            }
+            scope.run(|| {
+                crate::buffer::edit(model, "session-plan", vec![]);
+                set_ledger_collapsed(&ui, false);
+            });
+        }
         if name == "command-model" {
             scope.run(|| model.command_flow.set(String::new()));
         }
     }
     scope.dispose();
+}
+
+fn composer_reply_shot(model: crate::model::Model, ui: &Ui, collapsed: bool, settle: &impl Fn()) {
+    model.open_session("session-plan".into());
+    let source = model
+        .snapshot
+        .get_untracked()
+        .messages
+        .into_iter()
+        .find(|m| m.session_id == "session-plan" && m.tool.is_none())
+        .unwrap();
+    let quote = source.body.lines().next().unwrap().to_owned();
+    crate::buffer::edit(
+        model,
+        "session-plan",
+        vec![relay_core::Part {
+            id: "screenshot-reply".into(),
+            kind: relay_core::PartKind::Reply {
+                anchor: relay_core::Anchor {
+                    message_id: source.id,
+                    start: 0,
+                    end: quote.len(),
+                    quote,
+                },
+                parts: vec![relay_core::Part::text("Keep this in the next turn.")],
+            },
+        }],
+    );
+    settle();
+    set_ledger_collapsed(ui, collapsed);
+}
+
+fn set_ledger_collapsed(ui: &Ui, collapsed: bool) {
+    let label = if collapsed {
+        "Collapse agent settings"
+    } else {
+        "Expand agent settings"
+    };
+    if let Some(control) = ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some(label))
+    {
+        for kind in [
+            PointerEventKind::Down(PointerButton::Primary),
+            PointerEventKind::Up(PointerButton::Primary),
+        ] {
+            ui.dispatch_pointer(PointerEvent {
+                kind,
+                position: control.rect.center(),
+                pointer_type: PointerType::Mouse,
+                modifiers: Modifiers::default(),
+                timestamp: Duration::ZERO,
+            });
+        }
+    }
 }
 
 enum ConnectionShot {

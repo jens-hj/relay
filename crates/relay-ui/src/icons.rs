@@ -14,7 +14,7 @@ mosaic::scheme! {
         /// Execution approval modes: automatic, ask each time, unrestricted.
         execution { automatic:Svg, ask:Svg, unrestricted:Svg },
         /// Small marks: a confirming check, a link (endpoints), copy.
-        mark { check:Svg, link:Svg, copy:Svg },
+        mark { check:Svg, link:Svg, copy:Svg, reply:Svg },
     }
 }
 
@@ -50,7 +50,7 @@ pub fn icons() -> UiIcons {
         },
         mark {
             check:"assets/icons/mark-check.svg", link:"assets/icons/mark-link.svg",
-            copy:"assets/icons/mark-copy.svg",
+            copy:"assets/icons/mark-copy.svg", reply:"assets/icons/mark-reply.svg",
         },
     } }
 }

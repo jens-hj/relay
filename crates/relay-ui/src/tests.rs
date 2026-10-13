@@ -7,6 +7,7 @@ use crate::tokens::{
     thresholds::{self, Level},
 };
 use mosaic::{core::reactive::flush, prelude::*, text::FontContext};
+use std::rc::Rc;
 use std::time::Duration;
 
 #[path = "../examples/gallery/sections.rs"]
@@ -311,6 +312,134 @@ fn dither_images_flood_one_colour_at_opacity() {
     assert!(pixels.iter().any(|pixel| pixel[3] > 0));
     for pixel in pixels {
         assert!(pixel[3] == 0 || *pixel == [0xE3, 0xB2, 0x66, 56]);
+    }
+}
+
+#[test]
+fn composer_model_glow_reaches_into_both_cells_without_losing_text_contrast() {
+    use crate::composer::{MODEL_GLOW_COLLAPSED_REACH, MODEL_GLOW_OPACITY, MODEL_GLOW_OPEN_REACH};
+    use crate::tokens::srgb_alpha;
+    assert_eq!(Breath::GLOW.period, 3.6);
+    assert_eq!(Breath::GLOW.at(0.0), Breath::GLOW.at(3.6));
+    for (width, height, before, after) in [
+        (144.0, 40.0, 0.43, MODEL_GLOW_OPEN_REACH),
+        (44.0, 106.0, 0.9, MODEL_GLOW_COLLAPSED_REACH),
+    ] {
+        let mask = |reach| {
+            let mut spec = DitherSpec::new(width, height, 1.0, Gradient::Corner, reach);
+            spec.seed = 3;
+            spec.mask()
+        };
+        let original = mask(before);
+        let strengthened = mask(after);
+        assert!(
+            strengthened.iter().filter(|on| **on).count()
+                > original.iter().filter(|on| **on).count() * 3 / 2
+        );
+        // More than just a brighter bottom: new grain rises above the old radius.
+        if width < height {
+            let upper = (width as usize) * (height as usize - width as usize);
+            assert!(!original[..upper].iter().any(|on| *on));
+            assert!(strengthened[..upper].iter().any(|on| *on));
+        }
+    }
+    // Only corner radii may exceed the cell width; live washes remain bounded.
+    assert_eq!(
+        DitherSpec::new(44.0, 106.0, 1.0, Gradient::Horizontal, 1.7).mask(),
+        DitherSpec::new(44.0, 106.0, 1.0, Gradient::Horizontal, 1.0).mask()
+    );
+    for variant in ThemeVariant::ALL {
+        let palette = variant.palette();
+        let under = palette.ground.panel;
+        for tint in ModelFamily::ALL
+            .into_iter()
+            .map(|family| palette.model(family))
+            .chain(std::iter::once(palette.ground.muted))
+        {
+            // Match Dither's quantized image alpha and breathing layer in linear light.
+            let base = (srgb_alpha(tint, under, MODEL_GLOW_OPACITY) * 255.0).round() / 255.0;
+            assert!(
+                base > srgb_alpha(tint, under, 0.5),
+                "the glow carries more colour than before"
+            );
+            let alpha = base * srgb_alpha(tint, under, Breath::GLOW.high.max(Breath::GLOW.low));
+            let pixel = Color::new(
+                under.r + (tint.r - under.r) * alpha,
+                under.g + (tint.g - under.g) * alpha,
+                under.b + (tint.b - under.b) * alpha,
+                1.0,
+            );
+            let ratio = contrast(palette.ground.ink, pixel);
+            assert!(
+                ratio >= 4.5,
+                "{}: model glow text contrast {ratio}",
+                variant.name()
+            );
+        }
+    }
+}
+
+#[test]
+fn composer_reply_strip_shares_edges_and_has_an_opaque_scaled_strong_rule() {
+    for (variant, scale) in [(ThemeVariant::Dark, 1.0), (ThemeVariant::Light, 1.5)] {
+        let mounted = mount(Size::new(500.0, 100.0), || {
+            let noop: OnPress = Rc::new(|| {});
+            view! {
+                col {
+                    ReplyStrip quote:("A long quoted source line. ".repeat(50))
+                        on-source:(noop.clone()) on-remove:(noop)
+                }
+            }
+        });
+        install_theme(&theme(variant, scale));
+        mounted.settle();
+        let snapshot = mounted.ui.inspection_snapshot();
+        let node = |label| {
+            snapshot
+                .nodes
+                .iter()
+                .find(|n| n.label.as_deref() == Some(label))
+                .unwrap()
+        };
+        let quote = node("Go to reply source");
+        let remove = node("Remove draft reply");
+        let strip = node("Draft reply strip");
+        assert!((quote.rect.max_x() - remove.rect.origin.x).abs() < 0.1);
+        assert_eq!(quote.rect.origin.y, strip.rect.origin.y);
+        assert_eq!(remove.rect.origin.y, strip.rect.origin.y);
+        assert_eq!(quote.rect.size.height, strip.rect.size.height);
+        assert_eq!(remove.rect.size.height, strip.rect.size.height);
+        assert!(remove.rect.max_x() <= strip.rect.max_x());
+        let strokes = mounted
+            .ui
+            .inspection_details(strip.id)
+            .unwrap()
+            .attributes
+            .into_iter()
+            .find(|a| a.name == "strokes")
+            .unwrap()
+            .value;
+        assert_eq!(
+            strokes,
+            format!(
+                "{:?}",
+                vec![StrokeSpec::new(scale, crate::tokens::ground.rule_strong)]
+            )
+        );
+        assert_eq!(variant.palette().ground.rule_strong.a, 1.0);
+        assert_eq!(
+            mosaic::core::theme::color(crate::tokens::ground.rule_strong),
+            variant.palette().ground.rule_strong
+        );
+        let icon = include_str!("../assets/icons/mark-reply.svg");
+        for required in [
+            "viewBox=\"0 0 24 24\"",
+            "stroke-width=\"1.8\"",
+            "stroke-linecap=\"square\"",
+            "stroke-linejoin=\"miter\"",
+        ] {
+            assert!(icon.contains(required));
+        }
     }
 }
 
