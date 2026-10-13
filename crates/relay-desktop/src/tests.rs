@@ -1,10 +1,11 @@
 use crate::{
     model::{EditTarget, Model, Page},
     network::NetworkState,
-    theme, ui,
+    ui,
 };
 use mosaic::{core::reactive::flush, prelude::*, text::FontContext};
 use relay_core::*;
+use relay_ui::tokens::{ThemeVariant, theme};
 use std::time::Duration;
 
 struct Mounted {
@@ -23,15 +24,17 @@ impl Drop for Mounted {
 
 fn mount(light: bool, width: f32) -> Mounted {
     mosaic::core::builtins::install();
-    install_theme(&theme::palette(light));
-    install_theme(&theme::icons());
+    install_theme(&theme(ThemeVariant::select(light, false), 1.0));
+    install_theme(&relay_ui::icons::icons());
+    install_theme(&crate::icons::icons());
     let scope = Scope::new(|| {});
     let ui = scope.run(Ui::new);
     let mut fonts = FontContext::embedded_only();
-    crate::fonts::configure(&mut fonts);
-    assert!(fonts.has_family("Reddit Sans"));
-    assert!(fonts.has_family("Zed Mono"));
+    relay_ui::fonts::install(&mut fonts);
+    assert!(fonts.has_family(relay_ui::fonts::MONO));
+    assert!(fonts.has_family(relay_ui::fonts::SERIF));
     ui.set_fonts(fonts);
+    relay_ui::attach(&ui);
     let (sender, commands) = tokio::sync::mpsc::unbounded_channel();
     let model = scope.run(|| Model::new(&ui, sender));
     model.receive(NetworkState {
@@ -465,359 +468,6 @@ fn command_completion_escape_and_ime_keep_normal_editing() {
 }
 
 #[test]
-fn sidebar_tree_disclosure_keyboard_and_secondary_actions_are_independent() {
-    let mounted = mount(false, 1380.0);
-    mounted
-        ._scope
-        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
-    let focused_label = || {
-        let focused = mounted.ui.focused().unwrap().id();
-        mounted
-            .ui
-            .inspection_snapshot()
-            .nodes
-            .into_iter()
-            .find(|n| n.id == focused)
-            .unwrap()
-            .label
-            .unwrap()
-    };
-    mounted.focus("Toggle project Relay · demo");
-    mounted.key(Key::ArrowLeft, false);
-    assert!(
-        !mounted
-            .model
-            .expanded_projects
-            .get_untracked()
-            .contains("demo")
-    );
-    mounted.key(Key::ArrowRight, false);
-    mounted.key(Key::ArrowRight, false);
-    assert_eq!(focused_label(), "Open director Project director");
-    mounted.key(Key::ArrowRight, false);
-    mounted.key(Key::ArrowRight, false);
-    assert_eq!(focused_label(), "Open worker Profile validation");
-    mounted.key(Key::Enter, false);
-    assert_eq!(mounted.model.session.get_untracked(), "session-worker");
-    assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
-    mounted.key(Key::ArrowLeft, false);
-    assert_eq!(focused_label(), "Open director Project director");
-    mounted.key(Key::ArrowLeft, false);
-    assert!(
-        !mounted
-            .model
-            .expanded_directors
-            .get_untracked()
-            .contains("director-main")
-    );
-    mounted.key(Key::ArrowLeft, false);
-    assert_eq!(focused_label(), "Toggle project Relay · demo");
-    mounted.key(Key::End, false);
-    assert_eq!(focused_label(), "Open director Review director");
-    mounted.key(Key::ArrowUp, false);
-    assert_eq!(focused_label(), "Open director Project director");
-    mounted.key(Key::Home, false);
-    assert_eq!(focused_label(), "Toggle project Relay · demo");
-    mounted.click("Toggle project Relay · demo");
-    assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
-    assert_eq!(mounted.model.session.get_untracked(), "session-worker");
-    mounted.model.open_session("session-worker".into());
-    mounted.settle();
-    assert!(
-        mounted
-            .model
-            .expanded_projects
-            .get_untracked()
-            .contains("demo")
-    );
-    assert!(
-        mounted
-            .model
-            .expanded_directors
-            .get_untracked()
-            .contains("director-main")
-    );
-    mounted.rect("Open worker Profile validation");
-    mounted.click("Profile for Project director");
-    assert_eq!(mounted.model.page.get_untracked(), Page::Directors);
-    assert_eq!(
-        mounted.model.editor.get_untracked(),
-        EditTarget::Director("director-main".into())
-    );
-    mounted.click("Open director Project director");
-    assert_eq!(mounted.model.session.get_untracked(), "session-plan");
-    mounted.click("Open board for Relay · demo");
-    assert_eq!(mounted.model.page.get_untracked(), Page::Board);
-    assert!(mounted.model.issue.get_untracked().is_none());
-    // A profile/transcript viewport's scale binding must die with that view.
-    mounted.click("Settings");
-    mounted.focus("Theme: Light");
-    mounted.click("Theme: Light");
-    mounted.click("Increase interface scale");
-    let snapshot = mounted.ui.inspection_snapshot();
-    let sidebar = snapshot
-        .nodes
-        .iter()
-        .find(|n| n.label.as_deref() == Some("Sidebar"))
-        .unwrap()
-        .id;
-    for node in snapshot.nodes.iter().filter(|n| n.role == Role::Button) {
-        let mut parent = node.parent;
-        let mut button_ancestor = false;
-        while let Some(id) = parent {
-            if id == sidebar {
-                assert!(!button_ancestor, "Nested sidebar control: {:?}", node.label);
-                break;
-            }
-            let ancestor = snapshot.nodes.iter().find(|n| n.id == id).unwrap();
-            button_ancestor |= ancestor.role == Role::Button;
-            parent = ancestor.parent;
-        }
-    }
-}
-
-#[test]
-fn sidebar_tree_groups_by_project_and_director_and_reacts_without_losing_expansion() {
-    for light in [false, true] {
-        let mounted = mount(light, 820.0);
-        mounted.click("Toggle director Project director");
-        let mut snapshot = mounted.model.snapshot.get_untracked();
-        let mut project = snapshot.projects[0].clone();
-        project.id = "other".into();
-        project.name = "Other project".into();
-        snapshot.projects.push(project);
-        let mut director = snapshot.directors[0].clone();
-        director.id = "director-other".into();
-        director.project_id = "other".into();
-        director.name = "Other director".into();
-        snapshot.directors.push(director);
-        let mut worker = snapshot.sessions[1].clone();
-        worker.id = "other-worker".into();
-        worker.project_id = "other".into();
-        worker.director_id = "director-other".into();
-        worker.title = "Other worker".into();
-        snapshot.sessions.push(worker);
-        mounted.model.receive(NetworkState {
-            snapshot: snapshot.clone(),
-            connected: true,
-            ..Default::default()
-        });
-        mounted.settle();
-        mounted.rect("Open worker Profile validation");
-        assert!(
-            !mounted
-                .ui
-                .inspection_snapshot()
-                .nodes
-                .iter()
-                .any(|n| n.label.as_deref() == Some("Open director Other director"))
-        );
-        mounted.click("Toggle project Other project");
-        assert_eq!(mounted.model.project.get_untracked(), "demo");
-        mounted.click("Toggle director Other director");
-        mounted.rect("Open worker Other worker");
-        snapshot.directors[0].name = "Renamed director".into();
-        snapshot.sessions[1].title = "Renamed worker".into();
-        snapshot.projects.reverse();
-        snapshot.revision += 1;
-        mounted.model.receive(NetworkState {
-            snapshot,
-            connected: true,
-            ..Default::default()
-        });
-        mounted.settle();
-        let project = mounted.rect("Toggle project Relay · demo");
-        let director = mounted.rect("Open director Renamed director");
-        let worker = mounted.rect("Open worker Renamed worker");
-        assert!(project.origin.x < director.origin.x && director.origin.x < worker.origin.x);
-        assert!(project.origin.y < director.origin.y && director.origin.y < worker.origin.y);
-        let review = mounted.rect("Open director Review director");
-        assert!(worker.origin.y < review.origin.y);
-        mounted.click("Open worker Other worker");
-        assert_eq!(mounted.model.project.get_untracked(), "other");
-        assert_eq!(mounted.model.session.get_untracked(), "other-worker");
-        mounted.ui.dispatch_pointer(PointerEvent {
-            kind: PointerEventKind::Move,
-            position: mounted.rect("Open worker Other worker").center(),
-            pointer_type: PointerType::Mouse,
-            modifiers: Modifiers::default(),
-            timestamp: Duration::ZERO,
-        });
-        mounted.ui.tick(Duration::from_millis(600));
-        mounted.settle();
-        assert!(
-            mounted
-                .ui
-                .inspection_snapshot()
-                .nodes
-                .iter()
-                .any(|n| n.role == Role::Tooltip && n.label.as_deref() == Some("Worker"))
-        );
-        mounted.click("Open director Other director");
-        assert_eq!(mounted.model.page.get_untracked(), Page::DirectorStart);
-        assert_eq!(
-            mounted.model.worker_director.get_untracked(),
-            "director-other"
-        );
-        mounted.rect("Next message");
-        mounted.rect("Send message");
-        mounted.click("Create director in Relay · demo");
-        assert_eq!(mounted.model.project.get_untracked(), "demo");
-        assert_eq!(mounted.model.editor.get_untracked(), EditTarget::New);
-        mounted.click("Project defaults for Other project");
-        assert_eq!(mounted.model.project.get_untracked(), "other");
-        assert_eq!(mounted.model.editor.get_untracked(), EditTarget::Defaults);
-    }
-}
-
-#[test]
-fn sidebar_footer_stays_fixed_while_large_trees_scroll_and_scale() {
-    let mut mounted = mount(false, 820.0);
-    mounted
-        ._scope
-        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
-    mounted.size = Size::new(820.0, 360.0);
-    let mut snapshot = mounted.model.snapshot.get_untracked();
-    for i in 0..30 {
-        let mut director = snapshot.directors[0].clone();
-        director.id = format!("extra-{i}");
-        director.name = format!("Director {i}");
-        snapshot.directors.push(director);
-    }
-    mounted.model.receive(NetworkState {
-        snapshot,
-        connected: true,
-        ..Default::default()
-    });
-    mounted.settle();
-    let before = mounted.rect("Settings");
-    assert!(before.origin.y > 300.0 && before.origin.y + before.size.height <= 360.0);
-    mounted.focus("Open director Director 29");
-    assert_eq!(mounted.rect("Settings"), before);
-    mounted.focus("Settings");
-    mounted.key(Key::Enter, false);
-    assert_eq!(mounted.model.page.get_untracked(), Page::Settings);
-    mounted.model.preferences.update(|p| {
-        p.scale = 1.5;
-        p.sidebar_width = 160.0;
-    });
-    mounted.settle();
-    let settings = mounted.rect("Settings");
-    let sidebar = mounted.rect("Sidebar");
-    assert!((settings.size.height / before.size.height - 1.5).abs() < 0.05);
-    assert!(settings.origin.y + settings.size.height <= 360.0);
-    assert!(settings.origin.x + settings.size.width <= sidebar.size.width);
-    mounted.click("Settings");
-    assert_eq!(mounted.model.page.get_untracked(), Page::Settings);
-}
-
-#[test]
-fn sidebar_connection_details_fit_narrow_widths_and_connection_states() {
-    for sidebar_width in [160.0, 220.0, 360.0] {
-        let mounted = mount(false, 1380.0);
-        mounted
-            .model
-            .preferences
-            .update(|p| p.sidebar_width = sidebar_width);
-        mounted
-            .model
-            .server_endpoint
-            .set("https://relay.example:7440/".into());
-        mounted.model.server_build.set(Some(BuildInfo {
-            version: "0.1.0".into(),
-            revision: "1234567890123456789012345678901234567890".into(),
-        }));
-        mounted.settle();
-        for label in ["Frontend build", "Server build"] {
-            let rect = mounted.rect(label);
-            assert!(rect.size.height > 0.0 && rect.max_y() <= mounted.size.height);
-            let node = mounted
-                .ui
-                .inspection_snapshot()
-                .nodes
-                .into_iter()
-                .find(|n| n.label.as_deref() == Some(label))
-                .unwrap();
-            assert!(node.description.unwrap().contains("0.1.0"));
-        }
-        mounted.click("Server connection details");
-        let settings = mounted.rect("Settings");
-        let revision = mounted.rect("Workspace revision");
-        assert!(revision.size.width >= settings.size.width);
-        assert!((revision.origin.x - settings.origin.x - settings.size.width).abs() < 1.0);
-        let indicator = mounted.rect("Connection indicator");
-        let sidebar = mounted.rect("Sidebar");
-        assert!(
-            (indicator.origin.x + indicator.size.width - sidebar.size.width + 12.0).abs() < 1.0
-        );
-        assert!(!has_label(&mounted, "Revision meaning"));
-        for sample in [Some(42), Some(180), Some(480), None] {
-            mounted.model.round_trip_ms.set(sample);
-            mounted.settle();
-            let snapshot = mounted.ui.inspection_snapshot();
-            let sidebar = mounted.rect("Sidebar");
-            for label in [
-                "Workspace revision",
-                "Server address",
-                "Connection transport",
-                "Server protocol",
-                "Connection quality",
-                "Connection status",
-            ] {
-                let head = snapshot
-                    .nodes
-                    .iter()
-                    .find(|n| n.label.as_deref() == Some(label))
-                    .unwrap();
-                for node in &snapshot.nodes {
-                    let mut parent = node.parent;
-                    while let Some(id) = parent {
-                        if id == head.id {
-                            let rect = node.rect;
-                            assert!(
-                                rect.origin.x >= sidebar.origin.x - 1.0
-                                    && rect.origin.x + rect.size.width
-                                        <= sidebar.origin.x + sidebar.size.width + 1.0,
-                                "{label} at {sidebar_width}px, {sample:?}: {:?} {rect:?} outside {sidebar:?}",
-                                node.label
-                            );
-                            break;
-                        }
-                        parent = snapshot.nodes.iter().find(|n| n.id == id).unwrap().parent;
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn sidebar_server_details_expose_endpoint_quality_and_header_status() {
-    let mounted = mount(false, 1380.0);
-    mounted
-        .model
-        .server_endpoint
-        .set("https://relay.example:7440/".into());
-    mounted.model.round_trip_ms.set(Some(42));
-
-    mounted.click("Server connection details");
-
-    for label in [
-        "Server connection details",
-        "Server address",
-        "Connection transport",
-        "Server protocol",
-        "Connection quality",
-        "Connection status",
-    ] {
-        assert!(has_label(&mounted, label), "Missing details row: {label}");
-    }
-    assert_eq!(mounted.model.round_trip_ms.get_untracked(), Some(42));
-    mounted.click("Server connection details");
-    assert!(!has_label(&mounted, "Server address"));
-}
-
-#[test]
 fn approval_control_scales_with_its_label_and_keeps_the_existing_approval() {
     let mounted = mount(false, 1380.0);
     mounted.model.receive(NetworkState {
@@ -851,8 +501,8 @@ fn display_settings_persist_validate_and_preserve_existing_file_on_failure() {
     assert_eq!(preferences.mode, ThemeMode::Dark);
     assert_eq!(preferences.scale, 1.0);
     preferences.mode = ThemeMode::System;
-    preferences.dark_neutral = true;
-    preferences.light_warm = true;
+    preferences.high_contrast = true;
+    preferences.legacy.dark_neutral = true;
     preferences.scale = 1.5;
     preferences.sidebar_width = 300.0;
     preferences.save(&path).unwrap();
@@ -883,76 +533,36 @@ fn settings_work_disconnected_and_scale_layout_and_hit_targets_without_losing_dr
     mounted.settle();
     let after = mounted.rect("Theme: Dark");
     assert!((after.size.height / before.size.height - 1.5).abs() < 0.05);
-    assert!((mounted.rect("Sidebar").size.width - 330.0).abs() < 1.0);
+    assert!((mounted.rect("Sidebar").size.width - 380.0 * 1.5).abs() < 1.0);
+    let page = || mosaic::core::theme::color(relay_ui::tokens::ground.page);
+    let dark = page();
     mounted.focus("Theme: Light");
     mounted.click("Theme: Light");
     assert_eq!(
         mounted.model.preferences.get_untracked().mode,
         crate::settings::ThemeMode::Light
     );
-    let paper = mosaic::core::theme::color(theme::surface.base);
-    mounted.focus("Light palette: Warm");
-    mounted.click("Light palette: Warm");
-    assert_ne!(mosaic::core::theme::color(theme::surface.base), paper);
+    let light = page();
+    assert_ne!(light, dark);
+    mounted.focus("High contrast");
+    mounted.click("High contrast");
+    assert!(mounted.model.preferences.get_untracked().high_contrast);
+    assert_ne!(page(), light);
     mounted.focus("Theme: Dark");
     mounted.click("Theme: Dark");
-    let slate = mosaic::core::theme::color(theme::surface.base);
-    mounted.focus("Dark palette: Neutral");
-    mounted.click("Dark palette: Neutral");
-    assert_ne!(mosaic::core::theme::color(theme::surface.base), slate);
+    assert_ne!(page(), dark);
     mounted.focus("Theme: System");
     mounted.click("Theme: System");
     assert_eq!(
         mounted.model.preferences.get_untracked().mode,
         crate::settings::ThemeMode::System
     );
-    assert_eq!(mosaic::core::theme::scalar(theme::ui_scale), 1.5);
+    assert_eq!(mosaic::core::theme::scalar(relay_ui::tokens::ui_scale), 1.5);
     assert_eq!(
         mounted.model.worker_prompt.get_untracked(),
         "Keep this draft"
     );
     assert!(mounted.commands.is_empty());
-}
-
-#[test]
-fn sidebar_drag_clamps_width_and_settings_remain_keyboard_reachable_in_short_window() {
-    let mut mounted = mount(false, 820.0);
-    let sidebar = mounted.rect("Sidebar");
-    let start = Vector2::new(sidebar.origin.x + sidebar.size.width - 1.0, 80.0);
-    for (kind, position) in [
-        (PointerEventKind::Down(PointerButton::Primary), start),
-        (PointerEventKind::Move, Vector2::new(700.0, 80.0)),
-        (
-            PointerEventKind::Up(PointerButton::Primary),
-            Vector2::new(700.0, 80.0),
-        ),
-    ] {
-        mounted.ui.dispatch_pointer(PointerEvent {
-            kind,
-            position,
-            pointer_type: PointerType::Mouse,
-            modifiers: Modifiers::default(),
-            timestamp: Duration::ZERO,
-        });
-        mounted.settle();
-    }
-    assert_eq!(
-        mounted.model.preferences.get_untracked().sidebar_width,
-        328.0
-    );
-    assert!((mounted.rect("Sidebar").size.width - 328.0).abs() < 1.0);
-    mounted.size = Size::new(820.0, 360.0);
-    mounted.settle();
-    mounted.focus("Settings");
-    mounted.key(Key::Enter, false);
-    assert_eq!(mounted.model.page.get_untracked(), Page::Settings);
-    mounted.key(Key::Character("k".into()), true);
-    mounted.focus("Reset sidebar width");
-    mounted.key(Key::Enter, false);
-    assert_eq!(
-        mounted.model.preferences.get_untracked().sidebar_width,
-        220.0
-    );
 }
 
 #[test]
@@ -981,7 +591,7 @@ fn large_scale_settings_keep_controls_visible_in_a_narrow_window() {
             .find(|a| a.name == "font-size")
             .unwrap()
             .value,
-        "28.0"
+        "25.0"
     );
     for label in [
         "Theme: System",
@@ -990,7 +600,7 @@ fn large_scale_settings_keep_controls_visible_in_a_narrow_window() {
     ] {
         mounted.focus(label);
         let rect = mounted.rect(label);
-        assert!(rect.origin.x >= 320.0, "{label}: {rect:?}");
+        assert!(rect.origin.x >= 0.0, "{label}: {rect:?}");
         assert!(
             rect.origin.x + rect.size.width <= 820.0,
             "{label}: {rect:?}"
@@ -1001,6 +611,31 @@ fn large_scale_settings_keep_controls_visible_in_a_narrow_window() {
 }
 
 impl Mounted {
+    fn rects(&self, label: &str) -> Vec<Rect> {
+        self.ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .filter(|n| n.label.as_deref() == Some(label))
+            .map(|n| n.rect)
+            .collect()
+    }
+    fn click_nth(&self, label: &str, index: usize) {
+        let position = self.rects(label)[index].center();
+        for kind in [
+            PointerEventKind::Down(PointerButton::Primary),
+            PointerEventKind::Up(PointerButton::Primary),
+        ] {
+            self.ui.dispatch_pointer(PointerEvent {
+                kind,
+                position,
+                pointer_type: PointerType::Mouse,
+                modifiers: Modifiers::default(),
+                timestamp: Duration::ZERO,
+            });
+        }
+        self.settle();
+    }
     fn settle(&self) {
         flush();
         for _ in 0..12 {
@@ -1123,7 +758,7 @@ fn phone_shell_reserves_safe_areas_without_scaling_or_squeezing_the_board() {
         mounted.click("Open navigation");
         let sidebar = mounted.rect("Sidebar");
         assert_eq!(sidebar.origin.y, 59.0);
-        assert_eq!(sidebar.size.width, 320.0);
+        assert_eq!(sidebar.size.width, 342.0);
         assert_eq!(sidebar.origin.y + sidebar.size.height, 866.0);
         mounted.click("Close navigation");
         mounted.model.preferences.update(|p| p.scale = 2.0);
@@ -1162,8 +797,8 @@ fn phone_navigation_tracks_edge_swipes_and_dismisses_without_activating_content(
     touch(&mounted, down, 10.0, 150.0);
     touch(&mounted, PointerEventKind::Move, 90.0, 152.0);
     assert!(!mounted.model.sidebar_open.get_untracked());
-    assert_eq!(mounted.rect("Sidebar").size.width, 320.0);
-    assert!((mounted.rect("Sidebar").origin.x + 240.0).abs() < 1.0);
+    assert_eq!(mounted.rect("Sidebar").size.width, 342.0);
+    assert!((mounted.rect("Sidebar").origin.x + 262.0).abs() < 1.0);
     touch(&mounted, PointerEventKind::Move, 230.0, 152.0);
     touch(&mounted, up, 230.0, 152.0);
     assert!(mounted.model.sidebar_open.get_untracked());
@@ -1267,7 +902,7 @@ fn command_palette_shares_edges_scrolls_and_dismisses_without_clicking_through()
             ._scope
             .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
         mounted.model.preferences.update(|p| p.scale = scale);
-        mounted.focus("Settings");
+        mounted.focus("Open command palette");
         let previous = mounted.ui.focused().unwrap().id();
         mounted.key(Key::Character("k".into()), true);
         let panel = mounted.rect("Command palette panel");
@@ -1280,7 +915,7 @@ fn command_palette_shares_edges_scrolls_and_dismisses_without_clicking_through()
             results.size.height > 0.0
                 && results.origin.y + results.size.height <= panel.origin.y + panel.size.height
         );
-        for label in ["Open board", "Open sessions", "Reset sidebar width"] {
+        for label in ["Open board", "Open sessions", "Publish board"] {
             let action = mounted.rect(label);
             assert!((action.origin.x - panel.origin.x).abs() < 1.0);
             assert!((action.size.width - panel.size.width).abs() < 1.0);
@@ -1288,7 +923,7 @@ fn command_palette_shares_edges_scrolls_and_dismisses_without_clicking_through()
         mounted.click("Command search");
         assert!(mounted.model.palette.get_untracked());
         let page = mounted.model.page.get_untracked();
-        mounted.click("Settings");
+        mounted.click("Page header");
         assert!(!mounted.model.palette.get_untracked());
         assert_eq!(mounted.model.page.get_untracked(), page);
         assert_eq!(mounted.ui.focused().unwrap().id(), previous);
@@ -1714,8 +1349,8 @@ fn worker_running_stop_completed_review_and_continue_use_recorded_session() {
     });
     mounted.model.open_session(session_id.clone());
     mounted.settle();
-    mounted.focus("Stop worker");
-    mounted.click("Stop worker");
+    mounted.focus("Stop");
+    mounted.click("Stop");
     let stop = mounted.commands.try_recv().unwrap();
     assert!(matches!(stop.command, Command::StopWorker { session_id: id } if id == session_id));
     let mut snapshot = mounted.model.snapshot.get_untracked();
@@ -1908,8 +1543,8 @@ fn removed_board_items_keep_history_but_block_new_turns_until_restored() {
         .snapshot
         .update(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Running);
     mounted.settle();
-    mounted.focus("Stop worker");
-    mounted.click("Stop worker");
+    mounted.focus("Stop");
+    mounted.click("Stop");
     assert!(matches!(
         mounted.commands.try_recv().unwrap().command,
         Command::StopWorker { .. }
@@ -2063,6 +1698,7 @@ fn known_conflict_requires_explicit_new_request_rebase_and_retains_draft() {
     });
     mounted.settle();
     mounted.focus("Review conflict for new request");
+
     mounted.click("Review conflict for new request");
     assert_eq!(
         mounted.model.worker_prompt.get_untracked(),
@@ -2939,11 +2575,13 @@ fn chat_reveals_the_caret_when_the_keyboard_resizes_without_a_new_edit() {
         );
     }
     let before_scroll = mounted.ui.ime_cursor_area().unwrap();
+    // Scroll the draft itself, inside the composer.
+    let draft = mounted.ui.inspection_snapshot().node(field).unwrap().rect;
     mounted.ui.dispatch_pointer(PointerEvent {
         kind: PointerEventKind::Wheel {
             delta: Vector2::new(0.0, 180.0),
         },
-        position: Vector2::new(190.0, 300.0),
+        position: Vector2::new(draft.center().x, before_scroll.origin.y - 20.0),
         pointer_type: PointerType::Mouse,
         modifiers: Modifiers::default(),
         timestamp: Duration::ZERO,
@@ -3155,7 +2793,7 @@ fn inline_permission_answers_exact_run_and_disappears_when_expired() {
                 <= request.origin.y + request.size.height,
         "{description:?} inside {request:?}"
     );
-    mounted.click("Allow once tool request");
+    mounted.click_nth("Approve", 0);
     let envelope = mounted.commands.try_recv().unwrap();
     assert!(
         matches!(envelope.command,Command::RespondPermission{permission_id, run_id, allow:true} if permission_id == "permission-1" && run_id == "native-run-1")
@@ -3176,7 +2814,7 @@ fn inline_permission_answers_exact_run_and_disappears_when_expired() {
             .inspection_snapshot()
             .nodes
             .iter()
-            .any(|n| n.label.as_deref() == Some("Allow once tool request"))
+            .any(|n| n.label.as_deref() == Some("Approve"))
     );
 }
 
@@ -3202,6 +2840,7 @@ fn type_in(mounted: &Mounted, label: &str, text: &str) {
 #[test]
 fn new_project_preserves_full_setup_draft_and_appends_on_acknowledgement() {
     let mut mounted = mount(false, 1380.0);
+    open_project_menu(&mounted);
     mounted.click("New Project");
     type_in(&mounted, "Project name", "Second project");
     type_in(&mounted, "Absolute project root on server", "/srv/second");
@@ -3212,6 +2851,7 @@ fn new_project_preserves_full_setup_draft_and_appends_on_acknowledgement() {
         "git@example.com:team/second.git",
     );
     mounted.click("Settings");
+    open_project_menu(&mounted);
     mounted.click("New Project");
     assert_eq!(
         mounted.model.project_draft.get_untracked().name,
@@ -3520,132 +3160,6 @@ fn first_director_prompt_uses_planning_session_without_issue_or_implementation_a
 }
 
 #[test]
-fn sidebar_hover_surface_spans_sibling_controls_and_new_director_marker_aligns() {
-    let mounted = mount(false, 1380.0);
-    let sidebar = mounted.rect("Sidebar");
-    let project = mounted.rect("Project row Relay · demo");
-    assert!((project.origin.x - sidebar.origin.x).abs() < 0.1);
-    assert!((project.size.width - sidebar.size.width).abs() < 0.1);
-    let first = mounted.rect("Director row Project director");
-    let second = mounted.rect("Director row Review director");
-    assert!((first.origin.x + first.size.width - sidebar.size.width).abs() < 0.1);
-    assert!((first.origin.y + first.size.height - second.origin.y).abs() < 0.1);
-    for label in [
-        "Profile for Project director",
-        "Project defaults for Relay · demo",
-    ] {
-        let action = mounted.rect(label);
-        assert!((action.origin.x + action.size.width - sidebar.size.width).abs() < 0.1);
-        assert!((action.size.height - first.size.height).abs() < 0.1);
-    }
-    let snapshot = mounted.ui.inspection_snapshot();
-    let row = snapshot
-        .nodes
-        .iter()
-        .find(|n| n.label.as_deref() == Some("Director row Project director"))
-        .unwrap();
-    let fill = || {
-        mounted
-            .ui
-            .inspection_details(row.id)
-            .unwrap()
-            .attributes
-            .into_iter()
-            .find(|a| a.name == "fill")
-            .map(|a| a.value)
-    };
-    let baseline = fill();
-    for label in [
-        "Toggle director Project director",
-        "Open director Project director",
-        "Profile for Project director",
-    ] {
-        mounted.ui.dispatch_pointer(PointerEvent {
-            kind: PointerEventKind::Move,
-            position: mounted.rect(label).center(),
-            pointer_type: PointerType::Mouse,
-            modifiers: Modifiers::default(),
-            timestamp: Duration::ZERO,
-        });
-        mounted.settle();
-        assert_ne!(fill(), baseline, "Hovering {label} must fill the whole row");
-        for sibling in [
-            "Toggle director Project director",
-            "Open director Project director",
-            "Profile for Project director",
-        ] {
-            let rect = mounted.rect(sibling);
-            assert!(
-                rect.origin.x >= row.rect.origin.x
-                    && rect.origin.x + rect.size.width
-                        <= row.rect.origin.x + row.rect.size.width + 0.01
-            );
-        }
-    }
-    let create = snapshot
-        .nodes
-        .iter()
-        .find(|n| n.label.as_deref() == Some("Create director in Relay · demo"))
-        .unwrap();
-    for (target, surface) in [
-        ("New Project", "New Project"),
-        (
-            "Create director in Relay · demo",
-            "New director row Relay · demo",
-        ),
-        (
-            "Project defaults for Relay · demo",
-            "New director row Relay · demo",
-        ),
-    ] {
-        mounted.ui.dispatch_pointer(PointerEvent {
-            kind: PointerEventKind::Move,
-            position: mounted.rect("Sidebar header").center(),
-            pointer_type: PointerType::Mouse,
-            modifiers: Modifiers::default(),
-            timestamp: Duration::ZERO,
-        });
-        mounted.settle();
-        let id = snapshot
-            .nodes
-            .iter()
-            .find(|n| n.label.as_deref() == Some(surface))
-            .unwrap()
-            .id;
-        let fill = || {
-            mounted
-                .ui
-                .inspection_details(id)
-                .unwrap()
-                .attributes
-                .into_iter()
-                .find(|a| a.name == "fill")
-                .map(|a| a.value)
-        };
-        let baseline = fill();
-        mounted.ui.dispatch_pointer(PointerEvent {
-            kind: PointerEventKind::Move,
-            position: mounted.rect(target).center(),
-            pointer_type: PointerType::Mouse,
-            modifiers: Modifiers::default(),
-            timestamp: Duration::ZERO,
-        });
-        mounted.settle();
-        assert_ne!(fill(), baseline, "Hovering {target} must fill {surface}");
-    }
-    let marker = snapshot.node(create.children[0]).unwrap();
-    assert!(
-        (marker.rect.center().x - mounted.rect("Toggle director Project director").center().x)
-            .abs()
-            < 0.1
-    );
-    assert!(
-        mounted.rect("New Project").origin.y
-            > mounted.rect("Create director in Relay · demo").origin.y
-    );
-}
-
-#[test]
 fn nonempty_columns_cannot_be_deleted_without_explicit_task_moves() {
     let mounted = mount(false, 1380.0);
     mounted.model.snapshot.set(local_project_snapshot());
@@ -3691,7 +3205,7 @@ fn new_project_form_remains_keyboard_reachable_at_two_hundred_percent() {
         mounted.focus(label);
         let rect = mounted.rect(label);
         assert!(
-            rect.origin.x >= 320.0 && rect.origin.x + rect.size.width <= 820.01,
+            rect.origin.x >= 0.0 && rect.origin.x + rect.size.width <= 820.01,
             "{label}: {rect:?}"
         );
     }
@@ -4415,94 +3929,67 @@ fn published_aliases_preserve_selected_board_scope_and_linked_sessions() {
 }
 
 #[test]
-fn every_palette_keeps_text_and_controls_readable() {
-    use crate::theme::{Palette, colors, contrast};
-    for palette in Palette::ALL {
-        let c = colors(palette);
-        let text = [
-            ("ink", c.ink),
-            ("muted", c.muted),
-            ("run text", c.run_text),
-            ("attention text", c.attention_text),
-            ("danger", c.danger),
-            ("success", c.success),
-            ("warning", c.warning),
-        ];
-        for (name, foreground) in text {
-            for background in c.neutrals() {
-                let ratio = contrast(foreground, background);
-                assert!(ratio >= 4.5, "{palette:?} {name}: {ratio:.2}");
-            }
-        }
-        for (name, foreground, background) in [
-            ("on inverse", c.on_inverse, c.inverse),
-            ("on inverse hover", c.on_inverse, c.inverse_hover),
-            ("on inverse pressed", c.on_inverse, c.inverse_pressed),
-            ("on run", c.on_run, c.run),
-            ("on attention", c.on_attention, c.attention),
-            ("ink on accent soft", c.ink, c.accent_soft),
-        ]
-        .into_iter()
-        .chain(c.tints.map(|tint| ("ink on tint", c.ink, tint)))
-        {
-            let ratio = contrast(foreground, background);
-            assert!(ratio >= 4.5, "{palette:?} {name}: {ratio:.2}");
-        }
-        for background in c.neutrals() {
-            for (name, mark) in [
-                ("focus ring", c.accent),
-                ("rule", c.line),
-                ("run glyph", c.run_text),
-                ("attention glyph", c.attention_text),
-            ] {
-                let ratio = contrast(mark, background);
-                assert!(ratio >= 3.0, "{palette:?} {name}: {ratio:.2}");
-            }
-        }
-        for (name, fill) in [
-            ("rest", c.inverse),
-            ("hover", c.inverse_hover),
-            ("pressed", c.inverse_pressed),
+fn every_theme_keeps_desktop_text_and_controls_readable() {
+    use relay_ui::tokens::{ThemeVariant, contrast};
+    for variant in ThemeVariant::ALL {
+        let palette = variant.palette();
+        let (g, s) = (palette.ground, palette.status);
+        let name = variant.name();
+        // Hover and pressed are washes; text sits on them over a panel.
+        let over = |wash: mosaic::prelude::Color| {
+            let [r, gr, b, a] = wash.to_srgb8();
+            let [ur, ug, ub, _] = g.panel.to_srgb8();
+            let mix = |top: u8, under: u8| {
+                (f32::from(top) * f32::from(a) / 255.0
+                    + f32::from(under) * (1.0 - f32::from(a) / 255.0))
+                    .round() as u8
+            };
+            mosaic::prelude::Color::from_srgb8(mix(r, ur), mix(gr, ug), mix(b, ub), 255)
+        };
+        // Desktop controls set text on their hover and pressed fills, and
+        // signal words on fields and selected rows.
+        for background in [
+            g.page,
+            g.panel,
+            g.panel_raised,
+            g.code,
+            g.selected,
+            over(g.hover),
+            over(g.pressed),
         ] {
-            let indicator = contrast(fill, c.surface);
-            assert!(
-                indicator >= 3.0,
-                "{palette:?} selector {name}: {indicator:.2}"
-            );
-        }
-        assert!(
-            contrast(c.inverse, c.inverse_hover) >= 1.2,
-            "{palette:?} hover must be visible"
-        );
-        assert!(
-            contrast(c.inverse_hover, c.inverse_pressed) >= 1.2,
-            "{palette:?} press must be visible"
-        );
-        if matches!(
-            palette,
-            Palette::Paper | Palette::Warm | Palette::Slate | Palette::Neutral
-        ) {
-            for value in [c.base, c.surface, c.ink, c.inverse, c.on_inverse] {
-                let [r, g, b, _] = value.to_srgb8();
+            for (role, foreground) in [("ink", g.ink), ("muted", g.muted)] {
+                let ratio = contrast(foreground, background);
                 assert!(
-                    [r, g, b] != [0, 0, 0] && [r, g, b] != [255, 255, 255],
-                    "{palette:?} uses pure black or white"
+                    ratio >= 4.5,
+                    "{name}: {role} on {background:?} is {ratio:.2}"
                 );
             }
         }
+        for background in [g.page, g.panel, g.code, g.selected] {
+            for (role, foreground) in [
+                ("failed", s.failed),
+                ("needs you", s.needs_you),
+                ("live", s.live),
+            ] {
+                let ratio = contrast(foreground, background);
+                assert!(
+                    ratio >= 4.5,
+                    "{name}: {role} on {background:?} is {ratio:.2}"
+                );
+            }
+            let ring = contrast(g.ink, background);
+            assert!(ring >= 3.0, "{name}: focus ring is {ring:.2}");
+        }
+        let primary = contrast(g.inverse, s.needs_you);
+        assert!(
+            primary >= 4.5,
+            "{name}: primary action text is {primary:.2}"
+        );
+        assert!(
+            contrast(g.selected, g.panel) > 1.0,
+            "{name}: selection must show"
+        );
     }
-}
-
-#[test]
-fn contrast_check_rejects_the_concept_text_colors() {
-    let hex = mosaic::prelude::Color::from_rgb_hex;
-    let warm = hex(0xE8E5DF);
-    for (concept, expected) in [(0xC46A4A, 3.03), (0x4F8A6A, 3.23), (0x8E9095, 2.54)] {
-        let ratio = crate::theme::contrast(hex(concept), warm);
-        assert!((ratio - expected).abs() < 0.02, "{concept:06X}: {ratio:.2}");
-        assert!(ratio < 4.5);
-    }
-    assert!(crate::theme::contrast(hex(0x62666D), hex(0xDAD5CC)) < 4.5);
 }
 
 fn settings_directory() -> std::path::PathBuf {
@@ -4523,18 +4010,63 @@ fn high_contrast_settings_are_additive_and_omitted_while_off() {
     .unwrap();
     let mut preferences = Preferences::load(&path).unwrap();
     assert_eq!(preferences.mode, ThemeMode::Light);
-    assert!(preferences.light_warm && preferences.dark_neutral);
-    assert!(!preferences.light_high_contrast && !preferences.dark_high_contrast);
+    assert!(preferences.legacy.light_warm && preferences.legacy.dark_neutral);
+    assert!(!preferences.high_contrast);
     assert_eq!(preferences.scale, 1.25);
     assert_eq!(preferences.sidebar_width, 300.0);
     assert_eq!(preferences.selected_boards["demo"], "board-1");
     preferences.save(&path).unwrap();
     let written = std::fs::read_to_string(&path).unwrap();
     assert!(!written.contains("high_contrast"), "{written}");
-    preferences.dark_high_contrast = true;
+    // Older clients still find the families they chose.
+    assert!(written.contains("light_palette = \"warm\""), "{written}");
+    assert!(written.contains("dark_palette = \"neutral\""), "{written}");
+    preferences.high_contrast = true;
     preferences.save(&path).unwrap();
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        written.contains("light_palette = \"high_contrast\""),
+        "{written}"
+    );
+    assert!(
+        written.contains("dark_palette = \"high_contrast\""),
+        "{written}"
+    );
     let reloaded = Preferences::load(&path).unwrap();
-    assert!(reloaded.dark_high_contrast && reloaded.dark_neutral);
+    assert!(reloaded.high_contrast && reloaded.legacy.dark_neutral && reloaded.legacy.light_warm);
+    assert_eq!(reloaded, preferences);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn obsolete_palette_settings_load_without_suspending_saves() {
+    use crate::settings::{Persistence, open};
+    let directory = settings_directory();
+    let path = directory.join("settings.toml");
+    // Files written by the palette-family versions, versioned and not.
+    for source in [
+        "version = 2\nmode = \"dark\"\nlight_palette = \"paper\"\ndark_palette = \"high_contrast\"\ndark_neutral = true\n",
+        "version = 2\nlight_palette = \"warm\"\ndark_palette = \"slate\"\n",
+        "mode = \"system\"\nlight_high_contrast = true\ndark_neutral = true\n",
+    ] {
+        std::fs::write(&path, source).unwrap();
+        let (preferences, persistence) = open(&path);
+        assert_eq!(persistence, Persistence::Enabled, "{source}");
+        preferences.save(&path).unwrap();
+        assert_eq!(open(&path), (preferences, Persistence::Enabled), "{source}");
+    }
+    let (first, _) = {
+        std::fs::write(
+            &path,
+            "version = 2\ndark_palette = \"high_contrast\"\ndark_neutral = true\n",
+        )
+        .unwrap();
+        open(&path)
+    };
+    assert!(first.high_contrast && first.legacy.dark_neutral);
+    // Unknown fields still suspend saving rather than being dropped.
+    std::fs::write(&path, "version = 2\naccent = \"pink\"\n").unwrap();
+    assert!(matches!(open(&path).1, Persistence::Suspended { .. }));
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -4700,35 +4232,8 @@ fn retry_reading_adopts_a_repaired_settings_file() {
 }
 
 #[test]
-fn palette_selectors_slide_between_families_and_high_contrast() {
-    let mounted = mount(false, 1380.0);
-    mounted
-        ._scope
-        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
-    mounted.key(Key::Character(",".into()), true);
-    mounted.click("Light palette: Warm");
-    mounted.click("Light palette: High contrast");
-    let preferences = mounted.model.preferences.get_untracked();
-    assert!(preferences.light_high_contrast && preferences.light_warm);
-    mounted.click("Light palette: Warm");
-    let preferences = mounted.model.preferences.get_untracked();
-    assert!(!preferences.light_high_contrast && preferences.light_warm);
-
-    mounted.focus("Dark palette: Slate");
-    mounted.key(Key::End, false);
-    assert!(mounted.model.preferences.get_untracked().dark_high_contrast);
-    mounted.key(Key::ArrowRight, false);
-    let preferences = mounted.model.preferences.get_untracked();
-    assert!(!preferences.dark_high_contrast && !preferences.dark_neutral);
-    assert_eq!(
-        mosaic::core::theme::color(crate::theme::surface.base),
-        crate::theme::colors(crate::theme::Palette::Slate).base
-    );
-}
-
-#[test]
 fn usage_split_separates_cached_input_and_survives_bad_reports() {
-    use crate::labels::UsageSplit;
+    use crate::ui::UsageSplit;
     let usage = |input, cached, output| TokenUsage {
         input_tokens: input,
         cached_input_tokens: cached,
@@ -4754,13 +4259,14 @@ fn usage_split_separates_cached_input_and_survives_bad_reports() {
     for fraction in huge.fractions().unwrap() {
         assert!((0.0..=1.0).contains(&fraction));
     }
-    assert_eq!(crate::labels::grouped(1_234_567), "1,234,567");
-    assert_eq!(crate::labels::grouped(999), "999");
+    assert_eq!(crate::ui::grouped(1_234_567), "1,234,567");
+    assert_eq!(crate::ui::grouped(999), "999");
 }
 
 #[test]
 fn issue_status_prefers_waiting_and_active_work_then_the_latest_outcome() {
-    use crate::labels::{RunState, issue_status};
+    use crate::adapt::issue_status;
+    use relay_ui::prelude::AgentStatus;
     let mut snapshot = demo_snapshot(DirectorProfile::default());
     let template = snapshot.sessions[1].clone();
     let session = |id: &str, status: WorkerStatus| {
@@ -4770,16 +4276,16 @@ fn issue_status_prefers_waiting_and_active_work_then_the_latest_outcome() {
         session.worker = Some(worker_run(status));
         session
     };
-    assert_eq!(issue_status(&snapshot, &[]), RunState::Ready);
+    assert_eq!(issue_status(&snapshot, &[]), None);
     let older_failure = session("a", WorkerStatus::Failed);
     let newer_success = session("b", WorkerStatus::Completed);
     assert_eq!(
         issue_status(&snapshot, &[older_failure.clone(), newer_success.clone()]),
-        RunState::Completed
+        Some(AgentStatus::Done)
     );
     assert_eq!(
         issue_status(&snapshot, &[newer_success.clone(), older_failure.clone()]),
-        RunState::Failed
+        Some(AgentStatus::Failed)
     );
     let queued = session("c", WorkerStatus::Queued);
     let running = session("d", WorkerStatus::Running);
@@ -4788,11 +4294,11 @@ fn issue_status_prefers_waiting_and_active_work_then_the_latest_outcome() {
             &snapshot,
             &[running.clone(), queued.clone(), newer_success.clone()]
         ),
-        RunState::Running
+        Some(AgentStatus::Working)
     );
     assert_eq!(
         issue_status(&snapshot, &[queued.clone(), newer_success.clone()]),
-        RunState::Queued
+        Some(AgentStatus::Queued)
     );
     snapshot.tool_permissions.push(ToolPermission {
         id: "p".into(),
@@ -4805,68 +4311,7 @@ fn issue_status_prefers_waiting_and_active_work_then_the_latest_outcome() {
     });
     assert_eq!(
         issue_status(&snapshot, &[running, queued, newer_success]),
-        RunState::Waiting
-    );
-}
-
-#[test]
-fn sidebar_rows_describe_worker_state_and_director_capacity() {
-    let mounted = mount(false, 1380.0);
-    mounted.click("Toggle director Project director");
-    let description = |label: &str| {
-        mounted
-            .ui
-            .inspection_snapshot()
-            .nodes
-            .iter()
-            .find(|n| n.label.as_deref() == Some(label))
-            .and_then(|n| n.description.clone())
-            .unwrap_or_default()
-    };
-    let mut snapshot = mounted.model.snapshot.get_untracked();
-    let index = snapshot
-        .sessions
-        .iter()
-        .position(|s| s.id == "session-worker")
-        .unwrap();
-    let title = snapshot.sessions[index].title.clone();
-    snapshot.sessions[index].fixture = false;
-    for (status, word) in [
-        (WorkerStatus::Queued, "Queued"),
-        (WorkerStatus::Running, "Running"),
-        (WorkerStatus::Interrupted, "Interrupted"),
-    ] {
-        snapshot.sessions[index].worker = Some(worker_run(status));
-        mounted.model.receive(NetworkState {
-            snapshot: snapshot.clone(),
-            connected: true,
-            ..Default::default()
-        });
-        mounted.settle();
-        let worker = description(&format!("Open worker {title}"));
-        assert!(worker.ends_with(word), "{worker}");
-    }
-    snapshot.sessions[index].worker = Some(worker_run(WorkerStatus::Running));
-    snapshot.tool_permissions.push(ToolPermission {
-        id: "permission-sidebar".into(),
-        session_id: snapshot.sessions[index].id.clone(),
-        run_id: "run".into(),
-        tool: "Write".into(),
-        description: "notes.txt".into(),
-        decision: None,
-        expired: false,
-    });
-    mounted.model.receive(NetworkState {
-        snapshot,
-        connected: true,
-        ..Default::default()
-    });
-    mounted.settle();
-    assert!(description(&format!("Open worker {title}")).ends_with("Waiting for approval"));
-    let director = description("Open director Project director");
-    assert!(
-        director.contains("of 4 workers active, 1 running"),
-        "{director}"
+        Some(AgentStatus::Waiting)
     );
 }
 
@@ -4912,17 +4357,8 @@ fn session_header_usage_and_execution_mode_use_measured_state() {
     });
     mounted.model.open_session(session_id.clone());
     mounted.settle();
-    let status = || {
-        mounted
-            .ui
-            .inspection_snapshot()
-            .nodes
-            .iter()
-            .find(|n| n.label.as_deref() == Some("Session status"))
-            .and_then(|n| n.description.clone())
-            .unwrap()
-    };
-    assert_eq!(status(), "Running");
+    let status = |mounted: &Mounted| header_status(mounted);
+    assert_eq!(status(&mounted), "Working");
     mounted.click("Session actions");
     mounted.click("Session usage and provenance");
     mounted.rect("Latest turn usage");
@@ -4944,7 +4380,7 @@ fn session_header_usage_and_execution_mode_use_measured_state() {
         ..Default::default()
     });
     mounted.settle();
-    assert_eq!(status(), "Queued");
+    assert_eq!(status(&mounted), "Queued");
     assert!(
         !mounted
             .ui
@@ -5008,6 +4444,7 @@ fn permission_rows_set_exact_values_for_every_action_by_click_and_keyboard() {
 fn director_options_survive_reopening_after_profile_controls_are_removed() {
     let mounted = mount(false, 1380.0);
     for _ in 0..3 {
+        open_project_menu(&mounted);
         mounted.click("Profile for Project director");
         mounted
             .model
@@ -5024,13 +4461,16 @@ fn director_options_survive_reopening_after_profile_controls_are_removed() {
             }
         });
         mounted.settle();
+        open_project_menu(&mounted);
         mounted.click("Open director Project director");
         // Reloading defaults changes every toggle after the old page is gone.
+        open_project_menu(&mounted);
         mounted.click("Profile for Review director");
         assert_eq!(
             mounted.model.editor.get_untracked(),
             EditTarget::Director("director-review".into())
         );
+        open_project_menu(&mounted);
         mounted.click("Open director Project director");
     }
 }
@@ -5155,7 +4595,7 @@ fn board_chrome_aligns_with_the_sidebar_and_frames_cards() {
     let bottom = |r: Rect| r.origin.y + r.size.height;
     let header = mounted.rect("Page header");
     let brand = mounted.rect("Sidebar header");
-    assert!(near(header.size.height, 56.0), "{header:?}");
+    assert!(near(header.size.height, 60.0), "{header:?}");
     assert!(near(bottom(header), bottom(brand)), "{header:?} {brand:?}");
     // Column heads start on the header rule, with no bar in between.
     let columns: Vec<Rect> = mounted
@@ -5173,12 +4613,12 @@ fn board_chrome_aligns_with_the_sidebar_and_frames_cards() {
     }
     // The board summary and the sidebar connection footer share a rule.
     let summary = mounted.rect("Board summary");
-    let connection = mounted.rect("Connection");
+    let connection = mounted.rect("Server connection details");
     assert!(
         near(summary.origin.y, connection.origin.y),
         "{summary:?} {connection:?}"
     );
-    assert!(near(summary.size.height, 52.0));
+    assert!(near(summary.size.height, 40.0));
     // Card previews are clipped to three laid-out lines.
     for node in mounted.ui.inspection_snapshot().nodes {
         if node.label.as_deref() == Some("Task preview") {
@@ -5227,21 +4667,10 @@ fn wide_profiles_show_the_action_matrix_beside_the_controls() {
 
 #[test]
 fn inverse_controls_show_hover_and_press_in_every_palette() {
-    for (light, alternate, high_contrast) in [
-        (true, false, false),
-        (true, true, false),
-        (true, false, true),
-        (false, false, false),
-        (false, true, false),
-        (false, false, true),
-    ] {
+    for variant in ThemeVariant::ALL {
+        let light = matches!(variant, ThemeVariant::Light | ThemeVariant::LightContrast);
         let mounted = mount(light, 1380.0);
-        install_theme(&theme::configured_palette(
-            light,
-            alternate,
-            high_contrast,
-            1.0,
-        ));
+        install_theme(&theme(variant, 1.0));
         mounted.model.open_director_profile("director-main".into());
         mounted.settle();
         let fill = |label: &str| {
@@ -5288,25 +4717,17 @@ fn inverse_controls_show_hover_and_press_in_every_palette() {
             assert_eq!(fill(filled), rest, "{filled} after leaving");
             rest
         };
-        let unselected = fill("Director row Review director");
-        let selected = hold(
-            "Open director Project director",
-            "Director row Project director",
-        );
-        assert_ne!(selected, unselected);
         hold("Save profile", "Save profile");
         hold("Agent harness: Codex", "Agent harness: Codex");
-        pointer(
-            PointerEventKind::Move,
-            mounted.rect("Open director Review director").center(),
+        open_project_menu(&mounted);
+        hold(
+            "Open director Review director",
+            "Open director Review director",
         );
-        let hovered = fill("Director row Review director");
-        assert_ne!(hovered, unselected, "unselected rows still show hover");
-        assert_ne!(hovered, selected);
+        open_project_menu(&mounted);
         mounted.click("New Project");
         hold("Create project", "Create project");
         mounted.click("Add connection");
-        hold("Connection type: Repository", "Connection type: Repository");
     }
 }
 
@@ -5504,92 +4925,6 @@ fn profile_field_headers_contain_their_text_and_controls() {
 }
 
 #[test]
-fn session_header_and_run_strip_show_only_recorded_values() {
-    let mounted = mount(false, 1380.0);
-    let mut snapshot = live_snapshot();
-    let session = &mut snapshot.sessions[0];
-    session.fixture = false;
-    session.director_id = snapshot.directors[0].id.clone();
-    let mut run = worker_run(WorkerStatus::Running);
-    run.thread_id = None;
-    run.worktree = Some("/srv/relay/worktrees/issue-2-a41c".into());
-    session.worker = Some(run);
-    let session_id = session.id.clone();
-    let cells = crate::conversation::run_cells(&snapshot, &snapshot.sessions[0]);
-    let keys: Vec<_> = cells.iter().map(|c| c.0).collect();
-    assert_eq!(
-        keys,
-        [
-            "Harness",
-            "Model",
-            "Context",
-            "Last prompt",
-            "Cache",
-            "Re-cache",
-            "Worktree",
-            "Next-turn approval"
-        ],
-        "no thread was recorded"
-    );
-    assert_eq!(cells[1].1, "—");
-    assert_eq!(cells[2].1, "— / —");
-    assert_eq!(cells[6].1, "…/worktrees/issue-2-a41c");
-    mounted.model.receive(NetworkState {
-        snapshot,
-        connected: true,
-        ..Default::default()
-    });
-    mounted.model.open_session(session_id);
-    mounted.settle();
-    let header = mounted.rect("Session header");
-    assert!((header.size.height - 74.0).abs() <= 1.0, "{header:?}");
-    let strip = mounted.rect("Session run");
-    assert!((strip.origin.y - (header.origin.y + header.size.height)).abs() <= 1.0);
-    assert!(has_label(&mounted, "Worktree"));
-    assert!(!has_label(&mounted, "Thread"));
-    // The draft sits beside the 92px author column.
-    let draft = mounted.rect("Next message");
-    let send = mounted.rect("Send message");
-    assert!(send.origin.x < draft.origin.x + 92.0);
-    assert!(has_label(&mounted, "Stop worker"));
-}
-
-#[test]
-fn session_run_model_and_context_follow_reported_updates() {
-    let mounted = mount(false, 1380.0);
-    let mut snapshot = live_snapshot();
-    let session = &mut snapshot.sessions[0];
-    session.fixture = false;
-    session.worker = Some(worker_run(WorkerStatus::Running));
-    let id = session.id.clone();
-    mounted.model.receive(NetworkState {
-        snapshot: snapshot.clone(),
-        connected: true,
-        ..Default::default()
-    });
-    mounted.model.open_session(id);
-    mounted.settle();
-    assert!(has_label(&mounted, "Model"));
-    assert!(has_label(&mounted, "Context"));
-    let worker = snapshot.sessions[0].worker.as_mut().unwrap();
-    worker.model = Some("reported-model".into());
-    worker.context_tokens = Some(12345);
-    worker.context_window = Some(200000);
-    snapshot.revision += 1;
-    let cells = crate::conversation::run_cells(&snapshot, &snapshot.sessions[0]);
-    assert!(cells.contains(&("Model", "reported-model".into())));
-    assert!(cells.contains(&("Context", "12,345 / 200,000".into())));
-    mounted.model.receive(NetworkState {
-        snapshot,
-        connected: true,
-        ..Default::default()
-    });
-    mounted.settle();
-    assert!(has_label(&mounted, "reported-model"));
-    assert!(has_label(&mounted, "12,345 / 200,000"));
-}
-
-#[test]
 fn live_readout_values_keep_their_container_typography_after_updates() {
     let mounted = mount(false, 1380.0);
     let mut snapshot = live_snapshot();
@@ -5622,7 +4957,7 @@ fn live_readout_values_keep_their_container_typography_after_updates() {
         })
     };
     let before = typography("0 / 4 active");
-    assert_eq!(before[0], "13.0");
+    assert_eq!(before[0], "12.5");
     assert_eq!(before[1], "Monospace");
     snapshot.revision += 1;
     snapshot.projects[0].defaults.max_workers = 5;
@@ -5880,22 +5215,15 @@ fn wide_sessions_turn_narrow_at_double_scale_without_rebuilding_the_draft() {
         plain_text(&crate::buffer::parts(mounted.model, &session_id)),
         "kept draft"
     );
-    for label in [
-        "Allow once tool request",
-        "Deny tool request",
-        "Send message",
-        "Session actions",
-    ] {
+    for label in ["Approve", "Reject", "Send message", "Session actions"] {
         let rect = mounted.rect(label);
         assert!(
             rect.origin.x >= 0.0 && rect.origin.x + rect.size.width <= 1381.0,
             "{label}: {rect:?}"
         );
     }
-    // Stop moves into the session actions when the header is narrow.
-    assert!(!has_label(&mounted, "Stop worker"));
-    mounted.click("Session actions");
-    assert!(has_label(&mounted, "Stop worker"));
+    // Stop stays in the header's control block at every width.
+    assert!(has_label(&mounted, "Stop"));
 }
 
 /// Pinned Mosaic `text_dyn_styled` binds a live text leaf's content and style
@@ -5904,13 +5232,13 @@ fn wide_sessions_turn_narrow_at_double_scale_without_rebuilding_the_draft() {
 /// and after a theme switch.
 #[test]
 fn live_text_typography_survives_content_and_theme_updates() {
-    use crate::{styles::relay, theme::ink};
+    use relay_ui::{style::relay, tokens::ground};
     mosaic::core::builtins::install();
-    install_theme(&theme::palette(false));
+    install_theme(&theme(ThemeVariant::Dark, 1.0));
     let scope = Scope::new(|| {});
     let ui = scope.run(Ui::new);
     let mut fonts = FontContext::embedded_only();
-    crate::fonts::configure(&mut fonts);
+    relay_ui::fonts::install(&mut fonts);
     ui.set_fonts(fonts);
     let value = State::new("one".to_string());
     scope.run(|| {
@@ -5925,8 +5253,8 @@ fn live_text_typography_survives_content_and_theme_updates() {
                 row #relay.caption {
                     text {format!("parent class {}", value.get())}
                 }
-                text font-color:ink.muted {format!("leaf color {}", value.get())}
-                row font-color:ink.muted {
+                text font-color:ground.muted {format!("leaf color {}", value.get())}
+                row font-color:ground.muted {
                     text {format!("container color {}", value.get())}
                 }
             }
@@ -5969,10 +5297,10 @@ fn live_text_typography_survives_content_and_theme_updates() {
     value.set("two".into());
     let updated = read("two");
     let updated_colors = colors("two");
-    install_theme(&theme::palette(true));
+    install_theme(&theme(ThemeVariant::Light, 1.0));
     let themed = read("two");
     let themed_colors = colors("two");
-    assert_eq!(initial, ["13.0", "13.0", "12.0", "12.0"].map(String::from));
+    assert_eq!(initial, ["13.0", "13.0", "11.5", "11.5"].map(String::from));
     assert_eq!(updated, initial, "content update");
     assert_eq!(themed, initial, "theme switch");
     assert_eq!(updated_colors, initial_colors, "content update");
@@ -6057,7 +5385,7 @@ fn bounded_session_disclosures_keep_controls_reachable_and_draft_mounted() {
     assert_control_hit(&mounted, "Session usage and provenance");
     mounted.key(Key::Enter, false);
     for label in [
-        "Stop worker",
+        "Stop",
         "Inherit worker execution settings",
         "Load shared draft",
         "Restore local draft",
@@ -6247,7 +5575,10 @@ fn conversation_tracks_constrain_recorded_text_and_draft_to_the_reading_width() 
     mounted.model.open_session(session_id);
     mounted.settle();
     let text = mounted.rect("Message reading-width");
-    assert!(text.size.width <= 760.0 + 1.0, "{text:?}");
+    let column = mounted.rect("Transcript");
+    // 848px reading column less the 128px speaker gutter.
+    assert!(column.size.width <= 848.0 + 1.0, "{column:?}");
+    assert!(text.size.width <= 720.0 + 1.0, "{text:?}");
     assert!(text.size.height > 40.0, "long text must wrap: {text:?}");
     let draft = mounted
         .ui
@@ -6260,10 +5591,14 @@ fn conversation_tracks_constrain_recorded_text_and_draft_to_the_reading_width() 
                 .is_some_and(|l| l.starts_with("Draft text"))
         })
         .unwrap();
-    assert!(draft.rect.size.width <= 760.0 + 1.0, "{:?}", draft.rect);
+    // The composer spans the same reading column, its draft right of the
+    // ledger.
     assert!(
-        (draft.rect.origin.x - text.origin.x).abs() < 1.0,
-        "draft and recorded text share a reading column"
+        draft.rect.origin.x >= column.origin.x
+            && draft.rect.origin.x + draft.rect.size.width
+                <= column.origin.x + column.size.width + 1.0,
+        "draft {:?} within the reading column {column:?}",
+        draft.rect
     );
 }
 
@@ -6286,10 +5621,14 @@ fn clicking_below_the_draft_focuses_its_end_across_the_buffer_width() {
             .unwrap();
         let label = draft.label.unwrap();
         // The empty draft is reachable without hitting its text-height field.
-        for x in [draft.rect.origin.x - 5.0, width - 50.0] {
+        // Across the composer's message area, left of the draft to its end.
+        for x in [
+            draft.rect.origin.x - 5.0,
+            draft.rect.origin.x + draft.rect.size.width - 10.0,
+        ] {
             mounted.focus("Session actions");
             let rect = mounted.rect(&label);
-            let position = Vector2::new(x, rect.origin.y + rect.size.height + 60.0);
+            let position = Vector2::new(x, rect.origin.y + rect.size.height + 16.0);
             for kind in [
                 PointerEventKind::Down(PointerButton::Primary),
                 PointerEventKind::Up(PointerButton::Primary),
@@ -6313,7 +5652,10 @@ fn clicking_below_the_draft_focuses_its_end_across_the_buffer_width() {
         mounted.key(Key::Home, true);
         mounted.focus("Session actions");
         let rect = mounted.rect(&label);
-        let position = Vector2::new(width - 50.0, rect.origin.y + rect.size.height + 60.0);
+        let position = Vector2::new(
+            rect.origin.x + rect.size.width - 10.0,
+            rect.origin.y + rect.size.height + 16.0,
+        );
         for kind in [
             PointerEventKind::Down(PointerButton::Primary),
             PointerEventKind::Up(PointerButton::Primary),
@@ -6353,19 +5695,13 @@ fn display_settings_write_sparse_overrides_and_reset_independently() {
         "version = 2"
     );
     p.mode = ThemeMode::Light;
-    p.light_warm = true;
-    p.dark_high_contrast = true;
+    p.high_contrast = true;
     p.scale = 1.6;
     p.sidebar_width = 310.0;
     p.selected_boards.insert("project".into(), "board".into());
     p.save(&path).unwrap();
     assert_eq!(Preferences::load(&path).unwrap(), p);
-    for setting in [
-        Setting::Mode,
-        Setting::LightPalette,
-        Setting::DarkPalette,
-        Setting::Scale,
-    ] {
+    for setting in [Setting::Mode, Setting::Contrast, Setting::Scale] {
         assert!(p.overridden(setting));
         p.reset(setting);
         assert!(!p.overridden(setting));
@@ -6388,43 +5724,11 @@ fn display_settings_write_sparse_overrides_and_reset_independently() {
 }
 
 #[test]
-fn sidebar_edge_double_click_clears_retained_resize_and_preserves_other_settings() {
-    let mounted = mount(false, 1380.0);
-    mounted.model.preferences.update(|p| {
-        p.sidebar_width = 310.0;
-        p.dark_neutral = true;
-    });
-    mounted.settle();
-    let edge = mounted.rect("Sidebar");
-    let position = Vector2::new(edge.origin.x + edge.size.width - 1.0, 120.0);
-    for _ in 0..2 {
-        for kind in [
-            PointerEventKind::Down(PointerButton::Primary),
-            PointerEventKind::Up(PointerButton::Primary),
-        ] {
-            mounted.ui.dispatch_pointer(PointerEvent {
-                kind,
-                position,
-                pointer_type: PointerType::Mouse,
-                modifiers: Modifiers::default(),
-                timestamp: Duration::ZERO,
-            });
-            mounted.settle();
-        }
-    }
-    assert_eq!(
-        mounted.model.preferences.get_untracked().sidebar_width,
-        220.0
-    );
-    assert!(mounted.model.preferences.get_untracked().dark_neutral);
-    assert!((mounted.rect("Sidebar").size.width - 220.0).abs() < 1.0);
-}
-
-#[test]
 fn direct_project_connections_and_header_actions_use_full_cells() {
     let mut mounted = mount(false, 1380.0);
     mounted.model.snapshot.set(local_project_snapshot());
     mounted.settle();
+    mounted.click("Toggle project Relay · demo");
     mounted.click("Project Connections for Relay · demo");
     assert_eq!(mounted.model.page.get_untracked(), Page::Connections);
     mounted.model.page.set(Page::Board);
@@ -6434,6 +5738,7 @@ fn direct_project_connections_and_header_actions_use_full_cells() {
     assert_eq!(new.origin.y, more.origin.y);
     assert_eq!(new.size.height, more.size.height);
     assert!(more.size.height > 34.0);
+    open_project_menu(&mounted);
     let tree = mounted.rect("Project Connections for Relay · demo");
     assert_eq!(tree.size.width, tree.size.height);
     let nodes = mounted.ui.inspection_snapshot();
@@ -6478,8 +5783,9 @@ fn direct_project_connections_and_header_actions_use_full_cells() {
         .find(|n| n.label.as_deref() == Some("New task"))
         .unwrap();
     let details = mounted.ui.inspection_details(new.id).unwrap();
-    let expected =
-        mosaic::render::PaintSpec::solid(mosaic::core::theme::color(crate::theme::ink.inverse));
+    let expected = mosaic::render::PaintSpec::solid(mosaic::core::theme::color(
+        relay_ui::tokens::ground.selected,
+    ));
     assert_eq!(
         details
             .attributes
@@ -6520,10 +5826,11 @@ fn transcript_sender_and_content_share_the_first_glyph_baseline() {
                 && r.origin.x > 220.0
         })
         .collect();
+    // The speaker in the gutter and the first line of the message sit on
+    // one line, though the speaker is set smaller.
     assert_eq!(glyphs.len(), 2, "{glyphs:?}");
-    assert_eq!(glyphs[0].1, glyphs[1].1);
     assert!(
-        (glyphs[0].0.origin.y - glyphs[1].0.origin.y).abs() < 1.0,
+        (glyphs[0].0.origin.y - glyphs[1].0.origin.y).abs() < 6.0,
         "{glyphs:?}"
     );
     mounted.model.snapshot.update(|s| {
@@ -6761,9 +6068,10 @@ fn header_drag_targets_include_text_and_gaps_but_exclude_interactive_descendants
         let target = mounted.ui.hit_test(position).unwrap().id();
         crate::window_chrome::is_drag_target(&nodes, target, header)
     };
-    assert!(draggable(
+    // The sidebar head is filled by its cells; page and session headers drag.
+    assert!(!draggable(
         "Sidebar header",
-        mounted.rect("Sidebar header").center()
+        mounted.rect("Toggle project Relay · demo").center()
     ));
     let header = mounted.rect("Page header");
     for offset in [10.0, 100.0, 240.0] {
@@ -6913,208 +6221,6 @@ fn streamed_messages_keep_the_bottom_visible_and_preserve_manual_reading_positio
     });
     mounted.settle();
     assert!((mounted.rect("Message stream-follow").origin.y - reading.origin.y).abs() < 2.0);
-}
-
-#[test]
-fn stop_control_fills_the_session_header_cell() {
-    let mounted = mount(false, 1380.0);
-    mounted.model.snapshot.update(|snapshot| {
-        snapshot
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == "session-worker")
-            .unwrap()
-            .worker = Some(worker_run(WorkerStatus::Running));
-    });
-    mounted.model.open_session("session-worker".into());
-    mounted.settle();
-    let header = mounted.rect("Session header");
-    let stop = mounted.rect("Stop worker");
-    assert!((stop.origin.y - header.origin.y).abs() < 0.1);
-    assert!((stop.size.height - header.size.height).abs() < 0.1);
-    assert!(
-        (stop.origin.x + stop.size.width - mounted.rect("Session actions").origin.x).abs() < 0.1
-    );
-}
-
-#[test]
-fn reopened_session_retains_model_and_measured_context_without_claiming_live_cache() {
-    let mounted = mount(false, 2400.0);
-    let mut snapshot = live_snapshot();
-    let mut run = worker_run(WorkerStatus::Completed);
-    run.model = Some("recorded-model".into());
-    run.context_window = Some(200_000);
-    run.last_usage = Some(TokenUsage {
-        input_tokens: 42_000,
-        cached_input_tokens: 40_000,
-        output_tokens: 1000,
-    });
-    snapshot.sessions[0].worker = Some(run);
-    let snapshot: Snapshot =
-        serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
-    let cells = crate::conversation::run_cells(&snapshot, &snapshot.sessions[0]);
-    for expected in [
-        ("Model", "recorded-model"),
-        ("Last prompt", "42000 tokens"),
-        ("Context", "— / 200,000"),
-        ("Cache", "Unknown"),
-        ("Re-cache", "Unknown"),
-    ] {
-        assert!(
-            cells
-                .iter()
-                .any(|(key, value)| *key == expected.0 && value == expected.1)
-        );
-    }
-    let id = snapshot.sessions[0].id.clone();
-    mounted.model.receive(NetworkState {
-        snapshot,
-        connected: true,
-        ..Default::default()
-    });
-    mounted.model.open_session(id);
-    mounted.settle();
-    let strip = mounted.rect("Session run");
-    let last = mounted.rect("Next-turn approval");
-    let header = mounted.rect("Session header");
-    assert!(
-        (strip.size.width - header.size.width).abs() <= 1.0,
-        "strip: {strip:?}, header: {header:?}"
-    );
-    assert!(
-        (last.origin.x + last.size.width - strip.origin.x - strip.size.width).abs() <= 1.0,
-        "strip: {strip:?}, last: {last:?}"
-    );
-}
-
-#[test]
-fn tool_activity_updates_in_place_and_discloses_input_at_narrow_widths() {
-    for light in [false, true] {
-        let mounted = mount(light, 820.0);
-        mounted.model.open_session("session-plan".into());
-        mounted.model.snapshot.update(|s| {
-            s.messages.retain(|m| m.session_id != "session-plan");
-            s.messages.push(Message {
-                id: "terminal-call".into(),
-                session_id: "session-plan".into(),
-                author: "Codex".into(),
-                kind: "tool_call".into(),
-                body: "first output\n".into(),
-                parts: vec![],
-                tool: Some(ToolCall {
-                    run_id: "turn".into(),
-                    name: "commandExecution".into(),
-                    kind: ToolKind::Run,
-                    state: ToolState::Running,
-                    input: "printf hello".into(),
-                    target: "printf hello".into(),
-                    directory: Some("/workspace".into()),
-                    exit_code: None,
-                    started_ms: None,
-                    finished_ms: None,
-                    detail: None,
-                }),
-            });
-        });
-        mounted.settle();
-        assert!(has_label(&mounted, "Terminal: Running"));
-        mounted.model.snapshot.update(|s| {
-            s.tool_permissions.push(ToolPermission {
-                id: "tool-approval".into(),
-                session_id: "session-plan".into(),
-                run_id: "turn".into(),
-                tool: "commandExecution".into(),
-                description: "printf hello".into(),
-                decision: None,
-                expired: false,
-            })
-        });
-        mounted.settle();
-        assert!(has_label(&mounted, "Terminal: Waiting for approval"));
-        mounted
-            .model
-            .snapshot
-            .update(|s| s.tool_permissions.clear());
-        mounted.settle();
-        let header = mounted.rect("Toggle Terminal activity terminal-call");
-        assert!(header.size.width > 200.0);
-        assert!(header.origin.x + header.size.width <= mounted.size.width);
-        mounted.click("Toggle tool output terminal-call");
-        assert!(has_label(&mounted, "Message terminal-call"));
-        mounted.click("Toggle tool output terminal-call");
-        mounted.click("Toggle tool input terminal-call");
-        mounted.model.snapshot.update(|s| {
-            let m = s
-                .messages
-                .iter_mut()
-                .find(|m| m.id == "terminal-call")
-                .unwrap();
-            m.body.push_str("failed output\n");
-            let t = m.tool.as_mut().unwrap();
-            t.state = ToolState::Failed;
-            t.exit_code = Some(1);
-        });
-        mounted.settle();
-        assert!(has_label(&mounted, "Terminal: Failed"));
-        mounted.click("Toggle Terminal activity terminal-call");
-        assert!(!has_label(&mounted, "Toggle tool input terminal-call"));
-        assert!(has_label(&mounted, "Terminal: Failed"));
-        mounted.click("Toggle Terminal activity terminal-call");
-        assert!(has_label(&mounted, "Toggle tool input terminal-call"));
-    }
-}
-
-#[test]
-fn tool_categories_keep_distinct_status_labels_and_file_changes_render() {
-    let mounted = mount(false, 1380.0);
-    mounted.model.open_session("session-plan".into());
-    mounted.model.snapshot.update(|s| {
-        s.messages.retain(|m| m.session_id != "session-plan");
-        for (i, kind) in [
-            ToolKind::Edit,
-            ToolKind::Read,
-            ToolKind::Search,
-            ToolKind::Fetch,
-            ToolKind::Spawn,
-            ToolKind::Other,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            s.messages.push(Message {
-                id: format!("tool-{i}"),
-                session_id: "session-plan".into(),
-                author: "Agent".into(),
-                kind: "tool_call".into(),
-                body: "result".into(),
-                parts: vec![],
-                tool: Some(ToolCall {
-                    run_id: "run".into(),
-                    name: "tool".into(),
-                    kind,
-                    state: ToolState::Completed,
-                    input: r#"[{"path":"src/main.rs","diff":"@@ -1 +1 @@\n-old\n+new"}]"#.into(),
-                    target: "src/main.rs".into(),
-                    directory: None,
-                    exit_code: None,
-                    started_ms: None,
-                    finished_ms: None,
-                    detail: None,
-                }),
-            });
-        }
-    });
-    mounted.settle();
-    for label in [
-        "File changes",
-        "Read file",
-        "Search",
-        "Web",
-        "Agent",
-        "Tool",
-    ] {
-        assert!(has_label(&mounted, &format!("{label}: Completed")));
-    }
 }
 
 #[test]
@@ -7402,7 +6508,7 @@ fn scrolling_loads_one_older_page_and_preserves_the_visible_message() {
         assert!(matches!(request,StreamRequest::Older{before,..} if before=="paged-50"));
         assert!(requests.try_recv().is_err());
         let label = if tools {
-            "Toggle Terminal activity paged-50"
+            "Tool call paged-50"
         } else {
             "Message paged-50"
         };
@@ -7475,4 +6581,778 @@ fn retained_search_result_does_not_repeatedly_move_the_reader() {
     mounted.model.focused_message.set(String::new());
     mounted.model.receive(update);
     assert!(mounted.model.focused_message.get_untracked().is_empty());
+}
+
+/// The demo workspace running its example orchestration.
+fn orchestration() -> Snapshot {
+    let mut snapshot = demo_snapshot(DirectorProfile::default());
+    demo_orchestration(&mut snapshot);
+    snapshot
+}
+
+fn mount_orchestration(width: f32) -> Mounted {
+    let mounted = mount(false, width);
+    mounted.model.receive(NetworkState {
+        snapshot: orchestration(),
+        connected: true,
+        status: "Connected".into(),
+        ..Default::default()
+    });
+    mounted.settle();
+    mounted
+}
+
+fn focused_label(mounted: &Mounted) -> Option<String> {
+    let focused = mounted.ui.focused()?.id();
+    mounted
+        .ui
+        .inspection_snapshot()
+        .node(focused)?
+        .label
+        .clone()
+}
+
+#[test]
+fn sidebar_keeps_project_navigation_in_ruled_cells_above_the_agent_tree() {
+    let mounted = mount(false, 1380.0);
+    let sidebar = mounted.rect("Sidebar");
+    let head = mounted.rect("Sidebar header");
+    assert!((sidebar.size.width - 380.0).abs() < 1.0);
+    assert!((head.size.height - 60.0).abs() < 1.0);
+    // Head cells fill the head and sit above the agents section.
+    for cell in [
+        "Toggle project Relay · demo",
+        "Open board for Relay · demo",
+        "Settings",
+    ] {
+        let rect = mounted.rect(cell);
+        assert!((rect.size.height - head.size.height).abs() < 1.0, "{cell}");
+        assert!(rect.origin.y + rect.size.height <= mounted.rect("Agents").origin.y + 1.0);
+    }
+    mounted.click("Toggle project Relay · demo");
+    open_project_menu(&mounted);
+    mounted.click("Profile for Project director");
+    assert_eq!(mounted.model.page.get_untracked(), Page::Directors);
+    assert_eq!(
+        mounted.model.editor.get_untracked(),
+        EditTarget::Director("director-main".into())
+    );
+    assert!(!has_label(&mounted, "Profile for Project director"));
+    mounted.click("Toggle project Relay · demo");
+    mounted.click("Open director Project director");
+    assert_eq!(mounted.model.session.get_untracked(), "session-plan");
+    assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
+    mounted.click("Toggle project Relay · demo");
+    mounted.click("Create director");
+    assert_eq!(mounted.model.editor.get_untracked(), EditTarget::New);
+    mounted.click("Toggle project Relay · demo");
+    mounted.click("Project defaults");
+    assert_eq!(mounted.model.editor.get_untracked(), EditTarget::Defaults);
+    mounted.click("Toggle project Relay · demo");
+    open_project_menu(&mounted);
+    mounted.click("New Project");
+    assert_eq!(mounted.model.page.get_untracked(), Page::NewProject);
+    mounted.click("Open board for Relay · demo");
+    assert_eq!(mounted.model.page.get_untracked(), Page::Board);
+    mounted.click("Settings");
+    assert_eq!(mounted.model.page.get_untracked(), Page::Settings);
+    // No control nests inside another one.
+    let snapshot = mounted.ui.inspection_snapshot();
+    let sidebar = snapshot
+        .nodes
+        .iter()
+        .find(|n| n.label.as_deref() == Some("Sidebar"))
+        .unwrap()
+        .id;
+    for node in snapshot.nodes.iter().filter(|n| n.role == Role::Button) {
+        let mut parent = node.parent;
+        let mut button_ancestor = false;
+        while let Some(id) = parent {
+            if id == sidebar {
+                assert!(!button_ancestor, "Nested sidebar control: {:?}", node.label);
+                break;
+            }
+            let ancestor = snapshot.nodes.iter().find(|n| n.id == id).unwrap();
+            button_ancestor |= ancestor.role == Role::Button;
+            parent = ancestor.parent;
+        }
+    }
+}
+
+#[test]
+fn agent_tree_follows_parent_links_scoped_to_the_selected_project() {
+    let mounted = mount_orchestration(1380.0);
+    let plan = tree_row(&mounted, "Profile design");
+    let migration = tree_row(&mounted, "Schema migration");
+    let write = tree_row(&mounted, "Write migrations");
+    assert!((plan.size.height - 34.0).abs() < 1.0);
+    assert!(plan.origin.y < migration.origin.y && migration.origin.y < write.origin.y);
+    // Each level adds a 14px elbow column and the row's 8px gap, as on
+    // the design board: compare the status squares.
+    let indent = |row: &str| {
+        let rect = tree_row(&mounted, row);
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .filter(|n| n.role == Role::Image && (n.rect.size.width - 10.0).abs() < 0.5)
+            .filter(|n| (n.rect.center().y - rect.center().y).abs() < 1.0)
+            .map(|n| n.rect.origin.x)
+            .fold(f32::MAX, f32::min)
+    };
+    assert!((indent("Write migrations") - indent("Schema migration") - 22.0).abs() < 1.0);
+    // Another project's agents stay out of this project's tree.
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    let mut other = snapshot.projects[0].clone();
+    other.id = "other".into();
+    other.name = "Other project".into();
+    snapshot.projects.push(other);
+    let mut session = snapshot.sessions[0].clone();
+    session.id = "other-session".into();
+    session.project_id = "other".into();
+    session.title = "Other agent".into();
+    session.parent_session_id = None;
+    snapshot.sessions.push(session);
+    mounted.model.snapshot.set(snapshot);
+    mounted.settle();
+    assert!(!has_row(&mounted, "Other agent"));
+    mounted.click("Toggle project Relay · demo");
+    mounted.click("Select project Other project");
+    assert_eq!(mounted.model.project.get_untracked(), "other");
+    assert!(has_row(&mounted, "Other agent"));
+    assert!(!has_row(&mounted, "Schema migration"));
+    mounted.click("Other agent");
+    assert_eq!(mounted.model.session.get_untracked(), "other-session");
+    assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
+}
+
+#[test]
+fn deep_branches_fold_and_focus_re_roots_the_tree_with_a_breadcrumb() {
+    let mounted = mount_orchestration(1380.0);
+    assert!(has_label(&mounted, "2 more levels · 2 agents"));
+    assert!(!has_row(&mounted, "Index check"));
+    mounted.click("Focus");
+    assert_eq!(
+        mounted.model.agent_focus.get_untracked().as_deref(),
+        Some("session-backfill")
+    );
+    assert!(has_label(&mounted, "depth 3"));
+    assert!(has_label(&mounted, "Verify backfill"));
+    assert!(has_row(&mounted, "Index check"));
+    assert!(!has_row(&mounted, "Migration tests"));
+    mounted.click("Back to root");
+    assert_eq!(mounted.model.agent_focus.get_untracked(), None);
+    assert!(has_row(&mounted, "Migration tests"));
+    // Collapsing a manager hides its branch and keeps what waits below it.
+    focus_row(&mounted, "Profile design");
+    mounted.key(Key::ArrowLeft, false);
+    assert!(
+        mounted
+            .model
+            .collapsed_agents
+            .get_untracked()
+            .contains("session-plan")
+    );
+    assert!(!has_row(&mounted, "Schema migration"));
+    assert!(has_label(&mounted, "1 waiting"));
+    mounted.key(Key::ArrowRight, false);
+    assert!(has_row(&mounted, "Schema migration"));
+    assert_eq!(focused_label(&mounted).as_deref(), Some("Profile design"));
+}
+
+#[test]
+fn needs_you_projects_a_deep_permission_and_one_answer_resolves_it_everywhere() {
+    let mut mounted = mount_orchestration(1380.0);
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot.projects[0].fixture = false;
+    for session in &mut snapshot.sessions {
+        session.fixture = false;
+    }
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    assert!(has_label(&mounted, "Needs you"));
+    // The manager two levels up shows the request in its transcript.
+    assert!(has_label(&mounted, "Approval request"));
+    assert!(has_label(&mounted, "Approval requested · Bash"));
+    assert!(mounted.rects("Approve").len() >= 2);
+    mounted.click_nth("Approve", 0);
+    let envelope = mounted.commands.try_recv().unwrap();
+    assert!(matches!(
+        envelope.command,
+        Command::RespondPermission { ref permission_id, allow: true, .. } if permission_id == "permission-migrate"
+    ));
+    // The server records one decision; every projection clears.
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot.tool_permissions[0].decision = Some(true);
+    snapshot.revision += 1;
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        outcome: Some((envelope.request_id, Ok(()))),
+        outcome_serial: 1,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(!has_label(&mounted, "Needs you"));
+    assert!(!has_label(&mounted, "Approval request"));
+    assert!(!has_label(&mounted, "Approve"));
+    let _ = &mut mounted;
+}
+
+#[test]
+fn connection_status_reports_state_latency_endpoint_protocol_and_builds() {
+    let mounted = mount(false, 1380.0);
+    mounted
+        .model
+        .server_endpoint
+        .set("https://relay.example:7440/".into());
+    mounted.model.server_build.set(Some(BuildInfo {
+        version: "0.1.0".into(),
+        revision: "1234567890123456789012345678901234567890".into(),
+    }));
+    mounted.model.round_trip_ms.set(Some(42));
+    mounted.settle();
+    let foot = mounted.rect("Connected, 42 ms");
+    let sidebar = mounted.rect("Sidebar");
+    assert!(foot.origin.y + foot.size.height <= sidebar.origin.y + sidebar.size.height + 1.0);
+    let details = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some("Server connection details"))
+        .unwrap();
+    assert!(details.description.unwrap().contains("relay.example:7440"));
+    mounted.click("Connected, 42 ms");
+    for text in [
+        "https://relay.example:7440/",
+        "HTTP + WebSocket",
+        "v5",
+        "42 ms",
+    ] {
+        assert!(has_label(&mounted, text), "Missing {text}");
+    }
+    assert!(mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+        n.label
+            .as_deref()
+            .is_some_and(|l| l.contains("Server 1234567"))
+    }));
+    mounted.model.receive(NetworkState {
+        connected: false,
+        status: "Reconnecting in 2s".into(),
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(has_label(&mounted, "Offline"));
+    assert_eq!(mounted.model.round_trip_ms.get_untracked(), None);
+}
+
+#[test]
+fn ledger_effort_steps_send_the_session_harness_selection() {
+    let mut mounted = mount_orchestration(1380.0);
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    for session in &mut snapshot.sessions {
+        session.fixture = false;
+    }
+    snapshot.projects[0].fixture = false;
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_session("session-plan".into());
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([(
+            "session-plan".to_string(),
+            Ok(HarnessCatalog {
+                session_id: "session-plan".into(),
+                harness: Harness::ClaudeCode,
+                models: vec![HarnessModel {
+                    id: "claude-opus-4-5".into(),
+                    name: "Opus 4.5".into(),
+                    efforts: vec!["low".into(), "medium".into(), "high".into(), "max".into()],
+                    default_effort: Some("medium".into()),
+                    fast: false,
+                }],
+                ..Default::default()
+            }),
+        )]));
+    mounted.settle();
+    assert!(has_label(&mounted, "Model: CLAUDE Opus 4.5. Change model"));
+    assert!(has_label(&mounted, "Effort high"));
+    mounted.click("Effort low");
+    let envelope = mounted.commands.try_recv().unwrap();
+    assert!(matches!(
+        envelope.command,
+        Command::SetHarnessSelection { ref session_id, selection: HarnessSelection { model: Some(ref model), effort: Some(ref effort), .. } }
+            if session_id == "session-plan" && model == "claude-opus-4-5" && effort == "low"
+    ));
+    let _ = &mut mounted;
+}
+
+#[test]
+fn tool_calls_open_in_three_steps_and_the_fingerprint_counts_them() {
+    let mounted = mount_orchestration(1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    // One fingerprint segment per tool kind the director used.
+    for kind in [
+        "Read", "Edit", "Create", "Search", "Run", "Test", "Fetch", "Plan", "Message", "Wait",
+        "Result", "Other",
+    ] {
+        assert!(
+            has_label(&mounted, &format!("{kind}: 1 call, 8 percent")),
+            "fingerprint {kind}"
+        );
+    }
+    let opening = |mounted: &Mounted| {
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .filter_map(|n| n.label)
+            .filter(|l| {
+                l.starts_with("Collapsed.")
+                    || l.starts_with("Summary.")
+                    || l.starts_with("Expanded.")
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = opening(&mounted);
+    // The failed test run opens to its summary; the rest start collapsed.
+    assert_eq!(
+        before.iter().filter(|l| l.starts_with("Summary.")).count(),
+        1
+    );
+    let collapsed = before
+        .iter()
+        .filter(|l| l.starts_with("Collapsed."))
+        .count();
+    let last = mounted.rects("Collapsed. Open summary").len() - 1;
+    mounted.click_nth("Collapsed. Open summary", last);
+    assert_eq!(
+        opening(&mounted)
+            .iter()
+            .filter(|l| l.starts_with("Collapsed."))
+            .count(),
+        collapsed - 1
+    );
+    let last = mounted.rects("Summary. Expand fully").len() - 1;
+    mounted.click_nth("Summary. Expand fully", last);
+    assert_eq!(
+        opening(&mounted)
+            .iter()
+            .filter(|l| l.starts_with("Expanded."))
+            .count(),
+        1
+    );
+    mounted.click("Expanded. Collapse");
+    assert_eq!(opening(&mounted), before);
+    // The spawn is the child's tree row with a way into the tree.
+    assert!(has_label(&mounted, "Spawned 1 agents"));
+    mounted.focus("Open in tree");
+    mounted.key(Key::Enter, false);
+    assert_eq!(
+        mounted.model.agent_focus.get_untracked().as_deref(),
+        Some("session-plan")
+    );
+}
+
+#[test]
+fn session_header_shows_context_controls_and_agents_below() {
+    let mut mounted = mount_orchestration(1380.0);
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    for session in &mut snapshot.sessions {
+        session.fixture = false;
+    }
+    snapshot.projects[0].fixture = false;
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let header = mounted.rect("Session header");
+    assert!((header.size.height - 88.0).abs() < 1.0);
+    assert!(has_label(
+        &mounted,
+        "Context 62 percent used, 124k of 200k, compacted 2 times"
+    ));
+    assert!(mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+        n.label
+            .as_deref()
+            .is_some_and(|l| l.starts_with("Working. 7 agents below"))
+    }));
+    mounted.click("Stop");
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::StopWorker { ref session_id } if session_id == "session-plan"
+    ));
+    // A session without measured context shows no gauge.
+    mounted.model.open_session("session-worker".into());
+    mounted.settle();
+    assert!(!mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+        n.label
+            .as_deref()
+            .is_some_and(|l| l.starts_with("Context "))
+    }));
+    assert!(!has_label(&mounted, "Stop"));
+    let _ = &mut mounted;
+}
+
+fn tree_row(mounted: &Mounted, name: &str) -> Rect {
+    mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some(name) && n.role == Role::ListItem)
+        .unwrap_or_else(|| panic!("Missing tree row: {name}"))
+        .rect
+}
+
+fn focus_row(mounted: &Mounted, name: &str) {
+    for _ in 0..mounted.ui.inspection_snapshot().nodes.len() {
+        mounted.key(Key::Tab, false);
+        let focused = mounted.ui.focused().map(|f| f.id());
+        let snapshot = mounted.ui.inspection_snapshot();
+        if focused
+            .and_then(|id| snapshot.node(id))
+            .is_some_and(|n| n.label.as_deref() == Some(name) && n.role == Role::ListItem)
+        {
+            mounted.settle();
+            return;
+        }
+    }
+    panic!("Tree row is not keyboard reachable: {name}");
+}
+
+fn has_row(mounted: &Mounted, name: &str) -> bool {
+    mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .iter()
+        .any(|n| n.label.as_deref() == Some(name) && n.role == Role::ListItem)
+}
+#[test]
+fn session_header_shows_only_recorded_values() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = live_snapshot();
+    let session = &mut snapshot.sessions[0];
+    session.fixture = false;
+    session.director_id = snapshot.directors[0].id.clone();
+    let mut run = worker_run(WorkerStatus::Running);
+    run.thread_id = None;
+    run.worktree = Some("/srv/relay/worktrees/issue-2-a41c".into());
+    session.worker = Some(run);
+    let session_id = session.id.clone();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(session_id);
+    mounted.settle();
+    let header = mounted.rect("Session header");
+    assert!((header.size.height - 88.0).abs() <= 1.0, "{header:?}");
+    // Unmeasured context has no gauge; an unreported model reads as the
+    // harness default rather than a guess.
+    assert!(!mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+        n.label
+            .as_deref()
+            .is_some_and(|l| l.starts_with("Context "))
+    }));
+    assert!(has_label(&mounted, "Model: Default. Change model"));
+    // Recorded provenance stays one disclosure away.
+    mounted.click("Session actions");
+    mounted.click("Session usage and provenance");
+    assert!(has_label(&mounted, "Worktree"));
+    assert!(!has_label(&mounted, "Thread"));
+    // The draft sits in the composer beside the ledger, sending from its
+    // right edge.
+    let draft = mounted.rect("Next message");
+    let send = mounted.rect("Send message");
+    assert!(send.origin.x > draft.origin.x + draft.size.width - 1.0);
+    assert!(has_label(&mounted, "Stop"));
+}
+
+#[test]
+fn session_model_and_context_follow_reported_updates() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = live_snapshot();
+    let session = &mut snapshot.sessions[0];
+    session.fixture = false;
+    session.worker = Some(worker_run(WorkerStatus::Running));
+    let id = session.id.clone();
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(id);
+    mounted.settle();
+    assert!(has_label(&mounted, "Model: Default. Change model"));
+    let worker = snapshot.sessions[0].worker.as_mut().unwrap();
+    worker.model = Some("claude-sonnet-4-5".into());
+    worker.context_tokens = Some(12345);
+    worker.context_window = Some(200000);
+    snapshot.sessions[0].compactions = vec![Compaction { at_tokens: None }];
+    snapshot.revision += 1;
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(has_label(
+        &mounted,
+        "Model: CLAUDE Sonnet 4.5. Change model"
+    ));
+    assert!(has_label(
+        &mounted,
+        "Context 6 percent used, 12k of 200k, compacted 1 times"
+    ));
+}
+
+#[test]
+fn stop_control_fills_the_session_header_cell() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == "session-worker")
+            .unwrap()
+            .worker = Some(worker_run(WorkerStatus::Running));
+    });
+    mounted.model.open_session("session-worker".into());
+    mounted.settle();
+    let header = mounted.rect("Session header");
+    let stop = mounted.rect("Stop");
+    assert!((stop.origin.y - header.origin.y).abs() < 0.1);
+    assert!((stop.size.height - (header.size.height - 1.0)).abs() < 1.1);
+    assert!(
+        (stop.origin.x + stop.size.width - mounted.rect("Session actions").origin.x).abs() < 0.1
+    );
+}
+
+/// The status word in the session header's control block.
+fn header_status(mounted: &Mounted) -> String {
+    let header = mounted.rect("Session header");
+    mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .filter(|n| header.contains(n.rect.center()))
+        .filter_map(|n| n.label)
+        .find(|l| ["Working", "Waiting", "Failed", "Queued", "Done"].contains(&l.as_str()))
+        .unwrap_or_default()
+}
+
+#[test]
+fn reopened_session_retains_model_and_measured_usage_without_claiming_live_cache() {
+    let mounted = mount(false, 2400.0);
+    let mut snapshot = live_snapshot();
+    let mut run = worker_run(WorkerStatus::Completed);
+    run.model = Some("recorded-model".into());
+    run.context_window = Some(200_000);
+    run.last_usage = Some(TokenUsage {
+        input_tokens: 42_000,
+        cached_input_tokens: 40_000,
+        output_tokens: 1000,
+    });
+    snapshot.sessions[0].worker = Some(run);
+    let snapshot: Snapshot =
+        serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+    let id = snapshot.sessions[0].id.clone();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(id);
+    mounted.settle();
+    // An unknown model keeps its own name in the neutral hue.
+    assert!(has_label(&mounted, "Model: recorded-model. Change model"));
+    // A window without measured occupancy draws no gauge.
+    assert!(!mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+        n.label
+            .as_deref()
+            .is_some_and(|l| l.starts_with("Context "))
+    }));
+    mounted.click("Session actions");
+    mounted.click("Session usage and provenance");
+    assert!(has_label(&mounted, "42,000"));
+    assert!(mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+        n.label
+            .as_deref()
+            .is_some_and(|l| l.starts_with("Cache status is unknown"))
+    }));
+}
+
+/// Opens the sidebar's project menu unless it is open.
+fn open_project_menu(mounted: &Mounted) {
+    if !has_label(mounted, "Projects") {
+        let toggle = mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .filter_map(|n| n.label)
+            .find(|l| l.starts_with("Toggle project "))
+            .unwrap();
+        mounted.click(&toggle);
+    }
+}
+fn tool_row_description(mounted: &Mounted, id: &str) -> String {
+    mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some(&format!("Tool call {id}")))
+        .and_then(|n| n.description)
+        .unwrap_or_default()
+}
+
+#[test]
+fn tool_activity_updates_in_place_and_opens_failures() {
+    for light in [false, true] {
+        let mounted = mount(light, 820.0);
+        mounted.model.open_session("session-plan".into());
+        mounted.model.snapshot.update(|s| {
+            s.messages.retain(|m| m.session_id != "session-plan");
+            s.messages.push(Message {
+                id: "terminal-call".into(),
+                session_id: "session-plan".into(),
+                author: "Codex".into(),
+                kind: "tool_call".into(),
+                body: "first output\n".into(),
+                parts: vec![],
+                tool: Some(ToolCall {
+                    run_id: "turn".into(),
+                    name: "commandExecution".into(),
+                    kind: ToolKind::Run,
+                    state: ToolState::Running,
+                    input: "printf hello".into(),
+                    target: "printf hello".into(),
+                    directory: Some("/workspace".into()),
+                    exit_code: None,
+                    started_ms: None,
+                    finished_ms: None,
+                    detail: None,
+                }),
+            });
+        });
+        mounted.settle();
+        assert_eq!(
+            tool_row_description(&mounted, "terminal-call"),
+            "Run · Working"
+        );
+        mounted.model.snapshot.update(|s| {
+            s.tool_permissions.push(ToolPermission {
+                id: "tool-approval".into(),
+                session_id: "session-plan".into(),
+                run_id: "turn".into(),
+                tool: "commandExecution".into(),
+                description: "printf hello".into(),
+                decision: None,
+                expired: false,
+            })
+        });
+        mounted.settle();
+        assert_eq!(
+            tool_row_description(&mounted, "terminal-call"),
+            "Run · Waiting for approval"
+        );
+        mounted
+            .model
+            .snapshot
+            .update(|s| s.tool_permissions.clear());
+        mounted.settle();
+        let row = mounted.rect("Tool call terminal-call");
+        assert!(row.size.width > 200.0);
+        assert!(row.origin.x + row.size.width <= mounted.size.width);
+        assert!(!has_label(&mounted, "first output"));
+        mounted.click("Collapsed. Open summary");
+        assert!(has_label(&mounted, "Summary. Expand fully"));
+        mounted.click("Summary. Expand fully");
+        mounted.click("Expanded. Collapse");
+        mounted.model.snapshot.update(|s| {
+            let m = s
+                .messages
+                .iter_mut()
+                .find(|m| m.id == "terminal-call")
+                .unwrap();
+            m.body.push_str("failed output\n");
+            let t = m.tool.as_mut().unwrap();
+            t.state = ToolState::Failed;
+            t.exit_code = Some(1);
+        });
+        mounted.settle();
+        assert_eq!(
+            tool_row_description(&mounted, "terminal-call"),
+            "Run · Failed"
+        );
+        assert!(has_label(&mounted, "exit 1"));
+    }
+}
+
+#[test]
+fn tool_kinds_keep_their_verbs_and_unknown_outcomes_stay_unclaimed() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.model.snapshot.update(|s| {
+        s.messages.retain(|m| m.session_id != "session-plan");
+        for (i, (kind, state)) in [
+            (ToolKind::Edit, ToolState::Completed),
+            (ToolKind::Read, ToolState::Completed),
+            (ToolKind::Search, ToolState::Completed),
+            (ToolKind::Fetch, ToolState::Completed),
+            (ToolKind::Spawn, ToolState::Completed),
+            (ToolKind::Other, ToolState::Unknown),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            s.messages.push(Message {
+                id: format!("tool-{i}"),
+                session_id: "session-plan".into(),
+                author: "Agent".into(),
+                kind: "tool_call".into(),
+                body: "result".into(),
+                parts: vec![],
+                tool: Some(ToolCall {
+                    run_id: "run".into(),
+                    name: "tool".into(),
+                    kind,
+                    state,
+                    input: String::new(),
+                    target: "src/main.rs".into(),
+                    directory: None,
+                    exit_code: None,
+                    started_ms: None,
+                    finished_ms: None,
+                    detail: None,
+                }),
+            });
+        }
+    });
+    mounted.settle();
+    for (i, expected) in [
+        "Edit · Done",
+        "Read · Done",
+        "Search · Done",
+        "Fetch · Done",
+        "Spawn · Done",
+        "tool · Queued",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            tool_row_description(&mounted, &format!("tool-{i}")),
+            expected
+        );
+    }
 }

@@ -16,7 +16,8 @@ pub(crate) fn PageHeader(
     #[prop(optional)] children: Children,
 ) -> Element {
     view! {
-        row #relay.strip height:{px(56.0)}px shrink:0 label:"Page header"
+        row #relay.strip height:{crate::window_chrome::sidebar_header_height()}px shrink:0
+            label:"Page header"
             @pointer:{move |event, ctx| crate::window_chrome::drag_header(model, event, ctx)} {
             NavigationButton model:(model)
             col #relay.cell width:1fr min-width:0px
@@ -118,34 +119,40 @@ pub(crate) fn Module(
     }
 }
 
+/// The workspace notice: the message, the original request when it can be
+/// retried, and its actions in cells that wrap in narrow panes.
 #[component]
 pub(crate) fn Notice(model: Model) -> Element {
     view! {
         col height:min-content shrink:0 {
             if !model.notice.get().is_empty() {
-                row height:min-content fill:attention.fill pad:{px(12.0)}px gap:{px(12.0)}px
-                    align:center shrink:0 stroke:(width:{px(4.0)} color:attention.text edges:left) {
-                    col width:1fr height:min-content gap:{px(4.0)}px {
-                        text font-size:{px(12.0)}px font-color:{color(attention.on)}
-                            { model.notice.get() }
-                        if model.can_retry() {
-                            text font-size:{px(11.0)}px font-color:{color(attention.on)}
-                                { model.retry_summary() }
-                        }
-                    }
-                    if model.can_rebase() {
-                        button #relay.action @click:{ model.review_latest(); }
-                            disabled:{ model.busy.get() } "Review latest state"
-                    }
-                    if model.can_rebase() {
-                        button #relay.action @click:{ model.rebase_conflict(); }
-                            label:"Review conflict for new request" "Review conflict / new request"
-                    }
+                col height:min-content gap:{px(8.0)}px pad:{px(12.0)}px shrink:0 label:"Notice"
+                    fill:ground.panel-raised
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
+                    stroke:+(width:{px(2.0)} color:status.needs_you edges:left) {
+                    text font-size:{px(12.0)}px font-color:ground.ink { model.notice.get() }
                     if model.can_retry() {
-                        button #relay.action @click:{ model.retry_pending(); }
-                            label:"Retry original request" "Retry original request"
+                        text font-size:{px(11.0)}px font-color:ground.muted
+                            { model.retry_summary() }
                     }
-                    button #relay.action @click:{ model.notice.set(String::new()); } "Dismiss"
+                    grid height:min-content gap:{px(6.0)}px
+                        cols:{GridTracks::auto_fit(GridTrack::minmax(px(150.0).into(), GridTrack::fr(1.0)))} {
+                        if model.can_rebase() {
+                            button #relay.action @click:{ model.review_latest(); } width:fill
+                                disabled:{ model.busy.get() } "Review latest state"
+                        }
+                        if model.can_rebase() {
+                            button #relay.action @click:{ model.rebase_conflict(); } width:fill
+                                label:"Review conflict for new request"
+                                "Review conflict / new request"
+                        }
+                        if model.can_retry() {
+                            button #relay.action @click:{ model.retry_pending(); } width:fill
+                                label:"Retry original request" "Retry original request"
+                        }
+                        button #relay.action @click:{ model.notice.set(String::new()); } width:fill
+                            "Dismiss"
+                    }
                 }
             }
         }

@@ -70,20 +70,32 @@ pub fn Segments(
     /// Colours the chosen cell's text, for choices that carry a signal.
     #[prop(optional)]
     chosen_tone: Option<ColorToken>,
+    /// Names the choice; each cell is then labelled "{name}: {option}".
+    #[prop(optional)]
+    name: Option<String>,
+    #[prop(default = Live::fixed(false))] disabled: Live<bool>,
 ) -> Element {
     let row = view! {
         row width:max-content height:{px(32.0)}px shrink:0 role:list
             stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {}
     };
+    if let Some(name) = &name {
+        row.label(name.clone());
+    }
+    let count = options.len();
+    let cells = Rc::new(std::cell::RefCell::new(Vec::<Element>::new()));
     for (index, option) in options.into_iter().enumerate() {
         let pick = on_select.clone();
         let shown_text = option.clone();
         let current = selected.clone();
         let looks = selected.clone();
+        let off = disabled.clone();
         let cell = view! {
             button @click:{pick(index)} width:max-content height:fill radius:0px
-                pad:(horizontal:{px(12.0)}px vertical:0px) label:(option.clone())
-                font-family:monospace font-size:{px(11.5)}px font-weight:500 {
+                pad:(horizontal:{px(12.0)}px vertical:0px)
+                label:(name.as_ref().map_or_else(|| option.clone(), |name| format!("{name}: {option}")))
+                disabled:{off.get()} font-family:monospace font-size:{px(11.5)}px font-weight:500
+                disabled { opacity:0.45 } {
                 text
                     {
                     let _ = current.get();
@@ -124,6 +136,28 @@ pub fn Segments(
             }
         });
         cell.role(Role::Radio);
+        // Arrow keys move the choice like a radio group.
+        {
+            let (choose, cells, off) = (on_select.clone(), cells.clone(), disabled.clone());
+            cell.on_key(move |event, ctx| {
+                if !matches!(event.kind, KeyEventKind::Down { .. }) || off.get_untracked() {
+                    return;
+                }
+                let next = match event.key {
+                    Key::ArrowRight | Key::ArrowDown => (index + 1).min(count - 1),
+                    Key::ArrowLeft | Key::ArrowUp => index.saturating_sub(1),
+                    Key::Home => 0,
+                    Key::End => count - 1,
+                    _ => return,
+                };
+                choose(next);
+                if let Some(target) = cells.borrow().get(next) {
+                    target.focus();
+                }
+                ctx.stop_propagation();
+            });
+        }
+        cells.borrow_mut().push(cell.clone());
         row.adopt(&cell);
     }
     row

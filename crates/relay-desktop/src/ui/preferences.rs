@@ -1,5 +1,8 @@
 use super::*;
-use crate::controls::{ResetSetting, ResetSettingProps};
+use crate::controls::{
+    ContrastToggle, ContrastToggleProps, ModeSegments, ModeSegmentsProps, ResetSetting,
+    ResetSettingProps,
+};
 
 #[component]
 pub(crate) fn Settings(model: Model) -> Element {
@@ -30,20 +33,20 @@ pub(crate) fn Settings(model: Model) -> Element {
                     if matches!(model.settings_store.get().persistence, crate::settings::Persistence::Suspended { .. }) {
                         col height:min-content pad:(bottom:{px(24.0)}px) {
                             col height:min-content max-width:{px(760.0)}px gap:{px(10.0)}px
-                                pad:{px(14.0)}px fill:attention.fill
-                                stroke:(width:{px(4.0)} color:attention.text edges:left)
+                                pad:{px(14.0)}px fill:status.needs_you
+                                stroke:(width:{px(4.0)} color:status.needs_you edges:left)
                                 label:"Display settings not saved" {
                                 row #relay.title height:min-content font-size:{px(15.0)}px
-                                    font-color:attention.on {
+                                    font-color:ground.inverse {
                                     text "Display settings are not being saved"
                                 }
                                 row height:min-content font-size:{px(12.0)}px
-                                    font-color:attention.on {
+                                    font-color:ground.inverse {
                                     text
                                         {match model.settings_store.get().persistence {crate::settings::Persistence::Suspended { reason } => crate::settings::suspended_notice(&reason), _ => String::new()}}
                                 }
                                 row height:min-content font-size:{px(12.0)}px
-                                    font-color:attention.on {
+                                    font-color:ground.inverse {
                                     text
                                         {model.settings_store.get().path.map(|p| format!("File: {}", p.display())).unwrap_or_default()}
                                 }
@@ -72,14 +75,14 @@ pub(crate) fn Settings(model: Model) -> Element {
                         if !model.connected.get() || !model.harness_error.get().is_empty() {
                             row #relay.caption height:min-content
                                 pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px)
-                                stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                                 text
                                     {if !model.connected.get() {"Disconnected · last checked status retained".to_string()} else {model.harness_error.get()}}
                             }
                         }
                         for (_, harness) in [("codex",Harness::Codex),("claude",Harness::ClaudeCode)] {
                             col height:min-content gap:0px
-                                stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                                 HarnessCard model:(model) harness:(harness)
                             }
                         }
@@ -92,9 +95,10 @@ pub(crate) fn Settings(model: Model) -> Element {
                 col #relay.module max-width:{px(760.0)}px label:"Appearance" {
                     SettingsHead title:"Appearance" note:"Saved on this machine"
                     col height:min-content gap:0px pad:0px {
-                        AppearanceRow model:(model) title:"Theme" field:(0usize)
-                        AppearanceRow model:(model) title:"Light palette" field:(1usize)
-                        AppearanceRow model:(model) title:"Dark palette" field:(2usize)
+                        AppearanceRow model:(model) title:"Theme"
+                            setting:(crate::settings::Setting::Mode)
+                        AppearanceRow model:(model) title:"Contrast"
+                            setting:(crate::settings::Setting::Contrast)
                     }
                 }
                 col #relay.module max-width:{px(760.0)}px label:"Interface scale" {
@@ -104,7 +108,7 @@ pub(crate) fn Settings(model: Model) -> Element {
                         stepper #relay.scale-stepper min:80 max:200 step:10 label:"Interface scale percent" scale as scale_control
                         {scale_control.decrement().label("Decrease interface scale");scale_control.increment().label("Increase interface scale");}
                         row #relay.caption height:fill width:{px(34.0)}px align:center
-                            justify:center stroke:(width:{px(1.0)} color:rule.line edges:left) {
+                            justify:center stroke:(width:{px(1.0)} color:ground.rule edges:left) {
                             text "%"
                         }
                         ResetSetting model:(model) setting:(crate::settings::Setting::Scale)
@@ -114,7 +118,7 @@ pub(crate) fn Settings(model: Model) -> Element {
                 col #relay.module max-width:{px(760.0)}px label:"Fonts" {
                     SettingsHead title:"Fonts" note:""
                     row #relay.value height:min-content pad:{px(12.0)}px {
-                        text "Titles: Reddit Sans · Text: Zed Mono"
+                        text "Text: Geist Mono · Titles: Instrument Serif"
                     }
                 }
                 row #relay.caption height:min-content max-width:{px(760.0)}px {
@@ -131,30 +135,25 @@ pub(crate) fn Settings(model: Model) -> Element {
     root
 }
 
-/// A flush picker row with its reset cell kept outside the scroll viewport.
+/// A flush appearance row with its reset cell at the right.
 #[component]
-fn AppearanceRow(model: Model, title: &'static str, field: usize) -> Element {
-    let width = State::new(0.0f32);
-    let setting = match field {
-        0 => crate::settings::Setting::Mode,
-        1 => crate::settings::Setting::LightPalette,
-        _ => crate::settings::Setting::DarkPalette,
-    };
+fn AppearanceRow(model: Model, title: &'static str, setting: crate::settings::Setting) -> Element {
+    let contrast = matches!(setting, crate::settings::Setting::Contrast);
     view! {
         col height:min-content gap:0px
-            stroke:(width:{px(if field < 2 {1.0} else {0.0})} color:rule.line edges:bottom) {
+            stroke:(width:{px(if contrast {0.0} else {1.0})} color:ground.hairline edges:bottom) {
             row #relay.eyebrow height:{px(30.0)}px align:center
                 pad:(horizontal:{px(12.0)}px vertical:0px)
-                stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                 text text-transform:uppercase letter-spacing:{px(0.6)}px (title)
             }
-            row height:{px(34.0)}px gap:0px {
-                el width:1fr min-width:0px height:fill
-                    @layout:{move |rect:Rect| width.set(rect.size.width)} {
-                    scroll width:fill {
-                        AppearanceSegments model:(model) field:(field)
-                    } as picker_scroll
-                    {picker_scroll.content().style_dyn(move || Style::column().width(width.get().max(px(336.0))).height(px(34.0)).shrink(0.0));}
+            row height:{px(34.0)}px gap:0px align:center {
+                row width:1fr min-width:0px align:center pad:(left:{px(12.0)}px) {
+                    if contrast {
+                        ContrastToggle model:(model)
+                    } else {
+                        ModeSegments model:(model)
+                    }
                 }
                 ResetSetting model:(model) setting:(setting) name:(title.to_ascii_lowercase())
                     flush:true
@@ -198,7 +197,8 @@ pub(crate) fn HarnessCard(model: Model, harness: Harness) -> Element {
         col height:min-content gap:0px @layout:{move |rect:Rect|width.set(rect.size.width)} {
             if width.get() < px(520.0) {
                 col height:min-content gap:0px {
-                    row height:min-content stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                    row height:min-content
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                         HarnessSummary model:(model) harness:(harness)
                     }
                     HarnessActions model:(model) harness:(harness) advanced:(advanced)
@@ -212,9 +212,10 @@ pub(crate) fn HarnessCard(model: Model, harness: Harness) -> Element {
                 }
             }
             if advanced.get() {
-                col height:min-content gap:0px stroke:(width:{px(1.0)} color:rule.hair edges:top) {
+                col height:min-content gap:0px
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
                     col height:min-content gap:{px(8.0)}px pad:{px(12.0)}px
-                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                         row #relay.caption height:min-content {
                             text {harness_status.get().map(|s|s.detail).unwrap_or_default()}
                         }
@@ -228,14 +229,14 @@ pub(crate) fn HarnessCard(model: Model, harness: Harness) -> Element {
                         }
                     }
                     input #relay.field width:fill
-                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
                         label:{format!("{name} executable on server")} executable
                     button #relay.action
                         @click:{model.submit(Command::ConfigureHarness{harness,executable:executable.get_untracked().trim().into()},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
                         disabled:{!model.connected.get() || model.busy.get()} width:fill
-                        justify:start stroke:(width:0px color:rule.hair)
+                        justify:start stroke:(width:0px color:ground.hairline)
                         label:{format!("Save {name} executable and check status")}
-                        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+                        focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
                         "Save and check"
                 }
             }
@@ -268,10 +269,10 @@ pub(crate) fn HarnessSummary(model: Model, harness: Harness) -> Element {
                 text (if harness == Harness::Codex { "Codex" } else { "Claude Code" })
             }
             icon size:{px(14.0)}px shrink:0
-                font-color:{mosaic::core::theme::color(match state.get().as_str(){"ready"=>status.success,"signed_out"|"incompatible"=>status.warning,"unknown"|"error"|"failed"=>status.danger,_=>ink.muted})}
+                font-color:{mosaic::core::theme::color(match state.get().as_str(){"ready"=>ground.ink,"signed_out"|"incompatible"=>status.needs_you,"unknown"|"error"|"failed"=>status.failed,_=>ground.muted})}
                 {match state.get().as_str(){"ready"=>harness_ready,"signed_out"|"incompatible"=>harness_warning,"unknown"|"error"|"failed"=>harness_failed,_=>harness_neutral}}
             row height:min-content width:1fr min-width:0px font-size:{px(12.0)}px
-                font-color:{mosaic::core::theme::color(match state.get().as_str(){"ready"=>status.success,"signed_out"|"incompatible"=>status.warning,"unknown"|"error"|"failed"=>status.danger,_=>ink.muted})} {
+                font-color:{mosaic::core::theme::color(match state.get().as_str(){"ready"=>ground.ink,"signed_out"|"incompatible"=>status.needs_you,"unknown"|"error"|"failed"=>status.failed,_=>ground.muted})} {
                 text
                     {if !model.connected.get(){"Disconnected".into()}else if !model.harness_error.get().is_empty(){format!("Refresh failed · last check: {}",harness_status.get().map(|s|match s.state.as_str(){"ready"=>"Ready","signed_out"=>"Sign in","missing"=>"Missing","incompatible"=>"Incompatible",_=>"Check failed"}).unwrap_or("Unavailable"))}else{match state.get().as_str(){"ready"=>"Ready","signed_out"=>"Sign in","missing"=>"Missing","incompatible"=>"Incompatible","unknown"|"error"|"failed"=>"Check failed",""=>"Checking",_=>"Check unavailable"}.into()}}
             }
@@ -297,12 +298,12 @@ pub(crate) fn HarnessActions(
             button #relay.header-action
                 @click:{if let Some(sender)=model.harness_refresh.get_untracked(){let _=sender.send(());}}
                 width:{if fill_width {Dimension::Fill} else {Dimension::MaxContent}}
-                stroke:(width:{px(if fill_width {0.0} else {1.0})} color:rule.hair edges:left)
+                stroke:(width:{px(if fill_width {0.0} else {1.0})} color:ground.hairline edges:left)
                 disabled:{!model.connected.get()} label:{format!("Refresh {name} status")} "Refresh"
             button #relay.header-action
                 @click:{if let Some(found)=model.harnesses.get_untracked().iter().find(|s|s.harness==harness){executable.set(found.executable.clone());}advanced.set(!advanced.get_untracked());}
                 width:{if fill_width {Dimension::Fill} else {Dimension::MaxContent}}
-                stroke:(width:{px(1.0)} color:rule.hair edges:left)
+                stroke:(width:{px(1.0)} color:ground.hairline edges:left)
                 label:{format!("{name} executable and status details")} "Details"
         }
     }

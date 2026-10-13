@@ -162,6 +162,9 @@ pub fn Composer(
     #[prop(optional)]
     has_content: Option<Live<bool>>,
     #[prop(default = UiText::fixed(String::new()))] placeholder: UiText,
+    /// The key hint under the message; injected editors describe their own keys.
+    #[prop(default = UiText::fixed("↵ send · ⇧↵ new line".to_owned()))]
+    hint: UiText,
 ) -> Element {
     let content = Derived::new(move || {
         has_content
@@ -220,7 +223,7 @@ pub fn Composer(
         });
     }
     area.adopt(&view! {
-        Label text:"↵ send · ⇧↵ new line" role:(TextRole::Micro) tone:(Tone::Faint)
+        Label text:(hint) role:(TextRole::Micro) tone:(Tone::Faint)
     });
     view! {
         row height:min-content min-height:{px(116.0)}px fill:ground.panel font-family:monospace
@@ -234,7 +237,7 @@ pub fn Composer(
                     }
                 }
                 button @click:{if content.get_untracked() { send(); }} width:fill height:1fr
-                    align:center justify:center pad:0px radius:0px label:"Send"
+                    align:center justify:center pad:0px radius:0px label:"Send message"
                     disabled:{!content.get()}
                     fill:{if content.get() { mosaic::core::theme::color(ground.ink) } else { quiet_send(true) }}
                     font-color:{if content.get() { mosaic::core::theme::color(ground.inverse) } else { quiet_send(false) }}

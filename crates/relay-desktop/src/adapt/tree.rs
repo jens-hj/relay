@@ -195,3 +195,29 @@ pub fn needs_you(snapshot: &Snapshot, project_id: &str) -> Vec<PendingApproval> 
         })
         .collect()
 }
+
+/// An issue's state from its linked sessions: anything waiting on you, then
+/// active work, then the outcome of the most recently created run. Sessions
+/// carry no timestamps; snapshot order is creation order. `None` while no
+/// linked session has run.
+pub fn issue_status(snapshot: &Snapshot, sessions: &[Session]) -> Option<AgentStatus> {
+    let states: Vec<AgentStatus> = sessions
+        .iter()
+        .map(|s| session_status(snapshot, s))
+        .collect();
+    for active in [
+        AgentStatus::Waiting,
+        AgentStatus::Working,
+        AgentStatus::Queued,
+    ] {
+        if states.contains(&active) {
+            return Some(active);
+        }
+    }
+    sessions
+        .iter()
+        .zip(&states)
+        .rev()
+        .find(|(session, _)| session.worker.is_some())
+        .map(|(_, state)| *state)
+}

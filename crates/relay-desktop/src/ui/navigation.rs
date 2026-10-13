@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 pub(crate) fn drawer_width(viewport: f32) -> f32 {
-    (viewport - 48.0).clamp(0.0, 320.0)
+    (viewport - 48.0).clamp(0.0, relay_ui::tokens::px(crate::sidebar::SIDEBAR_WIDTH))
 }
 
 #[component]
@@ -13,8 +13,9 @@ pub(crate) fn Drawer(model: Model, width: State<f32>, drag: State<Option<f32>>) 
     let previous_focus = ui.focused();
     let view = view! {
         stack label:"Navigation drawer" {
-            button @click:{model.sidebar_open.set(false);} width:fill height:fill fill:scrim
-                radius:0px pad:0px label:"Dismiss navigation" ""
+            button @click:{model.sidebar_open.set(false);} width:fill height:fill
+                fill:{mosaic::core::theme::color(ground.page).alpha(0.72)} radius:0px pad:0px
+                label:"Dismiss navigation" ""
             col width:{drawer_width(width.get())}px place:start clip
                 translate:(x:{drag.get().unwrap_or_else(|| drawer_width(width.get())) - drawer_width(width.get())}px) {
                 Sidebar model:(model) viewport:(width)

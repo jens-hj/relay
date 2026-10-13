@@ -15,11 +15,9 @@ mod usage;
 mod tests;
 
 pub use context::context_view;
-pub use identity::{effort, effort_choice, harness, model_identity, session_model};
-pub use tools::{
-    approval_view, fingerprint, tool_status, tool_view, transcript_permissions, ui_kind,
-};
+pub use identity::{effort_choice, harness, session_model};
+pub use tools::{approval_view, fingerprint, tool_status, tool_view, transcript_permissions};
 pub use tree::{
-    PendingApproval, agent_forest, ancestor_path, needs_you, session_status, subtree_statuses,
+    agent_forest, ancestor_path, issue_status, needs_you, session_status, subtree_statuses,
 };
 pub use usage::harness_usage;

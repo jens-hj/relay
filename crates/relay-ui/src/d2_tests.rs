@@ -112,7 +112,7 @@ fn ledger_geometry_actions_and_editor_survive_collapse() {
         32.0
     );
     assert_eq!(mounted.rect("Collapse agent settings").size.width, 36.0);
-    assert_eq!(mounted.rect("Send").size.width, 44.0);
+    assert_eq!(mounted.rect("Send message").size.width, 44.0);
     let editor_id = mounted
         .ui
         .inspection_snapshot()
@@ -142,13 +142,13 @@ fn ledger_geometry_actions_and_editor_survive_collapse() {
             .unwrap()
             .id
     );
-    mounted.click(mounted.rect("Send").center());
+    mounted.click(mounted.rect("Send message").center());
     mounted.click(mounted.rect("Attach file").center());
     assert_eq!(sent.get_untracked(), 1);
     assert_eq!(attached.get_untracked(), 1);
     value.set(String::new());
     mounted.settle();
-    mounted.click(mounted.rect("Send").center());
+    mounted.click(mounted.rect("Send message").center());
     assert_eq!(sent.get_untracked(), 1);
 }
 #[test]
@@ -465,11 +465,11 @@ fn injected_editor_reports_content_without_a_plain_text_proxy() {
                 has-content:(Some(present.into())) on-send:(send) on-attach:(noop())
         }
     });
-    mounted.click(mounted.rect("Send").center());
+    mounted.click(mounted.rect("Send message").center());
     assert_eq!(sent.get_untracked(), 0);
     present.set(true);
     mounted.settle();
-    mounted.click(mounted.rect("Send").center());
+    mounted.click(mounted.rect("Send message").center());
     assert_eq!(sent.get_untracked(), 1);
 }
 
