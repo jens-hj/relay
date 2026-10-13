@@ -7542,11 +7542,11 @@ fn project_sidebar_children_have_one_outer_tree_indent() {
     let director = mounted.rect("Director row Project director");
     assert!((director.origin.x - project.origin.x - 14.0).abs() < 0.1);
     assert!(director.origin.y >= project.origin.y + project.size.height);
+    // The 60px agents header starts right under the project menu; its New
+    // agent cell is centred in it.
     let new_project = mounted.rect("New Project");
-    assert!(
-        (mounted.rect("New agent").origin.y - new_project.origin.y - new_project.size.height).abs()
-            < 1.0
-    );
+    let header_top = new_project.origin.y + new_project.size.height;
+    assert!((mounted.rect("New agent").center().y - (header_top + 30.0)).abs() < 1.0);
     let root = tree_row(&mounted, "Profile design");
     // The tree keeps its normal 12px row padding plus the project's elbow.
     assert!(root.origin.x >= project.origin.x);
