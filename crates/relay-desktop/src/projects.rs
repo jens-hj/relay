@@ -449,7 +449,7 @@ fn ConnectionRow(model: Model, connection: ProjectConnection) -> Element {
                 row width:max-content shrink:0 {
                     CellButton label:{format!("Edit connection {}", connection.get().name)}
                         on-press:(edit.clone()) disabled:(blocked) rule:(Rule::Left) {
-                        { parent.adopt(&relay_ui::icons::icon_mark(relay_ui::icons::call.edit, 14.0)); }
+                        { parent.adopt(&relay_ui::icons::icon_mark(relay_ui::icons::mark.edit, 14.0)); }
                         Label text:"Edit" role:(TextRole::Label) weight:500
                     }
                 }

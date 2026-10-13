@@ -227,11 +227,16 @@ fn phase(
     }
     (elapsed, visible)
 }
-fn ring(state: Connection, latency: Option<u32>, motion: Rc<Cell<f32>>) -> Element {
+fn ring(state: Connection, latency: Option<u32>, sending: bool, motion: Rc<Cell<f32>>) -> Element {
     let glyph = view! {
         el width:{px(20.0)}px height:{px(20.0)}px shrink:0 nohit {}
     };
-    let (time, visible) = phase(&glyph, 1.6, state == Connection::Connecting, motion);
+    let (time, visible) = phase(
+        &glyph,
+        1.6,
+        state == Connection::Connecting || (state == Connection::Connected && sending),
+        motion,
+    );
     glyph.paint(move |ctx| {
         visible.set(true);
         let path = [
@@ -252,9 +257,26 @@ fn ring(state: Connection, latency: Option<u32>, motion: Rc<Cell<f32>>) -> Eleme
                         ctx.rect,
                         &portion(&path, 0.0, f32::from(latency_bars(ms)) / 4.0),
                         2.2,
-                        tint,
+                        if sending { tint.alpha(0.35) } else { tint },
                         16.0,
                     );
+                }
+                if sending {
+                    for (start, end) in [
+                        (time.get(), (time.get() + 0.18).min(1.0)),
+                        (0.0, (time.get() + 0.18 - 1.0).max(0.0)),
+                    ] {
+                        if end > start {
+                            line(
+                                ctx.scene,
+                                ctx.rect,
+                                &portion(&path, start, end),
+                                2.2,
+                                color(ground.ink),
+                                16.0,
+                            );
+                        }
+                    }
                 }
             }
             Connection::Offline => {
@@ -520,7 +542,7 @@ fn panel(
     copy: Option<OnPress>,
     motion: &ConnectionMotion,
 ) -> Element {
-    let glyph = ring(state, latency, motion.ring.clone());
+    let glyph = ring(state, latency, false, motion.ring.clone());
     let drawing = topology(state, info, telemetry, motion.socket.clone());
     let info = info.clone();
     let telemetry = telemetry.clone();
@@ -653,6 +675,7 @@ fn panel(
 #[component]
 pub fn ConnectionStatus(
     state: Live<Connection>,
+    #[prop(default = Live::fixed(false))] sending: Live<bool>,
     #[prop(default=Live::fixed(None))] latency: Live<Option<u32>>,
     #[prop(default=Live::fixed(ConnectionInfo::default()))] info: Live<ConnectionInfo>,
     #[prop(default=Live::fixed(ConnectionTelemetry::default()))] telemetry: Live<
@@ -706,12 +729,13 @@ pub fn ConnectionStatus(
     let glyph = view! {
         col width:{px(20.0)}px height:{px(20.0)}px shrink:0 {}
     };
-    let (glyph_state, glyph_latency) = (state.clone(), latency.clone());
+    let (glyph_state, glyph_latency, glyph_sending) =
+        (state.clone(), latency.clone(), sending.clone());
     let banner_motion = Rc::new(Cell::new(0.0));
     glyph.switch(
-        move || (glyph_state.get(), glyph_latency.get()),
-        move |parent, (state, latency)| {
-            parent.adopt(&ring(*state, *latency, banner_motion.clone()));
+        move || (glyph_state.get(), glyph_latency.get(), glyph_sending.get()),
+        move |parent, (state, latency, sending)| {
+            parent.adopt(&ring(*state, *latency, *sending, banner_motion.clone()));
         },
     );
     let word_state = state.clone();
@@ -720,12 +744,23 @@ pub fn ConnectionStatus(
     let tone = Derived::new(move || tone_state.get().token());
     let (summary_state, summary_latency, summary_telemetry) =
         (state.clone(), latency.clone(), telemetry.clone());
+    let summary_sending = sending.clone();
     let summary = Derived::new(move || {
+        if summary_state.get() == Connection::Connected && summary_sending.get() {
+            return "sending…".into();
+        }
         summary_telemetry
             .get()
             .summary(summary_state.get(), summary_latency.get())
     });
+    let label_sending = sending.clone();
     let label = Derived::new(move || {
+        if state.get() == Connection::Connected && label_sending.get() {
+            return format!(
+                "Connection: Connected, sending…. {} details",
+                if open.get() { "Hide" } else { "Show" }
+            );
+        }
         telemetry
             .get()
             .label(state.get(), latency.get(), open.get())
