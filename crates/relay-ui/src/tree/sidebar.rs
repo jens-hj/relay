@@ -34,7 +34,7 @@ pub fn StatusCounts(
     on_filter: Option<OnFilter>,
 ) -> Element {
     let grid = view! {
-        grid cols:5 height:min-content shrink:0
+        grid cols:(repeat(5 1fr)) height:min-content shrink:0
             stroke:(width:{px(1.0)} color:ground.hairline edges:(top bottom)) {}
     };
     for status in AgentStatus::ALL {
@@ -53,13 +53,7 @@ pub fn StatusCounts(
                 }
             }
         };
-        let word_tone = move || {
-            if amber() {
-                Signal::NeedsYou.token()
-            } else {
-                ground.muted
-            }
-        };
+        let word_amber = amber.clone();
         let current = active.clone();
         let notify = on_filter.clone();
         let press = move || {
@@ -74,19 +68,30 @@ pub fn StatusCounts(
         };
         let cell = view! {
             button @click:{press()} width:fill height:min-content min-width:0px radius:0px
-                pad:(left:{px(14.0)}px top:{px(10.0)}px bottom:{px(10.0)}px right:0px)
+                pad:(left:{px(14.0)}px top:{px(10.0)}px bottom:{px(10.0)}px right:{px(8.0)}px)
                 label:{format!("{} {}", label.get().get(status), status.word())}
                 fill:{if selected.get() == Some(status) { color(ground.selected) } else { Color::TRANSPARENT }}
                 hover { fill:ground.hover } pressed { fill:ground.pressed }
                 focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
-                col height:min-content gap:{px(4.0)}px {
+                col min-width:0px height:min-content gap:{px(4.0)}px {
                     row width:max-content height:min-content gap:{px(6.0)}px align:center {
                         StatusSquare status:(status)
                         text font-family:monospace font-size:{px(15.0)}px font-weight:500
                             font-color:{color(tone())} {count.get().get(status).to_string()}
                     }
-                    text font-family:monospace font-size:{px(11.0)}px
-                        font-color:{color(word_tone())} (status.word())
+                    // Narrow sidebars (the phone drawer) trim the word
+                    // rather than run it into the next cell.
+                    // Ellipsis takes the row's free width (1fr), so it
+                    // sits in a full-width row rather than the column.
+                    row min-width:0px height:min-content {
+                        if word_amber() {
+                            Ellipsis text:(status.word()) role:(TextRole::Caption)
+                                tone:(Tone::Signal(Signal::NeedsYou))
+                        } else {
+                            Ellipsis text:(status.word()) role:(TextRole::Caption)
+                                tone:(Tone::Muted)
+                        }
+                    }
                 }
             }
         };

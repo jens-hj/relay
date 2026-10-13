@@ -339,3 +339,83 @@ fn each_level_indents_by_one_fourteen_pixel_elbow_column() {
         assert!((pair[1] - pair[0] - 14.0).abs() < 0.5, "{depths:?}");
     }
 }
+
+#[test]
+fn status_words_keep_right_padding_and_trim_in_narrow_sidebars() {
+    // A phone drawer narrower than the 380px design: five 48px cells.
+    let mounted = mount(Size::new(240.0, 200.0), || {
+        let tally = StatusTally {
+            working: 10,
+            waiting: 2,
+            failed: 2,
+            queued: 4,
+            done: 7,
+        };
+        view! {
+            col width:{240.0}px {
+                StatusCounts tally:(tally)
+            }
+        }
+    });
+    for (cell, word) in [
+        ("10 working", "working"),
+        ("2 waiting", "waiting"),
+        ("2 failed", "failed"),
+        ("4 queued", "queued"),
+        ("7 done", "done"),
+    ] {
+        let cell = mounted.rect(cell);
+        let word = mounted
+            .rects(word)
+            .into_iter()
+            .find(|rect| cell.contains(rect.center()))
+            .unwrap_or_else(|| panic!("{word} inside its cell"));
+        assert!(
+            word.origin.x + word.size.width <= cell.origin.x + cell.size.width - 7.9,
+            "{word:?} keeps the right padding of {cell:?}"
+        );
+    }
+    let trimmed = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .filter(|node| node.role == mosaic::widgets::Role::Label)
+        .filter_map(|node| node.label)
+        .filter(|label| label.ends_with('…'))
+        .count();
+    assert!(trimmed > 0, "long words trim with an ellipsis");
+}
+
+#[test]
+fn status_words_show_in_full_at_the_design_width() {
+    let mounted = mount(Size::new(380.0, 200.0), || {
+        let tally = StatusTally {
+            working: 10,
+            waiting: 2,
+            failed: 2,
+            queued: 4,
+            done: 7,
+        };
+        view! {
+            col width:{380.0}px {
+                StatusCounts tally:(tally)
+            }
+        }
+    });
+    let shown: Vec<String> = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .filter(|node| node.role == mosaic::widgets::Role::Label)
+        .filter_map(|node| node.label)
+        .collect();
+    for word in ["working", "waiting", "failed", "queued", "done"] {
+        assert!(
+            shown.iter().any(|label| label == word),
+            "{word} in {shown:?}"
+        );
+    }
+    assert!(!shown.iter().any(|label| label.ends_with('…')), "{shown:?}");
+}
