@@ -2,7 +2,7 @@
 use crate::{icons::*, model::Model};
 use mosaic::prelude::*;
 use mosaic::widgets::{CursorIcon, InspectionNode, input::EventCtx};
-use relay_ui::style::*;
+use relay_ui::prelude::{CellButton, CellButtonProps};
 use relay_ui::tokens::{ground, px};
 
 pub(crate) const NATIVE_HEADER_HEIGHT: f32 = 60.0;
@@ -123,11 +123,39 @@ pub(crate) fn drag_header(model: Model, event: &PointerEvent, ctx: &mut EventCtx
     ctx.suppress_click();
 }
 
+/// Whether Relay draws its own window buttons (client decorations).
+pub(crate) const DRAWS_WINDOW_BUTTONS: bool =
+    !cfg!(any(target_os = "macos", target_arch = "wasm32"));
+
+/// Width of one window button cell.
+const WINDOW_BUTTON: f32 = 44.0;
+
+/// Room every page header leaves at its right end for the window controls.
+pub(crate) fn window_controls_width() -> f32 {
+    if DRAWS_WINDOW_BUTTONS {
+        px(WINDOW_BUTTON * 3.0)
+    } else {
+        0.0
+    }
+}
+
+/// A header's spacer under the window controls.
+#[component]
+pub(crate) fn WindowControlsSpace() -> Element {
+    view! {
+        el width:{window_controls_width()}px height:fill shrink:0 {}
+    }
+}
+
+/// The window buttons as one ruled group pinned to the window's top-right
+/// corner on every page, apart from any page's own controls.
 #[component]
 pub(crate) fn WindowControls(model: Model) -> Element {
     view! {
-        row width:max-content shrink:0 label:"Window controls" {
-            if !cfg!(any(target_os = "macos", target_arch = "wasm32")) {
+        row width:max-content height:{sidebar_header_height()}px shrink:0 label:"Window controls"
+            fill:ground.panel stroke:(width:{px(1.0)} color:ground.rule edges:left)
+            stroke:+(width:{px(1.0)} color:ground.rule edges:bottom) {
+            if DRAWS_WINDOW_BUTTONS {
                 WindowButton source:(window_minimize) label:("Minimize window")
                     action:(move || { let _ = model.window.get_untracked().minimize(); })
                 WindowButton source:(window_maximize) label:("Maximize or restore window")
@@ -141,10 +169,23 @@ pub(crate) fn WindowControls(model: Model) -> Element {
 
 #[component]
 fn WindowButton(source: SvgToken, label: &'static str, action: impl Fn() + 'static) -> Element {
-    view! {
-        button #relay.header-action @click.stop:{(action)()} @pointer-down.stop:{}
-            width:{px(32.0)}px shrink:0 pad:0px label:(label) {
+    let button = view! {
+        CellButton label:(label) horizontal-inset:(0.0) on-press:(action) {
             icon size:{px(13.0)}px stroke:ground.ink (source)
+        }
+    };
+    // Presses stay with the button rather than starting a window drag.
+    button.on_pointer(|event, ctx| {
+        if matches!(
+            event.kind,
+            PointerEventKind::Down(_) | PointerEventKind::Click(_)
+        ) {
+            ctx.stop_propagation();
+        }
+    });
+    view! {
+        row width:{px(WINDOW_BUTTON)}px shrink:0 {
+            { parent.adopt(&button); }
         }
     }
 }

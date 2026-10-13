@@ -459,7 +459,8 @@ impl Store {
             | Command::PromoteTurn { .. }
             | Command::CancelTurn { .. }
             | Command::EditQueuedTurn { .. }
-            | Command::ResumeQueue { .. }) => {
+            | Command::ResumeQueue { .. }
+            | Command::PauseQueue { .. }) => {
                 action = conversation::apply(
                     &transaction,
                     &mut snapshot,

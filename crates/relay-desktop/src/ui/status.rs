@@ -2,8 +2,9 @@
 
 use mosaic::core::theme::color;
 use mosaic::prelude::*;
-use relay_ui::prelude::{AgentStatus, StatusSquare, StatusSquareProps};
-use relay_ui::style::*;
+use relay_ui::prelude::{
+    AgentStatus, Label, LabelProps, StatusSquare, StatusSquareProps, TextRole, Tone,
+};
 use relay_ui::tokens::{ground, px};
 
 /// The word for a state; `None` is an issue no agent has worked on yet.
@@ -62,19 +63,14 @@ pub(crate) fn StatusLine(status: Derived<Option<AgentStatus>>) -> Element {
     }
 }
 
-/// A caps key above a value. Typography sits on the containers, so live
-/// values inherit one shared style.
+/// A muted caps key above its value.
 #[component]
 pub(crate) fn Readout(key: String, value: Derived<String>) -> Element {
     view! {
         col height:min-content min-width:0px gap:{px(3.0)}px {
-            row #relay.eyebrow height:min-content {
-                text text-wrap:none text-transform:uppercase letter-spacing:{px(0.6)}px
-                    (key.clone())
-            }
-            row #relay.value height:min-content {
-                text {value.get()}
-            }
+            Label text:(key.clone()) role:(TextRole::Caption) tone:(Tone::Muted) weight:500
+                caps:true
+            Label text:(value) role:(TextRole::Body)
         }
     }
 }

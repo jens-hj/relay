@@ -581,7 +581,7 @@ fn large_scale_settings_keep_controls_visible_in_a_narrow_window() {
     let number = nodes
         .nodes
         .iter()
-        .find(|n| n.label.as_deref() == Some("200"))
+        .find(|n| n.label.as_deref() == Some("200%"))
         .unwrap();
     let details = mounted.ui.inspection_details(number.id).unwrap();
     assert_eq!(
@@ -793,6 +793,10 @@ fn phone_navigation_tracks_edge_swipes_and_dismisses_without_activating_content(
         touch(&mounted, PointerEventKind::Move, x + dx, 150.0 + dy);
         touch(&mounted, up, x + dx, 150.0 + dy);
         assert!(!mounted.model.sidebar_open.get_untracked());
+        assert!(
+            mounted.model.issue.get_untracked().is_none(),
+            "gesture from {x}"
+        );
     }
     touch(&mounted, down, 10.0, 150.0);
     touch(&mounted, PointerEventKind::Move, 90.0, 152.0);
@@ -913,7 +917,8 @@ fn command_palette_shares_edges_scrolls_and_dismisses_without_clicking_through()
         assert!(panel.origin.y >= 0.0 && panel.origin.y + panel.size.height <= mounted.size.height);
         assert!(
             results.size.height > 0.0
-                && results.origin.y + results.size.height <= panel.origin.y + panel.size.height
+                && results.origin.y + results.size.height <= panel.origin.y + panel.size.height,
+            "{results:?} {panel:?}"
         );
         for label in ["Open board", "Open sessions", "Publish board"] {
             let action = mounted.rect(label);
@@ -942,7 +947,7 @@ fn command_palette_shares_edges_scrolls_and_dismisses_without_clicking_through()
 fn command_palette_enter_runs_the_keyboard_selected_row() {
     let mounted = mount(false, 1380.0);
     mounted.key(Key::Character("k".into()), true);
-    mounted.key(Key::ArrowDown, false);
+    // The first command starts highlighted; Down moves to the second.
     mounted.key(Key::ArrowDown, false);
     mounted.key(Key::Enter, false);
     assert!(!mounted.model.palette.get_untracked());
@@ -5222,8 +5227,10 @@ fn wide_sessions_turn_narrow_at_double_scale_without_rebuilding_the_draft() {
             "{label}: {rect:?}"
         );
     }
-    // Stop stays in the header's control block at every width.
-    assert!(has_label(&mounted, "Stop"));
+    // Stop moves into the session actions when the header is narrow.
+    assert!(!has_label(&mounted, "Stop"));
+    mounted.click("Session actions");
+    assert!(has_label(&mounted, "Stop worker"));
 }
 
 /// Pinned Mosaic `text_dyn_styled` binds a live text leaf's content and style
@@ -5232,7 +5239,8 @@ fn wide_sessions_turn_narrow_at_double_scale_without_rebuilding_the_draft() {
 /// and after a theme switch.
 #[test]
 fn live_text_typography_survives_content_and_theme_updates() {
-    use relay_ui::{style::relay, tokens::ground};
+    use relay_ui::prelude::{Label, LabelProps, TextRole};
+    use relay_ui::tokens::ground;
     mosaic::core::builtins::install();
     install_theme(&theme(ThemeVariant::Dark, 1.0));
     let scope = Scope::new(|| {});
@@ -5249,9 +5257,11 @@ fn live_text_typography_survives_content_and_theme_updates() {
                     text {format!("container {}", value.get())}
                 }
                 text font-size:13px {format!("leaf {}", value.get())}
-                text #relay.caption {format!("class {}", value.get())}
-                row #relay.caption {
-                    text {format!("parent class {}", value.get())}
+                Label text:(Derived::new(move || format!("class {}", value.get())))
+                    role:(TextRole::Label)
+                row font-size:24px {
+                    Label text:(Derived::new(move || format!("parent class {}", value.get())))
+                        role:(TextRole::Label)
                 }
                 text font-color:ground.muted {format!("leaf color {}", value.get())}
                 row font-color:ground.muted {
@@ -5323,6 +5333,9 @@ fn assert_control_hit(mounted: &Mounted, label: &str) {
         "{label}: {rect:?}"
     );
     let mut hit = mounted.ui.hit_test(rect.center()).map(|e| e.id());
+    let first = hit
+        .and_then(|id| snapshot.nodes.iter().find(|n| n.id == id))
+        .map(|n| (n.label.clone(), n.rect));
     while let Some(id) = hit {
         if id == target.id {
             return;
@@ -5333,7 +5346,7 @@ fn assert_control_hit(mounted: &Mounted, label: &str) {
             .find(|n| n.id == id)
             .and_then(|n| n.parent);
     }
-    panic!("Focused control clipped or obscured: {label}: {rect:?}");
+    panic!("Focused control clipped or obscured: {label}: {rect:?}, hit {first:?}");
 }
 
 #[test]
@@ -5385,7 +5398,7 @@ fn bounded_session_disclosures_keep_controls_reachable_and_draft_mounted() {
     assert_control_hit(&mounted, "Session usage and provenance");
     mounted.key(Key::Enter, false);
     for label in [
-        "Stop",
+        "Stop worker",
         "Inherit worker execution settings",
         "Load shared draft",
         "Restore local draft",
@@ -5754,13 +5767,29 @@ fn direct_project_connections_and_header_actions_use_full_cells() {
         .unwrap();
     assert!((icon.rect.center().x - tree.center().x).abs() < 0.1);
     assert!((icon.rect.center().y - tree.center().y).abs() < 0.1);
+    // A card with linked sessions counts them in its foot, inside the card.
+    let card = nodes
+        .nodes
+        .iter()
+        .find(|n| {
+            n.description.as_deref().is_some_and(|d| {
+                d.ends_with("linked sessions") && !d.ends_with(" 0 linked sessions")
+            })
+        })
+        .unwrap();
     let count = nodes
         .nodes
         .iter()
-        .find(|n| n.label.as_deref() == Some("Task session count"))
+        .find(|n| {
+            n.label
+                .as_deref()
+                .is_some_and(|l| l.ends_with(" session") || l.ends_with(" sessions"))
+        })
         .unwrap();
-    let footer = nodes.node(count.parent.unwrap()).unwrap();
-    assert_eq!(count.rect.size.height, footer.rect.size.height);
+    assert!(
+        card.rect.contains(count.rect.center()),
+        "{card:?} {count:?}"
+    );
     mounted
         .model
         .snapshot
@@ -6687,8 +6716,7 @@ fn agent_tree_follows_parent_links_scoped_to_the_selected_project() {
     let write = tree_row(&mounted, "Write migrations");
     assert!((plan.size.height - 34.0).abs() < 1.0);
     assert!(plan.origin.y < migration.origin.y && migration.origin.y < write.origin.y);
-    // Each level adds a 14px elbow column and the row's 8px gap, as on
-    // the design board: compare the status squares.
+    // Each level adds one 14px elbow column: compare the status squares.
     let indent = |row: &str| {
         let rect = tree_row(&mounted, row);
         mounted
@@ -6701,7 +6729,7 @@ fn agent_tree_follows_parent_links_scoped_to_the_selected_project() {
             .map(|n| n.rect.origin.x)
             .fold(f32::MAX, f32::min)
     };
-    assert!((indent("Write migrations") - indent("Schema migration") - 22.0).abs() < 1.0);
+    assert!((indent("Write migrations") - indent("Schema migration") - 14.0).abs() < 1.0);
     // Another project's agents stay out of this project's tree.
     let mut snapshot = mounted.model.snapshot.get_untracked();
     let mut other = snapshot.projects[0].clone();
@@ -7354,5 +7382,154 @@ fn tool_kinds_keep_their_verbs_and_unknown_outcomes_stay_unclaimed() {
             tool_row_description(&mounted, &format!("tool-{i}")),
             expected
         );
+    }
+}
+
+#[test]
+fn one_catalog_per_project_harness_lets_every_row_show_effort() {
+    let mut mounted = mount_orchestration(1380.0);
+    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(sender));
+    mounted
+        ._scope
+        .run(|| crate::command_ui::bind_discovery(mounted.model));
+    mounted.settle();
+    let mut asked = Vec::new();
+    while let Ok(request) = requests.try_recv() {
+        if let crate::buffer_network::Request::Catalog { session, .. } = request {
+            asked.push(session);
+        }
+    }
+    asked.sort();
+    asked.dedup();
+    // The first Codex and the first Claude Code session of the project.
+    assert_eq!(asked, ["session-plan", "session-worker"]);
+    // With both catalogs loaded, rows of every model show their effort.
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([
+            (
+                "session-plan".to_string(),
+                Ok(demo_catalog("session-plan", Harness::ClaudeCode)),
+            ),
+            (
+                "session-worker".to_string(),
+                Ok(demo_catalog("session-worker", Harness::Codex)),
+            ),
+        ]));
+    mounted.settle();
+    // Opus at high (of four steps and max), Sonnet at medium, Codex at medium.
+    for track in ["Effort 3 of 4", "Effort 2 of 3"] {
+        assert!(has_label(&mounted, track), "{track}");
+    }
+    let _ = &mut mounted;
+}
+
+#[test]
+fn the_ledger_names_a_selected_effort_without_its_steps() {
+    let mounted = mount_orchestration(1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    // No catalog yet: the selection is named, with no step track.
+    assert!(has_label(&mounted, "Selected effort"));
+    assert!(has_label(&mounted, "high"));
+    assert!(!has_label(&mounted, "Effort max"));
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([(
+            "session-plan".to_string(),
+            Ok(demo_catalog("session-plan", Harness::ClaudeCode)),
+        )]));
+    mounted.settle();
+    assert!(!has_label(&mounted, "Selected effort"));
+    assert!(has_label(&mounted, "Effort max"));
+}
+
+#[test]
+fn the_header_pause_cell_and_p_hold_and_resume_the_queue() {
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let session = mounted.model.session.get_untracked();
+    let submission = |state: SubmissionState| Submission {
+        id: "queued-turn".into(),
+        session_id: session.clone(),
+        parts: vec![Part::text("Next")],
+        state,
+        approve_implementation: false,
+        error: None,
+        interrupts_run: None,
+        last_edit_request: None,
+    };
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.submissions.push(submission(SubmissionState::Queued)));
+    mounted.settle();
+    mounted.click("Pause");
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::PauseQueue { ref session_id } if *session_id == session
+    ));
+    mounted.model.busy.set(false);
+    mounted.model.snapshot.update(|s| {
+        s.submissions[0].state = SubmissionState::Paused;
+        s.revision += 1;
+    });
+    mounted.settle();
+    assert!(!has_label(&mounted, "Pause"));
+    mounted.click("Resume");
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::ResumeQueue { ref session_id } if *session_id == session
+    ));
+    mounted.model.busy.set(false);
+    // P toggles outside text fields, and types into the draft inside one.
+    mounted.focus("Session actions");
+    mounted.key(Key::Character("p".into()), false);
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::ResumeQueue { .. }
+    ));
+    mounted.model.busy.set(false);
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|n| n.label.filter(|l| l.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&draft);
+    mounted.key(Key::Character("p".into()), false);
+    assert!(mounted.commands.try_recv().is_err());
+    // Without queued or held turns there is no pause cell.
+    mounted.model.snapshot.update(|s| s.submissions.clear());
+    mounted.settle();
+    assert!(!has_label(&mounted, "Pause") && !has_label(&mounted, "Resume"));
+    let _ = &mut mounted;
+}
+
+#[test]
+fn window_controls_are_one_ruled_group_apart_from_page_controls() {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mounted = mount(false, 1380.0);
+        mounted.model.page.set(Page::Board);
+        mounted.model.issue.set(Some("issue-2".into()));
+        mounted.settle();
+        let group = mounted.rect("Window controls");
+        let close_issue = mounted.rect("Close issue details");
+        // The group sits at the window's top-right corner, and the
+        // inspector's own close cell ends before it starts.
+        assert!((group.origin.x + group.size.width - 1380.0).abs() < 1.0);
+        assert!(group.origin.y.abs() < 1.0);
+        assert!(close_issue.origin.x + close_issue.size.width <= group.origin.x + 0.5);
+        for page in [Page::Sessions, Page::Settings, Page::Directors] {
+            mounted.model.issue.set(None);
+            mounted.model.page.set(page);
+            mounted.settle();
+            assert_eq!(mounted.rect("Window controls"), group, "{page:?}");
+        }
     }
 }

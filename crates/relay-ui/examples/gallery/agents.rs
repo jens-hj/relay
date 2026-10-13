@@ -369,16 +369,22 @@ fn surfaces_section() -> Element {
             action: "Write to the database".into(),
             choice: Permission::Ask,
             pending: true,
+            name: String::new(),
+            flags: vec![],
         },
         PermissionRow {
             action: "Edit files in the worktree".into(),
             choice: Permission::Allow,
             pending: false,
+            name: String::new(),
+            flags: vec![],
         },
         PermissionRow {
             action: "Push to the remote".into(),
             choice: Permission::Deny,
             pending: false,
+            name: String::new(),
+            flags: vec![],
         },
     ]);
     let change: Rc<dyn Fn(usize, Permission)> = Rc::new(move |index, choice| {
@@ -438,6 +444,7 @@ fn surfaces_section() -> Element {
             status,
             labels: labels.into_iter().map(String::from).collect(),
             selected,
+            ..Default::default()
         };
         column.adopt(&view! {
             IssueCard issue:(issue)

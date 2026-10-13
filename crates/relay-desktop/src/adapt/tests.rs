@@ -176,15 +176,9 @@ fn model_identity_splits_family_version_and_vendor() {
             ModelHue::Haiku,
         ),
         ("sonnet[1m]", "Sonnet", "", "CLAUDE", ModelHue::Sonnet),
-        (
-            "gpt-5.1-codex-max",
-            "GPT",
-            "5.1 codex max",
-            "GPT",
-            ModelHue::Sol,
-        ),
+        ("gpt-5.1-codex-max", "GPT", "5.1", "GPT", ModelHue::Sol),
         ("gpt5", "GPT", "5", "GPT", ModelHue::Sol),
-        ("codex-mini-latest", "Codex", "mini", "GPT", ModelHue::Sol),
+        ("codex-mini-latest", "Codex", "", "GPT", ModelHue::Sol),
         ("sol-6.1", "Sol", "6.1", "GPT", ModelHue::Sol),
         ("llama-3.1-70b", "llama-3.1-70b", "", "", ModelHue::Neutral),
     ];
@@ -414,4 +408,35 @@ fn session_model_reads_reported_model_and_catalog_effort() {
         relay_ui::prelude::Harness::Codex
     );
     assert_eq!(ui_kind(ToolKind::Other), UiKind::Other);
+}
+
+#[test]
+fn rows_borrow_a_loaded_catalog_of_the_same_harness_for_their_effort() {
+    let snapshot = demo();
+    let plan = snapshot.sessions[0].clone();
+    let migration = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == "session-migration")
+        .unwrap()
+        .clone();
+    let backfill = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == "session-backfill")
+        .unwrap()
+        .clone();
+    let catalogs = BTreeMap::from([(
+        plan.id.clone(),
+        Ok(demo_catalog(&plan.id, relay_core::Harness::ClaudeCode)),
+    )]);
+    let (_, effort) = session_model(&migration, &catalogs);
+    let effort = effort.unwrap();
+    assert_eq!(effort.name(), "medium");
+    let (_, effort) = session_model(&plan, &catalogs);
+    let effort = effort.unwrap();
+    assert!(effort.has_max && !effort.at_max);
+    assert_eq!(effort.name(), "high");
+    // A Claude catalog never describes a Codex model.
+    assert!(session_model(&backfill, &catalogs).1.is_none());
 }

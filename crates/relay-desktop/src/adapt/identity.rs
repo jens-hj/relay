@@ -48,7 +48,7 @@ pub fn model_identity(id: &str) -> ModelIdentity {
         let first = words[0];
         let rest = first.trim_start_matches("gpt");
         let mut identity = ModelIdentity::new("GPT", "", ModelHue::Sol).vendor("GPT");
-        identity.version = version(
+        identity.version = number(
             &std::iter::once(rest)
                 .filter(|rest| !rest.is_empty())
                 .chain(words[1..].iter().copied())
@@ -66,7 +66,7 @@ pub fn model_identity(id: &str) -> ModelIdentity {
         .filter(|(index, word)| !skip.contains(index) && **word != "claude")
         .map(|(_, word)| *word)
         .collect();
-    ModelIdentity::new(family, version(&rest), hue).vendor(vendor)
+    ModelIdentity::new(family, number(&rest), hue).vendor(vendor)
 }
 
 fn capitalize(word: &str) -> String {
@@ -77,23 +77,16 @@ fn capitalize(word: &str) -> String {
         .unwrap_or_default()
 }
 
-/// "4", "5" → "4.5"; "5.1", "codex", "max" → "5.1 codex max".
-fn version(words: &[&str]) -> String {
-    let numbers: Vec<&str> = words
+/// The version a family is shown with: its numbers, "4", "5" → "4.5" and
+/// "5.1" → "5.1". Variant words ("codex", "max", "mini") stay in the
+/// reported model id, which provenance shows in full.
+fn number(words: &[&str]) -> String {
+    words
         .iter()
         .copied()
-        .filter(|word| word.chars().all(|c| c.is_ascii_digit() || c == '.'))
-        .collect();
-    let others: Vec<&str> = words
-        .iter()
-        .copied()
-        .filter(|word| !word.chars().all(|c| c.is_ascii_digit() || c == '.'))
-        .collect();
-    std::iter::once(numbers.join("."))
-        .filter(|numbers| !numbers.is_empty())
-        .chain(others.into_iter().map(str::to_string))
+        .filter(|word| !word.is_empty() && word.chars().all(|c| c.is_ascii_digit() || c == '.'))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(".")
 }
 
 /// The ordinary efforts a model offers and whether it offers max.
@@ -163,16 +156,29 @@ pub fn session_model(
 ) -> (Option<ModelIdentity>, Option<Effort>) {
     let selected = session.selection.model.as_deref();
     let reported = session.worker.as_ref().and_then(|w| w.model.as_deref());
+    let find = |catalog: &HarnessCatalog| {
+        [selected, reported]
+            .into_iter()
+            .flatten()
+            .find_map(|id| catalog.models.iter().find(|m| m.id == id))
+            .cloned()
+    };
+    // The session's own catalog, else any loaded catalog of the same harness
+    // that lists the model: a model's effort steps do not depend on the
+    // session.
+    let harness = session.worker.as_ref().map(|w| w.harness);
     let catalog_model = catalogs
         .get(&session.id)
         .and_then(|catalog| catalog.as_ref().ok())
-        .and_then(|catalog| {
-            [selected, reported]
-                .into_iter()
-                .flatten()
-                .find_map(|id| catalog.models.iter().find(|m| m.id == id))
+        .and_then(find)
+        .or_else(|| {
+            catalogs
+                .values()
+                .filter_map(|catalog| catalog.as_ref().ok())
+                .filter(|catalog| harness.is_none_or(|h| catalog.harness == h))
+                .find_map(find)
         });
     let identity = reported.or(selected).map(model_identity);
-    let effort = catalog_model.and_then(|model| effort(&session.selection, model));
+    let effort = catalog_model.and_then(|model| effort(&session.selection, &model));
     (identity, effort)
 }

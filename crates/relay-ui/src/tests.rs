@@ -455,13 +455,17 @@ fn popover_opens_and_dismisses_on_escape_and_outside_clicks() {
                 }
             }
         });
+        let button = view! {
+            CellButton label:"Open" on-press:(toggle) {
+                Label text:"Open"
+            }
+        };
+        let focus = button.clone();
         view! {
             col {
                 stack width:{100.0}px height:{40.0}px {
-                    CellButton label:"Open" on-press:(toggle) {
-                        Label text:"Open"
-                    }
-                    Popover open:(open) label:"Details" content:(content)
+                    { parent.adopt(&button); }
+                    Popover open:(open) label:"Details" content:(content) trigger:(Some(focus))
                 }
             }
         }
@@ -475,6 +479,15 @@ fn popover_opens_and_dismisses_on_escape_and_outside_clicks() {
     assert!(open.get_untracked(), "clicks inside keep it open");
     mounted.key(Key::Escape);
     assert!(!open.get_untracked());
+    let focused = mounted.ui.focused().map(|e| e.id());
+    let trigger_id = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|n| n.label.as_deref() == Some("Open") && n.role == mosaic::widgets::Role::Button)
+        .map(|n| n.id);
+    assert_eq!(focused, trigger_id, "Escape returns focus to the trigger");
     mounted.click(trigger);
     assert!(open.get_untracked());
     mounted.click(trigger);
@@ -655,4 +668,28 @@ fn washes_match_srgb_blending() {
     assert!((crate::tokens::srgb_alpha(tint, under, 1.0) - 1.0).abs() < 1e-4);
     let header = crate::tokens::srgb_alpha(tint, under, 0.14);
     assert!(header > 0.02 && header < 0.08, "{header}");
+}
+
+/// The approval wash thins from left to right like the boards' `gWa`
+/// (0.6 → 0.08). Coverage per eighth of a Needs-you card measured on the
+/// board screenshot (text included) ran 0.73 → 0.08.
+#[test]
+fn approval_wash_thins_to_the_right_like_the_boards() {
+    for (width, height) in [(356.0, 118.0), (720.0, 232.0)] {
+        let spec = DitherSpec::new(width, height, 1.0, Gradient::Amber, 1.0);
+        let mask = spec.mask();
+        let (w, h) = spec.pixels();
+        let coverage = |band: u32| {
+            let (x0, x1) = (band * w / 8, (band + 1) * w / 8);
+            let on = (0..h)
+                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                .filter(|(x, y)| mask[(*y * w + *x) as usize])
+                .count();
+            on as f32 / ((x1 - x0) * h) as f32
+        };
+        let bands: Vec<f32> = (0..8).map(coverage).collect();
+        assert!(bands[0] > 0.5 && bands[0] < 0.8, "{bands:?}");
+        assert!(bands[7] < 0.12, "{bands:?}");
+        assert!(bands.windows(2).all(|p| p[1] <= p[0] + 0.02), "{bands:?}");
+    }
 }

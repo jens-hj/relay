@@ -15,26 +15,6 @@ impl ButtonStyle {
     }
 }
 
-// The DSL calls this constructor; retain Mosaic's behaviour and parts,
-// while allowing every internal text leaf to inherit Relay's type scale.
-pub fn stepper_with_options(
-    parent: &Element,
-    value: State<f32>,
-    options: StepperOptions,
-) -> mosaic::widgets::Stepper {
-    mosaic::widgets::stepper_styled_with_options(
-        parent,
-        value,
-        mosaic::prelude::StepperStyle {
-            text: TextStyle::inherited(),
-            button: ButtonStyle::default(),
-            radius: 0.0,
-            ..Default::default()
-        },
-        options,
-    )
-}
-
 pub fn button(
     parent: &Element,
     label: impl Into<String>,
@@ -49,8 +29,10 @@ use crate::{
     settings::{Setting, ThemeMode},
 };
 use mosaic::prelude::*;
-use relay_ui::prelude::{Segments, SegmentsProps, Toggle, ToggleProps};
-use relay_ui::style::*;
+use relay_ui::overlay::{Tooltip, TooltipProps};
+use relay_ui::prelude::{
+    CellButton, CellButtonProps, Rule, Segments, SegmentsProps, Toggle, ToggleProps,
+};
 use relay_ui::tokens::{ground, px};
 use std::rc::Rc;
 
@@ -83,26 +65,18 @@ pub fn ContrastToggle(model: Model) -> Element {
     }
 }
 
-/// A reset cell that returns one setting to its default.
+/// A reset cell that returns one setting to its default, at the right end
+/// of its row.
 #[component]
-pub fn ResetSetting(
-    model: Model,
-    setting: Setting,
-    name: String,
-    #[prop(default = false)] flush: bool,
-) -> Element {
-    let name = State::new(name);
+pub fn ResetSetting(model: Model, setting: Setting, name: String) -> Element {
+    let unchanged = Derived::new(move || !model.preferences.get().overridden(setting));
     view! {
-        row width:{px(34.0)}px height:{px(34.0)}px shrink:0 {
-            button #relay.icon-action @click:{model.preferences.update(|p|p.reset(setting));}
-                stroke:(width:{px(1.0)} color:ground.hairline
-                    edges:if flush {StrokeEdges::LEFT} else {StrokeEdges::ALL}
-                    offset:{px(if flush {0.0} else {-1.0})})
-                disabled:{!model.preferences.get().overridden(setting)}
-                label:{format!("Reset {}",name.get())} {
-                icon size:{px(16.0)}px reset-icon
-                tooltip #relay.tooltip summary:"Reset to default" {
-                    text {format!("Reset {} to default",name.get())}
+        row width:{px(40.0)}px shrink:0 {
+            CellButton label:(format!("Reset {name}")) rule:(Rule::Left) horizontal-inset:(0.0)
+                disabled:(unchanged)
+                on-press:(Rc::new(move || model.preferences.update(|p| p.reset(setting))) as relay_ui::prelude::OnPress) {
+                Tooltip text:(format!("Reset {name} to default")) {
+                    icon size:{px(16.0)}px stroke:ground.ink reset-icon
                 }
             }
         }

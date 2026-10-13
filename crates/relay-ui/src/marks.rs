@@ -20,6 +20,8 @@ pub enum Mark {
     Pause,
     /// A filled square: Stop (14-unit box).
     Stop,
+    /// A filled triangle pointing right: Resume (14-unit box).
+    Play,
     /// A rule with arrows pressing onto it from above and below: compaction
     /// (16-unit box).
     Compaction,
@@ -34,7 +36,7 @@ pub enum Mark {
 impl Mark {
     fn box_size(self) -> f32 {
         match self {
-            Mark::Pause | Mark::Stop => 14.0,
+            Mark::Pause | Mark::Stop | Mark::Play => 14.0,
             Mark::Compaction => 16.0,
             _ => 12.0,
         }
@@ -87,6 +89,13 @@ pub fn paint_mark(scene: &mut Scene, rect: Rect, mark: Mark, tint: Color) {
             block(scene, 8.5, 2.5, 2.5, 9.0);
         }
         Mark::Stop => block(scene, 2.5, 2.5, 9.0, 9.0),
+        Mark::Play => {
+            let points: Vec<Vector2> = [(3.5, 2.5), (11.5, 7.0), (3.5, 11.5)]
+                .iter()
+                .map(|&(x, y)| local(x, y))
+                .collect();
+            scene.shape(Shape::new(bounds).path(points, true).fill(tint));
+        }
         Mark::Compaction => {
             line(scene, &[(8.0, 1.5), (8.0, 5.5)], 1.4);
             line(scene, &[(5.5, 3.5), (8.0, 6.0), (10.5, 3.5)], 1.4);

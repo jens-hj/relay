@@ -39,6 +39,23 @@ pub fn Ledger(data: Live<LedgerView>, actions: LedgerActions) -> Element {
 fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
     let colour = vm.model.hue.token();
     let e = vm.effort;
+    let track = e.levels > 0 || e.has_max;
+    let named = (!track).then(|| vm.effort_label.clone()).flatten();
+    let tall = !track && named.is_none();
+    let named_cell = named.map(|name| {
+        view! {
+            col height:1fr justify:start pad:(horizontal:{px(10.0)}px vertical:{px(9.0)}px) {
+                CutCorner cut:(Cut::Small) corner:(Corner::TopRightBottomLeft)
+                    edge:(ground.rule_strong) {
+                    row height:{px(20.0)}px justify:between align:center
+                        pad:(horizontal:{px(8.0)}px vertical:0px) label:"Selected effort" {
+                        Label text:"EFFORT" role:(TextRole::Micro) weight:500 tone:(Tone::Muted)
+                        Label text:(name) role:(TextRole::BodyLarge) weight:600
+                    }
+                }
+            }
+        }
+    });
     if vm.collapsed {
         let toggle = actions.toggle;
         let label = format!(
@@ -90,7 +107,7 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
                 }
             }
             col width:1fr min-width:0px {
-                row height:{px(40.0)}px shrink:0 {
+                row height:{if tall { Dimension::Fill } else { Dimension::Px(px(40.0)) }} shrink:0 {
                     stack width:1fr min-width:0px clip {
                         Dither colour:(colour) gradient:(Gradient::Corner) reach:0.43f32 opacity:0.5
                             seed:3 breath:(Some(Breath::GLOW))
@@ -118,8 +135,11 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
                         }
                     }
                 }
-                Hairline colour:(ground.rule_strong)
-                if e.levels > 0 || e.has_max {
+                if !tall {
+                    Hairline colour:(ground.rule_strong)
+                }
+                { if let Some(cell) = &named_cell { parent.adopt(cell); } }
+                if track {
                     col height:1fr justify:between gap:{px(8.0)}px
                         pad:(horizontal:{px(10.0)}px vertical:{px(9.0)}px) {
                         CutCorner cut:(Cut::Small) corner:(Corner::TopRightBottomLeft)

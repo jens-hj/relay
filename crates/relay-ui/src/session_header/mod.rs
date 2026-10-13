@@ -110,6 +110,9 @@ pub fn ControlBlock(
     below: Vec<AgentStatus>,
     #[prop(optional)] on_below: Option<OnPress>,
     #[prop(optional)] on_pause: Option<OnPress>,
+    /// The queue is held: the pause cell offers Resume.
+    #[prop(default = false)]
+    paused: bool,
     #[prop(optional)] on_stop: Option<OnPress>,
 ) -> Element {
     let block = view! {
@@ -154,14 +157,19 @@ pub fn ControlBlock(
     };
     block.adopt(&status_cell);
     if let Some(pause) = on_pause {
+        let (glyph, word) = if paused {
+            (Mark::Play, "Resume")
+        } else {
+            (Mark::Pause, "Pause")
+        };
         let content = column(vec![
-            mark(Mark::Pause, 14.0, ground.ink),
-            sized_text("Pause".to_string().into(), 12.0, 500, ground.ink),
+            mark(glyph, 14.0, ground.ink),
+            sized_text(word.to_string().into(), 12.0, 500, ground.ink),
             view! {
                 Kbd keys:"P"
             },
         ]);
-        block.adopt(&header_cell("Pause".into(), pause, false, false, content));
+        block.adopt(&header_cell(word.into(), pause, false, false, content));
     }
     if let Some(stop) = on_stop {
         let content = column(vec![
@@ -198,6 +206,9 @@ pub fn SessionHeader(
     below: Vec<AgentStatus>,
     #[prop(optional)] on_below: Option<OnPress>,
     #[prop(optional)] on_pause: Option<OnPress>,
+    /// The queue is held: the pause cell offers Resume.
+    #[prop(default = false)]
+    paused: bool,
     #[prop(optional)] on_stop: Option<OnPress>,
 ) -> Element {
     let level = effort.map_or(0, |effort| effort.level());
@@ -251,7 +262,7 @@ pub fn SessionHeader(
             );
             parent.adopt(&view! {
                 ControlBlock status:(*status) below:(below) on-below:(on_below) on-pause:(on_pause)
-                    on-stop:(on_stop)
+                    paused:(paused) on-stop:(on_stop)
             });
         },
     );

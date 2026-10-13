@@ -1,8 +1,9 @@
 //! The conversation's relay-ui parts: the session header, tool calls, spawn
 //! and approval blocks, queued turns, and the ledger's settings.
 
+use crate::ui::press;
 use crate::ui::{NavigationButton, NavigationButtonProps};
-use crate::window_chrome::{WindowControls, WindowControlsProps};
+use crate::window_chrome::{WindowControlsSpace, WindowControlsSpaceProps};
 use crate::{adapt, buffer, icons::*, model::Model};
 use mosaic::prelude::*;
 use relay_core::*;
@@ -11,7 +12,7 @@ use relay_ui::prelude::{
     ModelHue, ModelIdentity, OnPress, Opening, SessionHeader, SessionHeaderProps, SpawnBlock,
     SpawnBlockProps, SpawnChild, ToolCallRow, ToolCallRowProps, ToolCallView, ToolDetail,
 };
-use relay_ui::style::*;
+use relay_ui::prelude::{CellButton, CellButtonProps, Label, LabelProps, Rule, TextRole, Tone};
 use relay_ui::tokens::{ToolKind as UiKind, ground, px};
 use std::rc::Rc;
 
@@ -25,6 +26,10 @@ struct HeaderView {
     context: Option<relay_ui::prelude::ContextView>,
     below: Vec<AgentStatus>,
     stoppable: bool,
+    /// Turns wait to follow the current one.
+    queued: bool,
+    /// Turns are held until resumed.
+    paused: bool,
 }
 
 fn header_view(model: Model) -> HeaderView {
@@ -44,6 +49,8 @@ fn header_view(model: Model) -> HeaderView {
             context: None,
             below: Vec::new(),
             stoppable: false,
+            queued: false,
+            paused: false,
         };
     };
     HeaderView {
@@ -57,6 +64,14 @@ fn header_view(model: Model) -> HeaderView {
             .worker
             .as_ref()
             .is_some_and(|w| matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running)),
+        queued: snapshot
+            .submissions
+            .iter()
+            .any(|s| s.session_id == id && s.state == SubmissionState::Queued),
+        paused: snapshot
+            .submissions
+            .iter()
+            .any(|s| s.session_id == id && s.state == SubmissionState::Paused),
     }
 }
 
@@ -64,8 +79,13 @@ fn header_view(model: Model) -> HeaderView {
 /// with its context gauge and controls, session actions and the window
 /// controls.
 #[component]
-pub(crate) fn SessionHead(model: Model, menu: State<bool>) -> Element {
-    let data = Derived::new(move || header_view(model));
+pub(crate) fn SessionHead(model: Model, menu: State<bool>, compact: Derived<bool>) -> Element {
+    // Narrow headers keep Stop in the session actions instead.
+    let data = Derived::new(move || {
+        let mut view = header_view(model);
+        view.stoppable &= !compact.get();
+        view
+    });
     let host = view! {
         row width:1fr min-width:0px {}
     };
@@ -84,6 +104,8 @@ pub(crate) fn SessionHead(model: Model, menu: State<bool>) -> Element {
                     model.agent_focus.set(Some(id));
                 }) as OnPress
             });
+            let pause: Option<OnPress> = (view.queued || view.paused)
+                .then(|| Rc::new(move || model.toggle_queue()) as OnPress);
             let compact: Option<OnPress> = view
                 .context
                 .is_some()
@@ -93,7 +115,7 @@ pub(crate) fn SessionHead(model: Model, menu: State<bool>) -> Element {
                     SessionHeader path:(view.path.clone()) title:(view.title.clone())
                         status:(view.status) effort:(view.effort) context:(view.context.clone())
                         on-compact:(compact) below:(view.below.clone()) on-below:(below)
-                        on-stop:(stop)
+                        on-pause:(pause) paused:(view.paused) on-stop:(stop)
                 }
             });
         },
@@ -104,12 +126,13 @@ pub(crate) fn SessionHead(model: Model, menu: State<bool>) -> Element {
             @pointer:{move |event, ctx| crate::window_chrome::drag_header(model, event, ctx)} {
             NavigationButton model:(model)
             { parent.adopt(&host); }
-            button #relay.header-action @click:{menu.set(!menu.get_untracked());} width:{px(44.0)}px
-                pad:0px label:"Session actions"
-                stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
-                icon size:{px(16.0)}px more-icon
+            row width:{px(44.0)}px shrink:0 {
+                CellButton label:"Session actions" rule:(Rule::Left) horizontal-inset:(0.0)
+                    selected:(menu) on-press:(press(move || menu.set(!menu.get_untracked()))) {
+                    icon size:{px(16.0)}px more-icon
+                }
             }
-            WindowControls model:(model)
+            WindowControlsSpace
         }
     }
 }
@@ -274,29 +297,27 @@ pub(crate) fn QueuedTurn(model: Model, submission: String) -> Element {
                 stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {
                 col width:{px(34.0)}px shrink:0 align:center pad:(top:{px(9.0)}px)
                     stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
-                    row #relay.eyebrow height:min-content width:max-content {
-                        text {position.get()}
-                    }
+                    Label text:(position) role:(TextRole::Caption) tone:(Tone::Muted) weight:500
                 }
-                col width:1fr min-width:0px height:min-content gap:{px(8.0)}px
-                    pad:(horizontal:{px(12.0)}px vertical:{px(9.0)}px) {
-                    row height:min-content font-size:{px(12.5)}px {
-                        text {current.get().map(|s| plain_text(&s.parts)).unwrap_or_default()}
-                    }
-                    if current.get().is_some_and(|s| s.error.is_some()) {
-                        row #relay.caption height:min-content {
-                            text {current.get().and_then(|s| s.error).unwrap_or_default()}
+                col width:1fr min-width:0px height:min-content gap:0px {
+                    col height:min-content gap:{px(8.0)}px
+                        pad:(horizontal:{px(12.0)}px vertical:{px(9.0)}px) {
+                        Label
+                            text:(Derived::new(move || current.get().map(|s| plain_text(&s.parts)).unwrap_or_default()))
+                            role:(TextRole::Body)
+                        if current.get().is_some_and(|s| s.error.is_some()) {
+                            Label
+                                text:(Derived::new(move || current.get().and_then(|s| s.error).unwrap_or_default()))
+                                role:(TextRole::Caption) tone:(Tone::Muted)
                         }
                     }
-                    row height:min-content gap:{px(6.0)}px {
-                        button #relay.action
-                            @click:{model.submit(Command::CancelTurn{submission_id:id.get_untracked()},model.snapshot.get_untracked().revision,crate::model::Saved::Action);}
-                            label:"Cancel queued message" "Cancel"
-                        button #relay.action
-                            @click:{buffer::edit_queued(model,&id.get_untracked());}
-                            label:"Edit queued message" "Edit"
-                        button #relay.action @click:{buffer::promote(model,&id.get_untracked());}
-                            label:"Send queued message now" "Send now"
+                    row height:{px(32.0)}px gap:0px
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
+                        {
+                            parent.adopt(&queued_action("Cancel queued message", "Cancel", true, move || model.submit(Command::CancelTurn { submission_id: id.get_untracked() }, model.snapshot.get_untracked().revision, crate::model::Saved::Action)));
+                            parent.adopt(&queued_action("Edit queued message", "Edit", false, move || buffer::edit_queued(model, &id.get_untracked())));
+                            parent.adopt(&queued_action("Send queued message now", "Send now", false, move || buffer::promote(model, &id.get_untracked())));
+                        }
                     }
                 }
             }
@@ -331,6 +352,11 @@ pub(crate) fn ledger_view(model: Model, open: bool) -> LedgerView {
     LedgerView {
         harness: adapt::harness(harness),
         model: identity.unwrap_or_else(|| ModelIdentity::new("Default", "", ModelHue::Neutral)),
+        // Without the model's steps, name the selected effort alone.
+        effort_label: effort
+            .is_none()
+            .then(|| session.and_then(|s| s.selection.effort.clone()))
+            .flatten(),
         effort: effort.unwrap_or_default(),
         collapsed: !open,
     }
@@ -373,4 +399,21 @@ pub(crate) fn choose_effort(model: Model, step: u8) {
         snapshot.revision,
         crate::model::Saved::Action,
     );
+}
+
+/// An action cell of a queued message, divided from the one before it.
+fn queued_action(
+    label: &'static str,
+    text: &'static str,
+    first: bool,
+    handler: impl Fn() + 'static,
+) -> Element {
+    let rule = if first { Rule::None } else { Rule::Left };
+    view! {
+        row width:max-content shrink:0 {
+            CellButton label:(label) rule:(rule) horizontal-inset:(12.0) on-press:(press(handler)) {
+                Label text:(text) role:(TextRole::Label) weight:500
+            }
+        }
+    }
 }

@@ -47,3 +47,22 @@ fn header_shows_title_gauge_and_only_the_controls_it_is_given() {
     mounted.settle();
     assert!(mounted.has("Done. 2 agents below: 1 waiting, 1 done. Show in tree"));
 }
+
+#[test]
+fn the_pause_cell_offers_resume_while_the_queue_is_held() {
+    use crate::prelude::*;
+    use mosaic::prelude::*;
+    use std::rc::Rc;
+    let noop: OnPress = Rc::new(|| {});
+    let (pause, resume) = (noop.clone(), noop.clone());
+    let mounted = crate::testing::mount(Size::new(900.0, 100.0), move || {
+        view! {
+            col {
+                ControlBlock status:(AgentStatus::Working) on-pause:(Some(pause.clone()))
+                ControlBlock status:(AgentStatus::Done) on-pause:(Some(resume.clone())) paused:true
+            }
+        }
+    });
+    assert!(mounted.has("Pause"));
+    assert!(mounted.has("Resume"));
+}

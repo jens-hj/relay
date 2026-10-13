@@ -21,7 +21,7 @@ mod usage;
 pub use conversation::*;
 pub use usage::*;
 
-pub use fixture::{demo_orchestration, demo_snapshot, demo_usage};
+pub use fixture::{demo_catalog, demo_orchestration, demo_snapshot, demo_usage};
 pub use profile::*;
 use serde::{Deserialize, Serialize};
 
@@ -396,6 +396,11 @@ pub enum Command {
     ResumeQueue {
         session_id: String,
     },
+    /// Holds a session's queued turns: they become paused, nothing launches
+    /// after the current turn, and `ResumeQueue` continues them.
+    PauseQueue {
+        session_id: String,
+    },
     SyncProject {
         project_id: String,
     },
@@ -509,6 +514,7 @@ impl Snapshot {
             | Command::CancelTurn { .. }
             | Command::EditQueuedTurn { .. }
             | Command::ResumeQueue { .. }
+            | Command::PauseQueue { .. }
             | Command::StopWorker { .. } => {
                 return Err("This command requires the server runtime".into());
             }
