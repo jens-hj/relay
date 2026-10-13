@@ -8,7 +8,9 @@ use relay_ui::prelude::{
     CellButton, CellButtonProps, Label, LabelProps, OnPress, PrimaryButton, PrimaryButtonProps,
     Rule, Segments, SegmentsProps, TextRole, Tone, UiText,
 };
-use relay_ui::surfaces::{Field, FieldProps, Module, ModuleProps, TextInput, TextInputProps};
+use relay_ui::surfaces::{
+    Field, FieldProps, Module, ModuleProps, RemoveCell, RemoveCellProps, TextInput, TextInputProps,
+};
 use relay_ui::tokens::{ground, px};
 
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -190,7 +192,7 @@ fn ProjectSetup(model: Model) -> Element {
     });
     view! {
         col height:min-content gap:0px {
-            Module title:"Project" caps:true {
+            Module title:"Project" icon:(Some(relay_ui::icons::command.project)) {
                 Field label:"Name" name:(Some("Project name".to_string())) value:(name)
                     placeholder:"Project name"
                 Field label:"Root on server"
@@ -200,7 +202,7 @@ fn ProjectSetup(model: Model) -> Element {
                     text:"The root is on the connected server. A local board is created automatically."
                     rule:false
             }
-            Module title:"Connections" caps:true {
+            Module title:"Connections" icon:(Some(relay_ui::icons::mark.link)) {
                 for (index, _connection) in {model.project_draft.get().connections.into_iter().enumerate()} {
                     let index = *index;
                     let connection = Derived::new(move || model.project_draft.get().connections.get(index).cloned());
@@ -379,6 +381,20 @@ fn ConnectionRow(model: Model, connection: ProjectConnection) -> Element {
             .unwrap_or_else(|| fallback.clone())
     });
     let blocked = Derived::new(move || model.busy.get() || !model.connected.get());
+    let editing = State::new(false);
+    let name = State::new(connection.get_untracked().name);
+    let edit = press(move || {
+        name.set(connection.get_untracked().name);
+        editing.set(true);
+    });
+    let update_id = id.clone();
+    let save = press(move || {
+        model.action(Command::UpdateConnection {
+            connection_id: update_id.clone(),
+            name: name.get_untracked(),
+        });
+        editing.set(false);
+    });
     let retry_id = id.clone();
     let retry = press(move || {
         model.action(Command::RetryConnection {
@@ -409,22 +425,53 @@ fn ConnectionRow(model: Model, connection: ProjectConnection) -> Element {
     });
     view! {
         col height:min-content gap:0px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-            col height:min-content gap:{px(6.0)}px
-                pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px) {
-                row height:min-content align:center gap:{px(8.0)}px {
-                    row width:1fr min-width:0px height:min-content {
-                        Label text:(Derived::new(move || connection.get().name))
-                            role:(TextRole::Label) weight:600
+            row height:min-content gap:0px
+                label:{format!("Connection row {}", connection.get().id)} {
+                col width:1fr min-width:0px height:min-content gap:{px(6.0)}px
+                    pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px) {
+                    row height:min-content align:center gap:{px(8.0)}px {
+                        row width:1fr min-width:0px height:min-content {
+                            Label text:(Derived::new(move || connection.get().name))
+                                role:(TextRole::Label) weight:600
+                        }
+                        text font-family:monospace font-size:{px(10.5)}px
+                            font-color:{mosaic::core::theme::color(if !connection.get().enabled { ground.muted } else { match connection.get().state { ConnectionState::Ready => relay_ui::tokens::status.full_steam, ConnectionState::Failed => relay_ui::tokens::status.failed, ConnectionState::Interrupted => relay_ui::tokens::status.needs_you, ConnectionState::Pending => ground.muted } })}
+                            {format!("{:?}{}", connection.get().state, if connection.get().enabled {""} else {" · disabled"})}
                     }
-                    Label
-                        text:(Derived::new(move || format!("{:?}{}", connection.get().state, if connection.get().enabled {""} else {" · disabled"})))
-                        role:(TextRole::Caption) tone:(Tone::Muted)
+                    Label text:(where_to) role:(TextRole::Caption) tone:(Tone::Muted)
+                    if connection.get().error.is_some() {
+                        Label
+                            text:(Derived::new(move || connection.get().error.unwrap_or_default()))
+                            role:(TextRole::Caption)
+                            tone:(Tone::Signal(relay_ui::tokens::Signal::Failed))
+                    }
                 }
-                Label text:(where_to) role:(TextRole::Caption) tone:(Tone::Muted)
-                if connection.get().error.is_some() {
-                    Label text:(Derived::new(move || connection.get().error.unwrap_or_default()))
-                        role:(TextRole::Caption)
-                        tone:(Tone::Signal(relay_ui::tokens::Signal::Failed))
+                row width:max-content shrink:0 {
+                    CellButton label:{format!("Edit connection {}", connection.get().name)}
+                        on-press:(edit.clone()) disabled:(blocked) rule:(Rule::Left) {
+                        { parent.adopt(&relay_ui::icons::icon_mark(relay_ui::icons::call.edit, 14.0)); }
+                        Label text:"Edit" role:(TextRole::Label) weight:500
+                    }
+                }
+                if connection.get().enabled {
+                    RemoveCell label:"Remove connection" on-press:(remove.clone())
+                        disabled:(blocked)
+                }
+            }
+            if editing.get() {
+                col height:min-content stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
+                    Field label:"Name" value:(name) name:(Some("Connection name".to_string()))
+                    Caption text:"The connection location stays the same."
+                    row height:{px(36.0)}px {
+                        CellButton label:"Save connection name" on-press:(save.clone())
+                            disabled:(Derived::new(move || blocked.get() || name.get().trim().is_empty())) {
+                            Label text:"Save name" role:(TextRole::Label) weight:500
+                        }
+                        CellButton label:"Cancel connection edit"
+                            on-press:(press(move || editing.set(false))) rule:(Rule::Left) {
+                            Label text:"Cancel" role:(TextRole::Label) weight:500
+                        }
+                    }
                 }
             }
             if !connection.get().enabled {
@@ -444,14 +491,6 @@ fn ConnectionRow(model: Model, connection: ProjectConnection) -> Element {
                     }
                 }
             }
-            if connection.get().enabled {
-                row height:{px(36.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
-                    CellButton label:"Remove connection" on-press:(remove.clone())
-                        disabled:(blocked) start:true horizontal-inset:(18.0) {
-                        Label text:"Remove connection" role:(TextRole::Label) weight:500
-                    }
-                }
-            }
         }
     }
 }
@@ -460,12 +499,12 @@ fn ConnectionRow(model: Model, connection: ProjectConnection) -> Element {
 fn Connections(model: Model) -> Element {
     view! {
         col height:min-content gap:0px {
-            Module title:"Connections" caps:true {
+            Module title:"Connections" icon:(Some(relay_ui::icons::mark.link)) {
                 for (_, connection) in {model.snapshot.get().connections.into_iter().filter(|c|c.project_id==model.project.get() && match &c.kind { ConnectionKind::Board{board_id} => model.snapshot.get().canonical_board_id(board_id) == board_id, _ => true }).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
                     ConnectionRow model:(model) connection:(connection.clone())
                 }
             }
-            Module title:"New connection" caps:true {
+            Module title:"New connection" icon:(Some(relay_ui::icons::mark.link)) {
                 ConnectionForm model:(model) initial:false
             }
             Operations model:(model)
@@ -537,7 +576,7 @@ pub(crate) fn Columns(model: Model, open: State<bool>) -> Element {
     view! {
         col height:min-content gap:0px {
             if open.get() && model.selected_board().is_some_and(|b|b.source==BoardSource::Local) {
-                Module title:"Columns" caps:true {
+                Module title:"Columns" icon:(Some(relay_ui::icons::command.board)) {
                     InputCell value:(name) label:"New column name" placeholder:"Column name"
                     ActionCell label:"Add column" on-press:(press(add)) disabled:(blocked)
                     for (_, column) in {model.board_columns().into_iter().map(|c|(c.id.clone(),c))} {
@@ -644,7 +683,8 @@ pub fn OperationHistory(model: Model, open: State<bool>) -> Element {
     };
     view! {
         col height:min-content gap:0px label:"Completed operations" {
-            Module title:"Operation history" caps:true head-end:(Some(close)) {
+            Module title:"Operation history" icon:(Some(relay_ui::icons::call.result))
+                head-end:(Some(close)) {
                 BoundedPanel limit:(Derived::new(|| px(180.0))) {
                     col height:min-content gap:0px {
                         for (_, operation) in {model.snapshot.get().operations.into_iter().filter(|o|o.project_id==model.project.get() && o.state==OperationState::Completed).map(|o|(o.id.clone(),o)).collect::<Vec<_>>()} {
@@ -1098,7 +1138,7 @@ fn Publish(model: Model) -> Element {
     });
     view! {
         col height:min-content gap:0px {
-            Module title:"Destination" caps:true {
+            Module title:"Destination" icon:(Some(relay_ui::icons::command.board)) {
                 row height:{px(40.0)}px
                     stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                     Segments name:("Destination".to_string())
@@ -1126,7 +1166,7 @@ fn Publish(model: Model) -> Element {
                     Caption text:"Reading destination statuses…"
                 }
             }
-            Module title:"Columns" caps:true
+            Module title:"Columns" icon:(Some(relay_ui::icons::command.board))
                 note:(Some(UiText::from("Map each local column to a destination status or list."))) {
                 for (_, column) in {model.board_columns().into_iter().map(|c|(c.id.clone(),c))} {
                     let id = State::new(column.id.clone());
@@ -1143,7 +1183,7 @@ fn Publish(model: Model) -> Element {
                     }
                 }
             }
-            Module title:"Issue repositories" caps:true {
+            Module title:"Issue repositories" icon:(Some(relay_ui::icons::command.project)) {
                 for (_, issue) in {model.snapshot.get().issues.into_iter().filter(|i|model.board_columns().iter().any(|c|model.task_in_column(i,&c.id))).map(|i|(i.id.clone(),i)).collect::<Vec<_>>()} {
                     let issue_id = State::new(issue.id.clone());
                     let issue_title = State::new(issue.title.clone());

@@ -295,6 +295,11 @@ pub enum Command {
         project_id: String,
         connection: ConnectionInput,
     },
+    /// Rename only; resource identity and captured session roots are immutable.
+    UpdateConnection {
+        connection_id: String,
+        name: String,
+    },
     RetryConnection {
         connection_id: String,
     },
@@ -487,6 +492,7 @@ impl Snapshot {
             Command::CreateProject { .. }
             | Command::RenameProject { .. }
             | Command::AddConnection { .. }
+            | Command::UpdateConnection { .. }
             | Command::RetryConnection { .. }
             | Command::RemoveConnection { .. }
             | Command::CreateTask { .. }
@@ -612,4 +618,34 @@ fn validate_text(label: &str, value: &str, max: usize) -> Result<(), String> {
         return Err(format!("{label} must be nonempty and at most {max} bytes"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod connection_command_tests {
+    use super::*;
+
+    #[test]
+    fn connection_update_contract_accepts_only_identity_and_display_name() {
+        let value = serde_json::json!({"type": "update_connection", "connection_id": "resource", "name": "Source"});
+        let command: Command = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            matches!(&command, Command::UpdateConnection { connection_id, name } if connection_id == "resource" && name == "Source")
+        );
+        assert_eq!(serde_json::to_value(command).unwrap(), value);
+        for field in [
+            "path",
+            "remote",
+            "kind",
+            "board_id",
+            "enabled",
+            "project_id",
+        ] {
+            let mut widened = value.clone();
+            widened[field] = serde_json::json!("changed");
+            assert!(
+                serde_json::from_value::<Command>(widened).is_err(),
+                "{field}"
+            );
+        }
+    }
 }

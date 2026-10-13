@@ -479,7 +479,7 @@ fn surfaces_section() -> Element {
                     actions:(vec![("Retry".to_string(), retry), ("Rebase".to_string(), rebase)])
                 row height:min-content align:start {
                     col width:1fr height:min-content {
-                        Module title:"Workspace" {
+                        Module title:"Workspace" icon:(Some(relay_ui::icons::command.project)) {
                             Field label:"Repository" value:(repository) placeholder:"owner/name"
                             row height:{px(40.0)}px
                                 stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
@@ -506,7 +506,8 @@ fn surfaces_section() -> Element {
                                 }
                             }
                         }
-                        Module title:"Permissions" caps:true {
+                        Module title:"Permissions"
+                            icon:(Some(relay_ui::icons::section.permissions)) {
                             {
                                 parent.adopt(&matrix);
                             }
@@ -514,7 +515,7 @@ fn surfaces_section() -> Element {
                     }
                     col width:{px(400.0)}px height:min-content
                         stroke:(width:{px(1.0)} color:ground.rule edges:left) {
-                        Module title:"Harnesses" {
+                        Module title:"Harnesses" icon:(Some(relay_ui::icons::harness.codex)) {
                             HarnessCard harness:(Harness::Codex) version:"0.42.0"
                                 auth:(HarnessAuth::SignedIn)
                             HarnessCard harness:(Harness::ClaudeCode) version:"2.1.4"

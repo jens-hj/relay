@@ -3239,6 +3239,14 @@ fn connection_states_update_and_retry_and_remove_use_stable_connection_ids() {
     mounted.model.snapshot.set(snapshot);
     mounted.model.page.set(Page::Connections);
     mounted.settle();
+    let row = mounted.rect("Connection row repo-1");
+    let remove = mounted.rect("Remove connection");
+    assert_eq!(remove.origin.y, row.origin.y);
+    assert_eq!(remove.size.height, row.size.height);
+    assert_eq!(
+        remove.origin.x + remove.size.width,
+        row.origin.x + row.size.width
+    );
     mounted.click("Retry connection");
     let retry = mounted.commands.try_recv().unwrap();
     assert!(
@@ -3277,6 +3285,49 @@ fn connection_states_update_and_retry_and_remove_use_stable_connection_ids() {
             .nodes
             .iter()
             .any(|n| n.label.as_deref() == Some("Remove connection"))
+    );
+}
+
+#[test]
+fn connection_edit_submits_only_a_name_and_cancel_keeps_resources() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    snapshot
+        .connections
+        .retain(|c| !matches!(c.kind, ConnectionKind::Board { .. }));
+    snapshot.connections.push(ProjectConnection {
+        id: "workspace".into(),
+        project_id: snapshot.projects[0].id.clone(),
+        name: "Workspace".into(),
+        enabled: true,
+        state: ConnectionState::Ready,
+        error: None,
+        kind: ConnectionKind::Directory {
+            path: "/srv/relay/workspace".into(),
+        },
+    });
+    let original = snapshot.connections[0].clone();
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.page.set(Page::Connections);
+    mounted.settle();
+    let edit = format!("Edit connection {}", original.name);
+    mounted.click(&edit);
+    type_in(&mounted, "Connection name", "Source workspace");
+    mounted.click("Cancel connection edit");
+    assert!(mounted.commands.is_empty());
+    assert_eq!(
+        mounted.model.snapshot.get_untracked().connections[0],
+        original
+    );
+    mounted.click(&edit);
+    type_in(&mounted, "Connection name", "Source workspace");
+    mounted.click("Save connection name");
+    assert!(matches!(mounted.commands.try_recv().unwrap().command,
+        Command::UpdateConnection { connection_id, name } if connection_id == original.id && name == "Source workspace"));
+    assert_eq!(
+        mounted.model.snapshot.get_untracked().connections[0],
+        original,
+        "the client waits for the authoritative server snapshot"
     );
 }
 

@@ -426,7 +426,7 @@ pub(crate) fn NewTaskForm(model: Model, open: State<bool>, draft: TaskDraft) -> 
         }
     });
     view! {
-        Module title:"New task" caps:true
+        Module title:"New task" icon:(Some(relay_ui::icons::command.create))
             note:(Some(UiText::from("Issue repository optional for local tasks"))) {
             row height:min-content stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                 TextInput value:(title) label:"New task title" placeholder:"Task title" framed:false
@@ -707,7 +707,7 @@ fn IssuePanel(
                             text:"No longer on this board · history retained. Restore and sync before starting or continuing a worker. Active turns may finish or be stopped."
                     }
                 }
-                Module title:"Linked sessions" caps:true
+                Module title:"Linked sessions" icon:(Some(relay_ui::icons::call.spawn))
                     note:(Some(UiText::from(Derived::new(move || format!("{:02}", linked.get()))))) {
                     for (_, session) in { model.sessions_for_task(&sessions_id).into_iter().map(|s| (s.id.clone(), s)).collect::<Vec<_>>() } {
                         LinkedSession model:(model) id:(session.id.clone())
@@ -715,7 +715,7 @@ fn IssuePanel(
                 }
                 TaskEditor model:(model)
                 if current.get().result.is_some() {
-                    Module title:"Result" caps:true {
+                    Module title:"Result" icon:(Some(relay_ui::icons::call.result)) {
                         col height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px) {
                             Label
                                 text:(Derived::new(move || current.get().result.unwrap_or_default()))
@@ -863,7 +863,7 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
             @layout:{move |rect:Rect| width.set(rect.size.width)} {
             Module
                 title:(if continuation { "Continue this session" } else { "Start task worker" }.to_string())
-                caps:true head-end:(change) {
+                icon:(Some(relay_ui::icons::call.spawn)) head-end:(change) {
                 if !continuation {
                     row height:min-content min-width:0px
                         pad:(horizontal:{px(18.0)}px vertical:{px(8.0)}px)

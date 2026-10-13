@@ -14,6 +14,7 @@ pub(super) fn handles(command: &Command) -> bool {
         Command::CreateProject { .. }
             | Command::RenameProject { .. }
             | Command::AddConnection { .. }
+            | Command::UpdateConnection { .. }
             | Command::RetryConnection { .. }
             | Command::RemoveConnection { .. }
             | Command::CreateTask { .. }
@@ -443,6 +444,18 @@ pub(super) fn apply(
             )? {
                 jobs.push(job);
             }
+        }
+        Command::UpdateConnection {
+            connection_id,
+            name,
+        } => {
+            let name = text(&name, 200, "connection name")?;
+            let connection = snapshot
+                .connections
+                .iter_mut()
+                .find(|c| c.id == connection_id)
+                .ok_or_else(|| Error::invalid("Connection not found"))?;
+            connection.name = name;
         }
         Command::RemoveConnection { connection_id } => {
             let connection = snapshot
@@ -1267,6 +1280,86 @@ fn run_inner(workspace: Workspace, id: String) {
 mod tests {
     use super::*;
     use crate::tests::{env, workspace};
+
+    #[test]
+    fn connection_updates_rename_only_validate_and_keep_receipts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut original = Snapshot::default();
+        create(&mut original, &dir.path().join("root"), "Connections");
+        let slot = original
+            .connections
+            .iter()
+            .position(|c| matches!(c.kind, ConnectionKind::Directory { .. }))
+            .unwrap();
+        let id = original.connections[slot].id.clone();
+        original.sessions = demo_snapshot(DirectorProfile::default()).sessions;
+        for session in &mut original.sessions {
+            session.project_id = original.projects[0].id.clone();
+            session.connection_ids = vec![id.clone()];
+            session.workspaces = vec![SessionWorkspace {
+                connection_id: id.clone(),
+                path: "/captured/original/root".into(),
+                repository: false,
+                branch: None,
+                base_commit: None,
+                changes: None,
+            }];
+        }
+        let w = workspace(&dir.path().join("db"), &original, RuntimeConfig::default());
+        let mut store = w.store.lock().unwrap();
+        let request = env(
+            original.revision,
+            Command::UpdateConnection {
+                connection_id: id.clone(),
+                name: "  Source workspace  ".into(),
+            },
+        );
+        let (renamed, action) = store.apply(request.clone(), &w.config).unwrap();
+        assert!(action.is_none());
+        let mut expected = original.clone();
+        expected.connections[slot].name = "Source workspace".into();
+        expected.revision = renamed.revision;
+        assert_eq!(
+            renamed, expected,
+            "only the display name and revision change"
+        );
+        let (retried, action) = store.apply(request.clone(), &w.config).unwrap();
+        assert_eq!(retried, renamed);
+        assert!(action.is_none());
+        let mut changed = request;
+        changed.command = Command::UpdateConnection {
+            connection_id: id.clone(),
+            name: "Different".into(),
+        };
+        assert!(store.apply(changed, &w.config).is_err());
+        for (connection_id, name) in [
+            (id.clone(), String::new()),
+            (id.clone(), " ".into()),
+            (id.clone(), "x".repeat(201)),
+            (id.clone(), "invalid\0name".into()),
+            ("missing".into(), "Name".into()),
+        ] {
+            assert!(
+                store
+                    .apply(
+                        env(
+                            renamed.revision,
+                            Command::UpdateConnection {
+                                connection_id,
+                                name
+                            }
+                        ),
+                        &w.config
+                    )
+                    .is_err()
+            );
+        }
+        drop(store);
+        drop(w);
+        let reopened =
+            crate::Store::open(&dir.path().join("db"), DirectorProfile::default()).unwrap();
+        assert_eq!(reopened.snapshot().unwrap(), renamed);
+    }
 
     fn create(snapshot: &mut Snapshot, root: &Path, name: &str) -> String {
         let request = uuid::Uuid::new_v4().to_string();

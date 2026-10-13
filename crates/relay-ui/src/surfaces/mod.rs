@@ -28,5 +28,5 @@ pub use form::{
 pub use page::{
     Command, CommandPalette, CommandPaletteProps, HeaderCell, HeaderCellProps, Module, ModuleProps,
     Notice, NoticeAction, NoticeProps, NoticeTone, OnCommand, PageHeader, PageHeaderProps,
-    ReadoutCell, ReadoutCellProps, filter_commands,
+    ReadoutCell, ReadoutCellProps, RemoveCell, RemoveCellProps, filter_commands,
 };

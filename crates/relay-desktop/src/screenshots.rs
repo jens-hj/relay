@@ -126,6 +126,35 @@ fn shell_screenshots() {
     let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
     let model = scope.run(|| crate::model::Model::new(&ui, sender));
     let mut snapshot = demo_snapshot(DirectorProfile::default());
+    // Demo conversations predate project connections. Include real resource
+    // rows here so Connections screenshots exercise their embedded actions.
+    let project_id = snapshot.projects[0].id.clone();
+    snapshot.connections = vec![
+        ProjectConnection {
+            id: "shot-workspace".into(),
+            project_id: project_id.clone(),
+            name: "Workspace".into(),
+            enabled: true,
+            state: ConnectionState::Ready,
+            error: None,
+            kind: ConnectionKind::Directory {
+                path: "/srv/relay/workspace".into(),
+            },
+        },
+        ProjectConnection {
+            id: "shot-repository".into(),
+            project_id: project_id.clone(),
+            name: "jens-hj/relay".into(),
+            enabled: true,
+            state: ConnectionState::Ready,
+            error: None,
+            kind: ConnectionKind::Repository {
+                remote: "https://github.com/jens-hj/relay.git".into(),
+                checkout: Some("/srv/relay/repos/github.com/jens-hj/relay".into()),
+                owned: true,
+            },
+        },
+    ];
     demo_orchestration(&mut snapshot);
     let now = crate::platform::SystemTime::now()
         .duration_since(crate::platform::UNIX_EPOCH)
@@ -150,6 +179,9 @@ fn shell_screenshots() {
         round_trip_ms: Some(42),
         ..Default::default()
     });
+    // A selected single shot must not depend on an earlier conversation
+    // opening the demo project.
+    model.project.set(project_id);
     model.server_endpoint.set("http://127.0.0.1:7331".into());
     // One harness ready and one needing a sign-in, so both availability
     // colours show.
