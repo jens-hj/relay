@@ -20,6 +20,7 @@ pub fn effort() -> Effort {
         current: 4,
         has_max: false,
         at_max: false,
+        first: 0,
     }
 }
 pub fn settings(collapsed: bool) -> LedgerView {

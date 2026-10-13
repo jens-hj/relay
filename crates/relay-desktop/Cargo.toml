@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 relay-core.workspace = true
+relay-ui.workspace = true
 mosaic.workspace = true
 serde.workspace = true
 serde_json.workspace = true

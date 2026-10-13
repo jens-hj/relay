@@ -9,13 +9,15 @@ pub fn run(workload: &str) -> Result<(), String> {
     let workload = workload.to_owned();
     App::new("Relay render probe")
         .window(crate::window_chrome::window_config())
-        .theme(crate::theme::configured_palette(false, false, false, 1.0))
-        .theme(crate::theme::icons())
-        .clear(crate::theme::surface.base)
+        .theme(relay_ui::tokens::theme_dark())
+        .theme(relay_ui::icons::icons())
+        .theme(crate::icons::icons())
+        .clear(relay_ui::tokens::ground.page)
         .run(move |ui, context| {
             let mut fonts = FontContext::embedded_only();
-            crate::fonts::configure(&mut fonts);
+            relay_ui::fonts::install(&mut fonts);
             ui.set_fonts(fonts);
+            relay_ui::attach(ui);
             let elapsed = Rc::new(Cell::new(0.0_f32));
             let (root, receiver) = if workload == "fixture" {
                 let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();

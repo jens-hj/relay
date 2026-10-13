@@ -9,7 +9,9 @@ pub(crate) fn compact_navigation(width: f32) -> bool {
         // Keep phone navigation folded after rotating into landscape.
         return width < 1000.0;
     }
-    width < 640.0
+    // The sidebar is fixed at 380px; below room for it and a reading
+    // column, navigation moves into the drawer.
+    width < relay_ui::tokens::px(crate::sidebar::SIDEBAR_WIDTH + 400.0)
 }
 
 pub(crate) fn top_clearance() -> f32 {

@@ -129,7 +129,7 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
     let disclosure_limit = Derived::new(move || (height.get() - px(90.0)).max(0.0) * 0.5);
     // Full header cells need room; below this the source, sync and board
     // choice move into the Board actions menu.
-    let full = Derived::new(move || width.get() >= px(1056.0));
+    let full = Derived::new(move || width.get() >= px(960.0));
     let stacked = Derived::new(move || narrow.get() || width.get() < px(620.0));
     let creating = State::new(false);
     let managing = State::new(false);
@@ -186,17 +186,16 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                         row width:max-content {
                             button #relay.header-action
                                 @click:{creating.set(!creating.get_untracked());}
-                                fill:{color(ink.inverse)} font-color:{color(ink.on_inverse)}
+                                fill:{color(ground.selected)} font-color:{color(ground.ink)}
                                 font-weight:700 label:"New task"
                                 width:{if width.get() < px(620.0) {Dimension::Px(px(36.0))} else {Dimension::MaxContent}}
                                 pad:(horizontal:{px(if width.get() < px(620.0) {0.0} else {16.0})}px vertical:0px)
-                                hover { fill:{color(ink.inverse_hover)} }
-                                pressed { fill:{color(ink.inverse_pressed)} } {
+                                hover { fill:{color(ground.hover)} }
+                                pressed { fill:{color(ground.pressed)} } {
                                 if width.get() < px(620.0) {
-                                    icon size:{px(16.0)}px stroke:ink.on-inverse plus-icon
+                                    icon size:{px(16.0)}px stroke:ground.ink plus-icon
                                 } else {
-                                    text font-weight:{700} font-color:{color(ink.on_inverse)}
-                                        "New task"
+                                    text font-weight:{700} font-color:{color(ground.ink)} "New task"
                                 }
                             }
                         }
@@ -212,7 +211,7 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                             col height:min-content width:{px(260.0)}px gap:0px {
                                 if !full.get() {
                                     col height:min-content gap:{px(6.0)}px pad:{px(12.0)}px
-                                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                                     row #relay.eyebrow height:min-content { text text-transform:uppercase letter-spacing:{px(0.6)}px "Source" }
                                     row #relay.value height:min-content { text {source.get()} }
                                     if can_sync(model) {
@@ -231,19 +230,19 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                                 if local.get() {
                                     button #relay.action width:fill justify:start
                                         @click:{managing.set(!managing.get_untracked()); menu.set(false);}
-                                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
-                                        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+                                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
+                                        focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
                                         label:"Manage columns" "Manage columns"
                                     button #relay.action width:fill justify:start
                                         @click:{model.page.set(Page::Publish); menu.set(false);}
-                                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
-                                        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+                                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
+                                        focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
                                         label:"Publish board" "Publish board"
                                 }
                                 button #relay.action width:fill justify:start
                                     @click:{history.set(!history.get_untracked()); menu.set(false);}
-                                    stroke:(width:0px color:rule.hair)
-                                    focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+                                    stroke:(width:0px color:ground.hairline)
+                                    focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
                                     label:"Operation history" "Operation history"
                             }
                         }
@@ -257,9 +256,10 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
             BoundedPanel limit:(disclosure_limit) {
                 if board_error(model).is_some() {
                     row height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(8.0)}px)
-                        fill:attention.fill stroke:(width:{px(4.0)} color:attention.text edges:left)
+                        fill:status.needs_you
+                        stroke:(width:{px(4.0)} color:status.needs_you edges:left)
                         label:"Board error" {
-                        row font-size:{px(12.0)}px font-color:attention.on {
+                        row font-size:{px(12.0)}px font-color:ground.inverse {
                             text {board_error(model).unwrap_or_default()}
                         }
                     }
@@ -269,19 +269,19 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                 }
                 if managing.get() {
                     col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
-                        stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
+                        stroke:(width:{px(1.0)} color:ground.rule edges:bottom) {
                         Columns model:(model) open:(managing)
                     }
                 }
                 if model.snapshot.get().operations.iter().any(|o| o.project_id == model.project.get() && o.state != OperationState::Completed) {
                     col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
-                        stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
+                        stroke:(width:{px(1.0)} color:ground.rule edges:bottom) {
                         Operations model:(model)
                     }
                 }
                 if history.get() {
                     col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
-                        stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
+                        stroke:(width:{px(1.0)} color:ground.rule edges:bottom) {
                         OperationHistory model:(model) open:(history)
                     }
                 }
@@ -317,15 +317,12 @@ pub(crate) fn BoardChoices(model: Model) -> Element {
                 button #relay.action @click:{select_board(model, &id.get_untracked());}
                     label:{format!("Select board {}",board_name.get())}
                     pad:(horizontal:{px(8.0)}px vertical:{px(2.0)}px)
-                    fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {ink.inverse} else {surface.panel}
-                    hover {
-                        fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {ink.inverse_hover} else {surface.raised}
-                    }
+                    fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {ground.selected} else {ground.panel}
+                    hover { fill:ground.hover }
                     pressed {
-                        fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {ink.inverse_pressed} else {surface.raised}
+                        fill:if model.selected_board().is_some_and(|b|b.id==id.get()) {ground.pressed} else {ground.hover}
                     } {
-                    row width:max-content
-                        font-color:{color(if model.selected_board().is_some_and(|b|b.id==id.get()) {ink.on_inverse} else {ink.fg})}
+                    row width:max-content font-color:{color(ground.ink)}
                         font-weight:{if model.selected_board().is_some_and(|b|b.id==id.get()) {700} else {400}} {
                         text {board_name.get()}
                     }
@@ -354,7 +351,7 @@ pub(crate) fn NewTaskForm(model: Model, open: State<bool>, draft: TaskDraft) -> 
     } = draft;
     view! {
         col height:min-content gap:{px(8.0)}px pad:(horizontal:{px(24.0)}px vertical:{px(12.0)}px)
-            stroke:(width:{px(1.0)} color:rule.line edges:bottom) label:"New task" {
+            stroke:(width:{px(1.0)} color:ground.rule edges:bottom) label:"New task" {
             input #relay.field label:"New task title" placeholder:"Task title" title
             input #relay.area multiline label:"New task body" placeholder:"Description"
                 height:{px(100.0)}px body
@@ -365,15 +362,12 @@ pub(crate) fn NewTaskForm(model: Model, open: State<bool>, draft: TaskDraft) -> 
             row height:min-content gap:{px(6.0)}px {
                 if model.selected_board().is_some_and(|b|b.source==BoardSource::Local) {
                     button #relay.action @click:{repository.set(None);}
-                        fill:if repository.get().is_none() {ink.inverse} else {surface.panel}
-                        hover {
-                            fill:if repository.get().is_none() {ink.inverse_hover} else {surface.raised}
-                        }
+                        fill:if repository.get().is_none() {ground.selected} else {ground.panel}
+                        hover { fill:ground.hover }
                         pressed {
-                            fill:if repository.get().is_none() {ink.inverse_pressed} else {surface.raised}
+                            fill:if repository.get().is_none() {ground.pressed} else {ground.hover}
                         } {
-                        row width:max-content
-                            font-color:{color(if repository.get().is_none() {ink.on_inverse} else {ink.fg})} {
+                        row width:max-content font-color:{color(ground.ink)} {
                             text "Local task"
                         }
                     }
@@ -384,15 +378,12 @@ pub(crate) fn NewTaskForm(model: Model, open: State<bool>, draft: TaskDraft) -> 
                     button #relay.action
                         @click:{repository.set(Some(connection_id.get_untracked()));}
                         label:{format!("New task repository {}",connection_name.get())}
-                        fill:if repository.get().as_ref()==Some(&connection_id.get()) {ink.inverse} else {surface.panel}
-                        hover {
-                            fill:if repository.get().as_ref()==Some(&connection_id.get()) {ink.inverse_hover} else {surface.raised}
-                        }
+                        fill:if repository.get().as_ref()==Some(&connection_id.get()) {ground.selected} else {ground.panel}
+                        hover { fill:ground.hover }
                         pressed {
-                            fill:if repository.get().as_ref()==Some(&connection_id.get()) {ink.inverse_pressed} else {surface.raised}
+                            fill:if repository.get().as_ref()==Some(&connection_id.get()) {ground.pressed} else {ground.hover}
                         } {
-                        row width:max-content
-                            font-color:{color(if repository.get().as_ref()==Some(&connection_id.get()) {ink.on_inverse} else {ink.fg})} {
+                        row width:max-content font-color:{color(ground.ink)} {
                             text {connection_name.get()}
                         }
                     }
@@ -435,7 +426,7 @@ pub(crate) fn BoardColumnView(model: Model, column: BoardColumn, scrolls: bool) 
     view! {
         col width:1fr min-width:0px
             height:if scrolls { {Dimension::Fill} } else { {Dimension::MinContent} }
-            stroke:(width:{px(1.0)} color:rule.hair edges:right) {
+            stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
             row #relay.strip height:{px(40.0)}px shrink:0 align:center gap:{px(10.0)}px
                 pad:(horizontal:{px(12.0)}px vertical:0px)
                 label:{ format!("Column {}", column_id.get()) } {
@@ -485,34 +476,35 @@ pub(crate) fn IssueCard(model: Model, issue: Issue) -> Element {
     // Fixture tasks cannot run, so they read as fixtures whatever their sessions.
     let state = Derived::new(move || {
         if fixture_project(model, &current.get().project_id) {
-            return RunState::Fixture;
+            return None;
         }
-        crate::labels::issue_status(&model.snapshot.get(), &model.sessions_for_task(&status_id))
+        crate::adapt::issue_status(&model.snapshot.get(), &model.sessions_for_task(&status_id))
     });
     let selected_id = id.clone();
     let selected = Derived::new(move || model.issue.get().as_deref() == Some(selected_id.as_str()));
     let preview = Derived::new(move || body_preview(&current.get().body));
     view! {
         button @click:{ model.issue.set(Some(id.clone())); model.worker_approval.set(false); }
-            width:fill height:min-content fill:surface.panel pad:0px radius:0px
+            width:fill height:min-content pad:0px radius:0px
             label:{ current.get().reference.map(|r|format!("Open issue #{}",r.number)).unwrap_or_else(||format!("Open local task {}",current.get().title)) }
-            description:{ format!("{} · {} linked sessions", state.get().label(), session_count.get()) }
-            stroke:(width:{px(if selected.get() {2.0} else {1.0})} color:{color(if selected.get() {ink.fg} else {rule.line})} offset:{px(-1.0)})
-            shadow:if selected.get() {
-                (offset:(x:{px(4.0)} y:{px(4.0)}) blur:0.0 color:{color(ink.fg)})
-            } else {
-                (offset:(x:0.0 y:0.0) blur:0.0 color:{Color::TRANSPARENT})
-            }
-            hover { fill:surface.raised }
-            focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(2.0)}) } {
+            description:{ format!("{} · {} linked sessions", if fixture_project(model, &current.get().project_id) { "Fixture" } else { status_word(state.get()) }, session_count.get()) }
+            fill:{color(if selected.get() {ground.selected} else {ground.panel})}
+            stroke:(width:{px(1.0)} color:{color(if selected.get() {ground.ink} else {ground.hairline})} offset:{px(-1.0)})
+            hover { fill:ground.hover }
+            focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(2.0)}) } {
             col height:min-content gap:0px pad:{px(2.0)}px clip {
-                row height:{px(22.0)}px stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
+                row height:{px(22.0)}px stroke:(width:{px(1.0)} color:ground.rule edges:bottom) {
                     row #relay.id-label width:max-content height:fill align:center
-                        pad:(horizontal:{px(8.0)}px vertical:0px) fill:ink.inverse
+                        pad:(horizontal:{px(8.0)}px vertical:0px) fill:ground.selected
                         font-size:{px(11.0)}px {
                         text text-wrap:none { issue_number(&current.get()) }
                     }
-                    LabelStrip labels:(Derived::new(move || current.get().labels))
+                    row width:1fr min-width:0px align:center gap:{px(4.0)}px
+                        pad:(horizontal:{px(6.0)}px vertical:0px) clip {
+                        for (_, label) in { current.get().labels.into_iter().map(|label| (label.clone(), label)) } {
+                            Chip text:(label.clone())
+                        }
+                    }
                 }
                 col height:min-content gap:{px(6.0)}px
                     pad:(left:{px(10.0)}px right:{px(10.0)}px top:{px(10.0)}px bottom:{px(12.0)}px) {
@@ -520,27 +512,21 @@ pub(crate) fn IssueCard(model: Model, issue: Issue) -> Element {
                         text label:{ current.get().title } { current.get().title }
                     }
                     if !preview.get().is_empty() {
-                        col #relay.preview font-color:ink.muted label:"Task preview" {
+                        col #relay.preview font-color:ground.muted label:"Task preview" {
                             text {preview.get()}
                         }
                     }
                 }
-                row height:{px(26.0)}px stroke:(width:{px(1.0)} color:rule.hair edges:top) {
+                row height:{px(26.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
                     row width:1fr min-width:0px align:center gap:{px(6.0)}px
                         pad:(horizontal:{px(8.0)}px vertical:0px) clip {
-                        if state.get() != RunState::Ready {
-                            StatusGlyph state:(state)
-                        }
-                        row width:max-content height:min-content font-size:{px(11.0)}px
-                            font-color:{color(state.get().text_color())} {
-                            text text-wrap:none { state.get().label() }
-                        }
+                        StatusLine status:(state)
                     }
                     if session_count.get() > 0 {
                         row #relay.caption height:fill width:max-content align:center
                             label:"Task session count" font-size:{px(11.0)}px
                             pad:(horizontal:{px(8.0)}px vertical:0px)
-                            stroke:(width:{px(1.0)} color:rule.hair edges:left) {
+                            stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
                             text text-wrap:none
                                 { format!("{} {}", session_count.get(), if session_count.get() == 1 { "session" } else { "sessions" }) }
                         }
@@ -555,10 +541,10 @@ pub(crate) fn IssueCard(model: Model, issue: Issue) -> Element {
 #[component]
 fn DetailRow(key: String, value: Derived<String>) -> Element {
     view! {
-        row height:min-content stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+        row height:min-content stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
             row #relay.eyebrow height:min-content width:{px(96.0)}px shrink:0
                 pad:(horizontal:{px(14.0)}px vertical:{px(7.0)}px)
-                stroke:(width:{px(1.0)} color:rule.hair edges:right) {
+                stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
                 text text-transform:uppercase letter-spacing:{px(0.6)}px (key.clone())
             }
             row #relay.value height:min-content width:1fr min-width:0px
@@ -589,12 +575,12 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
     });
     view! {
         col width:{if full {Dimension::Fill} else {Dimension::Px(px(392.0))}} min-width:0px shrink:1
-            fill:surface.panel stroke:(width:{px(1.0)} color:rule.line edges:left)
+            fill:ground.panel stroke:(width:{px(1.0)} color:ground.rule edges:left)
             @layout:{move |rect: Rect| {height.set(rect.size.height);detail_width.set(rect.size.width);}}
             label:"Issue details" {
             if issue.get().is_none() {
-                row #relay.strip height:{px(56.0)}px shrink:0 align:center
-                    label:"Issue unavailable header"
+                row #relay.strip height:{crate::window_chrome::sidebar_header_height()}px shrink:0
+                    align:center label:"Issue unavailable header"
                     @pointer:{move |event, ctx| crate::window_chrome::drag_header(model, event, ctx)} {
                     NavigationButton model:(model)
                     row #relay.caption height:min-content width:1fr
@@ -602,7 +588,7 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                         text "Issue unavailable"
                     }
                     button #relay.header-action @click:{ model.issue.set(None); }
-                        stroke:(width:{px(1.0)} color:rule.line edges:left)
+                        stroke:(width:{px(1.0)} color:ground.rule edges:left)
                         label:"Close issue details" width:{px(36.0)}px pad:0px {
                         icon size:{px(13.0)}px window-close
                     }
@@ -617,12 +603,12 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                 let fixture = Derived::new(move || model.snapshot.get().projects.iter().any(|p| p.id == current.get().project_id && p.fixture));
                 col min-width:0px gap:0px {
                     row height:min-content shrink:0
-                        stroke:(width:{px(1.0)} color:rule.line edges:bottom) label:"Issue header"
+                        stroke:(width:{px(1.0)} color:ground.rule edges:bottom) label:"Issue header"
                         @pointer:{move |event, ctx| crate::window_chrome::drag_header(model, event, ctx)} {
                         NavigationButton model:(model)
                         col #relay.id-label width:{px(if compact_header.get() {36.0} else {74.0})}px
                             min-height:{px(92.0)}px shrink:0 align:center justify:center
-                            fill:ink.inverse
+                            fill:ground.selected
                             font-size:{px(if compact_header.get() {14.0} else {24.0})}px {
                             text text-wrap:none { issue_number(&current.get()) }
                         }
@@ -634,21 +620,23 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                                         "Issue details"
                                 }
                             }
-                            row #relay.title font-size:{px(17.0)}px height:min-content {
+                            row height:min-content font-family:serif font-size:{px(22.0)}px
+                                font-color:ground.ink {
                                 text label:{ current.get().title } { current.get().title }
                             }
                             row height:min-content gap:{px(4.0)}px clip {
                                 for (_, label) in { current.get().labels.into_iter().map(|label| (label.clone(), label)) } {
-                                    Tag text:(label.clone())
+                                    Chip text:(label.clone())
                                 }
                             }
                         }
                         button #relay.header-action @click:{ model.issue.set(None); }
-                            stroke:(width:{px(1.0)} color:rule.line edges:left)
+                            stroke:(width:{px(1.0)} color:ground.rule edges:left)
                             label:"Close issue details" width:{px(36.0)}px pad:0px {
                             icon size:{px(13.0)}px window-close
                         }
-                        row width:max-content height:{px(56.0)}px shrink:0 {
+                        row width:max-content
+                            height:{crate::window_chrome::sidebar_header_height()}px shrink:0 {
                             WindowControls model:(model)
                         }
                     }
@@ -663,16 +651,17 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                             }
                             col height:min-content
                                 pad:(horizontal:{px(14.0)}px vertical:{px(12.0)}px)
-                                stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
-                                row font-size:{px(13.0)}px font-color:ink.muted height:min-content {
+                                stroke:(width:{px(1.0)} color:ground.rule edges:bottom) {
+                                row font-size:{px(13.0)}px font-color:ground.muted
+                                    height:min-content {
                                     text label:{ crate::projects::task_body(&current.get().body) }
                                         { crate::projects::task_body(&current.get().body) }
                                 }
                             }
                             if !model.snapshot.get().visible_task(&current.get().id) {
-                                col height:min-content pad:{px(10.0)}px fill:attention.fill
-                                    stroke:(width:{px(4.0)} color:attention.text edges:left) {
-                                    row font-size:{px(12.0)}px font-color:attention.on {
+                                col height:min-content pad:{px(10.0)}px fill:status.needs_you
+                                    stroke:(width:{px(4.0)} color:status.needs_you edges:left) {
+                                    row font-size:{px(12.0)}px font-color:ground.inverse {
                                         text label:"Issue removed from board"
                                             "No longer on this board · history retained. Restore and sync before starting or continuing a worker. Active turns may finish or be stopped."
                                     }
@@ -680,7 +669,7 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                             }
                             row height:{px(30.0)}px shrink:0 align:center justify:between
                                 pad:(horizontal:{px(14.0)}px vertical:0px)
-                                stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                                 row #relay.eyebrow height:min-content width:max-content {
                                     text text-transform:uppercase letter-spacing:{px(0.6)}px
                                         "Linked sessions"
@@ -692,19 +681,19 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                             }
                             for (_, session) in { model.sessions_for_task(&detail_id.get()).into_iter().map(|s| (s.id.clone(), s)).collect::<Vec<_>>() } {
                                 let id = State::new(session.id.clone());
-                                let linked_state = Derived::new(move || model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| crate::labels::session_state(&model.snapshot.get(), s)).unwrap_or(RunState::Unavailable));
+                                let linked_state = Derived::new(move || model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| crate::adapt::session_status(&model.snapshot.get(), s)));
                                 let linked_title = Derived::new(move || model.snapshot.get().sessions.iter().find(|s| s.id == id.get()).map(|s| s.title.clone()).unwrap_or_default());
                                 button #relay.tree-control
                                     @click:{ model.open_session(id.get_untracked()); } width:fill
                                     height:{px(28.0)}px justify:start gap:{px(8.0)}px
                                     pad:(horizontal:{px(14.0)}px vertical:0px)
-                                    stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
+                                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
                                     label:{ linked_title.get() }
-                                    description:{ linked_state.get().label() }
-                                    hover { fill:surface.raised } {
-                                    StatusGlyph state:(linked_state)
+                                    description:{ status_word(linked_state.get()) }
+                                    hover { fill:ground.hover } {
+                                    StatusMark status:(linked_state)
                                     stack #relay.fade-label font-size:{px(12.0)}px
-                                        font-color:ink.fg {
+                                        font-color:ground.ink {
                                         row #relay.fade-line {
                                             text width:max-content shrink:0 text-wrap:none
                                                 { linked_title.get() }
@@ -712,8 +701,8 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                                     }
                                     row width:max-content height:min-content shrink:0
                                         font-size:{px(11.0)}px
-                                        font-color:{color(linked_state.get().text_color())} {
-                                        text text-wrap:none { linked_state.get().label() }
+                                        font-color:{color(status_tone(linked_state.get()))} {
+                                        text text-wrap:none { status_word(linked_state.get()) }
                                     }
                                 }
                             }
@@ -721,7 +710,7 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
                                 TaskEditor model:(model)
                                 if current.get().result.is_some() {
                                     col height:min-content gap:{px(6.0)}px pad:{px(12.0)}px
-                                        stroke:(width:{px(1.0)} color:rule.line edges:top) {
+                                        stroke:(width:{px(1.0)} color:ground.rule edges:top) {
                                         row #relay.eyebrow height:min-content {
                                             text text-transform:uppercase letter-spacing:{px(0.6)}px
                                                 "Result"
@@ -757,11 +746,11 @@ pub(crate) fn WorkerApproval(model: Model) -> Element {
         move || {
             use mosaic::core::theme::{color, scalar};
             (
-                scalar(ui_scale),
-                color(surface.panel),
-                color(accent.focus),
-                color(rule.hair),
-                color(surface.base),
+                scalar(relay_ui::tokens::ui_scale),
+                color(ground.panel),
+                color(ground.ink),
+                color(ground.hairline),
+                color(ground.page),
             )
         },
         move |parent, &(scale, fill, accent_color, edge_color, mark)| {
@@ -819,8 +808,8 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
             .unwrap_or_else(|| "Ready · server rechecks policy and revision".into())
     });
     view! {
-        col height:min-content min-width:0px fill:surface.panel
-            stroke:(width:{px(1.0)} color:rule.line edges:top) label:"Worker setup"
+        col height:min-content min-width:0px fill:ground.panel
+            stroke:(width:{px(1.0)} color:ground.rule edges:top) label:"Worker setup"
             @layout:{move |rect:Rect| width.set(rect.size.width)} {
             row #relay.module-head gap:0px pad:0px {
                 row #relay.eyebrow height:min-content min-width:0px clip width:1fr
@@ -830,7 +819,7 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
                 }
                 if !continuation {
                     button #relay.header-action @click:{ choosing.set(!choosing.get_untracked()); }
-                        stroke:(width:{px(1.0)} color:rule.line edges:left)
+                        stroke:(width:{px(1.0)} color:ground.rule edges:left)
                         label:"Choose director and resources"
                         { if choosing.get() { "Done" } else { "Change" } }
                 }
@@ -838,7 +827,7 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
             if !continuation {
                 row #relay.caption height:min-content min-width:0px clip
                     pad:(horizontal:{px(12.0)}px vertical:{px(6.0)}px)
-                    stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
                     description:{setup.get()} {
                     text text-wrap:none {setup.get()}
                 }
@@ -846,14 +835,14 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
             BoundedPanel limit:(Derived::new(|| px(180.0))) {
                 if choosing.get() && !continuation {
                     col height:min-content gap:0px
-                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                         for (_, director) in { model.snapshot.get().directors.into_iter().filter(|d| d.project_id == model.project.get()).map(|d| (d.id.clone(), d)).collect::<Vec<_>>() } {
                             let id = State::new(director.id.clone());
                             button #relay.action
                                 @click:{ model.worker_director.set(id.get_untracked()); model.worker_approval.set(false); }
                                 width:fill justify:start role:radio
-                                fill:if model.worker_director.get() == id.get() {surface.selected} else {surface.panel}
-                                stroke:(width:{px(if model.worker_director.get() == id.get() {3.0} else {1.0})} color:{color(if model.worker_director.get() == id.get() {ink.fg} else {rule.line})} edges:left)
+                                fill:if model.worker_director.get() == id.get() {ground.selected} else {ground.panel}
+                                stroke:(width:{px(if model.worker_director.get() == id.get() {3.0} else {1.0})} color:{color(if model.worker_director.get() == id.get() {ground.ink} else {ground.rule})} edges:left)
                                 { model.snapshot.get().directors.iter().find(|d| d.id == id.get()).map(|d| format!("Director: {}", d.name)).unwrap_or_default() }
                         }
                         WorkspaceChoices model:(model) flush:true
@@ -863,13 +852,13 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
                     grid
                         cols:{GridTracks::auto_fit(GridTrack::minmax(px(80.0).into(), GridTrack::fr(1.0)))}
                         height:min-content gap:0px
-                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
                         label:"Worker policy" {
                         for (_, key) in { worker_policy(model, continuation).into_iter().map(|(k, _)| (k, k)).collect::<Vec<_>>() } {
                             let field: &'static str = key;
                             col height:min-content min-width:0px
                                 pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px)
-                                stroke:(width:{px(1.0)} color:rule.hair edges:right) {
+                                stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
                                 Readout key:(field.to_string())
                                     value:(Derived::new(move || worker_policy(model, continuation).into_iter().find(|(k, _)| *k == field).map(|(_, v)| v).unwrap_or_default()))
                             }
@@ -879,11 +868,11 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
             }
             col height:min-content gap:0px {
                 input #relay.area multiline height:{px(92.0)}px label:"Worker prompt" width:fill
-                    stroke:(width:{px(1.0)} color:rule.line edges:bottom)
+                    stroke:(width:{px(1.0)} color:ground.rule edges:bottom)
                     placeholder:"Prompt for this turn…" model.worker_prompt
                 if model.worker_profile(continuation).is_ok_and(|(p, _)| p.permissions.get(&Task::Implement) == Some(&Permission::Ask)) {
                     row height:min-content pad:{px(12.0)}px
-                        stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                         WorkerApproval model:(model)
                     }
                 }
@@ -895,10 +884,10 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
                     button #relay.primary @click:{ model.run_worker(continuation); }
                         width:{if compact.get() {Dimension::Fill} else {Dimension::MaxContent}}
                         height:fill
-                        stroke:(width:{px(1.0)} color:rule.line edges:if compact.get() {StrokeEdges::TOP} else {StrokeEdges::LEFT})
+                        stroke:(width:{px(1.0)} color:ground.rule edges:if compact.get() {StrokeEdges::TOP} else {StrokeEdges::LEFT})
                         label:if continuation { "Send worker prompt" } else { "Start worker" }
                         disabled:{ model.worker_gate(continuation).is_err() }
-                        focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) }
+                        focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) }
                         { if continuation { "Send / continue" } else { "Start worker" } }
                 }
             }
@@ -1017,12 +1006,17 @@ fn BoardFooter(model: Model) -> Element {
             .into_iter()
             .filter(|i| columns.iter().any(|c| model.task_in_column(i, &c.id)))
             .map(|i| {
-                crate::labels::issue_status(&model.snapshot.get(), &model.sessions_for_task(&i.id))
+                crate::adapt::issue_status(&model.snapshot.get(), &model.sessions_for_task(&i.id))
             })
             .collect::<Vec<_>>()
     });
-    let with_state = move |state: RunState| {
-        Derived::new(move || format!("{:02}", tasks.get().iter().filter(|s| **s == state).count()))
+    let with_state = move |state: AgentStatus| {
+        Derived::new(move || {
+            format!(
+                "{:02}",
+                tasks.get().iter().filter(|s| **s == Some(state)).count()
+            )
+        })
     };
     let fixture = Derived::new(move || fixture_project(model, &model.project.get()));
     // Each director limits its own workers, so the project's ceiling is the
@@ -1033,7 +1027,7 @@ fn BoardFooter(model: Model) -> Element {
             .directors
             .iter()
             .filter(|d| d.project_id == model.project.get())
-            .map(|d| crate::labels::director_capacity(&snapshot, &d.id))
+            .map(|d| crate::sidebar::director_capacity(&snapshot, &d.id))
             .fold((0, 0), |(a, l), (_, active, limit)| (a + active, l + limit));
         format!("{active} / {limit} active")
     });
@@ -1041,21 +1035,21 @@ fn BoardFooter(model: Model) -> Element {
     let width = State::new(0.0f32);
     let compact = Derived::new(move || width.get() < px(560.0));
     let summary = Derived::new(move || {
-        let count = |state: RunState| tasks.get().iter().filter(|s| **s == state).count();
+        let count = |state: AgentStatus| tasks.get().iter().filter(|s| **s == Some(state)).count();
         if fixture.get() {
             format!("{} tasks", tasks.get().len())
         } else {
             format!(
                 "{} tasks · {} running · {} waiting · workers {}",
                 tasks.get().len(),
-                count(RunState::Running),
-                count(RunState::Waiting),
+                count(AgentStatus::Working),
+                count(AgentStatus::Waiting),
                 workers.get()
             )
         }
     });
     view! {
-        row height:{px(52.0)}px shrink:0 stroke:(width:{px(1.0)} color:rule.line edges:top)
+        row height:{px(40.0)}px shrink:0 stroke:(width:{px(1.0)} color:ground.rule edges:top)
             @layout:{move |rect: Rect| width.set(rect.size.width)} label:"Board summary" {
             if compact.get() {
                 HeaderCell key:("Board".to_string()) value:(summary)
@@ -1065,8 +1059,8 @@ fn BoardFooter(model: Model) -> Element {
                     value:(Derived::new(move || format!("{:02}", tasks.get().len())))
             }
             if !fixture.get() && !compact.get() {
-                HeaderCell key:("Running".to_string()) value:(with_state(RunState::Running))
-                HeaderCell key:("Waiting".to_string()) value:(with_state(RunState::Waiting))
+                HeaderCell key:("Running".to_string()) value:(with_state(AgentStatus::Working))
+                HeaderCell key:("Waiting".to_string()) value:(with_state(AgentStatus::Waiting))
                 HeaderCell key:("Project workers".to_string()) value:(workers)
             }
         }

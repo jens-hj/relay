@@ -3493,6 +3493,7 @@ dependencies = [
  "percent-encoding",
  "pollster",
  "relay-core",
+ "relay-ui",
  "reqwest",
  "serde",
  "serde_json",

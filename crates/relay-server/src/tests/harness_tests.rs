@@ -1423,6 +1423,8 @@ async fn restart_interrupts_unfinished_tool_records_without_erasing_output() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("db");
     let mut snapshot = demo_snapshot(DirectorProfile::default());
+    // Fixture sessions own no process, so restart repair leaves them alone.
+    snapshot.sessions[0].fixture = false;
     snapshot.messages.push(Message {
         id: "unfinished-tool".into(),
         session_id: "session-plan".into(),
@@ -1444,6 +1446,8 @@ async fn restart_interrupts_unfinished_tool_records_without_erasing_output() {
             detail: None,
         }),
     });
+    // The demo orchestration's example states survive a restart.
+    demo_orchestration(&mut snapshot);
     let mut store = Store::open(&db, DirectorProfile::default()).unwrap();
     store.save(&snapshot).unwrap();
     drop(store);
@@ -1462,6 +1466,18 @@ async fn restart_interrupts_unfinished_tool_records_without_erasing_output() {
         .unwrap();
     assert_eq!(message.body, "retained output");
     assert_eq!(message.tool.as_ref().unwrap().state, ToolState::Interrupted);
+    let example = restarted
+        .messages
+        .iter()
+        .find(|m| m.id == "t-migrate")
+        .unwrap();
+    assert_eq!(example.tool.as_ref().unwrap().state, ToolState::Running);
+    assert!(restarted.tool_permissions.iter().all(|p| !p.expired));
+    assert!(restarted.sessions.iter().any(|s| {
+        s.worker
+            .as_ref()
+            .is_some_and(|w| w.status == WorkerStatus::Running)
+    }));
     assert_eq!(
         shutdown.workspace.store.lock().unwrap().snapshot().unwrap(),
         restarted

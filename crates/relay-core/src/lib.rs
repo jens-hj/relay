@@ -21,7 +21,7 @@ mod usage;
 pub use conversation::*;
 pub use usage::*;
 
-pub use fixture::demo_snapshot;
+pub use fixture::{demo_orchestration, demo_snapshot, demo_usage};
 pub use profile::*;
 use serde::{Deserialize, Serialize};
 

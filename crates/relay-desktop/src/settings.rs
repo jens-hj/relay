@@ -1,5 +1,6 @@
-use crate::{model::Model, theme};
+use crate::model::Model;
 use mosaic::prelude::*;
+use relay_ui::tokens::{ThemeVariant, UiTheme};
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
@@ -14,42 +15,88 @@ pub enum ThemeMode {
     System,
 }
 
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Preferences {
-    pub mode: ThemeMode,
+/// Palette families chosen in earlier versions. The current interface has
+/// one family per mode; these are kept so older clients reading the same
+/// file still find the family they saved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LegacyPalettes {
     pub light_warm: bool,
     pub dark_neutral: bool,
-    /// Omitted while false so files stay readable by clients that predate it.
-    #[serde(skip_serializing_if = "is_false")]
-    pub light_high_contrast: bool,
-    #[serde(skip_serializing_if = "is_false")]
-    pub dark_high_contrast: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Preferences {
+    pub mode: ThemeMode,
+    pub high_contrast: bool,
     pub scale: f32,
+    /// The resizable sidebar of earlier versions; preserved, not used.
     pub sidebar_width: f32,
     pub selected_boards: std::collections::BTreeMap<String, String>,
+    pub legacy: LegacyPalettes,
 }
 
 impl Default for Preferences {
     fn default() -> Self {
         Self {
             mode: ThemeMode::Dark,
-            light_warm: false,
-            dark_neutral: false,
-            light_high_contrast: false,
-            dark_high_contrast: false,
+            high_contrast: false,
             scale: 1.0,
             sidebar_width: 220.0,
             selected_boards: Default::default(),
+            legacy: LegacyPalettes::default(),
         }
     }
 }
 
-/// Local wire format: absence means follow the application default.
+/// The first, unversioned settings file.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Unversioned {
+    mode: ThemeMode,
+    light_warm: bool,
+    dark_neutral: bool,
+    light_high_contrast: bool,
+    dark_high_contrast: bool,
+    scale: f32,
+    sidebar_width: f32,
+    selected_boards: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for Unversioned {
+    fn default() -> Self {
+        let d = Preferences::default();
+        Self {
+            mode: d.mode,
+            light_warm: false,
+            dark_neutral: false,
+            light_high_contrast: false,
+            dark_high_contrast: false,
+            scale: d.scale,
+            sidebar_width: d.sidebar_width,
+            selected_boards: d.selected_boards,
+        }
+    }
+}
+
+impl From<Unversioned> for Preferences {
+    fn from(u: Unversioned) -> Self {
+        Self {
+            mode: u.mode,
+            high_contrast: u.light_high_contrast || u.dark_high_contrast,
+            scale: u.scale,
+            sidebar_width: u.sidebar_width,
+            selected_boards: u.selected_boards,
+            legacy: LegacyPalettes {
+                light_warm: u.light_warm,
+                dark_neutral: u.dark_neutral,
+            },
+        }
+    }
+}
+
+/// Local wire format: absence means follow the application default. High
+/// contrast is written as both modes' high-contrast palette, so clients
+/// that predate the single toggle read the same choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum LightPalette {
@@ -89,25 +136,22 @@ struct Overrides {
 impl Overrides {
     fn from_preferences(p: &Preferences) -> Self {
         let d = Preferences::default();
+        let (warm, neutral) = (p.legacy.light_warm, p.legacy.dark_neutral);
         Self {
             version: 2,
             mode: (p.mode != d.mode).then_some(p.mode),
-            light_palette: if p.light_high_contrast {
+            light_palette: if p.high_contrast {
                 Some(LightPalette::HighContrast)
-            } else if p.light_warm {
-                Some(LightPalette::Warm)
             } else {
-                None
+                warm.then_some(LightPalette::Warm)
             },
-            dark_palette: if p.dark_high_contrast {
+            dark_palette: if p.high_contrast {
                 Some(DarkPalette::HighContrast)
-            } else if p.dark_neutral {
-                Some(DarkPalette::Neutral)
             } else {
-                None
+                neutral.then_some(DarkPalette::Neutral)
             },
-            light_warm: (p.light_high_contrast && p.light_warm).then_some(true),
-            dark_neutral: (p.dark_high_contrast && p.dark_neutral).then_some(true),
+            light_warm: (p.high_contrast && warm).then_some(true),
+            dark_neutral: (p.high_contrast && neutral).then_some(true),
             scale: (p.scale != d.scale).then_some(p.scale),
             sidebar_width: (p.sidebar_width != d.sidebar_width).then_some(p.sidebar_width),
             selected_boards: p.selected_boards.clone(),
@@ -121,13 +165,16 @@ impl Overrides {
             ));
         }
         let mut p = Preferences::default();
+        let light_contrast = self.light_palette == Some(LightPalette::HighContrast);
+        let dark_contrast = self.dark_palette == Some(DarkPalette::HighContrast);
         p.mode = self.mode.unwrap_or(p.mode);
-        p.light_high_contrast = self.light_palette == Some(LightPalette::HighContrast);
-        p.dark_high_contrast = self.dark_palette == Some(DarkPalette::HighContrast);
-        p.light_warm = self.light_palette == Some(LightPalette::Warm)
-            || (p.light_high_contrast && self.light_warm.unwrap_or(false));
-        p.dark_neutral = self.dark_palette == Some(DarkPalette::Neutral)
-            || (p.dark_high_contrast && self.dark_neutral.unwrap_or(false));
+        p.high_contrast = light_contrast || dark_contrast;
+        p.legacy = LegacyPalettes {
+            light_warm: self.light_palette == Some(LightPalette::Warm)
+                || (light_contrast && self.light_warm.unwrap_or(false)),
+            dark_neutral: self.dark_palette == Some(DarkPalette::Neutral)
+                || (dark_contrast && self.dark_neutral.unwrap_or(false)),
+        };
         p.scale = self.scale.unwrap_or(p.scale);
         p.sidebar_width = self.sidebar_width.unwrap_or(p.sidebar_width);
         p.selected_boards = self.selected_boards;
@@ -139,8 +186,7 @@ impl Overrides {
 #[derive(Clone, Copy)]
 pub enum Setting {
     Mode,
-    LightPalette,
-    DarkPalette,
+    Contrast,
     Scale,
 }
 impl Preferences {
@@ -148,8 +194,7 @@ impl Preferences {
         let d = Self::default();
         match setting {
             Setting::Mode => self.mode != d.mode,
-            Setting::LightPalette => self.light_warm || self.light_high_contrast,
-            Setting::DarkPalette => self.dark_neutral || self.dark_high_contrast,
+            Setting::Contrast => self.high_contrast != d.high_contrast,
             Setting::Scale => self.scale != d.scale,
         }
     }
@@ -157,24 +202,10 @@ impl Preferences {
         let d = Self::default();
         match setting {
             Setting::Mode => self.mode = d.mode,
-            Setting::LightPalette => {
-                self.light_warm = d.light_warm;
-                self.light_high_contrast = d.light_high_contrast;
-            }
-            Setting::DarkPalette => {
-                self.dark_neutral = d.dark_neutral;
-                self.dark_high_contrast = d.dark_high_contrast;
-            }
+            Setting::Contrast => self.high_contrast = d.high_contrast,
             Setting::Scale => self.scale = d.scale,
         }
     }
-}
-
-pub fn reset_sidebar(model: Model) {
-    model
-        .preferences
-        .update(|p| p.sidebar_width = Preferences::default().sidebar_width);
-    model.sidebar_reset.update(|serial| *serial += 1);
 }
 
 impl Preferences {
@@ -209,7 +240,9 @@ impl Preferences {
                 .map_err(|error| format!("Invalid display settings: {error}"))?
                 .resolve()?
         } else {
-            toml::from_str(&source).map_err(|error| format!("Invalid display settings: {error}"))?
+            toml::from_str::<Unversioned>(&source)
+                .map_err(|error| format!("Invalid display settings: {error}"))?
+                .into()
         };
         preferences.validate()?;
         Ok(preferences)
@@ -446,20 +479,12 @@ pub fn path() -> Result<PathBuf, String> {
         .ok_or_else(|| "Set RELAY_SETTINGS_PATH to store local display settings.".into())
 }
 
-pub fn themes(preferences: &Preferences) -> (theme::RelayTheme, theme::RelayTheme) {
+/// The light and dark relay-ui themes for these preferences.
+pub fn themes(preferences: &Preferences) -> (UiTheme, UiTheme) {
+    let variant = |light| ThemeVariant::select(light, preferences.high_contrast);
     (
-        theme::configured_palette(
-            true,
-            preferences.light_warm,
-            preferences.light_high_contrast,
-            preferences.scale,
-        ),
-        theme::configured_palette(
-            false,
-            preferences.dark_neutral,
-            preferences.dark_high_contrast,
-            preferences.scale,
-        ),
+        relay_ui::tokens::theme(variant(true), preferences.scale),
+        relay_ui::tokens::theme(variant(false), preferences.scale),
     )
 }
 

@@ -6,22 +6,15 @@ mod chrome;
 pub(crate) mod navigation;
 mod preferences;
 mod profile;
+mod status;
 
-use crate::styles::*;
 use crate::{
-    controls::{
-        AppearanceSegments, AppearanceSegmentsProps, ButtonStyle, button, stepper_with_options,
-    },
+    controls::{ButtonStyle, button, stepper_with_options},
     conversation::{Conversation, ConversationProps},
-    labels::{
-        DirectorMark, DirectorMarkProps, LabelStrip, LabelStripProps, Readout, ReadoutProps,
-        RunState, SlidingSegments, SlidingSegmentsProps, SlotMeter, SlotMeterProps, StatusGlyph,
-        StatusGlyphProps, Tag, TagProps,
-    },
+    icons::*,
     model::{EditTarget, Model, Page},
     projects::*,
     sidebar::{Sidebar, SidebarProps},
-    theme::*,
 };
 pub(crate) use board::*;
 pub(crate) use chrome::*;
@@ -33,6 +26,12 @@ use preferences::*;
 pub(crate) use profile::overridden_fields;
 use profile::*;
 use relay_core::*;
+use relay_ui::prelude::{
+    AgentStatus, Chip, ChipProps, HarnessGlyph, HarnessGlyphProps, Segments, SegmentsProps,
+};
+use relay_ui::style::*;
+use relay_ui::tokens::{ground, px, status};
+pub(crate) use status::*;
 
 pub fn shell(model: Model) -> Element {
     let width = State::new(1280.0f32);
@@ -46,7 +45,7 @@ pub fn shell(model: Model) -> Element {
     let root = view! {
         stack width:{model.browser_viewport.get().map_or(Dimension::Fill, |size| Dimension::Px(size.width))}
             height:{model.browser_viewport.get().map_or(Dimension::Fill, |size| Dimension::Px(size.height))}
-            fill:surface.base safe-area:all pad:(top:{model.browser_top_clearance.get()}px) clip font-family:monospace font-color:ink.fg font-size:{px(14.0)}px {
+            fill:ground.page safe-area:all pad:(top:{model.browser_top_clearance.get()}px) clip font-family:monospace font-color:ground.ink font-size:{px(14.0)}px {
             row @layout:{ move |rect: Rect| width.set(rect.size.width) } {
                 col width:{if mobile.get() {Dimension::Px(0.0)} else {Dimension::MaxContent}} shrink:0 {
                     if !mobile.get() {
@@ -79,8 +78,8 @@ pub fn shell(model: Model) -> Element {
                                 col height:min-content pad:{px(32.0)}px gap:{px(12.0)}px {
                                     text font-family:sans-serif font-size:{px(18.0)}px
                                         "Waiting for your workspace"
-                                    text font-color:{color(ink.muted)} { model.status.get() }
-                                    text font-color:ink.muted
+                                    text font-color:{color(ground.muted)} { model.status.get() }
+                                    text font-color:ground.muted
                                         "Start relay-server and connect with its workspace token."
                                 }
                             } else {
@@ -121,7 +120,7 @@ pub fn shell(model: Model) -> Element {
         }
     });
     #[cfg(target_arch = "wasm32")]
-    Effect::new(move || crate::browser::surface_color(color(surface.base)));
+    Effect::new(move || crate::browser::surface_color(color(ground.page)));
     crate::window_chrome::install(&root, model);
     root.on_key(move |event, ctx| {
         if !matches!(event.kind, KeyEventKind::Down { .. }) {
@@ -202,7 +201,7 @@ fn Sessions(model: Model) -> Element {
     }
 }
 
-const PALETTE_ACTIONS: [(&str, &str); 12] = [
+const PALETTE_ACTIONS: [(&str, &str); 11] = [
     ("Open board", "Navigate"),
     ("Open sessions", "Navigate"),
     ("Edit project defaults", "Profile"),
@@ -214,7 +213,6 @@ const PALETTE_ACTIONS: [(&str, &str); 12] = [
     ("Project Connections", "Project"),
     ("New Project", "Create"),
     ("Publish board", "Board"),
-    ("Reset sidebar width", "Layout"),
 ];
 
 #[component]
@@ -241,14 +239,15 @@ fn Palette(model: Model) -> Element {
             .or_else(|| matches.first().copied())
     });
     let view = view! {
-        col fill:scrim align:center pad:(horizontal:{px(16.0)}px vertical:{px(40.0)}px)
+        col fill:{mosaic::core::theme::color(ground.page).alpha(0.72)} align:center
+            pad:(horizontal:{px(16.0)}px vertical:{px(40.0)}px)
             @layout:{move |rect:Rect| available_height.set(rect.size.height)} {
             col width:{px(560.0)} max-width:100% height:1fr
                 max-height:{px(120.0 + if matches.get().is_empty() {60.0} else {40.0 * matches.get().len() as f32}).min(px(640.0)).min((available_height.get()-px(80.0)).max(px(160.0)))}
-                fill:surface.panel stroke:(width:{px(1.0)} color:rule.line offset:{px(0.5)}) pad:0px
-                gap:0px label:"Command palette panel" {
+                fill:ground.panel stroke:(width:{px(1.0)} color:ground.rule offset:{px(0.5)})
+                pad:0px gap:0px label:"Command palette panel" {
                 row height:{px(44.0)}px shrink:0 gap:0px align:center
-                    stroke:(width:{px(1.0)} color:rule.hair edges:bottom) {
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                     row width:1fr min-width:0px align:center gap:{px(9.0)}px
                         pad:(horizontal:{px(14.0)}px vertical:0px) {
                         icon size:{px(16.0)}px command-icon
@@ -256,13 +255,13 @@ fn Palette(model: Model) -> Element {
                             "Command palette"
                     }
                     button #relay.header-action @click:{model.palette.set(false);}
-                        stroke:(width:{px(1.0)} color:rule.hair edges:left)
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:left)
                         label:"Close command palette" "Esc"
                 }
                 input #relay.field placeholder:"Find an action…" label:"Command search"
                     height:{px(46.0)}px shrink:0 pad:(horizontal:{px(14.0)}px vertical:{px(10.0)}px)
-                    stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
-                    focused { stroke:(width:{px(2.0)} color:accent.focus offset:{px(-2.0)}) } query
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
+                    focused { stroke:(width:{px(2.0)} color:ground.ink offset:{px(-2.0)}) } query
                     as command_search
                 {command_search.focus();}
                 scroll height:1fr min-height:0px label:"Command results" {
@@ -273,14 +272,11 @@ fn Palette(model: Model) -> Element {
                             button #relay.tree-control @click:{palette_action(model, index);}
                                 width:fill height:{px(40.0)}px justify:start gap:{px(12.0)}px
                                 pad:(horizontal:{px(14.0)}px vertical:0px) label:(label)
-                                font-color:{color(if current.get() == Some(index) {ink.on_inverse} else {ink.fg})}
-                                font-size:{px(13.0)}px
-                                fill:{if current.get() == Some(index) {color(ink.inverse)} else {Color::TRANSPARENT}}
-                                stroke:(width:{px(1.0)} color:rule.hair edges:bottom)
-                                hover {
-                                    fill:{color(if current.get() == Some(index) {ink.inverse_hover} else {surface.raised})}
-                                }
-                                focused { stroke:(width:{px(3.0)} color:accent.focus edges:left) } {
+                                font-color:{color(ground.ink)} font-size:{px(13.0)}px
+                                fill:{if current.get() == Some(index) {color(ground.selected)} else {Color::TRANSPARENT}}
+                                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
+                                hover { fill:{color(ground.hover)} }
+                                focused { stroke:(width:{px(3.0)} color:ground.ink edges:left) } {
                                 icon size:{px(16.0)}px
                                     {match index {0|10 => board_icon, 1|6 => worker_icon, 2 => sliders_icon, 3 => director_icon, 5|11 => reset_icon, 7 => gear_icon, 8 => connections_icon, 9 => plus_icon, _ => command_icon}}
                                 row width:1fr min-width:0px height:min-content {
@@ -300,7 +296,7 @@ fn Palette(model: Model) -> Element {
                         }
                         if matches.get().is_empty() {
                             row height:{px(60.0)}px pad:{px(14.0)}px align:center
-                                label:"No matching commands" font-color:ink.muted {
+                                label:"No matching commands" font-color:ground.muted {
                                 text "No matching commands"
                             }
                         }
@@ -308,7 +304,7 @@ fn Palette(model: Model) -> Element {
                 }
                 row height:{px(30.0)}px shrink:0 align:center justify:between
                     pad:(horizontal:{px(14.0)}px vertical:0px)
-                    stroke:(width:{px(1.0)} color:rule.hair edges:top) font-color:ink.muted
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:top) font-color:ground.muted
                     font-size:{px(10.0)}px {
                     text {format!("{} actions", matches.get().len())}
                     text "↑ ↓ Navigate · Enter Run · Esc Close"
@@ -405,7 +401,6 @@ fn palette_action(model: Model, index: usize) {
         8 => model.page.set(Page::Connections),
         9 => model.page.set(Page::NewProject),
         10 => model.page.set(Page::Publish),
-        11 => crate::settings::reset_sidebar(model),
         _ => {
             model.page.set(Page::Sessions);
             model.searching.set(true);

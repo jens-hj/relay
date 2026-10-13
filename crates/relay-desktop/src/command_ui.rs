@@ -1,11 +1,11 @@
 use crate::{
     buffer,
     model::{Model, Saved},
-    styles::*,
-    theme::*,
 };
 use mosaic::prelude::*;
 use relay_core::*;
+use relay_ui::style::*;
+use relay_ui::tokens::{ground, px};
 
 #[derive(Clone, Debug)]
 pub struct Choice {
@@ -381,7 +381,7 @@ fn selection(model: Model, model_id: String, effort: Option<String>, fast: bool)
     model.command_flow.set(String::new());
 }
 
-fn run(model: Model, name: &str, arg: &str) {
+pub(crate) fn run(model: Model, name: &str, arg: &str) {
     if has_content(&buffer::parts(model, &model.session.get_untracked())) {
         model
             .notice
@@ -414,7 +414,7 @@ pub fn CommandPanel(model: Model) -> Element {
     let flow = Derived::new(move || model.command_flow.get());
     let argument = model.command_argument;
     view! {
-        col height:min-content stroke:(width:{px(1.0)} color:rule.line edges:bottom) {
+        col height:min-content stroke:(width:{px(1.0)} color:ground.rule edges:bottom) {
             row height:min-content align:center {
                 text width:1fr pad:{px(10.0)}px {format!("/{}",flow.get())}
                 button #relay.action @click:{refresh(model,true);} disabled:{!model.connected.get()}

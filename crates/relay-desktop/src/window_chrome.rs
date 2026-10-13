@@ -1,9 +1,11 @@
 //! Platform window chrome for Relay's existing header cells (issue #11).
-use crate::{model::Model, styles::*, theme::*};
+use crate::{icons::*, model::Model};
 use mosaic::prelude::*;
 use mosaic::widgets::{CursorIcon, InspectionNode, input::EventCtx};
+use relay_ui::style::*;
+use relay_ui::tokens::{ground, px};
 
-pub(crate) const NATIVE_HEADER_HEIGHT: f32 = 56.0;
+pub(crate) const NATIVE_HEADER_HEIGHT: f32 = 60.0;
 
 pub(crate) fn window_config() -> WindowConfig {
     #[cfg(target_os = "macos")]
@@ -142,7 +144,7 @@ fn WindowButton(source: SvgToken, label: &'static str, action: impl Fn() + 'stat
     view! {
         button #relay.header-action @click.stop:{(action)()} @pointer-down.stop:{}
             width:{px(32.0)}px shrink:0 pad:0px label:(label) {
-            icon size:{px(13.0)}px stroke:ink.fg (source)
+            icon size:{px(13.0)}px stroke:ground.ink (source)
         }
     }
 }

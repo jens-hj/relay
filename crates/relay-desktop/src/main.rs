@@ -1,3 +1,4 @@
+mod adapt;
 #[cfg(target_arch = "wasm32")]
 mod browser;
 #[cfg(any(target_arch = "wasm32", test))]
@@ -7,8 +8,7 @@ mod buffer_network;
 mod command_ui;
 mod controls;
 mod conversation;
-mod fonts;
-mod labels;
+mod icons;
 mod model;
 mod network;
 mod panels;
@@ -17,13 +17,14 @@ mod project_network;
 mod projects;
 #[cfg(not(target_arch = "wasm32"))]
 mod render_probe;
+#[cfg(test)]
+mod screenshots;
 mod settings;
 mod sidebar;
-mod styles;
 #[cfg(test)]
 mod tests;
-mod theme;
 mod tool_activity;
+mod transcript;
 mod ui;
 mod window_chrome;
 
@@ -76,10 +77,11 @@ fn run(config: network::Config) -> Result<(), String> {
     App::new("Relay")
         .window(window_chrome::window_config())
         .theme(settings::themes(&preferences).1)
-        .theme(theme::icons())
-        .clear(theme::surface.base)
+        .theme(relay_ui::icons::icons())
+        .theme(icons::icons())
+        .clear(relay_ui::tokens::ground.page)
         .run(move |ui, context| {
-            fonts::configure(&mut ui.fonts().borrow_mut());
+            relay_ui::install(ui);
             let (updates, sender) = state_channel(network::NetworkState::default());
             let (commands, harness_refresh, transport_requests) =
                 network::start(config.clone(), sender);

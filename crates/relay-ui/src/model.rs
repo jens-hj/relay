@@ -90,6 +90,9 @@ pub struct Effort {
     pub current: u8,
     pub has_max: bool,
     pub at_max: bool,
+    /// Index in [`crate::effort::EFFORT_NAMES`] of the first ordinary
+    /// step, for models whose steps start above "minimal".
+    pub first: u8,
 }
 
 impl Effort {
@@ -100,7 +103,32 @@ impl Effort {
             current: current.min(levels.saturating_sub(1)),
             has_max: false,
             at_max: false,
+            first: 0,
         }
+    }
+
+    /// Starts the step names at `first` in
+    /// [`crate::effort::EFFORT_NAMES`].
+    pub fn starting_at(mut self, first: u8) -> Self {
+        self.first = first;
+        self
+    }
+
+    /// Every step's name, ordinary steps first, then max.
+    pub fn step_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = (0..self.levels)
+            .map(|step| {
+                crate::effort::EFFORT_NAMES
+                    .get(usize::from(self.first) + usize::from(step))
+                    .copied()
+                    .unwrap_or("level")
+                    .to_string()
+            })
+            .collect();
+        if self.has_max {
+            names.push("max".to_string());
+        }
+        names
     }
 
     /// Offers a max step, selected when `at_max`.

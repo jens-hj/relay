@@ -17,7 +17,7 @@ impl Effort {
             "max"
         } else {
             crate::effort::EFFORT_NAMES
-                .get(self.selected() as usize)
+                .get(usize::from(self.first) + self.selected() as usize)
                 .copied()
                 .unwrap_or("level")
         }
