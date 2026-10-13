@@ -108,7 +108,7 @@ fn form_controls_report_choices() {
     assert_eq!(mounted.rect("Repository").size.height, 40.0);
     mounted.click_label("Dark");
     assert_eq!(picked.borrow().as_slice(), [0]);
-    assert!(mounted.has("Workers 9"));
+    assert!(mounted.has("Workers"));
     mounted.click_label("Increase");
     mounted.click_label("Decrease");
     assert_eq!(numbers.borrow().as_slice(), [10, 7], "clamped to max");
@@ -135,17 +135,22 @@ fn board_surfaces_carry_labels_and_callbacks() {
             status: Some(AgentStatus::Working),
             labels: vec!["ui".into()],
             selected: false,
+            ..Default::default()
         };
         let rows = vec![
             PermissionRow {
                 action: "Write to the database".into(),
                 choice: Permission::Ask,
                 pending: true,
+                name: String::new(),
+                flags: vec![],
             },
             PermissionRow {
                 action: "Run tests".into(),
                 choice: Permission::Allow,
                 pending: false,
+                name: String::new(),
+                flags: vec![],
             },
         ];
         view! {
@@ -174,8 +179,9 @@ fn board_surfaces_carry_labels_and_callbacks() {
     );
     mounted.click(mounted.rects("Agent tree")[0].center());
     assert_eq!(opened.borrow().len(), 1);
-    assert_eq!(mounted.count("deny"), 4, "two rows, button and text each");
-    mounted.click(mounted.rects("deny")[0].center());
+    assert_eq!(mounted.count("deny"), 2, "one visible word per row");
+    mounted.click(mounted.rect("Write to the database: deny").center());
+    assert!(mounted.has("Run tests: allow"));
     assert_eq!(changes.borrow().as_slice(), [(0, Permission::Deny)]);
     for label in [
         "Codex",
@@ -209,4 +215,115 @@ fn page_header_cells_sit_flush_right() {
     assert_eq!(save.size.height, 72.0);
     assert!(mounted.has("Relay /"));
     assert!(mounted.has("HARNESSES"));
+}
+
+#[test]
+fn surfaces_take_the_slots_and_names_applications_need() {
+    let flags = Rc::new(RefCell::new(Vec::new()));
+    let flag_log = flags.clone();
+    let closed = Rc::new(RefCell::new(0));
+    let close_log = closed.clone();
+    let query = State::new(String::new());
+    let value = State::new("draft".to_string());
+    let mounted = mount(Size::new(1400.0, 1400.0), move || {
+        let on_flag: OnFlag =
+            Rc::new(move |row, column, on| flag_log.borrow_mut().push((row, column, on)));
+        let close: OnPress = Rc::new(move || *close_log.borrow_mut() += 1);
+        let noop: OnPress = Rc::new(|| {});
+        let on_change: Rc<dyn Fn(usize, Permission)> = Rc::new(|_, _| {});
+        let on_run: Rc<dyn Fn(String)> = Rc::new(|_| {});
+        let on_step: OnNumber = Rc::new(|_| {});
+        let issue = IssueView {
+            identifier: "#2".into(),
+            title: "Profiles".into(),
+            preview: "Define defaults".into(),
+            meta: "2 sessions".into(),
+            label: "Open issue #2".into(),
+            description: "Working · 2 linked sessions".into(),
+            ..Default::default()
+        };
+        let rows = vec![PermissionRow {
+            action: "Plan".into(),
+            choice: Permission::Allow,
+            pending: false,
+            name: "Plan permission".into(),
+            flags: vec![true, false],
+        }];
+        let columns = vec![
+            FlagColumn {
+                head: "Resp.".into(),
+                name: "responsibility".into(),
+            },
+            FlagColumn {
+                head: "Done".into(),
+                name: "required for completion".into(),
+            },
+        ];
+        let commands = vec![Command::new("board", "Open board").detail("Navigate")];
+        let spacer = view! { el width:20px height:20px label:"End" {} };
+        let footer = view! { row height:40px label:"Footer" {} };
+        let tail = view! { el width:20px height:20px label:"Head end" {} };
+        view! {
+            col {
+                PageHeader title:"Board" eyebrow:(Some("Project board".into())) height:(60.0) {
+                    ReadoutCell key:"Source" value:"Local board"
+                }
+                Module title:"Harnesses" caps:true note:(Some("On the server".into())) head-end:(Some(tail))
+                BoardColumn name:"Backlog" count:2usize fill:true head-label:("Column backlog".to_string()) {
+                    IssueCard issue:(issue)
+                }
+                IssueInspector identifier:"#2" title:"Profiles" on-close:(Some(close.clone()))
+                    close-label:"Close issue details" head-end:(Some(spacer)) footer:(Some(footer))
+                PermissionMatrix entries:(rows) on-change:(on_change) flag-columns:(columns)
+                    on-flag:(Some(on_flag))
+                HarnessCard harness:(Harness::Codex) status:(Some((AgentStatus::Done, "Ready".to_string())))
+                    actions:(vec![("Refresh".to_string(), noop.clone())])
+                Notice text:"Saved" detail:(Some("Request r12".into()))
+                    actions:(vec![("Retry original request".to_string(), noop.clone())])
+                CommandPalette commands:(commands) query:(query) on-run:(on_run)
+                    title:(Some("Command palette".to_string())) on-close:(Some(close)) close-label:"Close command palette"
+                    field-label:"Command search" footer:true
+                TextInput value:(value) label:"Worker prompt" multiline:true
+                Stepper value:100i64 on-change:(on_step) label:"Interface scale percent"
+                    decrease-label:"Decrease interface scale" increase-label:"Increase interface scale" suffix:"%"
+            }
+        }
+    });
+    for label in [
+        "Project board",
+        "Source",
+        "Local board",
+        "On the server",
+        "Head end",
+        "Column backlog",
+        "Open issue #2",
+        "Preview",
+        "2 sessions",
+        "Close issue details",
+        "End",
+        "Footer",
+        "Plan responsibility",
+        "Plan required for completion",
+        "Plan permission: allow",
+        "Ready",
+        "Refresh",
+        "Request r12",
+        "Retry original request",
+        "Close command palette",
+        "Command search",
+        "Command results",
+        "Navigate",
+        "1 command",
+        "Worker prompt",
+        "Interface scale percent",
+        "Decrease interface scale",
+    ] {
+        assert!(mounted.has(label), "{label}: {:?}", mounted.labels());
+    }
+    mounted.click_label("Plan required for completion");
+    assert_eq!(flags.borrow().as_slice(), [(0, 1, true)]);
+    mounted.click_label("Close issue details");
+    mounted.click_label("Close command palette");
+    assert_eq!(*closed.borrow(), 2);
+    assert_eq!(mounted.rect("Column backlog").size.height, 40.0);
 }

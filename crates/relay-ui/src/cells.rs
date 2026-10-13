@@ -160,18 +160,30 @@ pub fn CellButton(
     /// Horizontal content inset. Narrow ledger controls use zero.
     #[prop(default = 14.0)]
     horizontal_inset: f32,
+    /// Lays the contents from the start edge, as list rows do.
+    #[prop(default = false)]
+    start: bool,
+    /// Marks the cell as the current choice of a list.
+    #[prop(default = crate::Live::fixed(false))]
+    selected: crate::Live<bool>,
+    /// Supplementary accessible context.
+    #[prop(optional)]
+    description: Option<UiText>,
     /// The visible contents.
     #[prop(optional)]
     children: Children,
 ) -> Element {
     let edges = take_rule(rule);
+    let about = description.clone();
     with_ruling(None, || {
         view! {
             button @click:{on_press()} width:fill height:fill min-width:0px align:center
-                justify:center gap:{px(8.0)}px
+                justify:{if start { Justify::Start } else { Justify::Center }} gap:{px(8.0)}px
                 pad:(horizontal:{px(horizontal_inset)}px vertical:0px) radius:0px
-                fill:(Color::TRANSPARENT) font-color:ground.ink stroke:{rule_visual(edges)}
-                label:{label.get()} disabled:{disabled.get()} hover { fill:ground.hover }
+                fill:{if selected.get() { mosaic::core::theme::color(ground.selected) } else { Color::TRANSPARENT }}
+                font-color:ground.ink stroke:{rule_visual(edges)}
+                label:{label.get()} description:{about.as_ref().map(|d| d.get()).unwrap_or_default()}
+                disabled:{disabled.get()} hover { fill:ground.hover }
                 pressed { fill:ground.pressed }
                 focused { stroke:+(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
                 children
@@ -188,10 +200,17 @@ pub fn PrimaryButton(
     /// Activation handler.
     on_press: OnPress,
     #[prop(default = crate::Live::fixed(false))] disabled: crate::Live<bool>,
+    /// An accessible name other than the text.
+    #[prop(optional)]
+    label: Option<UiText>,
+    /// Fills its cell instead of hugging its text.
+    #[prop(default = false)]
+    fill: bool,
 ) -> Element {
-    let label = text.clone();
+    let label = label.unwrap_or_else(|| text.clone());
     view! {
-        button @click:{on_press()} height:{px(30.0)}px width:max-content shrink:0 align:center
+        button @click:{on_press()} height:{if fill { Dimension::Fill } else { Dimension::Px(px(30.0)) }}
+            width:{if fill { Dimension::Fill } else { Dimension::MaxContent }} shrink:0 align:center justify:center
             pad:(horizontal:{px(12.0)}px vertical:0px) radius:0px fill:status.needs-you
             font-color:ground.inverse font-size:{px(12.0)}px font-weight:500 label:{label.get()}
             disabled:{disabled.get()} hover { fill:status.needs-you fill:ground.hover }
@@ -210,10 +229,17 @@ pub fn SecondaryButton(
     /// Activation handler.
     on_press: OnPress,
     #[prop(default = crate::Live::fixed(false))] disabled: crate::Live<bool>,
+    /// An accessible name other than the text.
+    #[prop(optional)]
+    label: Option<UiText>,
+    /// Fills the width of its cell.
+    #[prop(default = false)]
+    fill: bool,
 ) -> Element {
-    let label = text.clone();
+    let label = label.unwrap_or_else(|| text.clone());
     view! {
-        button @click:{on_press()} height:{px(30.0)}px width:max-content shrink:0 align:center
+        button @click:{on_press()} height:{px(30.0)}px
+            width:{if fill { Dimension::Fill } else { Dimension::MaxContent }} shrink:0 align:center justify:center
             pad:(horizontal:{px(12.0)}px vertical:0px) radius:0px fill:(Color::TRANSPARENT)
             stroke:(width:{px(1.0)} color:ground.outline offset:{px(-1.0)}) font-color:ground.ink
             font-size:{px(12.0)}px font-weight:500 label:{label.get()} disabled:{disabled.get()}

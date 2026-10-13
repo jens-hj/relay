@@ -92,8 +92,8 @@ pub mod prelude {
         ConnectionStatusProps, Field, FieldProps, HarnessCard, HarnessCardProps, HeaderCell,
         HeaderCellProps, IssueCard, IssueCardProps, IssueInspector, IssueInspectorProps, Module,
         ModuleProps, Notice, NoticeProps, PageHeader, PageHeaderProps, PermissionMatrix,
-        PermissionMatrixProps, Segments, SegmentsProps, Select, SelectProps, Stepper, StepperProps,
-        Toggle, ToggleProps,
+        PermissionMatrixProps, ReadoutCell, ReadoutCellProps, Segments, SegmentsProps, Select,
+        SelectProps, Stepper, StepperProps, TextInput, TextInputProps, Toggle, ToggleProps,
     };
     pub use crate::text::{
         Ellipsis, EllipsisProps, Label, LabelProps, SerifSize, SerifTitle, SerifTitleProps,

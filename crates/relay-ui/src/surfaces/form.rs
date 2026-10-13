@@ -163,6 +163,45 @@ pub fn Segments(
     row
 }
 
+/// A bare text input that fills its cell: a hairline frame, an ink ring
+/// while focused. Multiline inputs take `height`.
+#[component]
+pub fn TextInput(
+    value: State<String>,
+    /// Accessible name.
+    label: String,
+    #[prop(default = UiText::fixed(String::new()))] placeholder: UiText,
+    #[prop(default = false)] multiline: bool,
+    /// Height in logical pixels before UI scale; one line by default.
+    #[prop(optional)]
+    height: Option<f32>,
+    /// Draws the hairline frame; off when the input fills a ruled cell.
+    #[prop(default = true)]
+    framed: bool,
+) -> Element {
+    let hint = placeholder.clone();
+    let edge = if framed { px(1.0) } else { 0.0 };
+    let tall = height.unwrap_or(if multiline { 92.0 } else { 36.0 });
+    if multiline {
+        view! {
+            input multiline width:fill height:{px(tall)}px shrink:0 radius:0px pad:{px(10.0)}px
+                fill:ground.code stroke:(width:(edge) color:ground.hairline offset:{px(-1.0)})
+                font-family:monospace font-size:{px(12.5)}px font-color:ground.ink label:(label)
+                placeholder:{hint.get()}
+                focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } value
+        }
+    } else {
+        view! {
+            input width:fill height:{px(tall)}px shrink:0 radius:0px
+                pad:(horizontal:{px(12.0)}px vertical:0px) fill:ground.code
+                stroke:(width:(edge) color:ground.hairline offset:{px(-1.0)})
+                font-family:monospace font-size:{px(12.5)}px font-color:ground.ink label:(label)
+                placeholder:{hint.get()}
+                focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } value
+        }
+    }
+}
+
 /// A number with − and + cells, clamped to `min..=max`.
 #[component]
 pub fn Stepper(
@@ -174,6 +213,13 @@ pub fn Stepper(
     /// Accessible name of the value.
     #[prop(default = "Value".to_string())]
     label: String,
+    /// Accessible names of the − and + cells.
+    #[prop(default = "Decrease".to_string())]
+    decrease_label: String,
+    #[prop(default = "Increase".to_string())] increase_label: String,
+    /// A unit after the value ("%"); hidden when empty.
+    #[prop(optional)]
+    suffix: String,
 ) -> Element {
     let (down, up) = (value.clone(), value.clone());
     let (lower, raise) = (on_change.clone(), on_change);
@@ -183,24 +229,42 @@ pub fn Stepper(
         Rc::new(move || raise((up.get_untracked().saturating_add(step)).clamp(min, max)));
     let shown = value.clone();
     let named = value.clone();
+    // The value is a spin button: Up and Down step it.
+    let (keyed_down, keyed_up) = (decrease.clone(), increase.clone());
+    let spin = view! {
+        row width:{px(48.0)}px height:min-content justify:center label:(label.clone())
+            description:{named.get().to_string()} {
+            text font-family:monospace font-size:{px(12.5)}px font-weight:500
+                {format!("{}{suffix}", shown.get())}
+        }
+    };
+    spin.role(Role::SpinButton);
+    spin.focusable(true);
+    spin.on_key(move |event, ctx| {
+        if !matches!(event.kind, KeyEventKind::Down { .. }) {
+            return;
+        }
+        match event.key {
+            Key::ArrowUp | Key::ArrowRight => keyed_up(),
+            Key::ArrowDown | Key::ArrowLeft => keyed_down(),
+            _ => return,
+        }
+        ctx.stop_propagation();
+    });
     view! {
         row width:max-content height:{px(32.0)}px shrink:0
             stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {
             row width:max-content {
                 row width:{px(32.0)}px shrink:0 {
-                    CellButton label:"Decrease" on-press:(decrease) {
+                    CellButton label:(decrease_label) on-press:(decrease) {
                         text font-family:monospace font-size:{px(13.0)}px "−"
                     }
                 }
                 Cell rule:(Rule::Left) {
-                    row width:{px(48.0)}px height:min-content justify:center role:label
-                        label:{format!("{label} {}", named.get())} {
-                        text font-family:monospace font-size:{px(12.5)}px font-weight:500
-                            {shown.get().to_string()}
-                    }
+                    { parent.adopt(&spin); }
                 }
                 row width:{px(32.0)}px shrink:0 {
-                    CellButton label:"Increase" on-press:(increase) rule:(Rule::Left) {
+                    CellButton label:(increase_label) on-press:(increase) rule:(Rule::Left) {
                         text font-family:monospace font-size:{px(13.0)}px "+"
                     }
                 }

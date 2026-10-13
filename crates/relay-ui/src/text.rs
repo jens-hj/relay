@@ -108,11 +108,16 @@ pub fn Label(
     /// Font weight: 400, 500 or 600.
     #[prop(default = Weight::REGULAR)]
     weight: Weight,
+    /// Set in spaced capitals, as section keys are.
+    #[prop(default = false)]
+    caps: bool,
 ) -> Element {
     let token = tone.token();
     view! {
         text font-family:monospace font-size:{px(role.size())}px font-weight:(weight.0)
-            font-color:(token) {text.get()}
+            font-color:(token)
+            text-transform:{if caps { TextTransform::Uppercase } else { TextTransform::None }}
+            letter-spacing:{px(if caps { 0.6 } else { 0.0 })}px {text.get()}
     }
 }
 

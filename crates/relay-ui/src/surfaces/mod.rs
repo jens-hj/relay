@@ -12,19 +12,19 @@ mod page;
 mod tests;
 
 pub use board::{
-    BoardColumn, BoardColumnProps, HarnessAuth, HarnessCard, HarnessCardProps, IssueCard,
-    IssueCardProps, IssueInspector, IssueInspectorProps, IssueView, OnPermission, Permission,
-    PermissionMatrix, PermissionMatrixProps, PermissionRow,
+    BoardColumn, BoardColumnProps, FlagColumn, HarnessAuth, HarnessCard, HarnessCardProps,
+    IssueCard, IssueCardProps, IssueInspector, IssueInspectorProps, IssueView, OnFlag,
+    OnPermission, Permission, PermissionMatrix, PermissionMatrixProps, PermissionRow,
 };
 pub use connection::{
     Connection, ConnectionInfo, ConnectionStatus, ConnectionStatusProps, latency_bars,
 };
 pub use form::{
     Field, FieldProps, OnIndex, OnNumber, OnSwitch, Segments, SegmentsProps, Select, SelectProps,
-    Stepper, StepperProps, Toggle, ToggleProps,
+    Stepper, StepperProps, TextInput, TextInputProps, Toggle, ToggleProps,
 };
 pub use page::{
     Command, CommandPalette, CommandPaletteProps, HeaderCell, HeaderCellProps, Module, ModuleProps,
     Notice, NoticeAction, NoticeProps, NoticeTone, OnCommand, PageHeader, PageHeaderProps,
-    filter_commands,
+    ReadoutCell, ReadoutCellProps, filter_commands,
 };
