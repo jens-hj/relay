@@ -8,7 +8,7 @@ pub use crate::tokens::ToolKind;
 use crate::tokens::{ModelFamily, ground};
 use mosaic::prelude::ColorToken;
 
-/// The identity colour of a model: one of the four families, or neutral
+/// The identity colour of a model: a named family, or neutral
 /// for a model without one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ModelHue {
@@ -16,9 +16,14 @@ pub enum ModelHue {
     Opus,
     Sonnet,
     Haiku,
+    Astra,
+    Luna,
+    Terra,
     #[default]
     Neutral,
 }
+
+crate::value::live_value!(ModelHue);
 
 impl ModelHue {
     /// The colour token: the family colour, or muted grey when neutral.
@@ -28,6 +33,9 @@ impl ModelHue {
             ModelHue::Opus => ModelFamily::Opus.token(),
             ModelHue::Sonnet => ModelFamily::Sonnet.token(),
             ModelHue::Haiku => ModelFamily::Haiku.token(),
+            ModelHue::Astra => ModelFamily::Astra.token(),
+            ModelHue::Luna => ModelFamily::Luna.token(),
+            ModelHue::Terra => ModelFamily::Terra.token(),
             ModelHue::Neutral => ground.muted,
         }
     }
@@ -39,6 +47,9 @@ impl From<ModelFamily> for ModelHue {
             ModelFamily::Sol => ModelHue::Sol,
             ModelFamily::Opus => ModelHue::Opus,
             ModelFamily::Sonnet => ModelHue::Sonnet,
+            ModelFamily::Astra => ModelHue::Astra,
+            ModelFamily::Luna => ModelHue::Luna,
+            ModelFamily::Terra => ModelHue::Terra,
             ModelFamily::Haiku => ModelHue::Haiku,
         }
     }

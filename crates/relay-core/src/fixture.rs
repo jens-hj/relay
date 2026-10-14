@@ -34,6 +34,8 @@ pub fn demo_snapshot(defaults: AgentProfile) -> Snapshot {
     }).collect();
     let agent_configs = vec![
         AgentConfig {
+            automatic_name: false,
+            draft_selection: HarnessSelection::default(),
             template: "director".into(),
             id: "director-main".into(),
             project_id: "demo".into(),
@@ -41,6 +43,8 @@ pub fn demo_snapshot(defaults: AgentProfile) -> Snapshot {
             overrides: ProfileOverrides::default(),
         },
         AgentConfig {
+            automatic_name: false,
+            draft_selection: HarnessSelection::default(),
             template: "director".into(),
             id: "director-review".into(),
             project_id: "demo".into(),
@@ -336,6 +340,9 @@ fn session(
     worker: Option<WorkerRun>,
 ) -> Session {
     Session {
+        automatic_name: false,
+        awaiting_first_message: false,
+        archived: false,
         profile: None,
         workspaces: vec![],
         selection: Default::default(),

@@ -230,7 +230,7 @@ pub fn IssueInspector(
     #[prop(optional)] children: Children,
 ) -> Element {
     let head = view! {
-        row height:min-content gap:0px align:start
+        row height:min-content gap:0px
             stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {}
     };
     if let Some(label) = head_label {
@@ -254,7 +254,7 @@ pub fn IssueInspector(
     head.adopt(&titles);
     if let Some(close) = on_close {
         head.adopt(&view! {
-            row width:{px(44.0)}px height:{px(44.0)}px shrink:0 {
+            row width:{px(44.0)}px min-height:{px(44.0)}px shrink:0 {
                 CellButton label:(close_label) on-press:(close) rule:(Rule::Left) {
                     {
                         parent.adopt(&mark(Mark::Cross, 12.0, ground.ink));

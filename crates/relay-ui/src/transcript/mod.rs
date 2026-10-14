@@ -85,6 +85,7 @@ pub fn SpawnBlock(agents: Live<Vec<SpawnChild>>, on_open_tree: OnPress) -> Eleme
             for (key, child) in { agents.get().into_iter().enumerate().map(|(i, c)| ((i, format!("{c:?}")), c)) } {
                 {
                     let line = crate::tree::AgentLine {
+                        archived: false,
                         can_spawn: false,
                         id: format!("spawn-{key:?}"), name: child.name.clone(), status: child.status,
                         harness: child.harness.unwrap_or(Harness::Codex), model: child.model.clone(),
@@ -149,14 +150,30 @@ pub fn ApprovalBlock(
     host
 }
 #[component]
-pub fn ThinkingLine(#[prop(default = Live::fixed(1u8))] effort: Live<u8>) -> Element {
-    view! {
-        stack height:{px(40.0)}px clip {
-            Wash reach:(Derived::new(move || live_reach(effort.get()))) over:(ground.page)
-            row align:center gap:{px(10.0)}px pad:(horizontal:{px(14.0)}px vertical:0px) {
-                StatusSquare status:(AgentStatus::Working)
-                Label text:"Thinking" role:(TextRole::Label) weight:500
-            }
-        }
-    }
+pub fn ThinkingLine(
+    #[prop(default = Live::fixed(1u8))] effort: Live<u8>,
+    #[prop(default = Live::fixed(ModelHue::Neutral))] hue: Live<ModelHue>,
+) -> Element {
+    let host = view! {
+        stack height:{px(40.0)}px clip {}
+    };
+    host.switch(
+        move || hue.get(),
+        move |parent, hue| {
+            let colour = hue.token();
+            let effort = effort.clone();
+            parent.adopt(&view! {
+                stack height:{px(40.0)}px clip {
+                    Dither colour:(colour) gradient:(crate::dither::Gradient::Horizontal)
+                        reach:(Derived::new(move || live_reach(effort.get()))) opacity:0.3 seed:7
+                        over:(ground.page)
+                    row align:center gap:{px(10.0)}px pad:(horizontal:{px(14.0)}px vertical:0px) {
+                        StatusSquare status:(AgentStatus::Working) working-colour:(colour)
+                        Label text:"Thinking" role:(TextRole::Label) weight:500
+                    }
+                }
+            });
+        },
+    );
+    host
 }

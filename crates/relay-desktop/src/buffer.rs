@@ -331,6 +331,9 @@ pub fn execution_problem(model: Model) -> Option<String> {
     let snapshot = model.snapshot.get();
     let id = model.session.get();
     let session = snapshot.sessions.iter().find(|s| s.id == id)?;
+    if session.archived {
+        return Some("Unarchive this chat before continuing".into());
+    }
     let Some(worker) = session.worker.as_ref().filter(|_| !session.fixture) else {
         return Some("This transcript cannot execute turns".into());
     };
@@ -375,7 +378,9 @@ pub fn execution_problem(model: Model) -> Option<String> {
         return Some("No worker slots available".into());
     }
     if !matches!(worker.status, WorkerStatus::Queued | WorkerStatus::Running)
-        && ((worker.thread_id.is_none() && session.conversations.is_empty())
+        && ((worker.thread_id.is_none()
+            && session.conversations.is_empty()
+            && !session.awaiting_first_message)
             || worker.worktree.is_none())
     {
         return Some("This worker has no resumable thread; open its linked issue".into());
@@ -533,6 +538,12 @@ pub fn send(model: Model) {
     let Some(session) = snapshot.sessions.iter().find(|s| s.id == session_id) else {
         return;
     };
+    if session.archived {
+        model
+            .notice
+            .set("Unarchive this chat before continuing".into());
+        return;
+    }
     let Some(_) = session.worker.as_ref().filter(|_| !session.fixture) else {
         model.notice.set("This transcript has no running agent. Drafts can be saved; execution requires a linked worker.".into());
         return;

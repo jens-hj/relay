@@ -81,6 +81,7 @@ impl AgentStatus {
 pub fn StatusSquare(
     /// The state to show.
     status: Live<AgentStatus>,
+    #[prop(optional)] working_colour: Option<ColorToken>,
 ) -> Element {
     let label_status = status.clone();
     let square = view! {
@@ -111,18 +112,38 @@ pub fn StatusSquare(
         });
     }
     square.paint(move |ctx| {
-        paint_status(ctx.scene, ctx.rect, status.get_untracked(), level.get());
+        paint_status_coloured(
+            ctx.scene,
+            ctx.rect,
+            status.get_untracked(),
+            level.get(),
+            working_colour,
+        );
     });
     square
 }
 
 /// Paints a status mark into `rect` (a 10-unit box scaled to the rect).
 pub fn paint_status(scene: &mut Scene, rect: Rect, status: AgentStatus, breath: f32) {
+    paint_status_coloured(scene, rect, status, breath, None);
+}
+
+fn paint_status_coloured(
+    scene: &mut Scene,
+    rect: Rect,
+    status: AgentStatus,
+    breath: f32,
+    working_colour: Option<ColorToken>,
+) {
     let unit = rect.size.width / 10.0;
     let at = |x: f32, y: f32| Vector2::new(rect.origin.x + x * unit, rect.origin.y + y * unit);
     let local = |x: f32, y: f32| Vector2::new((x - 5.0) * unit, (y - 5.0) * unit);
     let inner = Rect::from_xywh(at(1.0, 1.0).x, at(1.0, 1.0).y, 8.0 * unit, 8.0 * unit);
-    let tint = color(status.token());
+    let tint = color(if status == AgentStatus::Working {
+        working_colour.unwrap_or(status.token())
+    } else {
+        status.token()
+    });
     match status {
         AgentStatus::Idle => {}
         AgentStatus::Working => {

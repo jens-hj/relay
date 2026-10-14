@@ -439,7 +439,7 @@ pub fn approval_view(
         path: below
             .then(|| ancestor_path(snapshot, &permission.session_id).join(" / "))
             .filter(|path| !path.is_empty()),
-        heading: format!("Approval requested · {}", action(&permission.tool)),
+        heading: format!("Approval Requested · {}", action(&permission.tool)),
         command: (!description.trim().is_empty()).then_some(description),
         why: None,
         touches: None,

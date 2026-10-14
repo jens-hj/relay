@@ -207,6 +207,7 @@ pub enum Guide {
 /// Everything a tree row draws.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AgentLine {
+    pub archived: bool,
     pub can_spawn: bool,
     pub id: String,
     pub name: String,
@@ -342,6 +343,7 @@ fn walk(
     let expandable = has_children && !folds;
     let expanded = expandable && (node.expanded || options.filter.is_some());
     out.push(TreeLine::Agent(AgentLine {
+        archived: node.archived,
         can_spawn: node.can_spawn,
         id: node.id.clone(),
         name: node.name.clone(),

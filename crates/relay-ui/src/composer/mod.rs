@@ -43,7 +43,15 @@ pub fn Ledger(data: Live<LedgerView>, actions: LedgerActions) -> Element {
 }
 fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
     let colour = vm.model.hue.token();
-    let e = vm.effort;
+    let mut e = vm.effort;
+    if let Some(step) = vm.pending_effort {
+        e.current = step;
+    }
+    let effort_colour = if vm.pending_effort.is_some() {
+        ground.muted
+    } else {
+        colour
+    };
     let track = e.levels > 0 || e.has_max();
     let named = (!track).then(|| vm.effort_label.clone()).flatten();
     let tall = !track && named.is_none();
@@ -87,7 +95,7 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
                     }
                     col width:{px(22.0)}px align:center justify:center
                         stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
-                        { if e.levels > 0 || e.has_max() { let track = view! { EffortTrack levels:(e.levels) current:(e.selected()) tiers:(e.tiers) colour:(colour) orientation:(Orientation::Vertical) names:(e.step_names()) on-select:(Some(actions.set_effort)) }; track.style_dyn(|| Style::default().size(px(12.0), px(78.0)).shrink(0.0)); parent.adopt(&track); } }
+                        { if e.levels > 0 || e.has_max() { let track = view! { EffortTrack levels:(e.levels) current:(e.selected()) tiers:(e.tiers) colour:(effort_colour) orientation:(Orientation::Vertical) names:(e.step_names()) on-select:(Some(actions.set_effort)) }; track.style_dyn(|| Style::default().size(px(12.0), px(78.0)).shrink(0.0)); parent.adopt(&track); } }
                     }
                 }
                 col height:{px(22.0)}px {
@@ -158,7 +166,7 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
                                 row width:max-content height:min-content align:center
                                     gap:{px(5.0)}px {
                                     Label text:(e.name()) role:(TextRole::BodyLarge) weight:600
-                                        tone:(if e.at_max() { Tone::Colour(colour) } else { Tone::Ink })
+                                        tone:(if vm.pending_effort.is_some() { Tone::Muted } else if e.at_max() { Tone::Colour(colour) } else { Tone::Ink })
                                     Label
                                         text:(format!("{:02}/{:02}", e.selected() as u16 + 1, e.levels as u16 + e.tiers as u16))
                                         role:(TextRole::Micro) tone:(Tone::Muted)
@@ -166,7 +174,7 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
                             }
                         }
                         EffortTrack levels:(e.levels) current:(e.selected()) tiers:(e.tiers)
-                            colour:(colour) names:(e.step_names())
+                            colour:(effort_colour) names:(e.step_names())
                             on-select:(Some(actions.set_effort.clone()))
                     }
                 }
@@ -205,6 +213,9 @@ pub fn ReplyStrip(quote: UiText, on_source: OnPress, on_remove: OnPress) -> Elem
 /// `has-content` and retain their own buffer and submission logic.
 #[component]
 pub fn Composer(
+    #[prop(default = false)] inline: bool,
+    #[prop(default = Live::fixed(false))] stacked: Live<bool>,
+    #[prop(default = Live::fixed(116.0))] minimum_height: Live<f32>,
     settings: Live<LedgerView>,
     ledger_actions: LedgerActions,
     #[prop(default = State::new(String::new()))] value: State<String>,
@@ -215,12 +226,14 @@ pub fn Composer(
     #[prop(optional)]
     has_content: Option<Live<bool>>,
     #[prop(default = Live::fixed(false))] pending: Live<bool>,
+    #[prop(default = Live::fixed(false))] disabled: Live<bool>,
     #[prop(default = UiText::fixed(String::new()))] placeholder: UiText,
     /// The key hint under the message; injected editors describe their own keys.
     #[prop(default = UiText::fixed("↵ send · ⇧↵ new line".to_owned()))]
     hint: UiText,
 ) -> Element {
     let pending = Derived::new(move || pending.get());
+    let disabled = Derived::new(move || disabled.get());
     let content = Derived::new(move || {
         has_content
             .as_ref()
@@ -266,7 +279,8 @@ pub fn Composer(
             {
                 let previous = before_key.borrow().clone();
                 value.set(previous.clone());
-                if content.get_untracked() {
+                if content.get_untracked() && !pending.get_untracked() && !disabled.get_untracked()
+                {
                     send_key();
                 }
                 ctx.stop_propagation();
@@ -280,6 +294,43 @@ pub fn Composer(
     area.adopt(&view! {
         Label text:(hint) role:(TextRole::Micro) tone:(Tone::Faint)
     });
+    if inline {
+        return view! {
+            grid
+                cols:{if stacked.get() { GridTracks::new([GridTrack::fr(1.0)]) } else { GridTracks::new([GridTrack::MaxContent, GridTrack::fr(1.0)]) }}
+                height:min-content min-height:{px(minimum_height.get())}px font-family:monospace
+                font-color:ground.ink {
+                row width:max-content height:min-content align:start {
+                    Ledger data:(settings) actions:(ledger_actions) height:(Dimension::MinContent)
+                    col width:{px(62.0)}px shrink:0 height:min-content gap:{px(4.0)}px
+                        pad:(top:{px(12.0)}px) {
+                        Label text:"You" role:(TextRole::Label) tone:(Tone::Muted) weight:500
+                        button
+                            @click:{if content.get_untracked() && !pending.get_untracked() && !disabled.get_untracked() { send(); }}
+                            width:fill height:{px(40.0)}px radius:0px pad:0px align:center
+                            justify:center label:"Send message"
+                            disabled:{!content.get() || pending.get() || disabled.get()}
+                            fill:(Color::TRANSPARENT) font-color:ground.ink
+                            hover { fill:ground.hover } pressed { fill:ground.pressed }
+                            focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
+                            if pending.get() {
+                                { parent.adopt(&pending_mark()); }
+                            } else {
+                                text font-size:{px(22.0)}px {"↑"}
+                            }
+                        }
+                        row height:{px(40.0)}px {
+                            CellButton label:"Attach file" on-press:(on_attach)
+                                horizontal-inset:0.0 {
+                                Label text:"+" role:(TextRole::BodyLarge)
+                            }
+                        }
+                    }
+                }
+                { parent.adopt(&area); }
+            }
+        };
+    }
     view! {
         row height:min-content min-height:{px(116.0)}px fill:ground.panel font-family:monospace
             font-color:ground.ink stroke:(width:{px(1.0)} color:ground.rule) {
@@ -291,9 +342,11 @@ pub fn Composer(
                         Label text:"+" role:(TextRole::BodyLarge)
                     }
                 }
-                button @click:{if content.get_untracked() && !pending.get_untracked() { send(); }}
+                button
+                    @click:{if content.get_untracked() && !pending.get_untracked() && !disabled.get_untracked() { send(); }}
                     width:fill height:1fr align:center justify:center pad:0px radius:0px
-                    label:"Send message" disabled:{!content.get() || pending.get()}
+                    label:"Send message"
+                    disabled:{!content.get() || pending.get() || disabled.get()}
                     description:{if pending.get() {"Awaiting server acknowledgement"} else {""}}
                     fill:{if content.get() { mosaic::core::theme::color(ground.ink) } else { quiet_send(true) }}
                     font-color:{if content.get() { mosaic::core::theme::color(ground.inverse) } else { quiet_send(false) }}

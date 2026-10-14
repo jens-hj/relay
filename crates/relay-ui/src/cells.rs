@@ -176,7 +176,7 @@ pub fn CellButton(
     let edges = take_rule(rule);
     let about = description.clone();
     with_ruling(None, || {
-        view! {
+        let cell = view! {
             button @click:{on_press()} width:fill height:fill min-width:0px align:center
                 justify:{if start { Justify::Start } else { Justify::Center }} gap:{px(8.0)}px
                 pad:(horizontal:{px(horizontal_inset)}px vertical:0px) radius:0px
@@ -188,7 +188,14 @@ pub fn CellButton(
                 focused { stroke:+(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
                 children
             }
-        }
+        };
+        let reveal = cell.clone();
+        cell.on_focus_change(move |focused| {
+            if focused && reveal.interaction().focus_visible() {
+                reveal.reveal();
+            }
+        });
+        cell
     })
 }
 

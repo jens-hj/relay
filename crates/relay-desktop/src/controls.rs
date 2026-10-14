@@ -70,14 +70,19 @@ pub fn ContrastToggle(model: Model) -> Element {
 /// of its row.
 #[component]
 pub fn ResetSetting(model: Model, setting: Setting, name: String) -> Element {
+    let name = State::new(name);
     let unchanged = Derived::new(move || !model.preferences.get().overridden(setting));
     view! {
-        row width:{px(40.0)}px shrink:0 {
-            CellButton label:(format!("Reset {name}")) rule:(Rule::Left) horizontal-inset:(0.0)
-                disabled:(unchanged)
-                on-press:(Rc::new(move || model.preferences.update(|p| p.reset(setting))) as relay_ui::prelude::OnPress) {
-                Tooltip text:(format!("Reset {name} to default")) {
-                    icon size:{px(16.0)}px stroke:ground.ink reset-icon
+        row width:max-content shrink:0 {
+            if !unchanged.get() {
+                row width:{px(40.0)}px shrink:0 {
+                    CellButton label:(format!("Reset {}", name.get())) rule:(Rule::Left)
+                        horizontal-inset:(0.0)
+                        on-press:(Rc::new(move || model.preferences.update(|p| p.reset(setting))) as relay_ui::prelude::OnPress) {
+                        Tooltip text:(format!("Reset {} to default", name.get())) {
+                            icon size:{px(16.0)}px stroke:ground.ink reset-icon
+                        }
+                    }
                 }
             }
         }

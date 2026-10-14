@@ -183,6 +183,8 @@ pub(super) fn add_project(
             }),
         });
         snapshot.agent_configs.push(AgentConfig {
+            automatic_name: false,
+            draft_selection: HarnessSelection::default(),
             template: "director".into(),
             id: format!("agent-config-{id}"),
             project_id: id.clone(),

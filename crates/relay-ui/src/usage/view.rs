@@ -262,18 +262,18 @@ pub fn UsageRow(
         });
     }
     view! {
-        button @click:{on_press()} width:fill height:min-content radius:0px
-            pad:(horizontal:{px(18.0)}px vertical:{px(5.0)}px) gap:{px(10.0)}px align:center
-            fill:(Color::TRANSPARENT) font-color:ground.ink label:(label)
-            hover { fill:ground.hover } pressed { fill:ground.pressed }
-            focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
-            row width:{px(16.0)}px height:min-content shrink:0 justify:center {
-                Tooltip text:(name) {
+        Tooltip text:(name) width:(Dimension::Fill) {
+            button @click:{on_press()} width:fill height:min-content radius:0px
+                pad:(horizontal:{px(18.0)}px vertical:{px(5.0)}px) gap:{px(10.0)}px align:center
+                fill:(Color::TRANSPARENT) font-color:ground.ink label:(label)
+                hover { fill:ground.hover } pressed { fill:ground.pressed }
+                focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
+                row width:{px(16.0)}px height:min-content shrink:0 justify:center {
                     HarnessGlyph harness:(usage.harness)
                 }
-            }
-            {
-                parent.adopt(&bars);
+                {
+                    parent.adopt(&bars);
+                }
             }
         }
     }
@@ -532,9 +532,7 @@ pub fn UsageFoot(
         },
     );
     view! {
-        col height:min-content shrink:0 fill:ground.panel
-            stroke:(width:{px(1.0)} color:ground.rule offset:{px(-0.5)} edges:(left right))
-            label:"Usage foot" {
+        col height:min-content shrink:0 fill:ground.panel label:"Usage foot" {
             el width:fill height:{px(1.0)}px shrink:0 fill:ground.rule label:"Usage boundary"
                 nohit {}
             row height:min-content gap:{px(8.0)}px align:end

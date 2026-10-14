@@ -386,6 +386,8 @@ pub(super) fn apply(
                 github: None,
             });
             snapshot.agent_configs.push(AgentConfig {
+                automatic_name: false,
+                draft_selection: HarnessSelection::default(),
                 template: "director".into(),
                 id: format!("agent-config-{id}"),
                 project_id: id.clone(),
@@ -815,7 +817,14 @@ pub(super) fn apply(
             parts: _,
             approve_implementation,
         } => {
-            return start(
+            let selection = snapshot
+                .agent_configs
+                .iter()
+                .find(|c| c.id == agent_config_id)
+                .ok_or_else(|| Error::invalid("Agent configuration not found"))?
+                .draft_selection
+                .clone();
+            let action = start(
                 snapshot,
                 request,
                 &agent_config_id,
@@ -825,7 +834,14 @@ pub(super) fn apply(
                 approve_implementation,
                 None,
                 config,
-            );
+            )?;
+            snapshot
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == format!("session-{request}"))
+                .unwrap()
+                .selection = selection;
+            return Ok(action);
         }
         Command::StartSession {
             agent_config_id,
@@ -1039,7 +1055,11 @@ fn start(
         .map_err(Error::invalid)?;
     let session_id = format!("session-{request}");
     let title = if role == SessionRole::Root {
-        director.name.clone()
+        if director.automatic_name {
+            crate::task_title(&prompt)
+        } else {
+            director.name.clone()
+        }
     } else {
         snapshot
             .issues
@@ -1050,6 +1070,9 @@ fn start(
             .clone()
     };
     snapshot.sessions.push(Session {
+        automatic_name: role == SessionRole::Root && director.automatic_name,
+        awaiting_first_message: false,
+        archived: false,
         profile: None,
         parent_session_id: None,
         spawn: None,

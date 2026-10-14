@@ -341,13 +341,18 @@ fn authorize(
         .position(|s| s.id == session)
         .ok_or_else(|| Error::invalid("Session not found"))?;
     let session = candidate.sessions.remove(index);
+    if session.archived {
+        return Err(Error::invalid("Unarchive this chat before continuing"));
+    }
     if session.fixture || session.worker.is_none() {
         return Err(Error::invalid("This session cannot run agent turns"));
     }
     runtime::check_shared(snapshot, &session.id)?;
     let worker = session.worker.as_ref().unwrap();
     if !runtime::active(&worker.status)
-        && ((worker.thread_id.is_none() && session.conversations.is_empty())
+        && ((worker.thread_id.is_none()
+            && session.conversations.is_empty()
+            && !session.awaiting_first_message)
             || worker.worktree.is_none())
     {
         return Err(Error::invalid(
@@ -393,7 +398,13 @@ pub(super) fn apply(
                 .worker
                 .as_ref()
                 .unwrap();
-            if !runtime::active(&worker.status)
+            if !snapshot
+                .sessions
+                .iter()
+                .find(|s| s.id == session_id)
+                .unwrap()
+                .awaiting_first_message
+                && !runtime::active(&worker.status)
                 && ((worker.thread_id.is_none()
                     && snapshot
                         .sessions
@@ -664,6 +675,20 @@ pub(super) fn apply(
 }
 
 fn reserve(snapshot: &mut Snapshot, session: &str, id: &str, parts: &[Part]) {
+    let agent = snapshot
+        .sessions
+        .iter_mut()
+        .find(|s| s.id == session)
+        .unwrap();
+    if agent.awaiting_first_message {
+        if agent.automatic_name {
+            agent.title = crate::task_title(&plain_text(parts));
+        }
+        if let Some(spawn) = agent.spawn.as_mut() {
+            spawn.task = plain_text(parts);
+        }
+        agent.awaiting_first_message = false;
+    }
     let worker = snapshot
         .sessions
         .iter_mut()

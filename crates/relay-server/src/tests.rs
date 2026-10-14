@@ -1020,7 +1020,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            13
+            16
         );
         drop(store);
         let mut reopened = Store::open(&db, AgentProfile::default()).unwrap();
@@ -1114,7 +1114,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 14)
+        .pragma_update(None, "user_version", 17)
         .unwrap();
     drop(store);
     let error = Store::open(&db, AgentProfile::default()).err().unwrap();
@@ -1124,7 +1124,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        14
+        17
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -3306,4 +3306,74 @@ async fn paused_queue_holds_turns_after_the_current_one_until_resumed() {
 
 fn revision(w: &Workspace) -> u64 {
     w.snapshots.borrow().revision
+}
+
+#[test]
+fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("archive.sqlite");
+    let defaults = AgentProfile::default();
+    let store = Store::open(&path, defaults.clone()).unwrap();
+    let original = store.snapshot().unwrap();
+    let mut json = serde_json::to_value(&original).unwrap();
+    for session in json["sessions"].as_array_mut().unwrap() {
+        session.as_object_mut().unwrap().remove("archived");
+    }
+    store
+        .connection
+        .execute(
+            "UPDATE workspace SET snapshot=?1 WHERE id=1",
+            [serde_json::to_string(&json).unwrap()],
+        )
+        .unwrap();
+    store
+        .connection
+        .pragma_update(None, "user_version", 13)
+        .unwrap();
+    drop(store);
+    let mut store = Store::open(&path, defaults.clone()).unwrap();
+    let upgraded = store.snapshot().unwrap();
+    assert!(upgraded.sessions.iter().all(|s| !s.archived));
+    assert_eq!(upgraded.messages, original.messages);
+    assert_eq!(upgraded.protocol_version, PROTOCOL_VERSION);
+    let id = upgraded
+        .sessions
+        .iter()
+        .find(|s| {
+            s.worker
+                .as_ref()
+                .is_none_or(|w| !runtime::active(&w.status))
+        })
+        .unwrap()
+        .id
+        .clone();
+    store
+        .apply(
+            env(
+                upgraded.revision,
+                Command::SetSessionArchived {
+                    session_id: id.clone(),
+                    archived: true,
+                },
+            ),
+            &config(),
+        )
+        .unwrap();
+    drop(store);
+    let store = Store::open(&path, defaults).unwrap();
+    assert!(
+        store
+            .snapshot()
+            .unwrap()
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .archived
+    );
+    let schema: u32 = store
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema, 16);
 }

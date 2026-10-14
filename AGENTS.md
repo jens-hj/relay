@@ -29,6 +29,8 @@ If a credential is exposed, treat it as compromised. Rotate it without printing 
 
 Keep product UI copy plain, functional, and concise. Do not add marketing slogans, taglines, promotional filler, or decorative copy such as "your team, in motion". Use clear names for actions, settings, and state.
 
+Use Title Case for all app-owned headings and section titles. Capitalize principal words; keep short articles, conjunctions, and prepositions lowercase unless they begin or end the heading. Preserve acronyms, product names, and user-authored titles.
+
 Minimize visual nesting. Let sections and controls share their parent's borders, with only the dividers needed to distinguish them. Avoid inset framed cards or controls inside already framed panels. Put padding inside headings, text, and controls rather than around groups of framed elements. Header actions should fill their cells and align with adjacent sections; keep focus and selection states clear.
 
 `relay-core` owns the shared protocol and profile types. `relay-server` owns storage, GitHub synchronization, permissions, processes, and event publication. `relay-desktop` owns native presentation and networking. Keep shared-contract changes coordinated across both sides; preserve existing database data and bump the schema version when older servers could lose new state.

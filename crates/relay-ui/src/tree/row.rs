@@ -56,16 +56,27 @@ pub(crate) fn elbow_cells(parent: &Element, guides: &[Guide]) {
     if guides.is_empty() {
         return;
     }
+    let columns = guides.to_vec();
+    let count = columns.len();
     let group = view! {
-        row width:max-content gap:0px shrink:0 nohit {}
+        el width:{px(mosaic::core::theme::scalar(shape.indent) * count as f32)}px
+            height:{px(ROW_HEIGHT)}px shrink:0 nohit {}
     };
-    for &guide in guides {
-        let cell = view! {
-            el width:{px(mosaic::core::theme::scalar(shape.indent))}px height:fill shrink:0 nohit {}
-        };
-        cell.paint(move |ctx| paint_guide(ctx.scene, ctx.rect, guide));
-        group.adopt(&cell);
-    }
+    group.paint(move |ctx| {
+        let width = ctx.rect.size.width / count as f32;
+        for (index, guide) in columns.iter().copied().enumerate() {
+            paint_guide(
+                ctx.scene,
+                Rect::from_xywh(
+                    ctx.rect.origin.x + index as f32 * width,
+                    ctx.rect.origin.y,
+                    width,
+                    ctx.rect.size.height,
+                ),
+                guide,
+            );
+        }
+    });
     parent.adopt(&group);
 }
 
@@ -238,6 +249,9 @@ pub fn AgentTreeRow(
             hover { fill:ground.hover }
             focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {}
     };
+    if line.archived {
+        row.opacity(0.45);
+    }
     row.role(Role::ListItem);
     row.focusable(true);
     match line.status {
@@ -329,24 +343,55 @@ pub fn AgentTreeRow(
             });
         }
     }
-    if let Some(spawn) = on_spawn {
+    row.adopt(&outer);
+    if let Some(spawn) = on_spawn.filter(|_| !line.archived) {
         let id = line.id.clone();
         let interaction = row.interaction();
         let action = view! {
             button @click:{spawn(id.clone())} width:{px(26.0)}px height:{px(26.0)}px shrink:0
-                pad:0px radius:0px fill:(Color::TRANSPARENT) disabled:{!line.can_spawn}
-                label:(format!("New worker for {}", line.name)) hover { fill:ground.hover }
+                align:center justify:center pad:0px radius:0px fill:(under)
+                disabled:{!line.can_spawn} label:(format!("New worker for {}", line.name))
+                hover { fill:ground.panel-raised }
                 focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
                 { parent.adopt(&crate::marks::mark(crate::marks::Mark::Plus, 12.0, ground.ink)); }
             }
         };
         let button_interaction = action.interaction();
-        action.opacity_dyn(move || {
-            if interaction.hovered() || interaction.focused() || button_interaction.focused() {
-                1.0
-            } else {
-                0.0
+        action.opacity(0.0);
+        let fade = Rc::new(std::cell::Cell::new(0.0f32));
+        let destination = Rc::new(std::cell::Cell::new(0.0f32));
+        let animating = Rc::new(std::cell::Cell::new(false));
+        let animated = action.clone();
+        Effect::new(move || {
+            destination.set(
+                if interaction.hovered() || interaction.focused() || button_interaction.focused() {
+                    1.0
+                } else {
+                    0.0
+                },
+            );
+            if animating.replace(true) {
+                return;
             }
+            let (fade, destination, animating, target) = (
+                fade.clone(),
+                destination.clone(),
+                animating.clone(),
+                animated.clone(),
+            );
+            animated.animate(move |dt| {
+                let distance = destination.get() - fade.get();
+                let step = dt.as_secs_f32() / 0.12;
+                let next = fade.get() + distance.signum() * step.min(distance.abs());
+                fade.set(next);
+                target.opacity(next);
+                if (destination.get() - next).abs() < 0.001 {
+                    animating.set(false);
+                    mosaic::widgets::Tick::Done
+                } else {
+                    mosaic::widgets::Tick::Sleep(std::time::Duration::from_millis(16))
+                }
+            });
         });
         let hit = action.clone();
         Effect::new(move || {
@@ -362,14 +407,15 @@ pub fn AgentTreeRow(
                 ctx.stop_propagation();
             }
         });
-        content.adopt(&view! {
-            Tooltip
-                text:(if line.can_spawn { "New Worker" } else { "New Worker · start this agent first" }) {
-                { parent.adopt(&action); }
+        row.adopt(&view! {
+            row align:center justify:end pad:(right:{px(14.0)}px) {
+                Tooltip
+                    text:(if line.can_spawn { "New Worker" } else { "New Worker · start this agent first" }) {
+                    { parent.adopt(&action); }
+                }
             }
         });
     }
-    row.adopt(&outer);
     {
         let open = on_open.clone();
         let id = line.id.clone();

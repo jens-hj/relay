@@ -231,7 +231,7 @@ const PALETTE_ACTIONS: [(&str, &str); 11] = [
     ("Open settings", "Settings"),
     ("Project Connections", "Project"),
     ("New Project", "Create"),
-    ("Publish board", "Board"),
+    ("Publish Board", "Board"),
 ];
 
 /// The icon of a palette category.
@@ -277,7 +277,7 @@ fn Palette(model: Model) -> Element {
         Derived::new(move || ((available_height.get() / px(1.0)) - 194.0).clamp(80.0, 420.0));
     let panel = view! {
         CommandPalette commands:(commands) query:(model.palette_query) on-run:(run)
-            title:(Some("Command palette".to_string()))
+            title:(Some("Command Palette".to_string()))
             on-close:(Some(press(move || model.palette.set(false))))
             close-label:"Close command palette" field-label:"Command search"
             placeholder:"Find an action…" footer:true autofocus:true
@@ -312,7 +312,7 @@ fn Palette(model: Model) -> Element {
             previous.focus();
         }
     });
-    view.label("Command palette");
+    view.label("Command Palette");
     view
 }
 
@@ -339,14 +339,14 @@ fn palette_action(model: Model, index: usize) {
 
 fn page_label(page: Page) -> &'static str {
     match page {
-        Page::Board => "Project board",
+        Page::Board => "Project Board",
         Page::Sessions => "Sessions",
         Page::Profiles => "Directors",
         Page::Settings => "Settings",
         Page::NewProject => "New Project",
         Page::Connections => "Project Connections",
-        Page::Publish => "Publish board",
-        Page::AgentStart => "Agent conversation",
+        Page::Publish => "Publish Board",
+        Page::AgentStart => "Agent Conversation",
     }
 }
 
@@ -374,14 +374,35 @@ pub(crate) fn action_cell(
     disabled: impl Fn() -> bool + 'static,
     handler: impl Fn() + 'static,
 ) -> Element {
+    action_cell_contents(label, text, None, disabled, handler)
+}
+
+pub(crate) fn icon_action_cell(
+    label: impl Into<String>,
+    text: impl Into<String>,
+    icon: SvgToken,
+    disabled: impl Fn() -> bool + 'static,
+    handler: impl Fn() + 'static,
+) -> Element {
+    action_cell_contents(label, text, Some(icon), disabled, handler)
+}
+
+fn action_cell_contents(
+    label: impl Into<String>,
+    text: impl Into<String>,
+    icon: Option<SvgToken>,
+    disabled: impl Fn() -> bool + 'static,
+    handler: impl Fn() + 'static,
+) -> Element {
     use relay_ui::prelude::{CellButton, CellButtonProps, Label, LabelProps, TextRole};
     let label = label.into();
     let text = text.into();
     let blocked = Derived::new(disabled);
     view! {
         row height:{px(36.0)}px min-width:0px shrink:0
-            stroke:(width:{px(1.0)} color:ground.hairline edges:(right bottom)) {
+            stroke:(width:{px(1.0)} color:ground.hairline edges:(right bottom) offset:{px(-1.0)}) {
             CellButton label:(label) on-press:(press(handler)) disabled:(blocked) {
+                { if let Some(icon) = icon { parent.adopt(&relay_ui::icons::icon_mark(icon, 14.0)); } }
                 Label text:(text) role:(TextRole::Label) weight:500
             }
         }

@@ -466,11 +466,18 @@ fn harness_command_panel_is_attached_bounded_and_escape_restores_draft_focus() {
         assert!(panel.size.height <= 280.1 && panel.size.height > 0.0);
         assert!(panel.origin.x >= transcript.origin.x && panel.max_x() <= transcript.max_x());
         assert!(
-            transcript.max_y() <= panel.origin.y + 0.1,
+            panel.origin.y >= transcript.origin.y - 0.1
+                && panel.max_y() <= transcript.max_y() + 0.1,
             "{width}x{height}: transcript {transcript:?}, panel {panel:?}, composer {composer:?}"
         );
-        assert!(transcript.size.height < before.size.height);
-        assert!(composer.max_y() <= height + 0.1);
+        assert_eq!(
+            transcript.size.height, before.size.height,
+            "the panel belongs to the shared transcript viewport"
+        );
+        assert!(
+            composer.size.height > 0.0,
+            "the inline draft stays mounted below the command panel"
+        );
         assert_eq!(
             focused_label(&mounted).as_deref(),
             Some("Choose model Model 0")
@@ -500,6 +507,11 @@ fn harness_command_panel_is_attached_bounded_and_escape_restores_draft_focus() {
         crate::command_ui::open(mounted.model, "model");
         mounted.settle();
         mounted.click("Close commands");
+        assert!(
+            mounted.model.command_flow.get_untracked().is_empty(),
+            "close command click missed: {:?}",
+            mounted.rect("Close commands")
+        );
         assert_eq!(focused_label(&mounted).as_deref(), Some(draft.as_str()));
         crate::command_ui::open(mounted.model, "model");
         mounted.settle();
@@ -1296,7 +1308,7 @@ fn command_palette_shares_edges_scrolls_and_dismisses_without_clicking_through()
                 && results.origin.y + results.size.height <= panel.origin.y + panel.size.height,
             "{results:?} {panel:?}"
         );
-        for label in ["Open board", "Open sessions", "Publish board"] {
+        for label in ["Open board", "Open sessions", "Publish Board"] {
             let action = mounted.rect(label);
             assert!((action.origin.x - panel.origin.x).abs() < 1.0);
             assert!((action.size.width - panel.size.width).abs() < 1.0);
@@ -1544,6 +1556,12 @@ fn live_worker_approval_failure_retry_and_ack_open_exact_session() {
         .worker_prompt
         .set("Implement the issue".into());
     mounted.settle();
+    let policy = mounted.rect("Worker policy");
+    for field in ["Harness", "Implement", "Scope", "Workers"] {
+        let cell = mounted.rect(&format!("Worker policy {field}"));
+        assert!((cell.origin.y - policy.origin.y).abs() < 1.0);
+        assert!((cell.size.height - policy.size.height).abs() < 1.0);
+    }
     assert!(
         mounted
             .model
@@ -3027,7 +3045,9 @@ fn browser_visual_viewport_reflows_chat_without_resizing_the_canvas() {
         assert!(caret.origin.y >= viewport.origin.y - 0.5);
         assert!(
             caret.origin.y + caret.size.height <= viewport.origin.y + viewport.size.height + 0.5,
-            "caret must fit the visible chat while the canvas stays 390×900: {caret:?} / {viewport:?}"
+            "caret must fit the visible chat while the canvas stays 390×900: {caret:?} / {viewport:?}; field {:?}; composer {:?}",
+            tree.node(field).unwrap().rect,
+            mounted.rect("Message composer")
         );
         assert_eq!(mounted.ui.focused().unwrap().id(), field);
         assert_eq!(
@@ -3309,6 +3329,11 @@ fn board_memberships_selection_and_project_switching_preserve_running_sessions()
     let original_sessions = snapshot.sessions.clone();
     mounted.model.snapshot.set(snapshot);
     mounted.settle();
+    let group = mounted.rect("Board selector");
+    let choice = mounted.rect("Select board Second board");
+    assert!(choice.origin.y > group.origin.y);
+    assert!(choice.size.height >= 30.0);
+    assert!(choice.origin.y + choice.size.height <= group.origin.y + group.size.height + 1.0);
     let task = mounted
         .model
         .snapshot
@@ -3488,12 +3513,15 @@ fn appearance_radios_arrow_keys_and_scale_stepper_keep_accessible_semantics() {
         mounted.model.preferences.get_untracked().mode,
         crate::settings::ThemeMode::System
     );
+    assert!(!has_label(&mounted, "Reset interface scale"));
     mounted.focus("Interface scale percent");
     mounted.key(Key::ArrowUp, false);
     assert!((mounted.model.preferences.get_untracked().scale - 1.1).abs() < 0.001);
     mounted.focus("Reset interface scale");
     mounted.key(Key::Enter, false);
     assert_eq!(mounted.model.preferences.get_untracked().scale, 1.0);
+    mounted.settle();
+    assert!(!has_label(&mounted, "Reset interface scale"));
 }
 
 #[test]
@@ -4995,7 +5023,7 @@ fn provenance_names_connections_and_omits_unrecorded_values() {
         ]
     );
     let worker = &groups[1];
-    assert_eq!(worker.title, "Worker run");
+    assert_eq!(worker.title, "Worker Run");
     assert!(
         worker
             .rows
@@ -5072,6 +5100,8 @@ fn board_chrome_aligns_with_the_sidebar_and_frames_cards() {
     assert!(issue.origin.y < 1.0, "{issue:?}");
     assert!(issue.size.height >= 91.5, "{issue:?}");
     assert!(close.origin.y >= issue.origin.y && bottom(close) <= bottom(issue));
+    assert!((close.origin.y - issue.origin.y).abs() < 1.0);
+    assert!((close.size.height - issue.size.height).abs() < 1.0);
 }
 
 #[test]
@@ -5216,7 +5246,7 @@ fn fixture_projects_read_as_fixtures_and_local_projects_keep_their_status() {
             .all(|d| d.starts_with("Ready to scope ·")),
         "{local_cards:?}"
     );
-    for cell in ["Tasks", "Running", "Waiting", "Project workers"] {
+    for cell in ["Tasks", "Running", "Waiting", "Project Workers"] {
         assert!(has_label(&mounted, cell), "{cell}");
     }
 }
@@ -5265,12 +5295,12 @@ fn board_actions_menu_closes_on_escape_and_outside_clicks_and_reopens_at_once() 
     // Pressing another control closes the menu and still activates it.
     mounted.click("Board actions");
     assert!(has_label(&mounted, "Manage columns"));
-    mounted.click("New task");
+    mounted.click("New Task");
     assert!(closed(&mounted), "another control");
     assert!(has_label(&mounted, "New task title"));
     // Menu items act before the menu closes.
     mounted.click("Board actions");
-    mounted.click("Operation history");
+    mounted.click("Operation History");
     assert!(closed(&mounted));
     assert!(has_label(&mounted, "Completed operations"));
 }
@@ -5326,11 +5356,26 @@ fn profile_field_headers_contain_their_text_and_controls() {
             }
             mounted.settle();
             let snapshot = mounted.ui.inspection_snapshot();
+            if let Some(divider) = snapshot
+                .nodes
+                .iter()
+                .find(|n| n.label.as_deref() == Some("Profile column divider"))
+            {
+                let workers = mounted.rect("Concurrent Workers field header");
+                assert!(divider.rect.size.width > 0.0);
+                assert!(
+                    divider.rect.origin.y + divider.rect.size.height
+                        >= workers.origin.y + workers.size.height + relay_ui::tokens::px(40.0)
+                            - 1.0,
+                    "column divider must extend through the worker count row: {:?}",
+                    divider.rect
+                );
+            }
             for title in [
-                "Agent harness",
-                "Execution approval",
+                "Agent Harness",
+                "Execution Approval",
                 "Scope",
-                "Concurrent workers",
+                "Concurrent Workers",
             ] {
                 let label = format!("{title} field header");
                 let head = snapshot
@@ -5423,7 +5468,11 @@ fn profile_fields_remain_reachable_at_double_scale_without_rebuilding_the_draft(
         .model
         .open_profile(EditTarget::Config("director-main".into()));
     mounted.settle();
-    type_in(&mounted, "Agent name", "Retained director draft");
+    type_in(
+        &mounted,
+        "Custom name (optional)",
+        "Retained director draft",
+    );
     mounted.focus("Deploy permission: Allow");
     let control = mounted.rect("Deploy permission: Allow");
     assert!(
@@ -5497,7 +5546,7 @@ fn profile_scope_reacts_to_publication_and_harness_choice_reports_actual_availab
         .open_profile(EditTarget::Config("director-main".into()));
     mounted.settle();
     assert!(has_label(&mounted, "Scope Local task title"));
-    type_in(&mounted, "Agent name", "Unsubmitted edit");
+    type_in(&mounted, "Custom name (optional)", "Unsubmitted edit");
     let task = snapshot
         .issues
         .iter_mut()
@@ -5593,12 +5642,12 @@ fn new_task_draft_survives_closing_and_reopening_the_form() {
         ..Default::default()
     });
     mounted.settle();
-    mounted.click("New task");
+    mounted.click("New Task");
     type_in(&mounted, "New task title", "Kept title");
     type_in(&mounted, "New task body", "Kept body");
-    mounted.click("New task");
+    mounted.click("New Task");
     assert!(!has_label(&mounted, "New task title"));
-    mounted.click("New task");
+    mounted.click("New Task");
     mounted.click("Create task");
     let request = mounted.commands.try_recv().unwrap();
     assert!(
@@ -5950,7 +5999,7 @@ fn bounded_operation_history_exposes_recorded_results_and_keeps_close_reachable(
     mounted.model.snapshot.set(snapshot);
     mounted.settle();
     mounted.click("Board actions");
-    assert_control_hit(&mounted, "Operation history");
+    assert_control_hit(&mounted, "Operation History");
     mounted.key(Key::Enter, false);
     assert_control_hit(&mounted, "Operation details operation-49");
     mounted.key(Key::Enter, false);
@@ -5962,7 +6011,7 @@ fn bounded_operation_history_exposes_recorded_results_and_keeps_close_reachable(
     assert_control_hit(&mounted, "Close operation history");
     mounted.key(Key::Enter, false);
     assert!(!has_label(&mounted, "Operation details operation-49"));
-    assert_control_hit(&mounted, "New task");
+    assert_control_hit(&mounted, "New Task");
 }
 
 #[test]
@@ -5998,7 +6047,7 @@ fn page_header_eyebrow_follows_navigation_between_shared_header_pages() {
     for (page, expected) in [
         (Page::Settings, "Relay"),
         (Page::Connections, "Project Connections"),
-        (Page::Publish, "Publish board"),
+        (Page::Publish, "Publish Board"),
         (Page::NewProject, "Relay"),
     ] {
         mounted.model.page.set(page);
@@ -6105,6 +6154,21 @@ fn clicking_below_the_draft_focuses_its_end_across_the_buffer_width() {
         mounted.focus(&label);
         mounted.key(Key::Home, true);
         mounted.focus("Session actions");
+        // The draft is scrollable now; reveal its blank space before clicking it.
+        let rect = mounted.rect(&label);
+        let viewport = mounted.rect("Transcript viewport");
+        if rect.max_y() + 20.0 > viewport.max_y() {
+            mounted.ui.dispatch_pointer(PointerEvent {
+                kind: PointerEventKind::Wheel {
+                    delta: Vector2::new(0.0, -(rect.max_y() + 40.0 - viewport.max_y())),
+                },
+                position: viewport.center(),
+                pointer_type: PointerType::Mouse,
+                modifiers: Modifiers::default(),
+                timestamp: Duration::ZERO,
+            });
+            mounted.settle();
+        }
         let rect = mounted.rect(&label);
         let position = Vector2::new(
             rect.origin.x + rect.size.width - 10.0,
@@ -6123,6 +6187,13 @@ fn clicking_below_the_draft_focuses_its_end_across_the_buffer_width() {
             });
         }
         mounted.settle();
+        assert_eq!(
+            mounted.ui.focused().map(|field| field.id()),
+            Some(draft.id),
+            "blank draft click at {position:?}, field {:?}, viewport {:?}",
+            mounted.rect(&label),
+            mounted.rect("Transcript viewport")
+        );
         mounted
             .ui
             .dispatch_ime(ImeEvent::Commit(" appended".into()));
@@ -6187,7 +6258,7 @@ fn direct_project_connections_and_header_actions_use_full_cells() {
     assert_eq!(mounted.model.page.get_untracked(), Page::Connections);
     mounted.model.page.set(Page::Board);
     mounted.settle();
-    let new = mounted.rect("New task");
+    let new = mounted.rect("New Task");
     let more = mounted.rect("Board actions");
     assert_eq!(new.origin.y, more.origin.y);
     assert_eq!(new.size.height, more.size.height);
@@ -6250,7 +6321,7 @@ fn direct_project_connections_and_header_actions_use_full_cells() {
     let new = nodes
         .nodes
         .iter()
-        .find(|n| n.label.as_deref() == Some("New task"))
+        .find(|n| n.label.as_deref() == Some("New Task"))
         .unwrap();
     let details = mounted.ui.inspection_details(new.id).unwrap();
     let expected = mosaic::render::PaintSpec::solid(mosaic::core::theme::color(
@@ -6293,7 +6364,7 @@ fn transcript_sender_and_content_share_the_first_glyph_baseline() {
         .filter(|(r, _)| {
             r.origin.y >= body.origin.y - 10.0
                 && r.origin.y < body.origin.y + body.size.height
-                && r.origin.x > 220.0
+                && r.origin.x > mounted.rect("Sidebar").max_x()
         })
         .collect();
     // The speaker in the gutter and the first line of the message sit on
@@ -6572,9 +6643,9 @@ fn header_drag_targets_include_text_and_gaps_but_exclude_interactive_descendants
     mounted.settle();
     assert!(!draggable(
         "Profile header",
-        mounted.rect("Agent name").center()
+        mounted.rect("Custom name (optional)").center()
     ));
-    mounted.click("Agent name");
+    mounted.click("Custom name (optional)");
     mounted.key(Key::Character("X".into()), false);
     assert!(mounted.model.editor_name.get_untracked().contains('X'));
 }
@@ -7107,7 +7178,9 @@ fn sidebar_keeps_project_navigation_in_ruled_cells_above_the_agent_tree() {
     mounted.click("Select project Relay · demo");
     assert!(!has_label(&mounted, "Projects"));
     open_project_menu(&mounted);
-    mounted.click("Create director");
+    assert!(!has_label(&mounted, "Create director"));
+    mounted.click("Toggle project Relay · demo");
+    mounted.click("New agent");
     assert_eq!(mounted.model.editor.get_untracked(), EditTarget::New);
     mounted.click("Toggle project Relay · demo");
     mounted.click("Project defaults");
@@ -7235,10 +7308,10 @@ fn needs_you_projects_a_deep_permission_and_one_answer_resolves_it_everywhere() 
     mounted.model.snapshot.set(snapshot);
     mounted.model.open_session("session-plan".into());
     mounted.settle();
-    assert!(has_label(&mounted, "Needs you"));
+    assert!(has_label(&mounted, "Needs You"));
     // The manager two levels up shows the request in its transcript.
     assert!(has_label(&mounted, "Approval request"));
-    assert!(has_label(&mounted, "Approval requested · Bash"));
+    assert!(has_label(&mounted, "Approval Requested · Bash"));
     assert!(mounted.rects("Approve").len() >= 2);
     mounted.click_nth("Approve", 0);
     let envelope = mounted.commands.try_recv().unwrap();
@@ -7258,7 +7331,7 @@ fn needs_you_projects_a_deep_permission_and_one_answer_resolves_it_everywhere() 
         ..Default::default()
     });
     mounted.settle();
-    assert!(!has_label(&mounted, "Needs you"));
+    assert!(!has_label(&mounted, "Needs You"));
     assert!(!has_label(&mounted, "Approval request"));
     assert!(!has_label(&mounted, "Approve"));
     let _ = &mut mounted;
@@ -7538,11 +7611,10 @@ fn session_header_shows_only_recorded_values() {
     mounted.click("Session usage and provenance");
     assert!(has_label(&mounted, "Worktree"));
     assert!(!has_label(&mounted, "Thread"));
-    // The draft sits in the composer beside the ledger, sending from its
-    // right edge.
+    // The inline draft sends from the left gutter beside its ledger.
     let draft = mounted.rect("Next message");
     let send = mounted.rect("Send message");
-    assert!(send.origin.x > draft.origin.x + draft.size.width - 1.0);
+    assert!(send.max_x() <= draft.origin.x);
     assert!(has_label(&mounted, "Stop"));
 }
 
@@ -8232,10 +8304,89 @@ fn new_root_agents_keep_the_selected_profile_and_open_after_metadata_arrives() {
 }
 
 #[test]
+fn waiting_agent_is_idle_and_can_compose_its_first_turn_without_a_thread() {
+    let mounted = mount_orchestration(1380.0);
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    for session in &mut snapshot.sessions {
+        if let Some(worker) = &mut session.worker {
+            worker.status = WorkerStatus::Completed;
+        }
+    }
+    let session = snapshot
+        .sessions
+        .iter_mut()
+        .find(|s| s.id == "session-plan")
+        .unwrap();
+    session.awaiting_first_message = true;
+    session.automatic_name = true;
+    session.fixture = false;
+    session.conversations.clear();
+    let worker = session.worker.as_mut().unwrap();
+    worker.status = WorkerStatus::Completed;
+    worker.thread_id = None;
+    worker.worktree = Some("/tmp/relay-waiting-agent-test".into());
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    assert_eq!(crate::buffer::execution_problem(mounted.model), None);
+    let snapshot = mounted.model.snapshot.get_untracked();
+    assert_eq!(
+        crate::adapt::session_status(
+            &snapshot,
+            snapshot
+                .sessions
+                .iter()
+                .find(|s| s.id == "session-plan")
+                .unwrap()
+        ),
+        relay_ui::prelude::AgentStatus::Idle
+    );
+    assert!(!has_label(&mounted, "No resumable thread was recorded"));
+}
+
+#[test]
+fn unnamed_root_agent_opens_a_chat_without_a_task_or_custom_name() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.open_profile(EditTarget::New);
+    mounted.settle();
+    mounted.click("Create agent");
+    let envelope = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(&envelope.command, Command::CreateAgentConfig { name, .. } if name.is_empty())
+    );
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot
+        .apply(envelope.command, &envelope.request_id, 0)
+        .unwrap();
+    let config = snapshot.agent_configs.last().unwrap();
+    assert!(config.automatic_name);
+    assert_eq!(config.name, "New agent");
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        outcome: Some((envelope.request_id, Ok(()))),
+        outcome_serial: 1,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert_eq!(mounted.model.page.get_untracked(), Page::AgentStart);
+    assert!(mounted.model.worker_prompt.get_untracked().is_empty());
+    assert!(
+        !mounted
+            .model
+            .snapshot
+            .get_untracked()
+            .messages
+            .iter()
+            .any(|m| m.session_id == mounted.model.session.get_untracked())
+    );
+}
+
+#[test]
 fn agent_creation_uses_director_and_worker_profiles_and_preserves_parent_links() {
     let mut mounted = mount_orchestration(1380.0);
     mounted.click("New agent");
-    assert!(has_label(&mounted, "New agent"));
+    assert!(has_label(&mounted, "New Agent"));
     assert_eq!(mounted.model.editor_template.get_untracked(), "director");
     assert!(mounted.model.editor_profile.get_untracked().can_delegate());
     assert!(mounted.model.editor_parent.get_untracked().is_none());
@@ -8260,16 +8411,12 @@ fn agent_creation_uses_director_and_worker_profiles_and_preserves_parent_links()
     );
     assert_eq!(mounted.model.editor_template.get_untracked(), "worker");
     assert!(!mounted.model.editor_profile.get_untracked().can_delegate());
-    assert!(has_label(&mounted, "Agent task"));
-    mounted.model.editor_name.set("Validation".into());
-    mounted
-        .model
-        .worker_prompt
-        .set("Run the validation suite".into());
+    assert!(!has_label(&mounted, "Agent task"));
+    assert!(mounted.model.editor_name.get_untracked().is_empty());
     mounted.settle();
     mounted.click("Create agent");
     assert!(
-        matches!(mounted.commands.try_recv().unwrap().command, Command::StartChildAgent { parent_session_id, profile, .. } if parent_session_id == "session-plan" && !profile.can_delegate())
+        matches!(mounted.commands.try_recv().unwrap().command, Command::StartChildAgent { parent_session_id, profile, name, prompt, approve_implementation } if parent_session_id == "session-plan" && !profile.can_delegate() && name.is_empty() && prompt.is_empty() && !approve_implementation)
     );
 }
 
@@ -8507,7 +8654,216 @@ fn relay_context_messages_use_the_relay_mark_not_a_harness_glyph() {
         has_label(&mounted, "Relay"),
         "Relay speaks for its own context"
     );
-    assert!(has_label(&mounted, "Context sent to agent"));
+    assert!(has_label(&mounted, "Context Sent to Agent"));
     assert!(!has_label(&mounted, "Source context"));
     assert_eq!(glyphs(&mounted), before, "no harness glyph for Relay");
+}
+
+#[test]
+fn effort_selection_feedback_tracks_the_command_response_and_chat() {
+    for (accepted, lagging) in [(false, false), (true, false), (true, true)] {
+        let mut mounted = mount(false, 1380.0);
+        let id = "session-plan";
+        mounted.model.open_session(id.into());
+        mounted.model.snapshot.update(|snapshot| {
+            let session = snapshot.sessions.iter_mut().find(|s| s.id == id).unwrap();
+            session.selection.model = Some("gpt-6.1-sol".into());
+            session.selection.effort = Some("medium".into());
+        });
+        mounted
+            .model
+            .catalogs
+            .set(std::collections::BTreeMap::from([(
+                id.into(),
+                Ok(HarnessCatalog {
+                    models: vec![HarnessModel {
+                        id: "gpt-6.1-sol".into(),
+                        name: "Sol".into(),
+                        efforts: vec!["low".into(), "medium".into(), "high".into()],
+                        default_effort: Some("medium".into()),
+                        fast: false,
+                    }],
+                    ..Default::default()
+                }),
+            )]));
+        crate::transcript::choose_effort(mounted.model, 2);
+        let request = mounted.commands.try_recv().unwrap();
+        assert_eq!(
+            crate::transcript::ledger_view(mounted.model, true).pending_effort,
+            Some(2)
+        );
+        assert_eq!(mounted.model.pending_effort("session-worker"), None);
+        let mut snapshot = mounted.model.snapshot.get_untracked();
+        if accepted && !lagging {
+            snapshot
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == id)
+                .unwrap()
+                .selection
+                .effort = Some("high".into());
+        }
+        let acknowledged_revision = snapshot.revision + u64::from(lagging);
+        mounted.model.receive(NetworkState {
+            acknowledged_revision,
+            snapshot,
+            connected: true,
+            outcome: Some((
+                request.request_id,
+                if accepted {
+                    Ok(())
+                } else {
+                    Err("Rejected".into())
+                },
+            )),
+            outcome_serial: 1,
+            ..Default::default()
+        });
+        let ledger = crate::transcript::ledger_view(mounted.model, true);
+        assert_eq!(ledger.pending_effort, None);
+        assert_eq!(ledger.effort.current, if accepted { 2 } else { 1 });
+        if lagging {
+            let mut snapshot = mounted.model.snapshot.get_untracked();
+            snapshot.revision = acknowledged_revision;
+            snapshot
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == id)
+                .unwrap()
+                .selection
+                .effort = Some("high".into());
+            mounted.model.receive(NetworkState {
+                snapshot,
+                acknowledged_revision,
+                connected: true,
+                ..Default::default()
+            });
+            assert_eq!(mounted.model.acknowledged_effort(id), None);
+            assert_eq!(
+                crate::transcript::ledger_view(mounted.model, true)
+                    .effort
+                    .current,
+                2
+            );
+        }
+    }
+}
+
+#[test]
+fn archived_chat_is_hidden_by_default_readable_when_shown_and_cannot_send() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.snapshot.update(|snapshot| {
+        let session = snapshot
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == "session-plan")
+            .unwrap();
+        session.archived = true;
+        session.title = "Archived transcript test".into();
+    });
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let tree_contains = |mounted: &Mounted| {
+        mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+            n.label.as_deref() == Some("Archived transcript test") && n.role == Role::ListItem
+        })
+    };
+    assert!(!tree_contains(&mounted));
+    mounted.click("Show archived chats");
+    assert!(tree_contains(&mounted));
+    assert!(has_label(&mounted, "Archived chat. Unarchive to continue."));
+    crate::buffer::send(mounted.model);
+    assert!(mounted.commands.try_recv().is_err());
+    assert!(mounted.model.notice.get_untracked().contains("Unarchive"));
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == "session-plan")
+            .unwrap()
+            .archived = false
+    });
+    mounted.settle();
+    assert!(!has_label(
+        &mounted,
+        "Archived chat. Unarchive to continue."
+    ));
+}
+
+#[test]
+fn draft_shares_the_transcript_viewport_and_has_a_full_width_boundary() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let viewport = mounted.rect("Transcript viewport");
+    let boundary = mounted.rect("Draft boundary");
+    assert_eq!(boundary.size.width, viewport.size.width);
+    assert_eq!(boundary.origin.x, viewport.origin.x);
+    let editor = mounted.rect("Next message");
+    assert!(mounted.rect("Send message").origin.x < editor.origin.x);
+    let controller = mounted.model.ui.get_untracked().inspection_snapshot();
+    assert!(
+        !controller
+            .nodes
+            .iter()
+            .any(|node| node.label.as_deref() == Some("Composer dock"))
+    );
+}
+
+#[test]
+fn prelaunch_model_and_effort_render_before_any_message_is_sent() {
+    let mounted = mount(false, 1380.0);
+    let config = mounted.model.snapshot.get_untracked().agent_configs[0]
+        .id
+        .clone();
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot
+            .sessions
+            .retain(|s| s.agent_config_id != config || s.role != SessionRole::Root);
+        let config = snapshot
+            .agent_configs
+            .iter_mut()
+            .find(|c| c.id == config)
+            .unwrap();
+        config.overrides.harness = Some(Harness::ClaudeCode);
+        config.draft_selection = HarnessSelection {
+            model: Some("claude-haiku-5-5".into()),
+            effort: Some("low".into()),
+            ..Default::default()
+        };
+    });
+    mounted.model.open_root_agent(config.clone());
+    let draft = format!("agent-draft-{config}");
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([(
+            draft.clone(),
+            Ok(HarnessCatalog {
+                harness: Harness::ClaudeCode,
+                models: vec![HarnessModel {
+                    id: "claude-haiku-5-5".into(),
+                    name: "Haiku".into(),
+                    efforts: vec!["low".into(), "medium".into(), "high".into()],
+                    default_effort: Some("low".into()),
+                    fast: false,
+                }],
+                ..Default::default()
+            }),
+        )]));
+    mounted.settle();
+    let ledger = crate::transcript::ledger_view(mounted.model, true);
+    assert_eq!(ledger.model.short_name(), "Haiku 5.5");
+    assert_eq!(ledger.effort.name(), "low");
+    assert!(has_label(&mounted, "Model: CLAUDE Haiku 5.5. Change model"));
+    assert!(mounted.commands.is_empty());
+    assert!(
+        !mounted
+            .model
+            .snapshot
+            .get_untracked()
+            .sessions
+            .iter()
+            .any(|s| s.id == draft)
+    );
 }

@@ -183,7 +183,7 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
     let actions: PopoverContent =
         Rc::new(move || board_menu(model, menu, full, local, managing, history, source, synced));
     let header = view! {
-        PageHeader model:(model) eyebrow:(Derived::new(|| "Project board".to_string()))
+        PageHeader model:(model) eyebrow:(Derived::new(|| "Project Board".to_string()))
             title:(project_name) compact:(Derived::new(move || !full.get())) {
             if full.get() {
                 ReadoutCell key:"Source" value:(source)
@@ -200,14 +200,14 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
             if model.selected_board().is_some() {
                 row width:{if tight.get() {Dimension::Px(px(36.0))} else {Dimension::MaxContent}}
                     shrink:0 {
-                    CellButton label:"New task"
+                    CellButton label:"New Task"
                         on-press:(press(move || creating.set(!creating.get_untracked())))
                         rule:(Rule::Left) selected:true
                         horizontal-inset:(if tight.get() {0.0} else {16.0}) {
                         if tight.get() {
                             icon size:{px(16.0)}px stroke:ground.ink plus-icon
                         } else {
-                            Label text:"New task" role:(TextRole::Label) weight:(Weight::SEMIBOLD)
+                            Label text:"New Task" role:(TextRole::Label) weight:(Weight::SEMIBOLD)
                         }
                     }
                 }
@@ -314,9 +314,7 @@ fn board_menu(
                     }
                 }
                 if active_boards(model).len() > 1 {
-                    Label text:"Board" role:(TextRole::Caption) tone:(Tone::Muted) weight:500
-                        caps:true
-                    row height:{px(30.0)}px {
+                    row height:{px(60.0)}px {
                         BoardChoices model:(model)
                     }
                 }
@@ -332,7 +330,7 @@ fn board_menu(
             }),
         ));
         list.adopt(&menu_item(
-            "Publish board",
+            "Publish Board",
             Rc::new(move || {
                 model.page.set(Page::Publish);
                 menu.set(false);
@@ -340,7 +338,7 @@ fn board_menu(
         ));
     }
     list.adopt(&menu_item(
-        "Operation history",
+        "Operation History",
         Rc::new(move || {
             history.set(!history.get_untracked());
             menu.set(false);
@@ -353,17 +351,34 @@ fn board_menu(
 #[component]
 pub(crate) fn BoardChoices(model: Model) -> Element {
     view! {
-        row width:max-content gap:0px {
-            for (_, board) in {active_boards(model).into_iter().map(|b| (b.id.clone(), b)).collect::<Vec<_>>()} {
-                let id = board.id.clone();
-                let chosen = id.clone();
-                let name = board.name.clone();
-                row width:max-content shrink:0 {
-                    CellButton label:(format!("Select board {name}")) rule:(Rule::Left)
-                        on-press:(press(move || select_board(model, &id)))
-                        selected:(Derived::new(move || model.selected_board().is_some_and(|b| b.id == chosen)))
-                        horizontal-inset:(14.0) {
-                        Label text:(name.clone()) role:(TextRole::Label)
+        col width:max-content shrink:0 gap:0px label:"Board selector"
+            stroke:(width:{px(1.0)} color:ground.rule edges:left) {
+            row height:{px(24.0)}px shrink:0 align:center justify:center
+                stroke:(width:{px(1.0)} color:ground.rule edges:bottom) {
+                Label text:"Board" role:(TextRole::Caption) tone:(Tone::Muted) weight:500
+            }
+            row gap:0px {
+                for ((index, _), board) in {active_boards(model).into_iter().enumerate().map(|(i,b)| ((i,b.id.clone()), b)).collect::<Vec<_>>()} {
+                    let id = board.id.clone();
+                    let chosen = id.clone();
+                    let name = board.name.clone();
+                    let first = *index == 0;
+                    let provider = match &board.source { BoardSource::Local => 0, BoardSource::Github { .. } => 1, BoardSource::Gitlab { .. } => 2 };
+                    row width:max-content shrink:0 {
+                        CellButton label:(format!("Select board {name}"))
+                            rule:(if first { Rule::None } else { Rule::Left })
+                            on-press:(press(move || select_board(model, &id)))
+                            selected:(Derived::new(move || model.selected_board().is_some_and(|b| b.id == chosen)))
+                            horizontal-inset:(14.0) {
+                            if provider == 0 {
+                                icon size:{px(14.0)}px board-local-icon
+                            } else if provider == 1 {
+                                icon size:{px(14.0)}px board-github-icon
+                            } else {
+                                icon size:{px(14.0)}px board-gitlab-icon
+                            }
+                            Label text:(name.clone()) role:(TextRole::Label)
+                        }
                     }
                 }
             }
@@ -424,7 +439,7 @@ pub(crate) fn NewTaskForm(model: Model, open: State<bool>, draft: TaskDraft) -> 
         }
     });
     view! {
-        Module title:"New task" icon:(Some(relay_ui::icons::command.create))
+        Module title:"New Task" icon:(Some(relay_ui::icons::command.create))
             note:(Some(UiText::from("Issue repository optional for local tasks"))) {
             row height:min-content stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                 TextInput value:(title) label:"New task title" placeholder:"Task title" framed:false
@@ -619,7 +634,7 @@ pub(crate) fn IssueDetail(model: Model, #[prop(optional)] full: bool) -> Element
         col width:{if full {Dimension::Fill} else {Dimension::MaxContent}} min-width:0px shrink:1
             @layout:{move |rect: Rect| height.set(rect.size.height)} label:"Issue details" {
             if issue.get().is_none() {
-                IssueFrame identifier:"" title:"Issue unavailable" fill:(full)
+                IssueFrame identifier:"" title:"Issue Unavailable" fill:(full)
                     on-close:(Some(unavailable_close.clone())) close-label:"Close issue details"
                     head-label:(Some("Issue unavailable header".to_string()))
                     head-start:(Some(view! { NavigationButton model:(model) }))
@@ -705,7 +720,7 @@ fn IssuePanel(
                             text:"No longer on this board · history retained. Restore and sync before starting or continuing a worker. Active turns may finish or be stopped."
                     }
                 }
-                Module title:"Linked sessions" icon:(Some(relay_ui::icons::call.spawn))
+                Module title:"Linked Sessions" icon:(Some(relay_ui::icons::call.spawn))
                     note:(Some(UiText::from(Derived::new(move || format!("{:02}", linked.get()))))) {
                     for (_, session) in { model.sessions_for_task(&sessions_id).into_iter().map(|s| (s.id.clone(), s)).collect::<Vec<_>>() } {
                         LinkedSession model:(model) id:(session.id.clone())
@@ -860,7 +875,7 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
             stroke:(width:{px(1.0)} color:ground.rule edges:top) label:"Worker setup"
             @layout:{move |rect:Rect| width.set(rect.size.width)} {
             Module
-                title:(if continuation { "Continue this session" } else { "Start task worker" }.to_string())
+                title:(if continuation { "Continue This Session" } else { "Start Task Worker" }.to_string())
                 icon:(Some(relay_ui::icons::call.spawn)) head-end:(change) {
                 if !continuation {
                     row height:min-content min-width:0px
@@ -889,7 +904,7 @@ pub(crate) fn WorkerForm(model: Model, continuation: bool) -> Element {
                             label:"Worker policy" {
                             for (_, key) in { worker_policy(model, continuation).into_iter().map(|(k, _)| (k, k)).collect::<Vec<_>>() } {
                                 let field: &'static str = key;
-                                col height:min-content min-width:0px
+                                col min-width:0px label:(format!("Worker policy {field}"))
                                     pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px)
                                     stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
                                     Readout key:(field.to_string())
@@ -1103,16 +1118,16 @@ fn BoardFooter(model: Model) -> Element {
         row height:{px(32.0)}px shrink:0 stroke:(width:{px(1.0)} color:ground.rule edges:top)
             @layout:{move |rect: Rect| width.set(rect.size.width)} label:"Board summary" {
             if compact.get() {
-                ReadoutCell key:"Board" value:(summary)
+                ReadoutCell key:"Board" value:(summary) inline:true
             }
             if !compact.get() {
-                ReadoutCell key:"Tasks"
+                ReadoutCell key:"Tasks" inline:true
                     value:(Derived::new(move || format!("{:02}", tasks.get().len())))
             }
             if !fixture.get() && !compact.get() {
-                ReadoutCell key:"Running" value:(with_state(AgentStatus::Working))
-                ReadoutCell key:"Waiting" value:(with_state(AgentStatus::Waiting))
-                ReadoutCell key:"Project workers" value:(workers)
+                ReadoutCell key:"Running" value:(with_state(AgentStatus::Working)) inline:true
+                ReadoutCell key:"Waiting" value:(with_state(AgentStatus::Waiting)) inline:true
+                ReadoutCell key:"Project Workers" value:(workers) inline:true
             }
         }
     }

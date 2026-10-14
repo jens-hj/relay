@@ -94,13 +94,18 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
         } else {
             String::new()
         };
-        adapt::agent_forest(
+        let roots = adapt::agent_forest(
             &snapshot,
             &model.project.get(),
             &selected,
             &model.collapsed_agents.get(),
             &model.catalogs.get(),
-        )
+        );
+        if model.show_archived.get() {
+            roots
+        } else {
+            without_archived(roots)
+        }
     });
     let usage = Derived::new(move || {
         adapt::harness_usage(&model.snapshot.get(), &model.harnesses.get(), unix_now())
@@ -130,7 +135,7 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     let focused: relay_ui::Live<Option<String>> =
         Derived::new(move || model.agent_focus.get()).into();
     let agents = view! {
-        AgentSidebar roots:(roots) width:(width) focus:(focused) root-indent:true
+        AgentSidebar roots:(roots) width:(width) focus:(focused) root-indent:true framed:false
             on-new:(Some(new_agent)) on-spawn:(Some(spawn)) on-open:(Some(open))
             on-toggle:(Some(toggle)) on-focus:(Some(focus)) on-approve:(Some(approve))
             on-review:(Some(review)) {
@@ -141,14 +146,27 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
         }
     };
     view! {
-        col width:{px(width)}px shrink:0 fill:ground.panel clip label:"Sidebar" {
-            NavigationHead model:(model) menu:(menu)
-            if menu.get() {
-                ProjectMenu model:(model) menu:(menu)
+        stack width:{px(width)}px shrink:0 fill:ground.panel clip label:"Sidebar" {
+            col {
+                NavigationHead model:(model) menu:(menu)
+                row height:{px(32.0)}px
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                    CellButton label:"Show archived chats" selected:(model.show_archived)
+                        on-press:(press(move || model.show_archived.set(!model.show_archived.get_untracked()))) {
+                        Label
+                            text:(Derived::new(move || if model.show_archived.get() { "✓ Show archived".to_string() } else { "Show archived".to_string() }))
+                            role:(TextRole::Label) tone:(Tone::Muted)
+                    }
+                }
+                if menu.get() {
+                    ProjectMenu model:(model) menu:(menu)
+                }
+                col height:1fr min-height:0px {
+                    { parent.adopt(&agents); }
+                }
             }
-            col height:1fr min-height:0px {
-                { parent.adopt(&agents); }
-            }
+            el width:fill height:fill nohit label:"Sidebar border"
+                stroke:(width:{px(1.0)} color:ground.rule edges:(left right) offset:{px(-1.0)}) {}
         }
     }
 }
@@ -362,19 +380,10 @@ fn ProjectMenu(model: Model, menu: State<bool>) -> Element {
                     }
                     row height:{px(34.0)}px
                         stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                        row width:1fr min-width:0px {
-                            CellButton label:"Create director" start:true horizontal-inset:(18.0)
-                                on-press:(press(move || { menu.set(false); model.open_profile(EditTarget::New); })) {
-                                icon size:{px(13.0)}px plus-icon
-                                Label text:"New director" role:(TextRole::Label)
-                            }
-                        }
-                        row width:max-content shrink:0 {
-                            CellButton label:"Project defaults" rule:(Rule::Left)
-                                on-press:(press(move || { menu.set(false); model.open_profile(EditTarget::Defaults); })) {
-                                icon size:{px(14.0)}px sliders-icon
-                                Label text:"Defaults" role:(TextRole::Label)
-                            }
+                        CellButton label:"Project defaults" start:true horizontal-inset:(18.0)
+                            on-press:(press(move || { menu.set(false); model.open_profile(EditTarget::Defaults); })) {
+                            icon size:{px(14.0)}px sliders-icon
+                            Label text:"Defaults" role:(TextRole::Label)
                         }
                     }
                     row height:{px(34.0)}px {
@@ -531,4 +540,19 @@ pub fn director_capacity(snapshot: &Snapshot, agent_config_id: &str) -> (usize, 
         .map(|p| p.max_workers as usize)
         .unwrap_or(0);
     (running, active, limit)
+}
+
+/// Keep descendants readable without discarding the snapshot used to resolve inheritance.
+fn without_archived(nodes: Vec<AgentNode>) -> Vec<AgentNode> {
+    nodes
+        .into_iter()
+        .flat_map(|mut node| {
+            node.children = without_archived(node.children);
+            if node.archived {
+                node.children
+            } else {
+                vec![node]
+            }
+        })
+        .collect()
 }

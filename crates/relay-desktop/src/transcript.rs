@@ -346,16 +346,40 @@ pub(crate) fn ledger_view(model: Model, open: bool) -> LedgerView {
                 .map(|p| p.harness)
         })
         .unwrap_or_default();
-    let (identity, effort) = session
-        .map(|s| adapt::session_model(s, &catalogs))
-        .unwrap_or_default();
+    let (identity, mut effort) = session
+        .map(|s| {
+            let mut s = s.clone();
+            s.selection = model.harness_selection();
+            adapt::session_model(&s, &catalogs)
+        })
+        .unwrap_or_else(|| {
+            adapt::selection_model(
+                &model.harness_selection(),
+                None,
+                &id,
+                Some(harness),
+                &catalogs,
+            )
+        });
+    if let Some(name) = model.acknowledged_effort(&id)
+        && let Some(effort) = effort.as_mut()
+        && let Some(step) =
+            (0..effort.levels + effort.tiers).find(|&step| effort.step_name(step) == name)
+    {
+        effort.current = step;
+    }
+    let pending_effort = model.pending_effort(&id).and_then(|name| {
+        let effort = effort?;
+        (0..effort.levels + effort.tiers).find(|&step| effort.step_name(step) == name)
+    });
     LedgerView {
+        pending_effort,
         harness: adapt::harness(harness),
         model: identity.unwrap_or_else(|| ModelIdentity::new("Default", "", ModelHue::Neutral)),
         // Without the model's steps, name the selected effort alone.
         effort_label: effort
             .is_none()
-            .then(|| session.and_then(|s| s.selection.effort.clone()))
+            .then(|| model.harness_selection().effort)
             .flatten(),
         effort: effort.unwrap_or_default(),
         collapsed: !open,
@@ -366,14 +390,13 @@ pub(crate) fn ledger_view(model: Model, open: bool) -> LedgerView {
 pub(crate) fn choose_effort(model: Model, step: u8) {
     let snapshot = model.snapshot.get_untracked();
     let id = model.session.get_untracked();
-    let Some(session) = snapshot.sessions.iter().find(|s| s.id == id) else {
-        return;
-    };
-    let current = session.selection.clone();
-    let model_id = current
-        .model
-        .clone()
-        .or_else(|| session.worker.as_ref().and_then(|w| w.model.clone()));
+    let session = snapshot.sessions.iter().find(|s| s.id == id);
+    let current = model.harness_selection();
+    let model_id = current.model.clone().or_else(|| {
+        session
+            .and_then(|s| s.worker.as_ref())
+            .and_then(|w| w.model.clone())
+    });
     let catalogs = model.catalogs.get_untracked();
     let chosen = catalogs
         .get(&id)

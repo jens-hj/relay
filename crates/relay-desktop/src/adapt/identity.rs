@@ -13,7 +13,7 @@ pub fn harness(harness: relay_core::Harness) -> Harness {
 }
 
 /// The display identity of a reported model id: Claude Opus, Sonnet and
-/// Haiku take their family hues, GPT, Codex and Sol models the Sol hue, and
+/// Haiku and named GPT families take version-independent hues, and
 /// anything else stays neutral under its own name.
 pub fn model_identity(id: &str) -> ModelIdentity {
     // "sonnet[1m]" names a context variant, not a version.
@@ -31,6 +31,22 @@ pub fn model_identity(id: &str) -> ModelIdentity {
         .filter(|word| *word != "latest")
         .collect();
     let family_of = |name: &str| words.iter().position(|word| *word == name);
+    let named_hue = ["astra", "luna", "terra", "sol"]
+        .into_iter()
+        .find_map(|name| {
+            family_of(name).map(|index| {
+                (
+                    name,
+                    index,
+                    match name {
+                        "astra" => ModelHue::Astra,
+                        "luna" => ModelHue::Luna,
+                        "terra" => ModelHue::Terra,
+                        _ => ModelHue::Sol,
+                    },
+                )
+            })
+        });
     let claude = ["opus", "sonnet", "haiku"]
         .into_iter()
         .find_map(|name| family_of(name).map(|index| (name, index)));
@@ -55,9 +71,14 @@ pub fn model_identity(id: &str) -> ModelIdentity {
         } else {
             variants
         };
-        return ModelIdentity::new(family, number(&rest), ModelHue::Sol).vendor("GPT");
-    } else if let Some(index) = family_of("sol") {
-        ("Sol".to_string(), "GPT", ModelHue::Sol, vec![index])
+        return ModelIdentity::new(
+            family,
+            number(&rest),
+            named_hue.map_or(ModelHue::Sol, |(_, _, hue)| hue),
+        )
+        .vendor("GPT");
+    } else if let Some((name, index, hue)) = named_hue {
+        (capitalize(name), "GPT", hue, vec![index])
     } else if let Some(index) = family_of("codex") {
         ("Codex".to_string(), "GPT", ModelHue::Sol, vec![index])
     } else {
@@ -167,27 +188,39 @@ pub fn effort_choice(model: &HarnessModel, step: u8) -> Option<String> {
     model.efforts.get(usize::from(step)).cloned()
 }
 
-/// The model a session reports, or else the one it selected, with its
+/// The selected model, or the reported model when no selection is set, with its
 /// effort when the session's catalog describes that model.
 pub fn session_model(
     session: &Session,
     catalogs: &BTreeMap<String, Result<HarnessCatalog, String>>,
 ) -> (Option<ModelIdentity>, Option<Effort>) {
-    let selected = session.selection.model.as_deref();
-    let reported = session.worker.as_ref().and_then(|w| w.model.as_deref());
+    selection_model(
+        &session.selection,
+        session.worker.as_ref().and_then(|w| w.model.as_deref()),
+        &session.id,
+        session.worker.as_ref().map(|w| w.harness),
+        catalogs,
+    )
+}
+
+pub fn selection_model(
+    selection: &HarnessSelection,
+    reported: Option<&str>,
+    session_id: &str,
+    harness: Option<relay_core::Harness>,
+    catalogs: &BTreeMap<String, Result<HarnessCatalog, String>>,
+) -> (Option<ModelIdentity>, Option<Effort>) {
+    let effective = selection.model.as_deref().or(reported);
     let find = |catalog: &HarnessCatalog| {
-        [selected, reported]
-            .into_iter()
-            .flatten()
-            .find_map(|id| catalog.models.iter().find(|m| m.id == id))
+        effective
+            .and_then(|id| catalog.models.iter().find(|m| m.id == id))
             .cloned()
     };
     // The session's own catalog, else any loaded catalog of the same harness
     // that lists the model: a model's effort steps do not depend on the
     // session.
-    let harness = session.worker.as_ref().map(|w| w.harness);
     let catalog_model = catalogs
-        .get(&session.id)
+        .get(session_id)
         .and_then(|catalog| catalog.as_ref().ok())
         .and_then(find)
         .or_else(|| {
@@ -197,7 +230,7 @@ pub fn session_model(
                 .filter(|catalog| harness.is_none_or(|h| catalog.harness == h))
                 .find_map(find)
         });
-    let identity = reported.or(selected).map(model_identity);
-    let effort = catalog_model.and_then(|model| effort(&session.selection, &model));
+    let identity = effective.map(model_identity);
+    let effort = catalog_model.and_then(|model| effort(selection, &model));
     (identity, effort)
 }

@@ -30,7 +30,7 @@ mosaic::scheme! {
         /// State of an agent or call.
         status { live:Color, needs-you:Color, failed:Color, full-steam:Color },
         /// Which model thinks.
-        model { sol:Color, opus:Color, sonnet:Color, haiku:Color },
+        model { sol:Color, opus:Color, sonnet:Color, haiku:Color, astra:Color, luna:Color, terra:Color },
         /// Which tool type was called.
         tool {
             plan:Color, create:Color, edit:Color, test:Color, search:Color, fetch:Color,
@@ -162,7 +162,7 @@ pub struct Palette {
     pub ground: Ground,
     pub status: Statuses,
     /// Indexed by [`ModelFamily`].
-    pub model: [Color; 4],
+    pub model: [Color; 7],
     /// Indexed by [`ToolKind`].
     pub tool: [Color; 13],
     /// Indexed by [`ContextPart`].
@@ -208,7 +208,15 @@ impl Palette {
             failed: hex(0xE07A6E),
             full_steam: hex(0x9BD7A9),
         },
-        model: [hex(0x65C98C), hex(0xDF92D8), hex(0x48BFF5), hex(0xB3B94F)],
+        model: [
+            hex(0x65C98C),
+            hex(0xDF92D8),
+            hex(0x48BFF5),
+            hex(0xB3B94F),
+            hex(0xA5A1F2),
+            hex(0xF0B86E),
+            hex(0xD98570),
+        ],
         tool: [
             hex(0xCBC07B),
             hex(0xB7C684),
@@ -260,7 +268,15 @@ impl Palette {
             failed: hex(0xB23A2A),
             full_steam: hex(0x26703F),
         },
-        model: [hex(0x1B6F41), hex(0x9A3F93), hex(0x0B6A9C), hex(0x646812)],
+        model: [
+            hex(0x1B6F41),
+            hex(0x9A3F93),
+            hex(0x0B6A9C),
+            hex(0x646812),
+            hex(0x6255A6),
+            hex(0x895715),
+            hex(0x993E2D),
+        ],
         tool: [
             hex(0x6E6418),
             hex(0x5C6A22),
@@ -311,7 +327,15 @@ impl Palette {
             failed: hex(0xF5938A),
             full_steam: hex(0xACE8BA),
         },
-        model: [hex(0x7FE0A5), hex(0xF2AAEA), hex(0x74D2FF), hex(0xCBD166)],
+        model: [
+            hex(0x7FE0A5),
+            hex(0xF2AAEA),
+            hex(0x74D2FF),
+            hex(0xCBD166),
+            hex(0xC0BAFF),
+            hex(0xFFD08A),
+            hex(0xFFA18C),
+        ],
         tool: [
             hex(0xDDD394),
             hex(0xCAD89B),
@@ -362,7 +386,15 @@ impl Palette {
             failed: hex(0x96291C),
             full_steam: hex(0x1C5A31),
         },
-        model: [hex(0x145A33), hex(0x7C2F76), hex(0x054F78), hex(0x4A4D08)],
+        model: [
+            hex(0x145A33),
+            hex(0x7C2F76),
+            hex(0x054F78),
+            hex(0x4A4D08),
+            hex(0x4F408F),
+            hex(0x70430B),
+            hex(0x7F2D1E),
+        ],
         tool: [
             hex(0x575010),
             hex(0x48541A),
@@ -443,10 +475,21 @@ pub enum ModelFamily {
     Opus,
     Sonnet,
     Haiku,
+    Astra,
+    Luna,
+    Terra,
 }
 
 impl ModelFamily {
-    pub const ALL: [Self; 4] = [Self::Sol, Self::Opus, Self::Sonnet, Self::Haiku];
+    pub const ALL: [Self; 7] = [
+        Self::Sol,
+        Self::Opus,
+        Self::Sonnet,
+        Self::Haiku,
+        Self::Astra,
+        Self::Luna,
+        Self::Terra,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -454,6 +497,9 @@ impl ModelFamily {
             Self::Opus => "Opus",
             Self::Sonnet => "Sonnet",
             Self::Haiku => "Haiku",
+            Self::Terra => "Terra",
+            Self::Luna => "Luna",
+            Self::Astra => "Astra",
         }
     }
 
@@ -463,6 +509,9 @@ impl ModelFamily {
             Self::Opus => model.opus,
             Self::Sonnet => model.sonnet,
             Self::Haiku => model.haiku,
+            Self::Terra => model.terra,
+            Self::Luna => model.luna,
+            Self::Astra => model.astra,
         }
     }
 }
@@ -578,7 +627,7 @@ pub fn theme(variant: ThemeVariant, scale: f32) -> UiTheme {
     let p = variant.palette();
     let g = p.ground;
     let s = p.status;
-    let [sol, opus, sonnet, haiku] = p.model;
+    let [sol, opus, sonnet, haiku, astra, luna, terra] = p.model;
     let [
         plan,
         create,
@@ -609,7 +658,7 @@ pub fn theme(variant: ThemeVariant, scale: f32) -> UiTheme {
             selected:(g.selected), hover:(g.hover), pressed:(g.pressed), inverse:(g.inverse),
         },
         status { live:(s.live), needs-you:(s.needs_you), failed:(s.failed), full-steam:(s.full_steam) },
-        model { sol:sol, opus:opus, sonnet:sonnet, haiku:haiku },
+        model { sol:sol, opus:opus, sonnet:sonnet, haiku:haiku, astra:astra, luna:luna, terra:terra },
         tool {
             plan:plan, create:create, edit:edit, test:test, search:search, fetch:fetch,
             read:read, run:run, spawn:spawn, message:message, wait:wait, result:result,

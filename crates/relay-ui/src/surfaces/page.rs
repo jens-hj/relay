@@ -97,6 +97,9 @@ pub fn HeaderCell(
 #[component]
 pub fn PageHeader(
     title: UiText,
+    /// Optional mark beside the page title.
+    #[prop(optional)]
+    icon: Option<SvgToken>,
     #[prop(optional)] path: Vec<String>,
     /// A short muted line above the title, for what kind of page it is.
     #[prop(optional)]
@@ -134,9 +137,16 @@ pub fn PageHeader(
         });
     }
     let named = title.clone();
-    titles.adopt(&view! {
+    let title_row = view! {
+        row height:min-content min-width:0px gap:{px(10.0)}px align:center {}
+    };
+    if let Some(icon) = icon {
+        title_row.adopt(&crate::icons::icon_mark(icon, 20.0));
+    }
+    title_row.adopt(&view! {
         SerifTitle text:(named) size:(title_size)
     });
+    titles.adopt(&title_row);
     let has_leading = leading.is_some();
     view! {
         row height:{if scaled { px(height) } else { height }}px shrink:0 gap:{px(12.0)}px
@@ -584,11 +594,29 @@ pub fn CommandPalette(
 pub fn ReadoutCell(
     key: String,
     value: UiText,
+    /// Places the label beside its value for short summary strips.
+    #[prop(default = false)]
+    inline: bool,
     /// The value's colour, for readings that carry a signal; ink by default.
     #[prop(default = Live::fixed(Tone::Ink))]
     tone: Live<Tone>,
     #[prop(optional)] children: Children,
 ) -> Element {
+    if inline {
+        return view! {
+            row width:max-content max-width:{px(320.0)}px min-width:0px shrink:0 align:center
+                gap:{px(8.0)}px pad:(horizontal:{px(14.0)}px vertical:{px(4.0)}px)
+                label:(key.clone()) stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
+                Label text:(key) role:(TextRole::Caption) tone:(Tone::Muted) weight:500 caps:true
+                row width:1fr min-width:0px height:min-content clip {
+                    text text-wrap:none font-family:monospace
+                        font-size:{px(TextRole::Body.size())}px font-weight:500
+                        font-color:{mosaic::core::theme::color(tone.get().token())} {value.get()}
+                }
+                children
+            }
+        };
+    }
     view! {
         col width:max-content max-width:{px(320.0)}px min-width:0px shrink:0 justify:center
             gap:{px(4.0)}px pad:(horizontal:{px(14.0)}px vertical:0px) label:(key.clone())

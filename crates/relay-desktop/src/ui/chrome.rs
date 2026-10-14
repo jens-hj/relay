@@ -27,11 +27,23 @@ pub(crate) fn PageHeader(
     };
     let header = view! {
         PageStrip title:(UiText::from(title)) eyebrow:(Some(UiText::from(eyebrow)))
+            icon:(if model.page.get() == Page::Board { Some(relay_ui::icons::command.board) } else { None })
             height:(crate::window_chrome::NATIVE_HEADER_HEIGHT) scaled:(!cfg!(target_os = "macos"))
             title-size:(relay_ui::prelude::SerifSize::Medium)
             label:(Some("Page header".to_string())) leading:(Some(leading)) {
             children
             CommandPaletteButton model:(model) compact:(compact)
+            if cfg!(target_arch = "wasm32") && model.page.get() == Page::Settings {
+                row width:max-content shrink:0 {
+                    CellButton label:"Sign out of Relay" rule:(relay_ui::prelude::Rule::Left)
+                        on-press:(press(move || crate::platform::logout(model))) {
+                        icon size:{px(16.0)}px sign-out-icon
+                        if !compact.get() {
+                            Label text:"Sign out" role:(TextRole::Label) weight:500
+                        }
+                    }
+                }
+            }
             if model.page.get() != Page::Board || model.issue.get().is_none() || model.snapshot.get().projects.is_empty() {
                 WindowControlsSpace
             }

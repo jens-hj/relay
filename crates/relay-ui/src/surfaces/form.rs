@@ -154,6 +154,13 @@ pub fn Segments(
                 Color::TRANSPARENT
             };
             let mut visual = Visual::new().fill(fill);
+            if !chosen {
+                visual = visual.stroke(
+                    StrokeSpec::new(px(1.0), color(ground.rule))
+                        .edges(StrokeEdges::BOTTOM)
+                        .offset(-px(1.0)),
+                );
+            }
             if index > 0 {
                 visual = visual.stroke(
                     StrokeSpec::new(px(1.0), color(ground.hairline)).edges(StrokeEdges::LEFT),

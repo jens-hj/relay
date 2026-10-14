@@ -15,6 +15,9 @@ fn pending(permission: &ToolPermission) -> bool {
 /// means it waits for you; otherwise its worker run decides. A session
 /// that never ran is queued while a turn waits for it and done otherwise.
 pub fn session_status(snapshot: &Snapshot, session: &Session) -> AgentStatus {
+    if session.awaiting_first_message {
+        return AgentStatus::Idle;
+    }
     if snapshot
         .tool_permissions
         .iter()
@@ -100,11 +103,13 @@ pub fn agent_forest(
                 ),
             );
             let (model, effort) = session_model(session, catalogs);
+            built.archived = session.archived;
             built.model = model;
             built.effort = effort;
             built.expanded = !collapsed.contains(&session.id);
-            built.can_spawn =
-                session.worker.is_some() && (session.fixture || !session.workspaces.is_empty());
+            built.can_spawn = !session.archived
+                && session.worker.is_some()
+                && (session.fixture || !session.workspaces.is_empty());
             built.selected = session.id == selected;
             let mut nodes = Vec::new();
             for child in children.get(session.id.as_str()).into_iter().flatten() {
@@ -144,8 +149,21 @@ pub fn agent_forest(
                 format!("config:{}", config.id),
                 config.name.clone(),
                 AgentStatus::Idle,
-                harness(profile.map_or(relay_core::Harness::Codex, |p| p.harness)),
+                harness(
+                    profile
+                        .as_ref()
+                        .map_or(relay_core::Harness::Codex, |p| p.harness),
+                ),
             );
+            let (identity, effort) = super::identity::selection_model(
+                &config.draft_selection,
+                None,
+                &format!("agent-draft-{}", config.id),
+                profile.as_ref().map(|p| p.harness),
+                catalogs,
+            );
+            node.model = identity;
+            node.effort = effort;
             node.can_spawn = false;
             node.selected = selected == format!("agent-draft-{}", config.id);
             forest.push(node);

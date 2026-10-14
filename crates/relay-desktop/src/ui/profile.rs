@@ -46,9 +46,12 @@ fn AgentProfileSelector(model: Model) -> Element {
         }
     });
     let trigger = view! {
-        CellButton label:"Select agent profile" horizontal-inset:0.0 start:true
-            on-press:(press(move || open.set(!open.get_untracked()))) {
-            row width:1fr min-width:0px height:min-content clip {
+        button @click:{open.set(!open.get_untracked())} label:"Select agent profile"
+            width:max-content height:min-content min-width:0px align:center gap:{px(8.0)}px pad:0px
+            radius:0px fill:(Color::TRANSPARENT) stroke:(width:0px color:ground.ink)
+            hover { fill:ground.hover }
+            focused { stroke:(width:{px(1.0)} color:ground.ink edges:bottom) } {
+            row width:max-content min-width:0px height:min-content clip {
                 SerifTitle text:(Derived::new(move || model.agent_template_name()))
                     size:(SerifSize::Large)
             }
@@ -57,7 +60,7 @@ fn AgentProfileSelector(model: Model) -> Element {
     };
     let handle = trigger.clone();
     view! {
-        stack min-width:0px height:min-content {
+        stack width:max-content min-width:0px height:min-content {
             { parent.adopt(&trigger); }
             Popover open:(open) label:"Agent profiles" content:(content) trigger:(Some(handle))
         }
@@ -79,24 +82,12 @@ fn AgentSetup(model: Model) -> Element {
     });
     view! {
         col height:min-content {
-            TextInput value:(model.editor_name) label:"Agent name" placeholder:"Agent name"
-                framed:false
+            TextInput value:(model.editor_name) label:"Custom name (optional)"
+                placeholder:"Automatic from first message" framed:false
             if model.editor_parent.get().is_some() {
                 row height:min-content pad:{px(14.0)}px {
                     Label text:(Derived::new(move || format!("Subagent of {}", parent_title.get())))
                         role:(TextRole::Caption) tone:(Tone::Muted)
-                }
-                TextInput value:(model.worker_prompt) label:"Agent task"
-                    placeholder:"What should this agent do?" multiline:true framed:false
-                if model.editor_profile.get().permissions[&Task::Implement] == Permission::Ask {
-                    row height:{px(36.0)}px {
-                        CellButton label:"Approve agent implementation" start:true
-                            selected:(model.worker_approval)
-                            on-press:(press(move || model.worker_approval.set(!model.worker_approval.get_untracked()))) {
-                            Label text:"Approve implementation for the first turn"
-                                role:(TextRole::Caption)
-                        }
-                    }
                 }
             }
         }
@@ -199,11 +190,8 @@ pub(crate) fn Profiles(model: Model) -> Element {
         model.busy.get()
             || !model.connected.get()
             || (model.editor.get() == EditTarget::New
-                && (model.editor_name.get().trim().is_empty()
-                    || (model.editor_parent.get().is_some()
-                        && model.worker_prompt.get().trim().is_empty())
-                    || (model.editor_profile.get() != model.editor_base.get()
-                        && !model.editor_override_accepted.get())))
+                && model.editor_profile.get() != model.editor_base.get()
+                && !model.editor_override_accepted.get())
     });
     view! {
         col width:1fr gap:0px @layout:{move |rect: Rect| width.set(rect.size.width)} {
@@ -211,21 +199,32 @@ pub(crate) fn Profiles(model: Model) -> Element {
             Notice model:(model)
             scroll {
                 col height:min-content gap:0px {
-                    if model.editor.get() == EditTarget::New {
+                    if model.editor.get() != EditTarget::Defaults {
                         AgentSetup model:(model)
                     }
                     Inheritance model:(model)
                     // One grid for both layouts: the track template changes with the
                     // width, the controls themselves are never rebuilt.
-                    grid height:min-content gap:0px align:start
-                        cols:{if wide.get() { GridTracks::new([GridTrack::fr(1.0), GridTrack::fr(1.0)]) } else { GridTracks::new([GridTrack::fr(1.0)]) }} {
-                        col height:min-content min-width:0px gap:0px label:"Action matrix column"
-                            stroke:(width:{px(if wide.get() {1.0} else {0.0})} color:ground.hairline edges:right) {
-                            ActionMatrix model:(model)
-                            ProfileToml model:(model)
+                    stack height:min-content min-width:0px {
+                        grid height:min-content gap:0px align:start
+                            cols:{if wide.get() { GridTracks::new([GridTrack::fr(1.0), GridTrack::fr(1.0)]) } else { GridTracks::new([GridTrack::fr(1.0)]) }} {
+                            col height:min-content min-width:0px gap:0px
+                                label:"Action matrix column" {
+                                ActionMatrix model:(model)
+                                ProfileToml model:(model)
+                            }
+                            col height:min-content min-width:0px {
+                                ProfileControls model:(model)
+                            }
                         }
-                        col height:min-content min-width:0px {
-                            ProfileControls model:(model)
+                        if wide.get() {
+                            grid nohit gap:0px rows:{GridTracks::new([GridTrack::fr(1.0)])}
+                                cols:{GridTracks::new([GridTrack::fr(1.0), px(1.0).into(), GridTrack::fr(1.0)])} {
+                                el nohit {}
+                                el width:{px(1.0)}px height:fill fill:ground.rule-strong nohit
+                                    label:"Profile column divider" {}
+                                el nohit {}
+                            }
                         }
                     }
                 }
@@ -267,9 +266,9 @@ fn ProfileHeader(model: Model) -> Element {
     });
     let kind = Derived::new(move || {
         String::from(match model.editor.get() {
-            EditTarget::Defaults => "Project defaults",
-            EditTarget::Config(_) => "Agent profile",
-            EditTarget::New => "New agent",
+            EditTarget::Defaults => "Project Defaults",
+            EditTarget::Config(_) => "Agent Profile",
+            EditTarget::New => "New Agent",
         })
     });
     let title = Derived::new(move || {
@@ -677,7 +676,7 @@ fn ProfileToml(model: Model) -> Element {
         }
     };
     view! {
-        Module title:"Effective profile · TOML" icon:(Some(relay_ui::icons::call.read))
+        Module title:"Effective Profile · TOML" icon:(Some(relay_ui::icons::call.read))
             head-end:(Some(toggle)) {
             if model.advanced.get() {
                 col height:min-content gap:0px {
@@ -743,7 +742,7 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
         Derived::new(move || model.editor_profile.get().scope == AgentScope::Project);
     let harness = field_module(
         model,
-        "Agent harness",
+        "Agent Harness",
         "harness",
         None,
         view! {
@@ -754,14 +753,14 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
     );
     let approval = field_module(
         model,
-        "Execution approval",
+        "Execution Approval",
         "execution",
         None,
         view! {
             col height:min-content gap:0px {
                 row height:{px(48.0)}px
                     stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                    Segments name:("Execution approval".to_string())
+                    Segments name:("Execution Approval".to_string())
                         options:(ApprovalMode::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
                         icons:(crate::controls::approval_icons())
                         tones:(crate::controls::approval_tones())
@@ -807,7 +806,7 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
     });
     let workers = field_module(
         model,
-        "Concurrent workers",
+        "Concurrent Workers",
         "max_workers",
         None,
         view! {
@@ -914,7 +913,7 @@ fn HarnessPicker(model: Model) -> Element {
                 .collect::<Vec<_>>();
             parent.adopt(&view! {
                 HarnessChoices options:(options) selected:(relay_ui::Live::from(selected))
-                    on-select:(choose.clone()) label:"Agent harness"
+                    on-select:(choose.clone()) label:"Agent Harness"
             });
         },
     );

@@ -421,3 +421,71 @@ fn status_words_show_in_full_at_the_design_width() {
     }
     assert!(!shown.iter().any(|label| label.ends_with('…')), "{shown:?}");
 }
+
+#[test]
+fn spawn_overlay_reserves_no_space_and_archived_rows_remain_readable() {
+    let root = node("overlay", AgentStatus::Done).model(
+        ModelIdentity::new("Sol", "6.1", ModelHue::Sol),
+        Effort::new(5, 2),
+    );
+    let TreeLine::Agent(line) = flatten(&[root], Flatten::default()).remove(0) else {
+        panic!("agent row");
+    };
+    let opened = State::new(false);
+    let on_open: OnAgent = Rc::new(move |_| opened.set(true));
+    let mounted = mount(Size::new(500.0, 150.0), || {
+        let mut archived = line.clone();
+        archived.id = "archived".into();
+        archived.name = "archived".into();
+        archived.archived = true;
+        view! {
+            col {
+                AgentTreeRow line:(line.clone())
+                AgentTreeRow line:(line.clone()) on-spawn:(Some(Rc::new(|_| {}) as OnAgent))
+                AgentTreeRow line:(archived) on-open:(Some(on_open))
+                    on-spawn:(Some(Rc::new(|_| {}) as OnAgent))
+            }
+        }
+    });
+    let before = mounted.rects("Effort 3 of 5");
+    assert_eq!(before.len(), 3);
+    assert!(
+        before
+            .iter()
+            .all(|rect| rect.origin.x == before[0].origin.x)
+    );
+    mounted.hover(mounted.rect("New worker for overlay").center());
+    assert_eq!(mounted.rects("Effort 3 of 5"), before);
+    assert!(mounted.rects("New worker for archived").is_empty());
+    mounted.click_label("archived");
+    assert!(opened.get_untracked());
+}
+
+#[test]
+fn elbow_columns_span_the_full_row_and_follow_each_indentation_level() {
+    let mounted = mount(Size::new(200.0, 34.0), || {
+        view! {
+            Elbows guides:(vec![Guide::Pass, Guide::Branch, Guide::Last])
+        }
+    });
+    let scene = mounted.ui.scene();
+    let guides: Vec<_> = scene
+        .cmds
+        .iter()
+        .filter_map(|cmd| match cmd {
+            mosaic::render::PaintCmd::Shape(shape)
+                if shape.fill.as_solid()
+                    == Some(mosaic::core::theme::color(crate::tokens::ground.hairline)) =>
+            {
+                Some(shape.rect)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(guides.len(), 5);
+    assert_eq!(guides[0], Rect::from_xywh(6.0, 0.0, 1.0, 34.0));
+    assert_eq!(guides[1], Rect::from_xywh(20.0, 0.0, 1.0, 34.0));
+    assert_eq!(guides[2], Rect::from_xywh(20.0, 16.5, 8.0, 1.0));
+    assert_eq!(guides[3], Rect::from_xywh(34.0, 0.0, 1.0, 17.5));
+    assert_eq!(guides[4], Rect::from_xywh(34.0, 16.5, 8.0, 1.0));
+}

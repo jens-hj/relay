@@ -27,6 +27,7 @@ use std::rc::Rc;
 /// children, so the same type serves at every depth.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AgentNode {
+    pub archived: bool,
     /// Stable identity, passed back to callbacks.
     pub id: String,
     pub name: String,
@@ -52,6 +53,7 @@ impl AgentNode {
         harness: Harness,
     ) -> Self {
         AgentNode {
+            archived: false,
             id: id.into(),
             name: name.into(),
             status,

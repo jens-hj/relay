@@ -139,6 +139,9 @@ mod tests {
 
     fn session(id: &str, parent: Option<&str>, status: Option<WorkerStatus>) -> Session {
         Session {
+            automatic_name: false,
+            awaiting_first_message: false,
+            archived: false,
             profile: None,
             connection_ids: vec![],
             workspaces: vec![],

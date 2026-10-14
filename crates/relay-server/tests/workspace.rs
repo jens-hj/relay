@@ -89,7 +89,7 @@ async fn protocol_guard_and_multiple_local_projects_round_trip_without_remote_cr
         "protocol_mismatch"
     );
     assert_eq!(snapshot(&server).await, initial);
-    assert_eq!(PROTOCOL_VERSION, 6);
+    assert_eq!(PROTOCOL_VERSION, 9);
     let previous = reqwest::Client::new()
         .post(format!("{}/v1/commands", server.endpoint))
         .bearer_auth(TOKEN)

@@ -183,9 +183,9 @@ fn model_identity_splits_family_version_and_vendor() {
             "GPT",
             ModelHue::Sol,
         ),
-        ("gpt-6-luna", "Luna", "6", "GPT", ModelHue::Sol),
+        ("gpt-6-luna", "Luna", "6", "GPT", ModelHue::Luna),
         ("gpt-6.1-sol", "Sol", "6.1", "GPT", ModelHue::Sol),
-        ("gpt-6-astra", "Astra", "6", "GPT", ModelHue::Sol),
+        ("gpt-6-astra", "Astra", "6", "GPT", ModelHue::Astra),
         (
             "gpt-7-new-variant",
             "New Variant",
@@ -203,6 +203,9 @@ fn model_identity_splits_family_version_and_vendor() {
         ),
         ("gpt5", "GPT", "5", "GPT", ModelHue::Sol),
         ("codex-mini-latest", "Codex Mini", "", "GPT", ModelHue::Sol),
+        ("gpt-7-terra", "Terra", "7", "GPT", ModelHue::Terra),
+        ("luna-7.2", "Luna", "7.2", "GPT", ModelHue::Luna),
+        ("astra-8", "Astra", "8", "GPT", ModelHue::Astra),
         ("sol-6.1", "Sol", "6.1", "GPT", ModelHue::Sol),
         ("llama-3.1-70b", "llama-3.1-70b", "", "", ModelHue::Neutral),
     ];
@@ -524,4 +527,61 @@ fn rows_borrow_a_loaded_catalog_of_the_same_harness_for_their_effort() {
     assert_eq!(effort.name(), "high");
     // A Claude catalog never describes a Codex model.
     assert!(session_model(&backfill, &catalogs).1.is_none());
+}
+
+#[test]
+fn selected_model_and_effort_override_the_last_reported_model_together() {
+    let mut session = demo().sessions[0].clone();
+    session.worker.as_mut().unwrap().model = Some("claude-opus-5-5".into());
+    session.selection = HarnessSelection {
+        model: Some("claude-haiku-5-5".into()),
+        effort: Some("low".into()),
+        ..Default::default()
+    };
+    let haiku = HarnessModel {
+        id: "claude-haiku-5-5".into(),
+        name: "Haiku".into(),
+        efforts: vec![
+            "low".into(),
+            "medium".into(),
+            "high".into(),
+            "xhigh".into(),
+            "max".into(),
+        ],
+        default_effort: Some("low".into()),
+        fast: false,
+    };
+    let opus = HarnessModel {
+        id: "claude-opus-5-5".into(),
+        name: "Opus".into(),
+        efforts: vec!["medium".into(), "high".into()],
+        default_effort: Some("medium".into()),
+        fast: false,
+    };
+    let catalogs = BTreeMap::from([(
+        session.id.clone(),
+        Ok(HarnessCatalog {
+            harness: relay_core::Harness::ClaudeCode,
+            models: vec![haiku, opus.clone()],
+            ..Default::default()
+        }),
+    )]);
+    let (identity, effort) = session_model(&session, &catalogs);
+    assert_eq!(identity.unwrap().short_name(), "Haiku 5.5");
+    let effort = effort.unwrap();
+    assert_eq!(effort.step_name(effort.current), "low");
+    let stale = BTreeMap::from([(
+        session.id.clone(),
+        Ok(HarnessCatalog {
+            harness: relay_core::Harness::ClaudeCode,
+            models: vec![opus],
+            ..Default::default()
+        }),
+    )]);
+    let (identity, effort) = session_model(&session, &stale);
+    assert_eq!(identity.unwrap().hue, ModelHue::Haiku);
+    assert!(
+        effort.is_none(),
+        "never borrow steps from the previously reported model"
+    );
 }

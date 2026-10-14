@@ -351,7 +351,7 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
             if kind.get() == 3 {
                 InputCell value:(host) label:"GitLab host"
                 ActionCell
-                    label:(Derived::new(move || if group.get() {"Group board".to_string()} else {"Project board".to_string()}))
+                    label:(Derived::new(move || if group.get() {"Group board".to_string()} else {"Project Board".to_string()}))
                     on-press:(press(move || group.set(!group.get_untracked())))
             }
             if kind.get() >= 2 {
@@ -504,7 +504,7 @@ fn Connections(model: Model) -> Element {
                     ConnectionRow model:(model) connection:(connection.clone())
                 }
             }
-            Module title:"New connection" icon:(Some(relay_ui::icons::mark.link)) {
+            Module title:"New Connection" icon:(Some(relay_ui::icons::mark.link)) {
                 ConnectionForm model:(model) initial:false
             }
             Operations model:(model)
@@ -683,7 +683,7 @@ pub fn OperationHistory(model: Model, open: State<bool>) -> Element {
     };
     view! {
         col height:min-content gap:0px label:"Completed operations" {
-            Module title:"Operation history" icon:(Some(relay_ui::icons::call.result))
+            Module title:"Operation History" icon:(Some(relay_ui::icons::call.result))
                 head-end:(Some(close)) {
                 BoundedPanel limit:(Derived::new(|| px(180.0))) {
                     col height:min-content gap:0px {
@@ -1183,7 +1183,7 @@ fn Publish(model: Model) -> Element {
                     }
                 }
             }
-            Module title:"Issue repositories" icon:(Some(relay_ui::icons::command.project)) {
+            Module title:"Issue Repositories" icon:(Some(relay_ui::icons::command.project)) {
                 for (_, issue) in {model.snapshot.get().issues.into_iter().filter(|i|model.board_columns().iter().any(|c|model.task_in_column(i,&c.id))).map(|i|(i.id.clone(),i)).collect::<Vec<_>>()} {
                     let issue_id = State::new(issue.id.clone());
                     let issue_title = State::new(issue.title.clone());
@@ -1200,7 +1200,7 @@ fn Publish(model: Model) -> Element {
                 }
             }
             row height:{px(44.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                PrimaryButton text:"Publish board"
+                PrimaryButton text:"Publish Board"
                     label:(Some(UiText::from("Confirm board publication"))) on-press:(publish)
                     disabled:(publish_blocked) fill:true
             }

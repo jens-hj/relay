@@ -27,6 +27,7 @@ pub fn settings(collapsed: bool) -> LedgerView {
         harness: Harness::Codex,
         model: model(),
         effort: effort(),
+        pending_effort: None,
         effort_label: None,
         collapsed,
     }

@@ -9,6 +9,8 @@ mosaic::scheme! {
         director-icon:Svg, worker-icon:Svg, gear-icon:Svg, plus-icon:Svg, sliders-icon:Svg,
         window-minimize:Svg, window-maximize:Svg, window-close:Svg,
         command-icon:Svg, more-icon:Svg, connections-icon:Svg, reset-icon:Svg, navigation-icon:Svg,
+        sign-out-icon:Svg,
+        board-local-icon:Svg, board-github-icon:Svg, board-gitlab-icon:Svg,
     }
 }
 
@@ -20,5 +22,7 @@ pub fn icons() -> RelayIcons {
         plus-icon:"assets/icons/plus.svg", sliders-icon:"assets/icons/sliders.svg",
         window-minimize:"assets/icons/window-minimize.svg", window-maximize:"assets/icons/window-maximize.svg", window-close:"assets/icons/window-close.svg",
         command-icon:"assets/icons/command.svg", more-icon:"assets/icons/more.svg", connections-icon:"assets/icons/connections.svg", reset-icon:"assets/icons/reset.svg", navigation-icon:"assets/icons/navigation.svg",
+        sign-out-icon:"assets/icons/sign-out.svg",
+        board-local-icon:"assets/icons/board-local.svg", board-github-icon:"assets/icons/board-github.svg", board-gitlab-icon:"assets/icons/board-gitlab.svg",
     } }
 }

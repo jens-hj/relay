@@ -165,6 +165,9 @@ pub(super) fn authorize_session(
     approved: bool,
     config: &RuntimeConfig,
 ) -> Result<(), Error> {
+    if session.archived {
+        return Err(Error::invalid("Unarchive this chat before continuing"));
+    }
     let effective = profile(snapshot, session)?;
     let mut candidate = snapshot.clone();
     candidate.sessions.retain(|s| s.id != session.id);
@@ -646,6 +649,8 @@ async fn spawn(
     .await
     .map_err(Error::internal)??;
     let mut child = resources.session.clone();
+    child.automatic_name = false;
+    child.awaiting_first_message = false;
     child.profile = None;
     child.title = args.title;
     child.role = SessionRole::Worker;
@@ -1406,6 +1411,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_child_creation_waits_for_chat_submission_and_preserves_custom_names() {
+        for name in ["", "Static name"] {
+            let f = Fixture::new(Permission::Allow);
+            f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
+            let snapshot = f.workspace.snapshots.borrow().clone();
+            let mut profile =
+                AgentProfile::worker(&snapshot.session_profile(&snapshot.sessions[0]).unwrap());
+            profile.permissions.insert(Task::Implement, Permission::Ask);
+            let envelope = crate::tests::env(
+                snapshot.revision,
+                Command::StartChildAgent {
+                    parent_session_id: f.caller.clone(),
+                    name: name.into(),
+                    profile,
+                    prompt: String::new(),
+                    approve_implementation: false,
+                },
+            );
+            let id = format!("session-{}", envelope.request_id);
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", "Bearer test-token".parse().unwrap());
+            let _ = command(
+                State(f.workspace.clone()),
+                headers,
+                Ok(Json(envelope.clone())),
+            )
+            .await
+            .unwrap();
+            let before = f.workspace.snapshots.borrow().clone();
+            let child = before.sessions.iter().find(|s| s.id == id).unwrap();
+            assert!(child.awaiting_first_message);
+            assert_eq!(child.automatic_name, name.is_empty());
+            assert_eq!(
+                child.title,
+                if name.is_empty() { "New agent" } else { name }
+            );
+            assert_eq!(child.parent_session_id.as_deref(), Some(f.caller.as_str()));
+            assert_eq!(
+                child.worker.as_ref().unwrap().status,
+                WorkerStatus::Completed
+            );
+            assert!(!before.messages.iter().any(|m| m.session_id == id));
+            assert!(!before.submissions.iter().any(|s| s.session_id == id));
+            assert!(
+                f.workspace
+                    .store
+                    .lock()
+                    .unwrap()
+                    .run_id(&id)
+                    .unwrap()
+                    .is_none()
+            );
+            let parts = vec![relay_core::Part::text("Review the sidebar borders")];
+            let Json(draft) = crate::conversation::save_draft(
+                State(f.workspace.clone()),
+                axum::extract::Path(id.clone()),
+                Json(relay_core::SaveDraft {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    expected_revision: 0,
+                    parts: parts.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+            let rejected = f.workspace.store.lock().unwrap().apply(
+                crate::tests::env(
+                    before.revision,
+                    Command::SubmitTurn {
+                        session_id: id.clone(),
+                        draft_revision: draft.revision,
+                        parts: parts.clone(),
+                        approve_implementation: false,
+                    },
+                ),
+                &f.workspace.config,
+            );
+            assert!(rejected.is_err());
+            assert!(
+                f.workspace
+                    .store
+                    .lock()
+                    .unwrap()
+                    .snapshot()
+                    .unwrap()
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == id)
+                    .unwrap()
+                    .awaiting_first_message
+            );
+            let (after, action) = f
+                .workspace
+                .store
+                .lock()
+                .unwrap()
+                .apply(
+                    crate::tests::env(
+                        before.revision,
+                        Command::SubmitTurn {
+                            session_id: id.clone(),
+                            draft_revision: draft.revision,
+                            parts,
+                            approve_implementation: true,
+                        },
+                    ),
+                    &f.workspace.config,
+                )
+                .unwrap();
+            assert!(matches!(action, Some(Action::Run { session_id, .. }) if session_id == id));
+            let child = after.sessions.iter().find(|s| s.id == id).unwrap();
+            assert!(!child.awaiting_first_message);
+            assert_eq!(
+                child.title,
+                if name.is_empty() {
+                    "Review the sidebar borders"
+                } else {
+                    name
+                }
+            );
+            assert_eq!(
+                child.spawn.as_ref().unwrap().task,
+                "Review the sidebar borders"
+            );
+            assert_eq!(child.worker.as_ref().unwrap().status, WorkerStatus::Queued);
+            let persisted = f.workspace.store.lock().unwrap().snapshot().unwrap();
+            assert_eq!(persisted.sessions.iter().find(|s| s.id == id), Some(child));
+            Shutdown {
+                workspace: f.workspace.clone(),
+            }
+            .shutdown()
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn stopping_descendants_requires_delegation_and_cannot_stop_the_parent() {
         let f = Fixture::new(Permission::Allow);
         let child = f
@@ -1529,7 +1670,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 13);
+        assert_eq!(schema, 16);
         f.finish().await;
     }
     #[tokio::test]

@@ -3,9 +3,7 @@ use crate::controls::{
     ContrastToggle, ContrastToggleProps, ModeSegments, ModeSegmentsProps, ResetSetting,
     ResetSettingProps,
 };
-use relay_ui::prelude::{
-    CellButton, CellButtonProps, Label, LabelProps, Rule, TextRole, Tone, UiText,
-};
+use relay_ui::prelude::{CellButton, CellButtonProps, Label, LabelProps, TextRole, Tone, UiText};
 use relay_ui::surfaces::{
     HarnessCard as HarnessCell, HarnessCardProps as HarnessCellProps, Module, ModuleProps,
     Notice as NoticeStrip, NoticeProps as NoticeStripProps, NoticeTone, OnNumber, Stepper,
@@ -91,18 +89,6 @@ pub(crate) fn Settings(model: Model) -> Element {
     let root = view! {
         scroll {
             col height:min-content gap:0px {
-                if cfg!(target_arch = "wasm32") {
-                    row height:{px(40.0)}px
-                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                        row width:max-content {
-                            CellButton label:"Sign out of Relay"
-                                on-press:(press(move || crate::platform::logout(model)))
-                                rule:(Rule::Right) {
-                                Label text:"Sign out" role:(TextRole::Label) weight:500
-                            }
-                        }
-                    }
-                }
                 { parent.adopt(&saving); }
                 if model.settings_store.get().backup.is_some() {
                     { parent.adopt(&caption(Derived::new(move || model.settings_store.get().backup.map(|b| format!("Previous settings file kept at {}", b.display())).unwrap_or_default()), true)); }
@@ -115,9 +101,9 @@ pub(crate) fn Settings(model: Model) -> Element {
                     AppearanceRow model:(model) title:"Contrast"
                         setting:(crate::settings::Setting::Contrast)
                 }
-                Module title:"Interface scale" icon:(Some(relay_ui::icons::call.search))
+                Module title:"Interface Scale" icon:(Some(relay_ui::icons::call.search))
                     note:(Some(UiText::from("Display scaling follows the operating system"))) {
-                    row height:{px(40.0)}px gap:0px align:center label:"Interface scale" {
+                    row height:{px(40.0)}px gap:0px align:center label:"Interface Scale" {
                         row width:{px(150.0)}px shrink:0
                             stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
                             Stepper value:(relay_ui::Live::from(percent)) on-change:(set_percent)

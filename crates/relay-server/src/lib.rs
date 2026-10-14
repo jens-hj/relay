@@ -122,7 +122,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 13 {
+        if version > 16 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -142,7 +142,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 13;"
+             PRAGMA user_version = 16;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -212,9 +212,9 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
-        if version < 13 {
-            // Protocol 5: sub-agent links, compactions, tool details, and usage records
-            // default to empty. Rewriting normalizes legacy tool kinds.
+        if version < 16 {
+            // Normalize legacy snapshots with defaults for naming and waiting state.
+            // Schema 16 prevents older servers from dropping the new agent lifecycle state.
             let json: String = connection
                 .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
                     r.get(0)
@@ -320,6 +320,25 @@ impl Store {
                 "Workspace changed. Refresh and review your draft before saving again.",
             ));
         }
+        let continuation = match &envelope.command {
+            Command::SendWorker { session_id, .. }
+            | Command::SubmitTurn { session_id, .. }
+            | Command::ResumeQueue { session_id }
+            | Command::ConversationCommand { session_id, .. } => Some(session_id.as_str()),
+            Command::StartChildAgent {
+                parent_session_id, ..
+            } => Some(parent_session_id.as_str()),
+            Command::PromoteTurn { submission_id, .. } => snapshot
+                .submissions
+                .iter()
+                .find(|s| &s.id == submission_id)
+                .map(|s| s.session_id.as_str()),
+            _ => None,
+        };
+        if continuation.is_some_and(|id| snapshot.sessions.iter().any(|s| s.id == id && s.archived))
+        {
+            return Err(Error::invalid("Unarchive this chat before continuing"));
+        }
         let mut action = None;
         match envelope.command {
             Command::StartChildAgent {
@@ -329,8 +348,11 @@ impl Store {
                 prompt,
                 approve_implementation,
             } => {
-                validate_prompt(&prompt)?;
-                if name.trim().is_empty() || name.len() > 100 {
+                let waiting = prompt.trim().is_empty();
+                if !waiting {
+                    validate_prompt(&prompt)?;
+                }
+                if name.len() > 100 {
                     return Err(Error::invalid("Enter an agent name of at most 100 bytes"));
                 }
                 let parent = snapshot
@@ -360,7 +382,17 @@ impl Store {
                         "Child scope must stay within its parent's scope",
                     ));
                 }
-                child.title = name.trim().into();
+                child.automatic_name = name.trim().is_empty();
+                child.awaiting_first_message = waiting;
+                child.title = if child.automatic_name {
+                    if waiting {
+                        "New agent".into()
+                    } else {
+                        task_title(&prompt)
+                    }
+                } else {
+                    name.trim().into()
+                };
                 child.role = SessionRole::Worker;
                 child.parent_session_id = Some(parent_session_id);
                 child.profile = Some(profile.clone());
@@ -381,30 +413,43 @@ impl Store {
                 worker.model = None;
                 worker.context_tokens = None;
                 worker.context_window = None;
-                worker.status = WorkerStatus::Queued;
-                agent_tools::authorize_session(&snapshot, &child, approve_implementation, config)?;
+                worker.status = if waiting {
+                    WorkerStatus::Completed
+                } else {
+                    WorkerStatus::Queued
+                };
+                if !waiting {
+                    agent_tools::authorize_session(
+                        &snapshot,
+                        &child,
+                        approve_implementation,
+                        config,
+                    )?;
+                }
                 let session_id = child.id.clone();
                 snapshot.sessions.push(child);
-                snapshot.messages.push(Message {
-                    id: format!("prompt-{}", envelope.request_id),
-                    session_id: session_id.clone(),
-                    author: "You".into(),
-                    kind: "user".into(),
-                    body: prompt.clone(),
-                    parts: vec![Part::text(&prompt)],
-                    tool: None,
-                });
-                snapshot.submissions.push(Submission {
-                    id: envelope.request_id.clone(),
-                    session_id: session_id.clone(),
-                    parts: vec![Part::text(&prompt)],
-                    state: SubmissionState::Launching,
-                    approve_implementation,
-                    error: None,
-                    interrupts_run: None,
-                    last_edit_request: None,
-                });
-                action = Some(Action::Run { session_id, prompt });
+                if !waiting {
+                    snapshot.messages.push(Message {
+                        id: format!("prompt-{}", envelope.request_id),
+                        session_id: session_id.clone(),
+                        author: "You".into(),
+                        kind: "user".into(),
+                        body: prompt.clone(),
+                        parts: vec![Part::text(&prompt)],
+                        tool: None,
+                    });
+                    snapshot.submissions.push(Submission {
+                        id: envelope.request_id.clone(),
+                        session_id: session_id.clone(),
+                        parts: vec![Part::text(&prompt)],
+                        state: SubmissionState::Launching,
+                        approve_implementation,
+                        error: None,
+                        interrupts_run: None,
+                        last_edit_request: None,
+                    });
+                    action = Some(Action::Run { session_id, prompt });
+                }
             }
             command @ Command::StartRootAgent { .. } => {
                 let Command::StartRootAgent {
@@ -485,13 +530,23 @@ impl Store {
                 session_id,
                 selection,
             } => {
-                let session = snapshot
-                    .sessions
-                    .iter_mut()
-                    .find(|s| s.id == session_id && !s.fixture && s.worker.is_some())
-                    .ok_or_else(|| Error::invalid("Live session not found"))?;
-                session.selection = selection;
-                snapshot.revision += 1;
+                if let Some(config_id) = session_id.strip_prefix("agent-draft-") {
+                    let config = snapshot
+                        .agent_configs
+                        .iter_mut()
+                        .find(|c| c.id == config_id)
+                        .ok_or_else(|| Error::invalid("Agent configuration not found"))?;
+                    config.draft_selection = selection;
+                    snapshot.revision += 1;
+                } else {
+                    let session = snapshot
+                        .sessions
+                        .iter_mut()
+                        .find(|s| s.id == session_id && !s.fixture && s.worker.is_some())
+                        .ok_or_else(|| Error::invalid("Live session not found"))?;
+                    session.selection = selection;
+                    snapshot.revision += 1;
+                }
             }
             Command::ConversationCommand {
                 session_id,
@@ -620,6 +675,9 @@ impl Store {
                     .harness;
                 let session_id = format!("session-{}", envelope.request_id);
                 snapshot.sessions.push(Session {
+                    automatic_name: false,
+                    awaiting_first_message: false,
+                    archived: false,
                     profile: None,
                     parent_session_id: None,
                     spawn: None,
@@ -685,7 +743,9 @@ impl Store {
                 if runtime::active(&worker.status) {
                     return Err(Error::invalid("Worker already has an active turn"));
                 }
-                if (worker.thread_id.is_none() && session.conversations.is_empty())
+                if (worker.thread_id.is_none()
+                    && session.conversations.is_empty()
+                    && !session.awaiting_first_message)
                     || worker.worktree.is_none()
                 {
                     return Err(Error::invalid(
@@ -693,6 +753,20 @@ impl Store {
                     ));
                 }
                 agent_tools::authorize_session(&snapshot, session, approve_implementation, config)?;
+                let agent = snapshot
+                    .sessions
+                    .iter_mut()
+                    .find(|s| s.id == session_id)
+                    .unwrap();
+                if agent.awaiting_first_message {
+                    if agent.automatic_name {
+                        agent.title = task_title(&prompt);
+                    }
+                    if let Some(spawn) = agent.spawn.as_mut() {
+                        spawn.task = prompt.clone();
+                    }
+                    agent.awaiting_first_message = false;
+                }
                 let worker = snapshot
                     .sessions
                     .iter_mut()
@@ -838,6 +912,15 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+fn task_title(prompt: &str) -> String {
+    let title = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() {
+        "New agent".into()
+    } else {
+        title.chars().take(80).collect()
+    }
+}
+
 fn validate_prompt(prompt: &str) -> Result<(), Error> {
     if prompt.trim().is_empty() || prompt.len() > 32_000 {
         Err(Error::invalid(
@@ -1348,6 +1431,8 @@ pub fn router_with_browser(
                 }),
             });
             initial.agent_configs.push(AgentConfig {
+                automatic_name: false,
+                draft_selection: HarnessSelection::default(),
                 template: "director".into(),
                 id: format!("agent-config-{id}"),
                 project_id: id,
@@ -1714,8 +1799,10 @@ async fn command(
     {
         uuid::Uuid::parse_str(&envelope.request_id)
             .map_err(|_| Error::invalid("request_id must be a UUID"))?;
-        validate_prompt(prompt)?;
-        if name.trim().is_empty() || name.len() > 100 {
+        if !prompt.trim().is_empty() {
+            validate_prompt(prompt)?;
+        }
+        if name.len() > 100 {
             return Err(Error::invalid("Enter an agent name of at most 100 bytes"));
         }
         let snapshot = workspace.snapshots.borrow().clone();

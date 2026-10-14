@@ -11,6 +11,7 @@ struct Particle {
     dx: f32,
     dy: f32,
     lifetime: f32,
+    decay: f32,
     offset: f32,
 }
 
@@ -20,8 +21,8 @@ impl Particle {
         let phase = age / self.lifetime;
         // Grains arrive at full strength. Exponential decay falls quickly
         // near the emitter, then tapers slowly; normalization ends at zero.
-        let tail = (-4.0f32).exp();
-        let alpha = ((-4.0 * phase).exp() - tail) / (1.0 - tail);
+        let tail = (-self.decay).exp();
+        let alpha = ((-self.decay * phase).exp() - tail) / (1.0 - tail);
         (self.x + self.dx * age, self.y + self.dy * age, alpha)
     }
 }
@@ -78,13 +79,20 @@ impl Flow {
             // Different lifetimes reduce both density and opacity down the tail.
             // Many short-lived grains pack the dense edge, while a smaller
             // population of long-lived grains carries the sparse tail.
-            let lifetime = (distance / speed * (0.03 + random().powi(2) * 0.97)).max(0.5);
+            let usage = spec.gradient == Gradient::Usage;
+            let span = if usage {
+                random().powf(1.5)
+            } else {
+                random().powi(2)
+            };
+            let lifetime = (distance / speed * (0.03 + span * 0.97)).max(0.5);
             particles.push(Particle {
                 x,
                 y,
                 dx,
                 dy,
                 lifetime,
+                decay: if usage { 2.0 } else { 4.0 },
                 offset: random() * lifetime,
             });
         }
@@ -191,6 +199,7 @@ mod tests {
             dx: 1.0,
             dy: 0.0,
             lifetime: 4.0,
+            decay: 4.0,
             offset: 0.0,
         };
         let levels: Vec<_> = (0..=4)
@@ -210,6 +219,24 @@ mod tests {
     }
 
     #[test]
+    fn usage_grains_keep_more_ink_through_the_tail() {
+        let usage = Flow::new(&DitherSpec::new(240.0, 8.0, 1.0, Gradient::Usage, 1.0));
+        let horizontal = Flow::new(&DitherSpec::new(240.0, 8.0, 1.0, Gradient::Horizontal, 1.0));
+        for (usage, horizontal) in usage.particles.iter().zip(&horizontal.particles) {
+            assert!(usage.lifetime >= horizontal.lifetime);
+            let at_phase = |particle: &Particle, phase: f64| {
+                particle
+                    .at(f64::from(particle.lifetime) * phase - f64::from(particle.offset))
+                    .2
+            };
+            for phase in [0.25, 0.5, 0.75] {
+                assert!(at_phase(usage, phase) > at_phase(horizontal, phase));
+            }
+            assert!(at_phase(usage, 0.99999) < 0.00001);
+        }
+    }
+
+    #[test]
     fn grains_follow_density_direction_and_fade_before_restarting() {
         for gradient in [Gradient::Horizontal, Gradient::Usage, Gradient::Corner] {
             let flow = Flow::new(&DitherSpec::new(300.0, 40.0, 1.0, gradient, 1.0));
@@ -224,9 +251,9 @@ mod tests {
                 assert_eq!(particle.at(-f64::from(particle.offset)).2, 1.0);
                 assert!(
                     particle
-                        .at(f64::from(particle.lifetime) * 0.999 - f64::from(particle.offset))
+                        .at(f64::from(particle.lifetime) * 0.99999 - f64::from(particle.offset))
                         .2
-                        < 0.0001
+                        < 0.00001
                 );
                 let (x, y, _) =
                     particle.at(f64::from(particle.lifetime) * 0.5 - f64::from(particle.offset));

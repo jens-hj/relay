@@ -331,9 +331,9 @@ fn page(workspace: &Workspace, flow: &str, error: &str) -> Response {
         }
     };
     let title = match flow {
-        "setup" => "Set up owner",
-        "recover" => "Recover password",
-        _ => "Log in",
+        "setup" => "Set Up Owner",
+        "recover" => "Recover Password",
+        _ => "Log In",
     };
     let error = if error.is_empty() {
         String::new()
@@ -535,7 +535,7 @@ async fn setup(
         .map_err(Error::internal)?;
     let session = new_session(&tx)?;
     tx.commit().map_err(Error::internal)?;
-    let mut response = document("Recovery codes", &format!("<h1>Save recovery codes</h1><p>These codes are shown once. Each code can reset your password once.</p><pre>{}</pre><nav><a href=/app/>Continue</a></nav>",codes.join("\n"))).into_response();
+    let mut response = document("Recovery Codes", &format!("<h1>Save Recovery Codes</h1><p>These codes are shown once. Each code can reset your password once.</p><pre>{}</pre><nav><a href=/app/>Continue</a></nav>",codes.join("\n"))).into_response();
     response
         .headers_mut()
         .append("set-cookie", secure_cookie(COOKIE, &session, ABSOLUTE));

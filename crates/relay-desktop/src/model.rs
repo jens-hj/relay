@@ -78,6 +78,7 @@ pub struct Model {
     pub browser_top_clearance: State<f32>,
     pub browser_viewport: State<Option<Size>>,
     pub sidebar_open: State<bool>,
+    pub show_archived: State<bool>,
     pub settings_store: State<crate::settings::Store>,
     pub snapshot: State<Snapshot>,
     pub connected: State<bool>,
@@ -88,6 +89,7 @@ pub struct Model {
     pub notice: State<String>,
     pub command_feedback: State<String>,
     pub busy: State<bool>,
+    confirmed_selection: State<Option<(String, HarnessSelection)>>,
     pub page: State<Page>,
     pub project: State<String>,
     pub discovery_requests: State<Option<UnboundedSender<BoardSource>>>,
@@ -175,6 +177,7 @@ impl Model {
             browser_top_clearance: State::new(crate::platform::top_clearance()),
             browser_viewport: State::new(None),
             sidebar_open: State::new(false),
+            show_archived: State::new(false),
             settings_store: State::new(crate::settings::Store::default()),
             snapshot: State::new(Snapshot::default()),
             connected: State::new(false),
@@ -185,6 +188,7 @@ impl Model {
             notice: State::new(String::new()),
             command_feedback: State::new(String::new()),
             busy: State::new(false),
+            confirmed_selection: State::new(None),
             page: State::new(Page::Board),
             project: State::new(String::new()),
             discovery_requests: State::new(None),
@@ -271,6 +275,9 @@ impl Model {
         }
         self.syncing
             .set(snapshot.revision < update.acknowledged_revision);
+        if !self.syncing.get_untracked() {
+            self.confirmed_selection.set(None);
+        }
         self.snapshot.set(snapshot);
         let new_search = update.search_serial > self.search_serial.get_untracked();
         if new_search {
@@ -356,6 +363,15 @@ impl Model {
         }
     }
     fn acknowledge(&self, pending: Pending, id: &str) {
+        if self.syncing.get_untracked()
+            && let Command::SetHarnessSelection {
+                session_id,
+                selection,
+            } = &pending.envelope.command
+        {
+            self.confirmed_selection
+                .set(Some((session_id.clone(), selection.clone())));
+        }
         match pending.saved {
             Saved::Buffer(draft) => crate::buffer::acknowledge(*self, &draft, id),
             #[cfg(test)]
@@ -537,6 +553,64 @@ impl Model {
                 .set("Network worker stopped. Your draft is retained.".into());
         }
     }
+    /// The requested effort of an in-flight selection command for this chat.
+    pub fn pending_effort(&self, session: &str) -> Option<String> {
+        if !self.busy.get() {
+            return None;
+        }
+        self.pending
+            .get()
+            .and_then(|pending| match pending.envelope.command {
+                Command::SetHarnessSelection {
+                    session_id,
+                    selection,
+                } if session_id == session => selection.effort,
+                _ => None,
+            })
+    }
+
+    /// Acknowledged effort while the authoritative snapshot catches up.
+    pub fn acknowledged_effort(&self, session: &str) -> Option<String> {
+        self.confirmed_selection
+            .get()
+            .filter(|(id, _)| id == session)
+            .and_then(|(_, selection)| selection.effort)
+    }
+
+    pub fn harness_selection(&self) -> HarnessSelection {
+        let id = self.session.get();
+        if self.busy.get()
+            && let Some(pending) = self.pending.get()
+            && let Command::SetHarnessSelection {
+                session_id,
+                selection,
+            } = pending.envelope.command
+            && session_id == id
+        {
+            return selection;
+        }
+        if let Some((_, selection)) = self
+            .confirmed_selection
+            .get()
+            .filter(|(session, _)| *session == id)
+        {
+            return selection;
+        }
+        let snapshot = self.snapshot.get();
+        let id = self.session.get();
+        snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.selection.clone())
+            .or_else(|| {
+                id.strip_prefix("agent-draft-")
+                    .and_then(|id| snapshot.agent_configs.iter().find(|c| c.id == id))
+                    .map(|c| c.draft_selection.clone())
+            })
+            .unwrap_or_default()
+    }
+
     pub fn can_retry(&self) -> bool {
         self.pending.get().is_some() && !self.busy.get()
     }
@@ -697,7 +771,14 @@ impl Model {
                 };
                 base = config_base;
                 template = director.template.clone();
-                (director.name.clone(), director.overrides.clone())
+                (
+                    if director.automatic_name {
+                        String::new()
+                    } else {
+                        director.name.clone()
+                    },
+                    director.overrides.clone(),
+                )
             }
             EditTarget::New => (String::new(), ProfileOverrides::default()),
             EditTarget::Defaults => ("Project defaults".into(), ProfileOverrides::default()),
@@ -1481,18 +1562,13 @@ impl Model {
             },
             EditTarget::New => {
                 if let Some(parent_session_id) = self.editor_parent.get_untracked() {
-                    let prompt = self.worker_prompt.get_untracked();
-                    if prompt.trim().is_empty() {
-                        self.notice.set("Enter the worker's task".into());
-                        return;
-                    }
                     self.submit(
                         Command::StartChildAgent {
                             parent_session_id,
                             name: self.editor_name.get_untracked(),
                             profile,
-                            prompt,
-                            approve_implementation: self.worker_approval.get_untracked(),
+                            prompt: String::new(),
+                            approve_implementation: false,
                         },
                         self.editor_revision.get_untracked(),
                         Saved::ChildAgent,

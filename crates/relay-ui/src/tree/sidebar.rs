@@ -182,7 +182,7 @@ pub fn NeedsYou(
             parent.adopt(&view! {
                 row height:min-content gap:{px(8.0)}px align:end
                     pad:(left:{px(18.0)}px right:{px(18.0)}px top:{px(16.0)}px bottom:{px(8.0)}px) {
-                    SerifTitle text:"Needs you" size:(SerifSize::Small) italic:true
+                    SerifTitle text:"Needs You" size:(SerifSize::Small) italic:true
                         tone:(Tone::Signal(Signal::NeedsYou))
                     col width:max-content height:min-content pad:(bottom:{px(3.0)}px) {
                         {
@@ -243,6 +243,9 @@ pub fn FocusCrumb(
 /// through the callbacks; selection comes from [`AgentNode::selected`].
 #[component]
 pub fn AgentSidebar(
+    /// Draw an outer frame when used outside an already framed sidebar.
+    #[prop(default = true)]
+    framed: bool,
     roots: Live<Vec<AgentNode>>,
     /// Width in logical pixels before UI scale.
     #[prop(default = 380.0)]
@@ -420,7 +423,7 @@ pub fn AgentSidebar(
             }
             None => {
                 parent.adopt(&view! {
-                    SerifTitle text:"All agents" size:(SerifSize::Small) italic:true
+                    SerifTitle text:"All Agents" size:(SerifSize::Small) italic:true
                 });
             }
         },
@@ -473,7 +476,7 @@ pub fn AgentSidebar(
     let waiting: Live<Vec<Approval>> = waiting.into();
     view! {
         col width:{px(width)}px shrink:0 fill:ground.panel font-color:ground.ink label:"Agents"
-            stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {
+            stroke:(width:{px(if framed { 1.0 } else { 0.0 })} color:ground.hairline offset:{px(-1.0)}) {
             row height:{px(60.0)}px shrink:0 {
                 row width:1fr gap:{px(10.0)}px align:center
                     pad:(horizontal:{px(18.0)}px vertical:0px) {

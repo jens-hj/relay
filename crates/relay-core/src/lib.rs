@@ -90,6 +90,10 @@ fn director_template() -> String {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentConfig {
+    #[serde(default)]
+    pub automatic_name: bool,
+    #[serde(default)]
+    pub draft_selection: HarnessSelection,
     pub id: String,
     pub project_id: String,
     pub name: String,
@@ -108,6 +112,12 @@ pub enum SessionRole {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
+    #[serde(default)]
+    pub automatic_name: bool,
+    #[serde(default)]
+    pub awaiting_first_message: bool,
+    #[serde(default)]
+    pub archived: bool,
     /// Instance settings for a manually configured agent; inherited when absent.
     #[serde(default)]
     pub profile: Option<AgentProfile>,
@@ -287,6 +297,10 @@ pub struct CommandEnvelope {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    SetSessionArchived {
+        session_id: String,
+        archived: bool,
+    },
     SetHarnessSelection {
         session_id: String,
         selection: HarnessSelection,
@@ -573,6 +587,32 @@ impl Snapshot {
     /// Apply only to a candidate snapshot: the server commits it atomically after validation.
     pub fn apply(&mut self, command: Command, id: &str, now: u64) -> Result<(), String> {
         match command {
+            Command::SetSessionArchived {
+                session_id,
+                archived,
+            } => {
+                let session = self
+                    .sessions
+                    .iter_mut()
+                    .find(|s| s.id == session_id)
+                    .ok_or("Session not found")?;
+                if archived
+                    && session.worker.as_ref().is_some_and(|w| {
+                        matches!(w.status, WorkerStatus::Running | WorkerStatus::Queued)
+                    })
+                {
+                    return Err("Stop the worker before archiving this chat".into());
+                }
+                session.archived = archived;
+                if archived {
+                    for turn in self.submissions.iter_mut().filter(|s| {
+                        s.session_id == session_id && s.state == SubmissionState::Queued
+                    }) {
+                        turn.state = SubmissionState::Paused;
+                        turn.error = Some("Chat archived; unarchive and resume to continue".into());
+                    }
+                }
+            }
             Command::CreateProject { .. }
             | Command::RenameProject { .. }
             | Command::AddConnection { .. }
@@ -661,7 +701,9 @@ impl Snapshot {
                 template,
                 overrides,
             } => {
-                validate_text("Agent name", &name, 100)?;
+                if !name.trim().is_empty() {
+                    validate_text("Agent name", &name, 100)?;
+                }
                 self.validate_profile(
                     &project_id,
                     &overrides.resolve(&self.template_profile(
@@ -671,9 +713,15 @@ impl Snapshot {
                     )?),
                 )?;
                 self.agent_configs.push(AgentConfig {
+                    automatic_name: name.trim().is_empty(),
+                    draft_selection: HarnessSelection::default(),
                     id: format!("agent-config-{id}"),
                     project_id,
-                    name: name.trim().into(),
+                    name: if name.trim().is_empty() {
+                        "New agent".into()
+                    } else {
+                        name.trim().into()
+                    },
                     template,
                     overrides,
                 });
@@ -683,7 +731,9 @@ impl Snapshot {
                 name,
                 overrides,
             } => {
-                validate_text("Agent name", &name, 100)?;
+                if !name.trim().is_empty() {
+                    validate_text("Agent name", &name, 100)?;
+                }
                 let director = self
                     .agent_configs
                     .iter()
@@ -698,8 +748,34 @@ impl Snapshot {
                     .iter_mut()
                     .find(|d| d.id == agent_config_id)
                     .unwrap();
-                director.name = name.trim().into();
+                director.automatic_name = name.trim().is_empty();
+                director.name = if director.automatic_name {
+                    "New agent".into()
+                } else {
+                    name.trim().into()
+                };
                 director.overrides = overrides;
+                for session in self
+                    .sessions
+                    .iter_mut()
+                    .filter(|s| s.agent_config_id == agent_config_id && s.role == SessionRole::Root)
+                {
+                    session.automatic_name = name.trim().is_empty();
+                    if !session.automatic_name {
+                        session.title = name.trim().into();
+                    } else if let Some(message) = self.messages.iter().find(|m| {
+                        m.session_id == session.id && matches!(m.kind.as_str(), "user" | "prompt")
+                    }) {
+                        session.title = message
+                            .body
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .chars()
+                            .take(80)
+                            .collect();
+                    }
+                }
             }
             Command::AddComment {
                 message_id,
@@ -770,5 +846,60 @@ mod connection_command_tests {
                 "{field}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    #[test]
+    fn archive_defaults_for_legacy_sessions_and_round_trips() {
+        let snapshot = demo_snapshot(AgentProfile::default());
+        let mut json = serde_json::to_value(&snapshot.sessions[0]).unwrap();
+        json.as_object_mut().unwrap().remove("archived");
+        let mut session: Session = serde_json::from_value(json).unwrap();
+        assert!(!session.archived);
+        session.archived = true;
+        assert!(
+            serde_json::from_value::<Session>(serde_json::to_value(session).unwrap())
+                .unwrap()
+                .archived
+        );
+    }
+
+    #[test]
+    fn archived_chats_keep_transcripts_and_can_be_unarchived() {
+        let mut snapshot = demo_snapshot(AgentProfile::default());
+        let id = snapshot.sessions[0].id.clone();
+        if let Some(worker) = snapshot.sessions[0].worker.as_mut() {
+            worker.status = WorkerStatus::Completed;
+        }
+        let messages = snapshot.messages.clone();
+        let workspaces = snapshot.sessions[0].workspaces.clone();
+        snapshot
+            .apply(
+                Command::SetSessionArchived {
+                    session_id: id.clone(),
+                    archived: true,
+                },
+                "archive",
+                1,
+            )
+            .unwrap();
+        assert!(snapshot.sessions[0].archived);
+        assert_eq!(snapshot.messages, messages);
+        assert_eq!(snapshot.sessions[0].workspaces, workspaces);
+        snapshot
+            .apply(
+                Command::SetSessionArchived {
+                    session_id: id,
+                    archived: false,
+                },
+                "unarchive",
+                2,
+            )
+            .unwrap();
+        assert!(!snapshot.sessions[0].archived);
     }
 }

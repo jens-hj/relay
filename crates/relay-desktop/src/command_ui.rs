@@ -403,14 +403,7 @@ pub fn intercept(model: Model) -> bool {
 }
 
 fn selection(model: Model, model_id: String, effort: Option<String>, fast: bool) {
-    let current = model
-        .snapshot
-        .get_untracked()
-        .sessions
-        .iter()
-        .find(|s| s.id == model.session.get_untracked())
-        .map(|s| s.selection.clone())
-        .unwrap_or_default();
+    let current = model.harness_selection();
     let fast = if model.command_flow.get_untracked() == "effort" {
         current.fast
     } else {
@@ -626,14 +619,23 @@ pub fn CommandPanel(model: Model) -> Element {
     let layout_panel = panel.clone();
     panel.on_layout(move |_| {
         if initial.replace(false) {
-            let ui = model.ui.get_untracked();
-            entry.focus();
-            // The first command choice follows the header cells. Information-only
-            // commands keep focus on Close rather than stepping into the composer.
-            ui.focus_next();
-            if !layout_panel.interaction().focus_within() {
+            let entry = entry.clone();
+            let owner = layout_panel.clone();
+            let mut ready = false;
+            layout_panel.animate(move |_| {
+                if !ready {
+                    ready = true;
+                    owner.paint_dirty();
+                    return mosaic::widgets::Tick::Sleep(std::time::Duration::from_millis(16));
+                }
+                let ui = model.ui.get_untracked();
                 entry.focus();
-            }
+                ui.focus_next();
+                if !owner.interaction().focus_within() {
+                    entry.focus();
+                }
+                mosaic::widgets::Tick::Done
+            });
         }
     });
     let keys_panel = panel.clone();

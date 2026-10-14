@@ -996,3 +996,285 @@ async fn example_sessions_describe_the_demo_catalog_without_a_harness() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn archived_chat_is_readable_but_cannot_execute_until_unarchived() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, id, _) = setup(dir.path()).await;
+    let token = uuid::Uuid::new_v4().to_string();
+    let (app, shutdown) = router_with_shutdown(
+        dir.path().join("db"),
+        token.clone(),
+        AgentProfile::default(),
+        (*w.config).clone(),
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+    for archived in [true, false] {
+        let before: Snapshot = client
+            .get(format!("{endpoint}/v1/snapshot"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let response = client
+            .post(format!("{endpoint}/v1/commands"))
+            .bearer_auth(&token)
+            .header("x-relay-protocol", PROTOCOL_VERSION.to_string())
+            .json(&env(
+                before.revision,
+                Command::SetSessionArchived {
+                    session_id: id.clone(),
+                    archived,
+                },
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let snapshot: Snapshot = client
+            .get(format!("{endpoint}/v1/snapshot"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot
+                .sessions
+                .iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .archived,
+            archived
+        );
+        let history: HistoryPage = client
+            .get(format!("{endpoint}/v1/sessions/{id}/history"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(!history.messages.is_empty());
+        let response = client
+            .post(format!("{endpoint}/v1/commands"))
+            .bearer_auth(&token)
+            .header("x-relay-protocol", PROTOCOL_VERSION.to_string())
+            .json(&env(
+                snapshot.revision,
+                Command::SendWorker {
+                    session_id: id.clone(),
+                    prompt: "Continue".into(),
+                    approve_implementation: true,
+                },
+            ))
+            .send()
+            .await
+            .unwrap();
+        if archived {
+            assert_eq!(response.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(
+                response
+                    .json::<ApiError>()
+                    .await
+                    .unwrap()
+                    .message
+                    .contains("Unarchive")
+            );
+        } else {
+            assert!(response.status().is_success());
+        }
+    }
+    shutdown.shutdown().await.unwrap();
+    task.abort();
+}
+
+#[tokio::test]
+async fn prelaunch_selection_is_saved_and_used_for_the_first_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, _, capture) = setup(dir.path()).await;
+    let before = w.store.lock().unwrap().snapshot().unwrap();
+    let config = &before.agent_configs[0];
+    w.store
+        .lock()
+        .unwrap()
+        .apply(
+            env(
+                before.revision,
+                Command::UpdateAgentConfig {
+                    agent_config_id: config.id.clone(),
+                    name: String::new(),
+                    overrides: config.overrides.clone(),
+                },
+            ),
+            &w.config,
+        )
+        .unwrap();
+    let token = uuid::Uuid::new_v4().to_string();
+    let (app, shutdown) = router_with_shutdown(
+        dir.path().join("db"),
+        token.clone(),
+        AgentProfile::default(),
+        (*w.config).clone(),
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+    let before: Snapshot = client
+        .get(format!("{endpoint}/v1/snapshot"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let config = before.agent_configs[0].id.clone();
+    let selected = HarnessSelection {
+        model: Some("test-model".into()),
+        effort: Some("high".into()),
+        ..Default::default()
+    };
+    let response = client
+        .post(format!("{endpoint}/v1/commands"))
+        .bearer_auth(&token)
+        .header("x-relay-protocol", PROTOCOL_VERSION)
+        .json(&env(
+            before.revision,
+            Command::SetHarnessSelection {
+                session_id: format!("agent-draft-{config}"),
+                selection: selected.clone(),
+            },
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let saved: Snapshot = client
+        .get(format!("{endpoint}/v1/snapshot"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(saved.agent_configs[0].draft_selection, selected);
+    let request = env(
+        saved.revision,
+        Command::StartRootAgent {
+            agent_config_id: config.clone(),
+            issue_id: Some(saved.issues[0].id.clone()),
+            prompt: "First message".into(),
+            parts: vec![],
+            approve_implementation: true,
+        },
+    );
+    let id = format!("session-{}", request.request_id);
+    let response = client
+        .post(format!("{endpoint}/v1/commands"))
+        .bearer_auth(&token)
+        .header("x-relay-protocol", PROTOCOL_VERSION)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let launched: Snapshot = client
+        .get(format!("{endpoint}/v1/snapshot"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let agent = launched.sessions.iter().find(|s| s.id == id).unwrap();
+    assert!(agent.automatic_name);
+    let Command::StartRootAgent { prompt, .. } = &request.command else {
+        unreachable!()
+    };
+    assert_eq!(agent.title, crate::task_title(prompt));
+    assert_eq!(
+        launched
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .selection,
+        selected
+    );
+    let mut completed = false;
+    for _ in 0..100 {
+        let snapshot: Snapshot = client
+            .get(format!("{endpoint}/v1/snapshot"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.worker.as_ref())
+            .is_some_and(|w| w.status == WorkerStatus::Completed)
+        {
+            completed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(completed, "the first selected-model turn must complete");
+    let rpc: Vec<Value> = std::fs::read_to_string(&capture)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let started = rpc
+        .iter()
+        .rev()
+        .find(|v| v["method"] == "thread/start")
+        .unwrap();
+    assert_eq!(started["params"]["model"], "test-model");
+    let turn = rpc
+        .iter()
+        .rev()
+        .find(|v| v["method"] == "turn/start")
+        .unwrap();
+    assert_eq!(turn["params"]["effort"], "high");
+    shutdown.shutdown().await.unwrap();
+    task.abort();
+    let reopened = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
+    assert_eq!(
+        reopened
+            .snapshot()
+            .unwrap()
+            .agent_configs
+            .iter()
+            .find(|c| c.id == config)
+            .unwrap()
+            .draft_selection,
+        selected
+    );
+}

@@ -140,7 +140,7 @@ fn type_section() -> Element {
             row_of(roles, 24.0)
             row_of(tones, 18.0)
             row height:min-content gap:{px(24.0)}px align:end {
-                SerifTitle text:"Needs you" size:(SerifSize::Small) italic:true
+                SerifTitle text:"Needs You" size:(SerifSize::Small) italic:true
                     tone:(Tone::Signal(Signal::NeedsYou))
                 SerifTitle text:"Agents" size:(SerifSize::Medium)
                 SerifTitle text:"API migration" size:(SerifSize::Large)

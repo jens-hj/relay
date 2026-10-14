@@ -670,3 +670,134 @@ fn tool_rows_hover_in_their_own_tool_colour() {
     assert_ne!(read_rest, read_hover, "hover changes the fill");
     assert_ne!(read_hover, edit_hover, "each tool hovers in its own colour");
 }
+
+#[test]
+fn thinking_mark_follows_model_family_changes() {
+    let hue = State::new(ModelHue::Sol);
+    let mounted = mount(Size::new(720.0, 80.0), || {
+        view! {
+            ThinkingLine hue:(hue) effort:3u8
+        }
+    });
+    for family in [
+        ModelHue::Sol,
+        ModelHue::Astra,
+        ModelHue::Luna,
+        ModelHue::Terra,
+        ModelHue::Haiku,
+        ModelHue::Neutral,
+    ] {
+        hue.set(family);
+        mounted.settle();
+        let mark = mounted.rect("Working");
+        let scene = mounted.ui.scene();
+        let tint = scene
+            .cmds
+            .iter()
+            .find_map(|cmd| match cmd {
+                mosaic::render::PaintCmd::Shape(shape)
+                    if shape.rect.size == Size::new(8.0, 8.0)
+                        && shape.rect.origin == mark.origin + Vector2::new(1.0, 1.0) =>
+                {
+                    shape.fill.as_solid()
+                }
+                _ => None,
+            })
+            .expect("painted working square");
+        let expected = mosaic::core::theme::color(family.token());
+        assert_eq!(
+            (tint.r, tint.g, tint.b),
+            (expected.r, expected.g, expected.b)
+        );
+        assert!(tint.a > 0.0);
+        assert_eq!(mark.size, Size::new(10.0, 10.0));
+    }
+}
+
+#[test]
+fn ledger_effort_click_is_grey_until_confirmed_and_rejection_restores_selection() {
+    for collapsed in [false, true] {
+        let state = State::new(gallery::d2::settings(collapsed));
+        let confirmed = state.get_untracked().effort;
+        let step = 3;
+        let mut callbacks = actions(state);
+        callbacks.set_effort =
+            Rc::new(move |step| state.update(|vm| vm.pending_effort = Some(step)));
+        let mounted = mount(Size::new(212.0, 220.0), || {
+            view! {
+                Ledger data:(state) actions:(callbacks)
+            }
+        });
+        let assert_track = |selected, token| {
+            let label = crate::effort::effort_label(confirmed.levels, selected, confirmed.tiers);
+            let rect = mounted.rect(&label);
+            let tint = mosaic::core::theme::color(token);
+            let scene = mounted.ui.scene();
+            assert!(
+                scene.cmds.iter().any(|cmd| match cmd {
+                    mosaic::render::PaintCmd::Shape(shape) => {
+                        let centre = shape.rect.center();
+                        centre.x >= rect.origin.x
+                            && centre.x <= rect.max_x()
+                            && centre.y >= rect.origin.y
+                            && centre.y <= rect.max_y()
+                            && shape.fill.as_solid().is_some_and(|fill| fill == tint)
+                    }
+                    _ => false,
+                }),
+                "selected effort should paint in the expected colour"
+            );
+        };
+        mounted.click(
+            mounted
+                .rect(&format!("Effort {}", confirmed.step_name(step)))
+                .center(),
+        );
+        assert_eq!(state.get_untracked().pending_effort, Some(step));
+        assert_track(step, crate::tokens::ground.muted);
+        state.update(|vm| {
+            vm.effort.current = step;
+            vm.pending_effort = None;
+        });
+        mounted.settle();
+        assert_track(step, state.get_untracked().model.hue.token());
+        mounted.click(
+            mounted
+                .rect(&format!("Effort {}", confirmed.step_name(0)))
+                .center(),
+        );
+        assert_track(0, crate::tokens::ground.muted);
+        state.update(|vm| vm.pending_effort = None);
+        mounted.settle();
+        assert_track(step, state.get_untracked().model.hue.token());
+    }
+}
+
+#[test]
+fn inline_composer_puts_controls_in_the_gutter_and_grows_with_the_draft() {
+    let mut settings = gallery::d2::settings(true);
+    settings.pending_effort = None;
+    let value = State::new("Draft".to_owned());
+    let settings = State::new(settings);
+    let mounted = mount(Size::new(848.0, 1200.0), || {
+        view! {
+            Composer inline:true settings:(settings) ledger-actions:(actions(settings))
+                value:(value) on-send:(noop()) on-attach:(noop()) hint:"Ctrl/Cmd+Enter sends"
+        }
+    });
+    let send = mounted.rect("Send message");
+    let attach = mounted.rect("Attach file");
+    let editor = mounted.rect("Message");
+    assert!(send.max_x() <= editor.origin.x);
+    assert_eq!(send.origin.x, attach.origin.x);
+    assert!(send.origin.y < attach.origin.y);
+    assert!(mounted.rect("Expand agent settings").max_x() <= send.origin.x);
+    value.set(
+        (0..50)
+            .map(|i| format!("Line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    mounted.settle();
+    assert!(mounted.rect("Message").size.height > 500.0);
+}
