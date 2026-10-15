@@ -33,15 +33,15 @@ fn all_tools_cycle_openings_and_follow_live_data() {
         for opening in [Opening::Collapsed, Opening::Summary, Opening::Expanded] {
             assert!(mounted.labels().iter().any(|l| l == opening.label()));
             let header = mounted.rect(opening.label());
-            assert_eq!(header.size.height, 36.0);
+            assert_eq!(header.size.height, 30.0);
             assert!(header.size.width > 600.0);
-            mounted.click(header.origin + Vector2::new(80.0, 18.0));
+            mounted.click(Vector2::new(header.origin.x + 80.0, header.center().y));
             assert_eq!(value.get_untracked().opening, opening.next());
         }
         for x in [12.0, 350.0, 700.0] {
             let header = mounted.rect(value.get_untracked().opening.label());
             let next = value.get_untracked().opening.next();
-            mounted.click(header.origin + Vector2::new(x, 18.0));
+            mounted.click(Vector2::new(header.origin.x + x, header.center().y));
             assert_eq!(value.get_untracked().opening, next);
         }
         value.update(|v| {
@@ -211,7 +211,7 @@ fn transcript_gutter_column_and_thinking_geometry() {
         }
     });
     let body = mounted.rect("body slot");
-    assert_eq!(body.origin.x, (1100.0 - 848.0) / 2.0 + 128.0 + 16.0);
+    assert_eq!(body.origin.x, (1100.0 - 848.0) / 2.0 + 128.0 + 12.0);
     assert_eq!(mounted.rect("Working").size, Size::new(10.0, 10.0));
 }
 #[test]
@@ -616,6 +616,7 @@ fn tool_status_and_opening_share_full_height_cells() {
             }
         });
         let header = mounted.rect(Opening::Collapsed.label());
+        assert_eq!(header.size.height, 30.0);
         let snapshot = mounted.ui.inspection_snapshot();
         let indicator = snapshot
             .nodes
@@ -623,13 +624,15 @@ fn tool_status_and_opening_share_full_height_cells() {
             .find(|n| {
                 n.children.len() == 3
                     && (n.rect.size.width - 36.0).abs() < 0.1
-                    && (n.rect.size.height - 36.0).abs() < 0.1
+                    && (n.rect.size.height - header.size.height).abs() < 0.1
             })
             .expect("three full-height opening rectangles");
         assert!((indicator.rect.origin.x + 36.0 - header.origin.x - header.size.width).abs() < 0.1);
+        assert_eq!(indicator.rect.origin.y, header.origin.y);
         for child in &indicator.children {
             let node = snapshot.nodes.iter().find(|n| n.id == *child).unwrap();
-            assert_eq!(node.rect.size, Size::new(12.0, 36.0));
+            assert_eq!(node.rect.size, Size::new(12.0, header.size.height));
+            assert_eq!(node.rect.origin.y, header.origin.y);
         }
         let label = match specimen.kind {
             ToolKind::Run => {
@@ -649,7 +652,7 @@ fn tool_status_and_opening_share_full_height_cells() {
             .iter()
             .find(|n| n.label.as_deref() == Some(label))
             .unwrap();
-        while node.rect.size.height < 35.9 {
+        while node.rect.size.height < header.size.height - 0.1 {
             node = snapshot
                 .nodes
                 .iter()
@@ -657,6 +660,7 @@ fn tool_status_and_opening_share_full_height_cells() {
                 .unwrap();
         }
         assert_eq!(node.rect.size.height, header.size.height);
+        assert_eq!(node.rect.origin.y, header.origin.y);
         assert!((node.rect.origin.x + node.rect.size.width - indicator.rect.origin.x).abs() < 0.1);
     }
 }
