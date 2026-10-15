@@ -42,7 +42,7 @@ while IFS= read -r line; do
       # Neither the scoped secret nor the workspace credential is printed.
       test -z "${RELAY_TOKEN:-}" && test -z "${RELAY_TOKEN_FILE:-}"
       printf '%s' "$RELAY_AGENT_CAPABILITY" > "$RELAY_BOUNDARY_DIR/capability"
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' '{"jsonrpc":"2.0","id":3,"method":"ping"}' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}' | "$RELAY_BOUNDARY_SERVER" mcp > "$RELAY_BOUNDARY_DIR/receipt"
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' '{"jsonrpc":"2.0","id":3,"method":"ping"}' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}' '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"archive_agent","arguments":{"agent":"missing"}}}' | "$RELAY_BOUNDARY_SERVER" mcp > "$RELAY_BOUNDARY_DIR/receipt"
       printf '{"id":%s,"result":{"turn":{"id":"turn"}}}\n' "$id"
       printf '%s\n' '{"method":"turn/started","params":{"threadId":"fake-thread","turn":{"id":"turn"}}}' '{"method":"turn/completed","params":{"threadId":"fake-thread","turn":{"id":"turn","status":"completed"}}}'
       exit ;;
@@ -247,15 +247,20 @@ async fn stdio_http_run_capability_boundary() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(values.len(), 4);
+    assert_eq!(values.len(), 5);
     assert_eq!(values[0]["result"]["capabilities"]["tools"], json!({}));
     let tools = values[1]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 7);
     assert!(tools.iter().any(|tool| tool["name"] == "stop_agent"));
+    assert!(tools.iter().any(|tool| tool["name"] == "archive_agent"));
     assert_eq!(values[3]["result"]["isError"], false);
     let content: Value =
         serde_json::from_str(values[3]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(content["agents"][0]["id"], session);
+    assert_eq!(values[4]["result"]["isError"], true);
+    let archive: Value =
+        serde_json::from_str(values[4]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(archive["message"], "Agent missing");
     // Read the protected credential solely to verify revoked authentication; never format it.
     let secret = std::fs::read_to_string(server.directory.path().join("capability")).unwrap();
     let response = server

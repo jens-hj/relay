@@ -283,6 +283,99 @@ fn parse<T: serde::de::DeserializeOwned>(input: Value) -> Result<T, Error> {
     serde_json::from_value(input).map_err(|_| Error::invalid("Invalid tool arguments"))
 }
 
+/// Fail closed on missing, cyclic, or cross-project ancestry and branches.
+fn archive_scope(snapshot: &Snapshot, caller: &str, agent: &str) -> Result<(), Error> {
+    let parent = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == caller)
+        .ok_or_else(|| Error::invalid("Caller missing"))?;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut current = Some(agent);
+    let mut found_caller = false;
+    while let Some(id) = current {
+        if !seen.insert(id) {
+            return Err(Error::invalid("Invalid agent tree"));
+        }
+        let session = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| Error::invalid("Agent missing"))?;
+        if session.project_id != parent.project_id {
+            return Err(Error::invalid("Agents must belong to the same project"));
+        }
+        found_caller |= id == caller && id != agent;
+        current = session.parent_session_id.as_deref();
+    }
+    if !found_caller
+        || snapshot
+            .descendants(agent)
+            .iter()
+            .any(|s| s.project_id != parent.project_id)
+    {
+        return Err(Error::invalid("Only your own descendants can be archived"));
+    }
+    Ok(())
+}
+
+async fn archive_agent(
+    workspace: &Workspace,
+    caller: &str,
+    run: &str,
+    input: Value,
+    stop: &mut watch::Receiver<bool>,
+) -> Result<Value, Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Archive {
+        agent: String,
+    }
+    let args: Archive = parse(input)?;
+    let delegate = {
+        let snapshot = workspace.snapshots.borrow().clone();
+        archive_scope(&snapshot, caller, &args.agent)?;
+        let parent = snapshot.sessions.iter().find(|s| s.id == caller).unwrap();
+        profile(&snapshot, parent)?.permissions[&Task::Delegate]
+    };
+    match delegate {
+        Permission::Deny => return Err(Error::invalid("Profile denies managing subagents")),
+        Permission::Ask => {
+            approval(
+                workspace,
+                caller,
+                run,
+                "mcp__relay__archive_agent",
+                &format!("Archive subagent {} and its descendants", args.agent),
+                stop,
+            )
+            .await?
+        }
+        Permission::Allow => {}
+    }
+    let mut store = workspace.store.lock().map_err(Error::internal)?;
+    let current = store.snapshot()?;
+    active_caller(&store, &current, caller, run)?;
+    archive_scope(&current, caller, &args.agent)?;
+    let parent = current.sessions.iter().find(|s| s.id == caller).unwrap();
+    if profile(&current, parent)?.permissions[&Task::Delegate] != delegate {
+        return Err(Error::invalid("Agent policy changed; retry"));
+    }
+    let (snapshot, _) = store.apply(
+        CommandEnvelope {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            expected_revision: current.revision,
+            command: Command::SetSessionArchived {
+                session_id: args.agent.clone(),
+                archived: true,
+            },
+        },
+        &workspace.config,
+    )?;
+    workspace.snapshots.send_replace(snapshot);
+    Ok(json!({"agent":args.agent,"archived":true}))
+}
+
 pub(super) async fn route(
     State(workspace): State<Workspace>,
     headers: HeaderMap,
@@ -407,6 +500,7 @@ async fn call(
             workspace.snapshots.send_replace(current);
             Ok(json!({"agent":args.agent,"stop_requested":true}))
         }
+        "archive_agent" => archive_agent(workspace, caller, run, input, stop).await,
         "message_agent" => message_agent(workspace, caller, run, parse(input)?, stop).await,
         "wait_for_agents" => {
             let args: Wait = parse(input)?;
@@ -1041,6 +1135,12 @@ fn tools() -> Value {
             vec!["agent"],
         ),
         (
+            "archive_agent",
+            "Archive an inactive descendant and its subtree. Requires delegation permission; retains history and workspaces and pauses queued turns.",
+            json!({"agent":string}),
+            vec!["agent"],
+        ),
+        (
             "message_agent",
             "Queue a turn for an agent in this tree.",
             json!({"agent":string,"text":string}),
@@ -1106,6 +1206,7 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
                     if ![
                         "spawn_agent",
                         "stop_agent",
+                        "archive_agent",
                         "message_agent",
                         "wait_for_agents",
                         "report_result",
@@ -1566,6 +1667,251 @@ mod tests {
             .await
             .unwrap();
         }
+    }
+
+    fn archive_fixture(f: &Fixture) {
+        f.change(|s| {
+            let mut child = s.sessions[0].clone();
+            child.id = "archive-child".into();
+            child.parent_session_id = Some(f.caller.clone());
+            child.worker = None;
+            s.sessions.push(child.clone());
+            child.id = "archive-grandchild".into();
+            child.parent_session_id = Some("archive-child".into());
+            s.sessions.push(child);
+        });
+    }
+
+    #[test]
+    fn archive_tool_schema_is_discoverable() {
+        let tools = tools();
+        let tool = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "archive_agent")
+            .unwrap();
+        assert_eq!(tool["inputSchema"]["required"], json!(["agent"]));
+        assert_eq!(
+            tool["inputSchema"]["properties"],
+            json!({"agent":{"type":"string"}})
+        );
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+    }
+
+    #[tokio::test]
+    async fn archive_preserves_history_workspaces_and_is_idempotent_for_finished_states() {
+        let f = Fixture::new(Permission::Allow);
+        archive_fixture(&f);
+        f.change(|s| {
+            s.submissions.push(Submission {
+                id: "archive-queued-turn".into(),
+                session_id: "archive-grandchild".into(),
+                parts: vec![Part::text("Continue")],
+                state: SubmissionState::Queued,
+                approve_implementation: false,
+                error: None,
+                interrupts_run: None,
+                last_edit_request: None,
+            });
+        });
+        let before = f.workspace.snapshots.borrow().clone();
+        for status in [
+            None,
+            Some(WorkerStatus::Completed),
+            Some(WorkerStatus::Stopped),
+            Some(WorkerStatus::Failed),
+            Some(WorkerStatus::Interrupted),
+        ] {
+            f.change(|s| {
+                let mut worker = s.sessions[0].worker.clone().unwrap();
+                if let Some(status) = &status {
+                    worker.status = status.clone();
+                }
+                s.sessions
+                    .iter_mut()
+                    .find(|s| s.id == "archive-child")
+                    .unwrap()
+                    .worker = status.map(|_| worker);
+            });
+            for _ in 0..2 {
+                assert_eq!(
+                    f.call("archive_agent", json!({"agent":"archive-child"}))
+                        .await
+                        .unwrap(),
+                    json!({"agent":"archive-child","archived":true})
+                );
+            }
+        }
+        let after = f.workspace.store.lock().unwrap().snapshot().unwrap();
+        assert!(!after.sessions[0].archived);
+        assert!(
+            after
+                .sessions
+                .iter()
+                .filter(|s| s.id.starts_with("archive-"))
+                .all(|s| s.archived)
+        );
+        assert_eq!(before.messages, after.messages);
+        assert_eq!(before.sessions[1].workspaces, after.sessions[1].workspaces);
+        assert_eq!(before.sessions.len(), after.sessions.len());
+        let turn = after
+            .submissions
+            .iter()
+            .find(|s| s.id == "archive-queued-turn")
+            .unwrap();
+        assert_eq!(turn.state, SubmissionState::Paused);
+        assert_eq!(
+            turn.error.as_deref(),
+            Some("Chat archived; unarchive and resume to continue")
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn archive_rejects_active_subtrees_and_invalid_arguments() {
+        let f = Fixture::new(Permission::Allow);
+        archive_fixture(&f);
+        for target in ["archive-child", "archive-grandchild"] {
+            for status in [WorkerStatus::Queued, WorkerStatus::Running] {
+                f.change(|s| {
+                    let mut worker = s.sessions[0].worker.clone().unwrap();
+                    worker.status = status;
+                    s.sessions
+                        .iter_mut()
+                        .find(|s| s.id == target)
+                        .unwrap()
+                        .worker = Some(worker);
+                });
+                assert!(
+                    f.call("archive_agent", json!({"agent":"archive-child"}))
+                        .await
+                        .is_err()
+                );
+                assert!(!f.workspace.snapshots.borrow().sessions[1].archived);
+            }
+            f.change(|s| {
+                s.sessions
+                    .iter_mut()
+                    .find(|s| s.id == target)
+                    .unwrap()
+                    .worker = None
+            });
+        }
+        for args in [
+            json!({}),
+            json!({"agent":42}),
+            json!({"agent":"archive-child","extra":true}),
+        ] {
+            assert!(f.call("archive_agent", args).await.is_err());
+        }
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn archive_enforces_scope_and_delegation() {
+        let f = Fixture::new(Permission::Deny);
+        archive_fixture(&f);
+        assert!(
+            f.call("archive_agent", json!({"agent":"archive-child"}))
+                .await
+                .is_err()
+        );
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Delegate, Permission::Allow);
+        });
+        for target in [f.caller.as_str(), "missing"] {
+            assert!(
+                f.call("archive_agent", json!({"agent":target}))
+                    .await
+                    .is_err()
+            );
+        }
+        let original = f.workspace.snapshots.borrow().clone();
+        for (id, parent, project) in [
+            (
+                "archive-child",
+                None,
+                original.sessions[0].project_id.as_str(),
+            ),
+            ("archive-child", Some(f.caller.as_str()), "other-project"),
+            ("archive-grandchild", Some("archive-child"), "other-project"),
+            (
+                "archive-child",
+                Some("archive-grandchild"),
+                original.sessions[0].project_id.as_str(),
+            ),
+        ] {
+            f.change(|s| {
+                s.sessions = original.sessions.clone();
+                let session = s.sessions.iter_mut().find(|s| s.id == id).unwrap();
+                session.parent_session_id = parent.map(str::to_owned);
+                session.project_id = project.into();
+            });
+            assert!(
+                f.call("archive_agent", json!({"agent":"archive-child"}))
+                    .await
+                    .is_err()
+            );
+        }
+        f.change(|s| {
+            s.sessions = original.sessions.clone();
+            s.sessions[0].parent_session_id = Some("archive-child".into());
+            s.sessions[1].parent_session_id = None;
+        });
+        assert!(
+            f.call("archive_agent", json!({"agent":"archive-child"}))
+                .await
+                .is_err()
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn archive_ask_requires_approval_and_rechecks_policy_and_subtree() {
+        let f = Fixture::new(Permission::Ask);
+        archive_fixture(&f);
+        let (result, ()) = tokio::join!(
+            f.call("archive_agent", json!({"agent":"archive-child"})),
+            decide(&f.workspace, &f.caller, &f.run, false, "Archive subagent")
+        );
+        assert!(result.is_err());
+        for change in ["policy", "scope", "active"] {
+            let before = f.workspace.snapshots.borrow().clone();
+            let (result, ()) = tokio::join!(
+                f.call("archive_agent", json!({"agent":"archive-child"})),
+                async {
+                    decide(&f.workspace, &f.caller, &f.run, true, "Archive subagent").await;
+                    f.change(|s| match change {
+                        "policy" => {
+                            s.projects[0]
+                                .defaults
+                                .permissions
+                                .insert(Task::Delegate, Permission::Deny);
+                        }
+                        "scope" => s.sessions[1].parent_session_id = None,
+                        "active" => s.sessions[2].worker = s.sessions[0].worker.clone(),
+                        _ => unreachable!(),
+                    });
+                }
+            );
+            assert!(result.is_err(), "{change}");
+            assert!(!f.workspace.snapshots.borrow().sessions[1].archived);
+            f.change(|s| {
+                s.sessions = before.sessions;
+                s.projects = before.projects;
+            });
+        }
+        let (result, ()) = tokio::join!(
+            f.call("archive_agent", json!({"agent":"archive-child"})),
+            decide(&f.workspace, &f.caller, &f.run, true, "Archive subagent")
+        );
+        assert!(result.is_ok());
+        assert!(f.workspace.snapshots.borrow().sessions[1].archived);
+        f.finish().await;
     }
 
     #[tokio::test]
