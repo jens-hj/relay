@@ -10,6 +10,119 @@ fn node(id: &str, status: AgentStatus) -> AgentNode {
     AgentNode::new(id, id, status, Harness::Codex)
 }
 
+fn assert_action_visible(mounted: &crate::testing::Mounted, label: &str, visible: bool) {
+    let node = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|node| node.label.as_deref() == Some(label))
+        .unwrap();
+    let details = mounted.ui.inspection_details(node.id).unwrap();
+    for (name, expected) in [
+        ("opacity", if visible { "1.0" } else { "0.0" }),
+        ("hit-testable", if visible { "true" } else { "false" }),
+    ] {
+        let attribute = details
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name == name)
+            .unwrap();
+        assert_eq!(attribute.value, expected, "{label}: {name}");
+    }
+}
+
+#[test]
+fn selected_row_actions_require_hover_or_button_focus() {
+    let spawned = State::new(false);
+    let archived = State::new(false);
+    let deleted = State::new(false);
+    let mounted = mount(Size::new(380.0, 300.0), || {
+        let mut root = node("selected", AgentStatus::Idle).selected();
+        root.can_delete = true;
+        view! {
+            AgentSidebar roots:(Live::fixed(vec![root]))
+                on-spawn:(Some(Rc::new(move |_| spawned.set(true)) as OnAgent))
+                on-archive:(Some(Rc::new(move |_| archived.set(true)) as OnAgent))
+                archivable:(Live::fixed(vec!["selected".into()]))
+                on-delete:(Some(Rc::new(move |_| deleted.set(true)) as OnAgent))
+        }
+    });
+    let labels = [
+        "New worker for selected",
+        "Archive selected",
+        "Delete selected",
+    ];
+    for label in labels {
+        assert_action_visible(&mounted, label, false);
+    }
+    mounted.click_label("selected");
+    mounted.hover(Vector2::new(379.0, 299.0));
+    assert_eq!(mounted.focused_label().as_deref(), Some("selected"));
+    for label in labels {
+        assert_action_visible(&mounted, label, false);
+    }
+    mounted.hover(mounted.rect("selected").center());
+    for label in labels {
+        assert_action_visible(&mounted, label, true);
+    }
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Down(PointerButton::Primary),
+        position: mounted.rect(labels[0]).center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: std::time::Duration::ZERO,
+    });
+    mounted.hover(Vector2::new(379.0, 299.0));
+    assert_action_visible(&mounted, labels[0], true);
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Up(PointerButton::Primary),
+        position: Vector2::new(379.0, 299.0),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: std::time::Duration::ZERO,
+    });
+    mounted.hover(mounted.rect("selected").center());
+    mounted.click_label(labels[0]);
+    assert!(spawned.get_untracked());
+    mounted.click_label(labels[1]);
+    assert!(archived.get_untracked());
+    // Return focus to the row; Tab must still reach the invisible buttons.
+    mounted.click_label("selected");
+    mounted.hover(Vector2::new(379.0, 299.0));
+    for label in labels {
+        mounted.key(Key::Tab);
+        assert_eq!(mounted.focused_label().as_deref(), Some(label));
+        assert_action_visible(&mounted, label, true);
+    }
+    mounted.key(Key::Enter);
+    assert!(!deleted.get_untracked());
+    assert!(mounted.has("Confirm Deletion"));
+    // A pending confirmation stays usable even after focus and hover leave.
+    mounted.click_label("selected");
+    mounted.hover(Vector2::new(379.0, 299.0));
+    assert_action_visible(&mounted, labels[2], true);
+    mounted.click_label(labels[2]);
+    assert!(deleted.get_untracked());
+}
+
+#[test]
+fn hovered_uninitialized_row_keeps_spawn_disabled() {
+    let spawned = State::new(false);
+    let mounted = mount(Size::new(380.0, 300.0), || {
+        let mut root = node("uninitialized", AgentStatus::Idle).selected();
+        root.can_spawn = false;
+        view! {
+            AgentSidebar roots:(Live::fixed(vec![root]))
+                on-spawn:(Some(Rc::new(move |_| spawned.set(true)) as OnAgent))
+        }
+    });
+    mounted.hover(mounted.rect("uninitialized").center());
+    assert_action_visible(&mounted, "New worker for uninitialized", true);
+    mounted.click_label("New worker for uninitialized");
+    assert!(!spawned.get_untracked());
+}
+
 /// root ─ a ─ b ─ c ─ d ─ e (a chain six deep) plus a waiting leaf.
 fn chain() -> Vec<AgentNode> {
     let e = node("e", AgentStatus::Done);

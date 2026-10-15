@@ -13,7 +13,9 @@ use relay_ui::prelude::{
     ModelHue, ModelIdentity, OnPress, Opening, SessionHeader, SessionHeaderProps, SpawnBlock,
     SpawnBlockProps, SpawnChild, ToolCallRow, ToolCallRowProps, ToolCallView, ToolDetail,
 };
-use relay_ui::prelude::{CellButton, CellButtonProps, Label, LabelProps, Rule, TextRole, Tone};
+use relay_ui::prelude::{
+    CellButton, CellButtonProps, Label, LabelProps, Rule, TextRole, Tone, Tooltip, TooltipProps,
+};
 use relay_ui::tokens::{ToolKind as UiKind, ground, px};
 use std::rc::Rc;
 
@@ -302,13 +304,19 @@ pub(crate) fn QueuedTurn(model: Model, submission: String) -> Element {
         MessageRow speaker:(relay_ui::Live::from(speaker)) {
             row height:min-content min-width:0px label:"Queued message"
                 stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {
-                col width:{px(34.0)}px shrink:0 align:center pad:(top:{px(8.0)}px)
-                    stroke:(width:{px(1.0)} color:ground.hairline edges:right) {
+                col width:{px(34.0)}px height:min-content shrink:0 align:center
+                    pad:(horizontal:0px vertical:{px(4.0)}px) {
                     Label text:(position) role:(TextRole::Caption) tone:(Tone::Muted) weight:500
+                    {
+                        parent.adopt(&queued_action("Cancel queued message", relay_ui::icons::mark.remove, Tone::Signal(relay_ui::tokens::Signal::Failed), move || model.submit(Command::CancelTurn { submission_id: id.get_untracked() }, model.snapshot.get_untracked().revision, crate::model::Saved::Action)));
+                        parent.adopt(&queued_action("Edit queued message", relay_ui::icons::mark.edit, Tone::Signal(relay_ui::tokens::Signal::NeedsYou), move || buffer::edit_queued(model, &id.get_untracked())));
+                        parent.adopt(&queued_action("Send queued message now", relay_ui::icons::mark.send, Tone::Signal(relay_ui::tokens::Signal::FullSteam), move || buffer::promote(model, &id.get_untracked())));
+                    }
                 }
+                el width:{px(1.0)}px height:fill shrink:0 nohit fill:ground.hairline {}
                 col width:1fr min-width:0px height:min-content gap:0px {
                     col height:min-content gap:{px(8.0)}px
-                        pad:(left:{px(12.0)}px right:{px(12.0)}px top:{px(8.0)}px bottom:{px(4.0)}px) {
+                        pad:(horizontal:{px(12.0)}px vertical:{px(8.0)}px) {
                         for (_, part) in { current.get().map(|s| s.parts.into_iter().map(|part| ((part.id.clone(), format!("{part:?}")), part)).collect::<Vec<_>>()).unwrap_or_default() } {
                             col height:min-content min-width:0px {
                                 QueuedPart model:(model) part:(part.clone())
@@ -318,14 +326,6 @@ pub(crate) fn QueuedTurn(model: Model, submission: String) -> Element {
                             Label
                                 text:(Derived::new(move || current.get().and_then(|s| s.error).unwrap_or_default()))
                                 role:(TextRole::Caption) tone:(Tone::Muted)
-                        }
-                    }
-                    row height:{px(32.0)}px gap:0px
-                        stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
-                        {
-                            parent.adopt(&queued_action("Cancel queued message", "Cancel", relay_ui::icons::mark.remove, Tone::Signal(relay_ui::tokens::Signal::Failed), true, move || model.submit(Command::CancelTurn { submission_id: id.get_untracked() }, model.snapshot.get_untracked().revision, crate::model::Saved::Action)));
-                            parent.adopt(&queued_action("Edit queued message", "Edit", relay_ui::icons::mark.edit, Tone::Signal(relay_ui::tokens::Signal::NeedsYou), false, move || buffer::edit_queued(model, &id.get_untracked())));
-                            parent.adopt(&queued_action("Send queued message now", "Send now", relay_ui::icons::mark.send, Tone::Signal(relay_ui::tokens::Signal::FullSteam), false, move || buffer::promote(model, &id.get_untracked())));
                         }
                     }
                 }
@@ -468,23 +468,20 @@ pub(crate) fn choose_effort(model: Model, step: u8) {
     );
 }
 
-/// An action cell of a queued message, divided from the one before it.
+/// A compact action in the queue-number gutter, described on hover and focus.
 fn queued_action(
     label: &'static str,
-    text: &'static str,
     icon: SvgToken,
     tone: Tone,
-    first: bool,
     handler: impl Fn() + 'static,
 ) -> Element {
-    let rule = if first { Rule::None } else { Rule::Left };
     view! {
-        row width:max-content shrink:0 {
-            CellButton label:(label) rule:(rule) horizontal-inset:(12.0) on-press:(press(handler)) {
-                row width:max-content align:center gap:{px(6.0)}px
-                    font-color:{mosaic::core::theme::color(tone.token())} {
-                    { parent.adopt(&relay_ui::icons::icon_mark(icon, 12.0)); }
-                    Label text:(text) role:(TextRole::Label) tone:(tone) weight:500
+        Tooltip text:(label) {
+            row width:{px(26.0)}px height:{px(20.0)}px shrink:0 {
+                CellButton label:(label) horizontal-inset:(0.0) on-press:(press(handler)) {
+                    row width:max-content font-color:{mosaic::core::theme::color(tone.token())} {
+                        { parent.adopt(&relay_ui::icons::icon_mark(icon, 12.0)); }
+                    }
                 }
             }
         }

@@ -362,7 +362,7 @@ pub fn AgentTreeRow(
                 { parent.adopt(&crate::marks::mark(crate::marks::Mark::Plus, 12.0, ground.ink)); }
             }
         };
-        reveal_row_action(&row, &action);
+        reveal_row_action(&row, &action, Live::fixed(false));
         actions.adopt(&view! {
             Tooltip
                 text:(if line.can_spawn { "New Worker" } else { "New Worker · start this agent first" }) {
@@ -381,7 +381,7 @@ pub fn AgentTreeRow(
                 { parent.adopt(&crate::marks::mark(crate::marks::Mark::Archive, 12.0, ground.ink)); }
             }
         };
-        reveal_row_action(&row, &action);
+        reveal_row_action(&row, &action, Live::fixed(false));
         actions.adopt(&view! {
             row width:max-content height:min-content {
                 if can_archive.get() {
@@ -411,7 +411,7 @@ pub fn AgentTreeRow(
                 }
             }
         };
-        reveal_row_action(&row, &action);
+        reveal_row_action(&row, &action, confirm.into());
         actions.adopt(&view! {
             Tooltip text:"Delete Branch Permanently" {
                 { parent.adopt(&action); }
@@ -588,22 +588,24 @@ pub fn FoldedBranch(
     outer
 }
 
-fn reveal_row_action(row: &Element, action: &Element) {
+// Row focus follows pointer selection; only the action's own focus reveals it.
+// Preserve a press or pending confirmation after the pointer leaves.
+fn reveal_row_action(row: &Element, action: &Element, confirming: Live<bool>) {
     let interaction = row.interaction();
     let button_interaction = action.interaction();
+    let visible = Derived::new(move || {
+        interaction.hovered()
+            || button_interaction.focused()
+            || button_interaction.pressed()
+            || confirming.get()
+    });
     action.opacity(0.0);
     let fade = Rc::new(std::cell::Cell::new(0.0f32));
     let destination = Rc::new(std::cell::Cell::new(0.0f32));
     let animating = Rc::new(std::cell::Cell::new(false));
     let animated = action.clone();
     Effect::new(move || {
-        destination.set(
-            if interaction.hovered() || interaction.focused() || button_interaction.focused() {
-                1.0
-            } else {
-                0.0
-            },
-        );
+        destination.set(if visible.get() { 1.0 } else { 0.0 });
         if animating.replace(true) {
             return;
         }
@@ -629,9 +631,7 @@ fn reveal_row_action(row: &Element, action: &Element) {
     });
     let hit = action.clone();
     Effect::new(move || {
-        hit.hit_testable(
-            interaction.hovered() || interaction.focused() || button_interaction.focused(),
-        );
+        hit.hit_testable(visible.get());
     });
     action.on_pointer(move |event, ctx| {
         if matches!(

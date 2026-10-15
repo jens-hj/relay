@@ -9554,9 +9554,120 @@ fn typing_during_image_read_is_retained_after_the_image() {
 }
 
 #[test]
+fn queued_gutter_actions_fit_short_messages_and_work_with_keyboard_at_each_scale() {
+    for scale in [1.0, 1.5, 2.0] {
+        let mut mounted = mount(false, 1800.0);
+        mounted.model.preferences.update(|p| p.scale = scale);
+        install_theme(&theme(ThemeVariant::Dark, scale));
+        mounted.model.open_session("session-plan".into());
+        mounted.model.snapshot.update(|snapshot| {
+            snapshot.messages.retain(|m| m.session_id != "session-plan");
+            snapshot.submissions.push(Submission {
+                id: "compact-queue".into(),
+                session_id: "session-plan".into(),
+                parts: vec![Part::text("Short message")],
+                state: SubmissionState::Queued,
+                approve_implementation: false,
+                error: None,
+                interrupts_run: None,
+                last_edit_request: None,
+            });
+        });
+        mounted.settle();
+        let labels = [
+            "Cancel queued message",
+            "Edit queued message",
+            "Send queued message now",
+        ];
+        let queued = mounted.rect("Queued message");
+        let text = mounted.rect("Short message");
+        let number = mounted.rect("01");
+        assert!(queued.size.height <= 88.0 * scale, "{queued:?}");
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Move,
+            position: mounted.rect(labels[0]).center(),
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+        mounted.settle();
+        mounted.ui.tick(Duration::from_millis(600));
+        mounted.settle();
+        assert!(
+            mounted
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .iter()
+                .any(|node| node.role == Role::Tooltip && node.label.as_deref() == Some(labels[0]))
+        );
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Move,
+            position: Vector2::ZERO,
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+        mounted.settle();
+        let mut bottom = number.max_y();
+        for label in labels {
+            let button = mounted.rect(label);
+            assert!(button.origin.y >= bottom - 0.1, "{label}: {button:?}");
+            assert!(button.max_x() < text.origin.x, "{label} stays in gutter");
+            assert!(button.origin.x >= queued.origin.x && button.max_y() <= queued.max_y() + 0.1);
+            assert!(
+                (button.size.height - 20.0 * scale).abs() < 0.1,
+                "scale={scale}, button={button:?}"
+            );
+            assert!((button.center().x - number.center().x).abs() < 0.1);
+            bottom = button.max_y();
+            mounted.focus(label);
+            assert_eq!(focused_label(&mounted).as_deref(), Some(label));
+            assert!(
+                mounted
+                    .ui
+                    .inspection_snapshot()
+                    .nodes
+                    .iter()
+                    .any(|node| node.role == Role::Tooltip && node.label.as_deref() == Some(label))
+            );
+            assert_control_hit(&mounted, label);
+        }
+        // Focus traverses the three controls in their visual order.
+        mounted.focus(labels[0]);
+        mounted.key(Key::Tab, false);
+        assert_eq!(focused_label(&mounted).as_deref(), Some(labels[1]));
+        mounted.key(Key::Tab, false);
+        assert_eq!(focused_label(&mounted).as_deref(), Some(labels[2]));
+        mounted.key(Key::Enter, false);
+        assert!(matches!(mounted.commands.try_recv().unwrap().command,
+            Command::PromoteTurn { submission_id, .. } if submission_id == "compact-queue"));
+        mounted.model.busy.set(false);
+        mounted.focus(labels[0]);
+        mounted.key(Key::Enter, false);
+        assert!(matches!(mounted.commands.try_recv().unwrap().command,
+            Command::CancelTurn { submission_id } if submission_id == "compact-queue"));
+        mounted.model.busy.set(false);
+        mounted.focus(labels[1]);
+        mounted.key(Key::Enter, false);
+        assert_eq!(
+            plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+            "Short message"
+        );
+    }
+}
+
+#[test]
 fn queued_and_paused_messages_render_images_between_their_text_and_preserve_edits() {
     for state in [SubmissionState::Queued, SubmissionState::Paused] {
-        let mounted = mount(false, 1380.0);
+        let mounted = mount(false, 1800.0);
+        let scale = if state == SubmissionState::Paused {
+            1.5
+        } else {
+            1.0
+        };
+        mounted.model.preferences.update(|p| p.scale = scale);
+        install_theme(&theme(ThemeVariant::Dark, scale));
         mounted.model.open_session("session-plan".into());
         mounted
             .model
@@ -9577,6 +9688,28 @@ fn queued_and_paused_messages_render_images_between_their_text_and_preserve_edit
             Part::text("Text before the queued image"),
             picture,
             Part::text("Text after the queued image"),
+            crate::buffer::insert_asset(
+                mounted.model,
+                "queued.txt".into(),
+                "text/plain".into(),
+                b"Attachment contents".to_vec(),
+            )
+            .unwrap(),
+            Part {
+                id: "queued-long-reply".into(),
+                kind: PartKind::Reply {
+                    anchor: relay_core::Anchor {
+                        message_id: "source".into(),
+                        start: 0,
+                        end: 5,
+                        quote: "Quote".into(),
+                    },
+                    parts: vec![Part::text(
+                        "A long queued reply with enough words to wrap across several lines. "
+                            .repeat(8),
+                    )],
+                },
+            },
         ];
         mounted.model.snapshot.update(|snapshot| {
             snapshot.submissions.push(Submission {
@@ -9594,21 +9727,50 @@ fn queued_and_paused_messages_render_images_between_their_text_and_preserve_edit
         let queued = mounted.rect("Queued message");
         let before = mounted.rect("Text before the queued image");
         let after = mounted.rect("Text after the queued image");
-        let images: Vec<_> = mounted
-            .ui
-            .inspection_snapshot()
+        let tree = mounted.ui.inspection_snapshot();
+        let attachment = tree
             .nodes
-            .into_iter()
+            .iter()
+            .find(|node| node.label.as_deref() == Some("Attachment queued.png"))
+            .unwrap()
+            .id;
+        let images: Vec<_> = tree
+            .nodes
+            .iter()
             .filter(|node| {
-                node.role == Role::Image
-                    && queued.contains(node.rect.center())
-                    && node.rect.max_y() <= after.origin.y
+                if node.role != Role::Image {
+                    return false;
+                }
+                let mut parent = node.parent;
+                while let Some(id) = parent {
+                    if id == attachment {
+                        return true;
+                    }
+                    parent = tree
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == id)
+                        .and_then(|node| node.parent);
+                }
+                false
             })
             .collect();
         assert_eq!(images.len(), 1);
         assert!(before.max_y() <= images[0].rect.origin.y);
         assert!(images[0].rect.max_y() <= after.origin.y);
         assert!(images[0].rect.size.height > 0.0);
+        let file = mounted.rect("Attachment queued.txt");
+        let reply = mounted.rect("↩ Quote");
+        assert!(after.max_y() <= file.origin.y && file.max_y() <= reply.origin.y);
+        let last_text = mounted.rect(
+            &"A long queued reply with enough words to wrap across several lines. ".repeat(8),
+        );
+        assert!(last_text.max_y() <= queued.max_y());
+        // No footer is reserved beneath long content: only the content inset remains.
+        assert!(
+            queued.max_y() - last_text.max_y() <= 20.0 * scale,
+            "scale={scale}, queued={queued:?}, last={last_text:?}"
+        );
         assert!(!has_label(&mounted, "Remove inline file"));
         for action in [
             "Cancel queued message",
@@ -9616,6 +9778,11 @@ fn queued_and_paused_messages_render_images_between_their_text_and_preserve_edit
             "Send queued message now",
         ] {
             let button = mounted.rect(action);
+            assert!(
+                button.max_x() < before.origin.x,
+                "{action} stays in number gutter"
+            );
+            assert!(button.origin.y >= queued.origin.y && button.max_y() <= queued.max_y());
             assert_eq!(
                 mounted
                     .ui
@@ -9650,6 +9817,7 @@ fn queued_and_paused_messages_render_images_between_their_text_and_preserve_edit
             .unwrap()
             .parts
             .clone();
+        assert_control_hit(&mounted, "Edit queued message");
         mounted.click("Edit queued message");
         assert_eq!(crate::buffer::parts(mounted.model, "session-plan"), updated);
     }
@@ -9720,7 +9888,7 @@ fn queued_reply_images_fetch_missing_bytes_and_appear_when_received() {
             .insert(asset.id.clone(), std::sync::Arc::new(bytes));
     });
     mounted.settle();
-    let queued = mounted.rect("Queued message");
+    let attachment = mounted.rect("Attachment remote.png");
     let after = mounted.rect("Reply after image");
     let image = mounted
         .ui
@@ -9729,7 +9897,7 @@ fn queued_reply_images_fetch_missing_bytes_and_appear_when_received() {
         .into_iter()
         .find(|node| {
             node.role == Role::Image
-                && queued.contains(node.rect.center())
+                && attachment.contains(node.rect.center())
                 && node.rect.max_y() <= after.origin.y
         })
         .unwrap();
