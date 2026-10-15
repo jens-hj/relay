@@ -46,7 +46,8 @@ pub fn MessageRow(
 #[component]
 pub fn UserMessage(#[prop(optional)] children: Children) -> Element {
     view! {
-        col height:min-content min-width:0px pad:(vertical:{px(14.0)}px horizontal:{px(16.0)}px)
+        col height:min-content min-width:0px
+            pad:(top:{px(10.0)}px bottom:{px(6.0)}px left:{px(12.0)}px right:{px(12.0)}px)
             fill:ground.panel-raised stroke:(width:{px(1.0)} color:ground.hairline)
             font-size:{px(13.0)}px line-height:1.7 {
             children

@@ -3,7 +3,7 @@ pub(super) fn body(vm: &ToolCallView, actions: ToolActions) -> Element {
     let expanded = vm.opening == Opening::Expanded;
     let body = view! {
         col height:min-content min-width:0px gap:{px(if expanded { 8.0 } else { 6.0 })}px
-            pad:(top:{px(10.0)}px bottom:{px(12.0)}px left:{px(12.0)}px right:{px(12.0)}px)
+            pad:(top:{px(6.0)}px bottom:{px(6.0)}px left:{px(12.0)}px right:{px(12.0)}px)
             stroke:(width:{px(1.0)} color:ground.hairline edges:top) {}
     };
     let Some(detail) = &vm.detail else {

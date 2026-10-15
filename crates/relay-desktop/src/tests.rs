@@ -2629,13 +2629,14 @@ fn rapid_second_send_waits_for_ack_then_promotes_exact_queue_and_keeps_newer_dra
     buffer::edit(
         mounted.model,
         "session-plan",
-        vec![Part::text("Correction")],
+        vec![Part::text("\n\n Correction \n\n")],
     );
     buffer::send(mounted.model);
     buffer::send(mounted.model);
     let Request::Save { session, request } = rx.try_recv().unwrap() else {
         panic!()
     };
+    assert_eq!(plain_text(&request.parts), "Correction");
     let saved = Draft {
         session_id: session.clone(),
         revision: 1,
@@ -3566,7 +3567,11 @@ fn first_director_prompt_uses_planning_session_without_issue_or_implementation_a
             .find_map(|n| n.label.filter(|l| l.starts_with("Draft text")))
             .unwrap()
     };
-    type_in(&mounted, &draft_label(&mounted), "Plan the project");
+    type_in(
+        &mounted,
+        &draft_label(&mounted),
+        "\n\n Plan the project \n\n",
+    );
     mounted.model.open_root_agent("director-review".into());
     mounted.settle();
     type_in(&mounted, &draft_label(&mounted), "Review plan");
@@ -3577,7 +3582,7 @@ fn first_director_prompt_uses_planning_session_without_issue_or_implementation_a
             mounted.model,
             "agent-draft-director-main"
         )),
-        "Plan the project"
+        "\n\n Plan the project \n\n"
     );
     assert_eq!(
         mounted.model.worker_prompt.get_untracked(),
@@ -7465,6 +7470,77 @@ fn ledger_effort_steps_send_the_session_harness_selection() {
 }
 
 #[test]
+fn consecutive_tool_calls_are_compact_while_prose_keeps_its_spacing() {
+    for scale in [1.0, 2.0] {
+        let mounted = mount(false, 1380.0);
+        mounted
+            ._scope
+            .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
+        mounted.model.preferences.update(|p| p.scale = scale);
+        mounted.model.open_session("session-plan".into());
+        mounted.model.snapshot.update(|snapshot| {
+            snapshot.messages.retain(|m| m.session_id != "session-plan");
+            for (id, kind, body) in [
+                ("dense-1", "command_execution", "echo first\nExit: 0\nfirst"),
+                (
+                    "dense-2",
+                    "command_execution",
+                    "echo second\nExit: 0\nsecond",
+                ),
+                (
+                    "dense-prose",
+                    "assistant",
+                    "Some explanation between the tool calls.",
+                ),
+                ("dense-3", "command_execution", "echo third\nExit: 0\nthird"),
+                (
+                    "dense-4",
+                    "command_execution",
+                    "echo fourth\nExit: 0\nfourth",
+                ),
+            ] {
+                snapshot.messages.push(Message {
+                    id: id.into(),
+                    session_id: "session-plan".into(),
+                    author: "Codex".into(),
+                    kind: kind.into(),
+                    body: body.into(),
+                    parts: vec![],
+                    tool: None,
+                });
+            }
+        });
+        mounted.settle();
+        let first = mounted.rect("Tool call dense-1");
+        let second = mounted.rect("Tool call dense-2");
+        let third = mounted.rect("Tool call dense-3");
+        let fourth = mounted.rect("Tool call dense-4");
+        assert!(
+            (first.size.height - 30.0 * scale).abs() < 1.0,
+            "scale {scale}: first {first:?}, second {second:?}"
+        );
+        assert!((second.origin.y - first.max_y() - 6.0 * scale).abs() < 1.0);
+        assert!((fourth.origin.y - third.max_y() - 6.0 * scale).abs() < 1.0);
+        assert!(third.origin.y - second.max_y() >= 56.0 * scale);
+        // Paging in older history must update the existing first row's spacing.
+        mounted.model.snapshot.update(|snapshot| {
+            let mut older = snapshot
+                .messages
+                .iter()
+                .find(|m| m.id == "dense-1")
+                .unwrap()
+                .clone();
+            older.id = "dense-older".into();
+            snapshot.messages.insert(0, older);
+        });
+        mounted.settle();
+        let older = mounted.rect("Tool call dense-older");
+        let first = mounted.rect("Tool call dense-1");
+        assert!((first.origin.y - older.max_y() - 6.0 * scale).abs() < 1.0);
+    }
+}
+
+#[test]
 fn tool_calls_open_in_three_steps_and_the_fingerprint_counts_them() {
     let mounted = mount_orchestration(1380.0);
     mounted.model.open_session("session-plan".into());
@@ -9469,22 +9545,44 @@ fn queued_and_paused_messages_render_images_between_their_text_and_preserve_edit
         });
         mounted.settle();
         let queued = mounted.rect("Queued message");
+        let before = mounted.rect("Text before the queued image");
+        let after = mounted.rect("Text after the queued image");
         let images: Vec<_> = mounted
             .ui
             .inspection_snapshot()
             .nodes
             .into_iter()
-            .filter(|node| node.role == Role::Image && queued.contains(node.rect.center()))
+            .filter(|node| {
+                node.role == Role::Image
+                    && queued.contains(node.rect.center())
+                    && node.rect.max_y() <= after.origin.y
+            })
             .collect();
         assert_eq!(images.len(), 1);
-        let before = mounted.rect("Text before the queued image");
-        let after = mounted.rect("Text after the queued image");
         assert!(before.max_y() <= images[0].rect.origin.y);
         assert!(images[0].rect.max_y() <= after.origin.y);
         assert!(images[0].rect.size.height > 0.0);
         assert!(!has_label(&mounted, "Remove inline file"));
-        mounted.rect("Cancel queued message");
-        mounted.rect("Send queued message now");
+        for action in [
+            "Cancel queued message",
+            "Edit queued message",
+            "Send queued message now",
+        ] {
+            let button = mounted.rect(action);
+            assert_eq!(
+                mounted
+                    .ui
+                    .inspection_snapshot()
+                    .nodes
+                    .iter()
+                    .filter(|node| {
+                        node.role == Role::Image && button.contains(node.rect.center())
+                    })
+                    .count(),
+                1,
+                "{action} should have an icon"
+            );
+        }
         // Same part ID with changed text must refresh the queue preview.
         mounted.model.snapshot.update(|snapshot| {
             if let PartKind::Text { text } =
@@ -9576,12 +9674,17 @@ fn queued_reply_images_fetch_missing_bytes_and_appear_when_received() {
     });
     mounted.settle();
     let queued = mounted.rect("Queued message");
+    let after = mounted.rect("Reply after image");
     let image = mounted
         .ui
         .inspection_snapshot()
         .nodes
         .into_iter()
-        .find(|node| node.role == Role::Image && queued.contains(node.rect.center()))
+        .find(|node| {
+            node.role == Role::Image
+                && queued.contains(node.rect.center())
+                && node.rect.max_y() <= after.origin.y
+        })
         .unwrap();
     assert!(mounted.rect("Reply before image").max_y() <= image.rect.origin.y);
     assert!(image.rect.max_y() <= mounted.rect("Reply after image").origin.y);

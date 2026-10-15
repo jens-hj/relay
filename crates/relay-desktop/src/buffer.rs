@@ -458,6 +458,39 @@ pub fn promote(model: Model, id: &str) {
     );
 }
 
+// Trim only the edges of a message, preserving spacing between inline parts.
+fn trim_message(parts: &mut Vec<Part>) {
+    for part in parts.iter_mut() {
+        if let PartKind::Reply { parts, .. } = &mut part.kind {
+            trim_message(parts);
+        }
+    }
+    let mut leading = 0;
+    for part in parts.iter_mut() {
+        let PartKind::Text { text } = &mut part.kind else {
+            break;
+        };
+        *text = text.trim_start().to_owned();
+        if !text.is_empty() {
+            break;
+        }
+        leading += 1;
+    }
+    parts.drain(..leading);
+    let mut trailing = 0;
+    for part in parts.iter_mut().rev() {
+        let PartKind::Text { text } = &mut part.kind else {
+            break;
+        };
+        *text = text.trim_end().to_owned();
+        if !text.is_empty() {
+            break;
+        }
+        trailing += 1;
+    }
+    parts.truncate(parts.len() - trailing);
+}
+
 fn send_first(model: Model) {
     if crate::command_ui::intercept(model) {
         return;
@@ -519,12 +552,14 @@ fn send_first(model: Model) {
     }
     state.approval_needed = false;
     model.buffer.set(state);
+    let mut submitted_parts = parts.clone();
+    trim_message(&mut submitted_parts);
     model.submit(
         Command::StartRootAgent {
             agent_config_id: model.worker_director.get_untracked(),
             issue_id: model.issue.get_untracked(),
-            prompt: plain_text(&parts),
-            parts: parts.clone(),
+            prompt: plain_text(&submitted_parts),
+            parts: submitted_parts,
             approve_implementation: model.worker_approval.get_untracked(),
         },
         model.snapshot.get_untracked().revision,
@@ -664,7 +699,9 @@ pub fn send(model: Model) {
         model.notice.set(error);
         return;
     }
-    doc.finalize = Some(std::mem::take(&mut doc.parts));
+    let mut submitted_parts = std::mem::take(&mut doc.parts);
+    trim_message(&mut submitted_parts);
+    doc.finalize = Some(submitted_parts);
     doc.changed = Instant::now() - Duration::from_secs(1);
     state.approval_needed = false;
     commit(model, state);
@@ -1451,4 +1488,75 @@ pub(crate) fn validate_browser_recovery(source: &str) -> Result<(), String> {
         return Ok(());
     }
     serde_json::from_str::<BrowserJournal>(source).map(|_|()).map_err(|_| "Cannot read browser draft recovery. The IndexedDB record was preserved; restore or back it up before restarting Relay.".into())
+}
+
+#[cfg(test)]
+mod trimming_tests {
+    use super::*;
+
+    #[test]
+    fn trims_message_edges_without_changing_internal_formatting_or_attachments() {
+        let file = Part {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: PartKind::Asset {
+                asset: Asset {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: "image.png".into(),
+                    media_type: "image/png".into(),
+                    size: 1,
+                },
+            },
+        };
+        let mut parts = vec![
+            Part::text("\n \t"),
+            Part::text("\n Before\n\n  indented "),
+            file.clone(),
+            Part::text(" after\n\n  indented\n "),
+            Part::text("\n\t"),
+        ];
+        let before_id = parts[1].id.clone();
+        trim_message(&mut parts);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0].id, before_id);
+        assert_eq!(plain_text(&parts[..1]), "Before\n\n  indented ");
+        assert_eq!(parts[1], file);
+        assert_eq!(plain_text(&parts[2..]), " after\n\n  indented");
+        let trimmed = parts.clone();
+        trim_message(&mut parts);
+        assert_eq!(parts, trimmed);
+
+        let mut attachment_only = vec![Part::text("\n"), file.clone(), Part::text("\n")];
+        trim_message(&mut attachment_only);
+        assert_eq!(attachment_only, vec![file]);
+        let mut blank = vec![Part::text(" \n"), Part::text("\t\r\n")];
+        trim_message(&mut blank);
+        assert!(blank.is_empty());
+    }
+
+    #[test]
+    fn trims_reply_text_without_changing_its_anchor() {
+        let anchor = Anchor {
+            message_id: "source".into(),
+            start: 0,
+            end: 6,
+            quote: " quote".into(),
+        };
+        let mut parts = vec![Part {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: PartKind::Reply {
+                anchor: anchor.clone(),
+                parts: vec![Part::text("\n Answer\n\nMore\n\n")],
+            },
+        }];
+        trim_message(&mut parts);
+        let PartKind::Reply {
+            anchor: actual,
+            parts,
+        } = &parts[0].kind
+        else {
+            panic!()
+        };
+        assert_eq!(actual, &anchor);
+        assert_eq!(plain_text(parts), "Answer\n\nMore");
+    }
 }

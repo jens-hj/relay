@@ -1348,10 +1348,15 @@ pub fn Conversation(model: Model) -> Element {
                                         }
                                     }
                                 }
-                                for (_, message) in {model.snapshot.get().messages.into_iter().filter(|m|m.session_id==model.session.get()).map(|m|(m.id.clone(),m)).collect::<Vec<_>>()} {
-                                    col height:min-content {
-                                        TranscriptMessage model:(model)
-                                            message-id:(message.id.clone()) controller:(controller)
+                                if model.snapshot.get().messages.iter().any(|m|m.session_id==model.session.get()) {
+                                    col height:min-content min-width:0px gap:0px {
+                                        for (_, message) in {model.snapshot.get().messages.into_iter().filter(|m|m.session_id==model.session.get()).map(|m|(m.id.clone(),m)).collect::<Vec<_>>()} {
+                                            col height:min-content {
+                                                TranscriptMessage model:(model)
+                                                    message-id:(message.id.clone())
+                                                    controller:(controller)
+                                            }
+                                        }
                                     }
                                 }
                                 if session.get().is_some_and(|s| s.archived) {
@@ -1601,6 +1606,28 @@ pub fn Conversation(model: Model) -> Element {
 #[component]
 fn TranscriptMessage(model: Model, message_id: String, controller: ControllerState) -> Element {
     let message_id = State::new(message_id);
+    let spacing = Derived::new(move || {
+        let snapshot = model.snapshot.get();
+        let id = message_id.get();
+        let mut previous = None;
+        for message in snapshot
+            .messages
+            .iter()
+            .filter(|m| m.session_id == model.session.get())
+        {
+            let tool = message.tool.is_some()
+                || matches!(message.kind.as_str(), "command_execution" | "file_change");
+            if message.id == id {
+                return match previous {
+                    None => 0.0,
+                    Some(true) if tool => 6.0,
+                    Some(_) => 28.0,
+                };
+            }
+            previous = Some(tool);
+        }
+        0.0
+    });
     let message = Derived::new(move || {
         model
             .snapshot
@@ -1731,8 +1758,10 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
     let row = if tool {
         view! {
             MessageRow speaker:(relay_ui::Live::from(speaker)) harness:(harness) {
-                ToolMessage model:(model) message:(message)
-                { parent.adopt(&body); }
+                col height:min-content min-width:0px gap:0px {
+                    ToolMessage model:(model) message:(message)
+                    { parent.adopt(&body); }
+                }
             }
         }
     } else if prompt {
@@ -1753,8 +1782,11 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
             }
         }
     };
+    // Anchor paging to the content, excluding spacing that can change when
+    // earlier messages arrive.
+    let content_anchor = row.clone();
     let root = view! {
-        col height:min-content min-width:0px {
+        col height:min-content min-width:0px pad:(top:{px(spacing.get())}px) {
             { parent.adopt(&row); }
         }
     };
@@ -1763,7 +1795,7 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
     shared
         .borrow_mut()
         .messages
-        .insert(id.clone(), root.clone());
+        .insert(id.clone(), content_anchor);
     mosaic::core::reactive::on_cleanup(move || {
         shared.borrow_mut().messages.remove(&id);
     });

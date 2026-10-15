@@ -74,7 +74,7 @@ fn call(vm: ToolCallView, on_opening: OnOpening, actions: ToolActions) -> (Eleme
     }
     .unwrap_or_default();
     let header = view! {
-        stack height:{px(36.0)}px shrink:0 clip {
+        stack height:{px(30.0)}px shrink:0 clip {
             if active {
                 Dither colour:(edge)
                     gradient:(if vm.status == AgentStatus::Waiting { Gradient::Amber } else { Gradient::Horizontal })
@@ -108,7 +108,7 @@ fn call(vm: ToolCallView, on_opening: OnOpening, actions: ToolActions) -> (Eleme
         ))
     };
     let control = view! {
-        button @click:{on_opening(opening.next())} width:fill height:{px(36.0)}px shrink:0
+        button @click:{on_opening(opening.next())} width:fill height:{px(30.0)}px shrink:0
             radius:0px pad:0px fill:(Color::TRANSPARENT) label:(opening.label())
             hover { fill:{tint(0.08)} } pressed { fill:{tint(0.14)} }
             focused { stroke:+(width:1px color:ground.ink offset:-1px) } {
