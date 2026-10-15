@@ -27,16 +27,24 @@ fn archive_action_is_only_available_for_eligible_sessions_and_does_not_open_them
     let eligible = State::new(vec!["idle".to_string()]);
     let on_archive: OnAgent = Rc::new(move |id| archived.set(id));
     let on_open: OnAgent = Rc::new(move |_| opened.set(true));
+    let on_spawn: OnAgent = Rc::new(|_| {});
     let mounted = mount(Size::new(320.0, 500.0), || {
         view! {
             AgentSidebar
                 roots:(Live::fixed(vec![node("idle", AgentStatus::Idle), node("running", AgentStatus::Working)]))
                 archivable:(Live::from(eligible)) on-archive:(Some(on_archive))
-                on-open:(Some(on_open))
+                on-open:(Some(on_open)) on-spawn:(Some(on_spawn))
         }
     });
     assert!(mounted.labels().contains(&"Archive idle".to_string()));
     assert!(!mounted.labels().contains(&"Archive running".to_string()));
+    let row = mounted.rect("idle");
+    let archive = mounted.rect("Archive idle");
+    let spawn = mounted.rect("New worker for idle");
+    assert!((archive.center().y - row.center().y).abs() < 0.01);
+    assert!((spawn.center().y - row.center().y).abs() < 0.01);
+    assert!((row.max_x() - archive.max_x() - 14.0).abs() < 0.01);
+    assert!(spawn.max_x() < archive.origin.x);
     mounted.ui.dispatch_pointer(PointerEvent {
         kind: PointerEventKind::Move,
         position: mounted.rect("idle").center(),
@@ -76,6 +84,10 @@ fn archived_branch_requires_two_delete_clicks() {
     mounted.click_label("Delete archived");
     assert!(deleted.get_untracked().is_empty());
     assert!(mounted.has("Confirm Deletion"));
+    let row = mounted.rect("archived");
+    let button = mounted.rect("Delete archived");
+    assert!((button.center().y - row.center().y).abs() < 0.01);
+    assert!((row.max_x() - button.max_x() - 14.0).abs() < 0.01);
     mounted.click_label("Delete archived");
     assert_eq!(deleted.get_untracked(), "archived");
 }

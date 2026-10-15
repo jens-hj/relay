@@ -117,8 +117,22 @@ fn framed_ledger_preserves_effort_label_height_for_both_harnesses() {
         let frame = mounted.rect("Effort selection frame");
         assert!(frame.size.height >= 20.0, "{harness:?}: {frame:?}");
         let ledger = mounted.rect("Agent ledger");
+        let effort = settings.get_untracked().effort;
+        let track = mounted.rect(&crate::effort::effort_label(
+            effort.levels,
+            effort.selected(),
+            effort.tiers,
+        ));
         assert_eq!(mounted.rect("Ledger border"), ledger);
         assert!(frame.max_y() <= ledger.max_y());
+        assert!(
+            track.origin.y >= frame.max_y() + 8.0,
+            "{harness:?}: {frame:?} {track:?}"
+        );
+        assert!(
+            track.max_y() + 9.0 <= ledger.max_y() + 0.01,
+            "{harness:?}: {track:?} {ledger:?}"
+        );
     }
 }
 

@@ -53,7 +53,7 @@ pub fn Ledger(
             parent.adopt(&content);
             parent.adopt(&view! {
                 el width:fill height:fill nohit label:"Ledger border"
-                    stroke:(width:{px(1.0)} color:ground.rule-strong edges:edges offset:{px(if framed {-0.5} else {0.0})}) {}
+                    stroke:(width:{px(1.0)} color:ground.rule edges:edges offset:{px(if framed {-0.5} else {0.0})}) {}
             });
         },
     );
@@ -65,6 +65,11 @@ fn ledger(
     animation_clock: Rc<std::cell::Cell<f64>>,
 ) -> Element {
     let colour = vm.model.hue.token();
+    let harness_label = if vm.harness == Harness::ClaudeCode {
+        "CLAUDE".to_string()
+    } else {
+        vm.harness.name().to_uppercase()
+    };
     let mut e = vm.effort;
     if let Some(step) = vm.pending_effort {
         e.current = step;
@@ -82,7 +87,7 @@ fn ledger(
             col height:min-content shrink:0 justify:start
                 pad:(horizontal:{px(10.0)}px vertical:{px(9.0)}px) {
                 CutCorner cut:(Cut::Small) corner:(Corner::TopRightBottomLeft)
-                    height:(Dimension::MinContent) shrink:0.0 edge:(ground.rule_strong) {
+                    height:(Dimension::MinContent) shrink:0.0 edge:(ground.rule) {
                     row height:{px(20.0)}px justify:between align:center
                         pad:(horizontal:{px(8.0)}px vertical:0px) label:"Selected effort" {
                         Label text:"EFFORT" role:(TextRole::Micro) weight:500 tone:(Tone::Muted)
@@ -133,18 +138,19 @@ fn ledger(
     view! {
         row {
             col width:{px(32.0)}px shrink:0 fill:ground.panel-raised
-                stroke:(width:{px(1.0)} color:ground.rule-strong edges:right) {
+                stroke:(width:{px(1.0)} color:ground.rule edges:right) {
                 CellButton
                     label:(format!("Harness: {}. Change harness", vm.harness.name().to_uppercase()))
                     on-press:(actions.change_harness) horizontal-inset:0.0 {
                     col width:max-content align:center gap:{px(10.0)}px
                         pad:(vertical:{px(11.0)}px horizontal:0px) {
                         HarnessGlyph harness:(vm.harness) size:14.0
-                        VerticalLabel text:(vm.harness.name().to_uppercase())
+                        VerticalLabel text:(harness_label.clone())
                     }
                 }
             }
-            col width:1fr min-width:0px {
+            col width:1fr min-width:0px
+                height:{if tall { Dimension::Fill } else { Dimension::MinContent }} {
                 row height:{if tall { Dimension::Fill } else { Dimension::Px(px(40.0)) }} shrink:0 {
                     stack width:1fr min-width:0px clip {
                         Dither colour:(colour) gradient:(Gradient::Corner)
@@ -168,7 +174,7 @@ fn ledger(
                         }
                     }
                     col width:{px(36.0)}px shrink:0
-                        stroke:(width:{px(1.0)} color:ground.rule-strong edges:left) {
+                        stroke:(width:{px(1.0)} color:ground.rule edges:left) {
                         CellButton label:"Collapse agent settings" on-press:(actions.toggle)
                             horizontal-inset:0.0 {
                             Label text:"‹" role:(TextRole::BodyLarge)
@@ -176,15 +182,15 @@ fn ledger(
                     }
                 }
                 if !tall {
-                    Hairline colour:(ground.rule_strong)
+                    Hairline colour:(ground.rule)
                 }
                 { if let Some(cell) = &named_cell { parent.adopt(cell); } }
                 if track {
-                    col height:1fr min-height:{px(66.0)}px shrink:0 justify:between gap:{px(8.0)}px
+                    col height:min-content shrink:0 gap:{px(8.0)}px
                         pad:(horizontal:{px(10.0)}px vertical:{px(9.0)}px) {
                         CutCorner cut:(Cut::Small) corner:(Corner::TopRightBottomLeft)
                             height:(Dimension::MinContent) shrink:0.0 label:"Effort selection frame"
-                            edge:(if e.at_max() { colour } else { ground.rule_strong }) {
+                            edge:(if e.at_max() { colour } else { ground.rule }) {
                             row height:{px(20.0)}px justify:between align:center
                                 pad:(horizontal:{px(8.0)}px vertical:0px) {
                                 Label text:"EFFORT" role:(TextRole::Micro) weight:500
@@ -360,7 +366,7 @@ pub fn Composer(
                                     { parent.adopt(&crate::icons::icon_mark(crate::icons::mark.send, 20.0)); }
                                 }
                             }
-                            Hairline colour:(ground.rule_strong)
+                            Hairline colour:(ground.rule)
                             button @click:{on_attach()} width:fill height:{px(40.0)}px align:center
                                 justify:center pad:0px radius:0px label:"Attach file"
                                 fill:(Color::TRANSPARENT) font-color:ground.ink
@@ -373,7 +379,7 @@ pub fn Composer(
                             }
                         }
                         el width:fill height:fill nohit label:"Composer actions border"
-                            stroke:(width:{px(1.0)} color:ground.rule-strong offset:{px(-0.5)}) {}
+                            stroke:(width:{px(1.0)} color:ground.rule offset:{px(-0.5)}) {}
                     }
                 }
             }

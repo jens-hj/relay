@@ -24,10 +24,11 @@ pub fn start(config: Config, sender: StateSender<Update>) -> mpsc::UnboundedSend
                     None=>break,
                 },
                 request=receiver.recv()=>match request {
-                    Some(Request::Catalog {session,force})=>{
+                    Some(request @ (Request::Catalog {..} | Request::ProfileCatalog {..}))=>{
+                        let (session,path,force)=request.catalog_route();
                         let client=client.clone();let config=config.clone();let events=events.clone();
                         spawn_local(async move {
-                        let path=format!("v1/sessions/{}/catalog",percent_encoding::utf8_percent_encode(&session,percent_encoding::NON_ALPHANUMERIC));
+
                         let request=if force {client.post(config.url(&path))}else{client.get(config.url(&path))};
                         let result=match browser::send(&config,request).await {
                             Ok(response) if response.status().is_success()=>response.json::<HarnessCatalog>().await.map_err(|_|"Invalid harness catalog".into()),

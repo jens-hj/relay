@@ -156,7 +156,14 @@ pub(super) fn configure(
 
 /// Resolve ancestry iteratively, without a depth limit. Missing/cyclic links fail closed.
 pub(super) fn profile(snapshot: &Snapshot, session: &Session) -> Result<AgentProfile, Error> {
-    snapshot.session_profile(session).map_err(Error::invalid)
+    let mut profile = snapshot.session_profile(session).map_err(Error::invalid)?;
+    if let Some(worker) = &session.worker {
+        profile.harness = worker.harness;
+    }
+    if let Some(model) = &session.selection.model {
+        profile.model = model.clone();
+    }
+    Ok(profile)
 }
 /// Existing scope/board/slot checks, with the session's effective permission map.
 pub(super) fn authorize_session(
@@ -551,7 +558,6 @@ async fn spawn(
             .effort
             .as_ref()
             .is_some_and(|e| e.is_empty() || e.len() > 64)
-        || (args.effort.is_some() && args.model.is_none())
     {
         return Err(Error::invalid("Choose a valid model before setting effort"));
     }
@@ -657,10 +663,25 @@ async fn spawn(
     child.parent_session_id = Some(caller.into());
     child.compactions.clear();
     child.selection = HarnessSelection {
-        model: args.model,
+        model: args.model.or_else(|| {
+            (args.harness.is_none_or(|h| h == effective.harness))
+                .then(|| {
+                    effective
+                        .model_selection()
+                        .model
+                        .or_else(|| parent.selection.model.clone())
+                        .or_else(|| parent.worker.as_ref().and_then(|w| w.model.clone()))
+                })
+                .flatten()
+        }),
         effort: args.effort,
         ..Default::default()
     };
+    if child.selection.model.is_none() {
+        return Err(Error::invalid(
+            "Choose a model in the agent profile or provide a model for this worker",
+        ));
+    }
     child.spawn = Some(SpawnGrant {
         task: args.task.clone(),
         context: args.context.clone(),
@@ -1161,6 +1182,7 @@ mod tests {
             snapshot.sessions.clear();
             snapshot.messages.clear();
             snapshot.projects[0].defaults.max_workers = 64;
+            snapshot.projects[0].defaults.model = "fixture-model".into();
             snapshot.projects[0]
                 .defaults
                 .permissions
@@ -1670,7 +1692,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 17);
+        assert_eq!(schema, 18);
         f.finish().await;
     }
     #[tokio::test]
@@ -1954,10 +1976,14 @@ mod tests {
     #[tokio::test]
     async fn queued_message_is_read_by_the_next_real_harness_turn() {
         let f = Fixture::new(Permission::Allow);
-        crate::tests::script(
-            &f.workspace.config.codex,
-            "sleep 0.2\nprintf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1}}'",
-        );
+        let native = crate::tests::command_tests::CODEX
+            .replace(
+                "@CAPTURE@",
+                f._directory.path().join("capture").to_str().unwrap(),
+            )
+            .replace("test-model", "fixture-model");
+        // This fixture speaks native RPC rather than the legacy turn wrapper.
+        std::fs::write(&f.workspace.config.codex, format!("#!/bin/sh\n{native}")).unwrap();
         let child = f
             .call("spawn_agent", json!({"title":"Child","task":"First"}))
             .await

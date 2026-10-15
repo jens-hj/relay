@@ -13,8 +13,8 @@ use relay_ui::surfaces::{
 };
 use relay_ui::tokens::Signal;
 
-/// The seven profile fields a director can override, each as a whole.
-const OVERRIDE_FIELDS: usize = 7;
+/// Profile fields an agent can override, each as a whole.
+const OVERRIDE_FIELDS: usize = 8;
 
 #[component]
 fn AgentProfileSelector(model: Model) -> Element {
@@ -150,6 +150,7 @@ fn ProfileChangeActions(model: Model) -> Element {
 pub(crate) fn overridden_fields(overrides: &ProfileOverrides) -> Vec<&'static str> {
     [
         ("Harness", overrides.harness.is_some()),
+        ("Model", overrides.model.is_some()),
         ("Execution", overrides.execution.is_some()),
         ("Scope", overrides.scope.is_some()),
         ("Responsibilities", overrides.responsibilities.is_some()),
@@ -190,6 +191,8 @@ pub(crate) fn Profiles(model: Model) -> Element {
     let wide = Derived::new(move || width.get() >= px(960.0));
     let save_disabled = Derived::new(move || {
         model.busy.get()
+            || (model.editor.get() == EditTarget::New
+                && model.editor_profile.get().model.is_empty())
             || !model.connected.get()
             || (model.editor.get() == EditTarget::New
                 && model.editor_profile.get() != model.editor_base.get()
@@ -753,6 +756,15 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
             }
         },
     );
+    let model_selection = field_module(
+        model,
+        "Agent Model",
+        "model",
+        None,
+        view! {
+            ModelPicker model:(model)
+        },
+    );
     let approval = field_module(
         model,
         "Execution Approval",
@@ -839,7 +851,106 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
     );
     view! {
         col height:min-content gap:0px {
-            { for module in [&harness, &approval, &scope, &workers] { parent.adopt(module); } }
+            { for module in [&harness, &model_selection, &approval, &scope, &workers] { parent.adopt(module); } }
+        }
+    }
+}
+
+#[component]
+fn ModelPicker(model: Model) -> Element {
+    let requested = State::new(std::collections::BTreeSet::<String>::new());
+    Effect::new(move || {
+        let project = model.project.get();
+        let harness = model.editor_profile.get().harness;
+        let key = format!("profile:{project}:{harness:?}");
+        if model.connected.get()
+            && !model.catalogs.get().contains_key(&key)
+            && !requested.get().contains(&key)
+            && let Some(sender) = model.buffer_requests.get()
+            && sender
+                .send(crate::buffer_network::Request::ProfileCatalog { project, harness })
+                .is_ok()
+        {
+            requested.update(|keys| {
+                keys.insert(key);
+            });
+        }
+    });
+    let open = State::new(false);
+    let content: PopoverContent = std::rc::Rc::new(move || {
+        let host = view! {
+            col width:{px(320.0)}px height:min-content {}
+        };
+        host.switch(move || {
+            let profile = model.editor_profile.get();
+            let key = format!("profile:{}:{:?}", model.project.get(), profile.harness);
+            model.catalogs.get().get(&key).cloned()
+        }, move |parent, result| {
+            if let Some(Ok(catalog)) = result.as_ref().filter(|result| result.as_ref().is_ok_and(|catalog| !catalog.models.is_empty())) {
+                for choice in &catalog.models {
+                    let id = choice.id.clone();
+                    let selected_id = id.clone();
+                    let title = choice.name.clone();
+                    let label = format!("Use profile model {id}");
+                    let selected: relay_ui::Live<bool> = Derived::new(move || model.editor_profile.get().model == selected_id).into();
+                    parent.adopt(&view! {
+                        row height:{px(40.0)}px {
+                            CellButton label:(label.clone()) start:true selected:(selected)
+                                on-press:(press(move || { model.modify_profile("model", |p| p.model = id.clone()); open.set(false); })) {
+                                Ellipsis text:(title.clone()) role:(TextRole::Label)
+                            }
+                        }
+                    });
+                }
+            } else {
+                let text = match result { Some(Err(error)) => error.clone(), Some(Ok(_)) => "No models available".into(), None => "Loading models…".into() };
+                parent.adopt(&view! {
+                    col height:min-content {
+                        row height:min-content pad:{px(14.0)}px {
+                            Label text:(text.clone()) role:(TextRole::Caption) tone:(Tone::Muted)
+                        }
+                        row height:{px(40.0)}px {
+                            CellButton label:"Retry profile models"
+                                on-press:(press(move || {
+                                let harness = model.editor_profile.get_untracked().harness;
+                                let project = model.project.get_untracked();
+                                if let Some(sender) = model.buffer_requests.get_untracked() { let _ = sender.send(crate::buffer_network::Request::ProfileCatalog { project, harness }); }
+                            })) {
+                                Label text:"Retry" role:(TextRole::Label)
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        host
+    });
+    let name = Derived::new(move || {
+        let profile = model.editor_profile.get();
+        let key = format!("profile:{}:{:?}", model.project.get(), profile.harness);
+        model
+            .catalogs
+            .get()
+            .get(&key)
+            .and_then(|c| c.as_ref().ok())
+            .and_then(|c| c.models.iter().find(|m| m.id == profile.model))
+            .map(|m| m.name.clone())
+            .unwrap_or_else(|| {
+                if profile.model.is_empty() {
+                    "Choose Model".into()
+                } else {
+                    profile.model
+                }
+            })
+    });
+    view! {
+        stack height:{px(44.0)}px {
+            CellButton label:"Select profile model" start:true
+                on-press:(press(move || open.set(!open.get_untracked()))) {
+                Label text:(name) role:(TextRole::Label)
+                icon size:{px(12.0)}px tree-chevron-down
+            }
+            Popover open:(open) label:"Profile Models" content:(content)
         }
     }
 }

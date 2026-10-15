@@ -14,7 +14,8 @@ while IFS= read -r line; do
         echo '{"type":"result","subtype":"success","session_id":"11111111-2222-4333-8444-555555555555"}'
         continue
       fi
-      echo '{"type":"control_response","response":{"subtype":"success","request_id":"relay-initialize","response":{}}}' ;;
+      request=$(printf '%s' "$line" | jq -r '.request_id')
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"models":[{"value":"workspace-model","displayName":"Workspace model"}]}}}\n' "$request" ;;
     user)
       echo '{"type":"system","subtype":"init","model":"reported-claude-model","session_id":"11111111-2222-4333-8444-555555555555"}'
       echo '{"type":"system","subtype":"session_state_changed","state":"running","sdk_host_only":true}'
@@ -67,6 +68,8 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >> codex-rpc.jsonl
   case "$method" in
     initialize) printf '{"id":%s,"result":{}}\n' "$id";;
+    model/list) printf '{"id":%s,"result":{"data":[{"id":"workspace-model","displayName":"Workspace model"}]}}\n' "$id" ;;
+    skills/list|mcpServerStatus/list) printf '{"id":%s,"result":{"data":[]}}\n' "$id" ;;
     thread/start|thread/resume) printf '{"id":%s,"result":{"thread":{"id":"multi-workspace-thread"}}}\n' "$id";;
     turn/start)
       printf '%s' "$line" | jq -r '.params.sandboxPolicy.writableRoots[]' > roots
@@ -86,6 +89,7 @@ async fn multi_workspace(harness: Harness) {
     let mut snapshot = Snapshot::default();
     let defaults = AgentProfile {
         harness,
+        model: "workspace-model".into(),
         ..Default::default()
     };
     crate::projects::apply(
@@ -1271,7 +1275,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        17
+        18
     );
     let worker = snapshot.sessions[0].worker.as_mut().unwrap();
     worker.model = Some("reported-model".into());

@@ -89,7 +89,7 @@ async fn protocol_guard_and_multiple_local_projects_round_trip_without_remote_cr
         "protocol_mismatch"
     );
     assert_eq!(snapshot(&server).await, initial);
-    assert_eq!(PROTOCOL_VERSION, 10);
+    assert_eq!(PROTOCOL_VERSION, 11);
     let previous = reqwest::Client::new()
         .post(format!("{}/v1/commands", server.endpoint))
         .bearer_auth(TOKEN)
@@ -324,6 +324,7 @@ async fn directors_inherit_updated_defaults_while_overrides_stay_specialized() {
             project_id: "demo".into(),
             name: "Release director".into(),
             overrides: ProfileOverrides {
+                model: Some("test-model".into()),
                 max_workers: Some(2),
                 ..Default::default()
             },

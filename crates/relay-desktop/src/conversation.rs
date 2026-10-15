@@ -994,9 +994,6 @@ pub fn Conversation(model: Model) -> Element {
                         }
                     }
 
-                    if session.get().is_some_and(|s| s.archived) {
-                        Label text:"Archived chat. Unarchive to continue." role:(TextRole::Caption) tone:(Tone::Muted)
-                    }
                     Composer inline:true stacked:(relay_ui::Live::from(compact)) settings:(relay_ui::Live::from(ledger)) ledger-actions:(ledger_actions)
                         gutter-width:(relay_ui::Live::fixed(212.0))
                         disabled:(relay_ui::Live::from(Derived::new(move || session.get().is_some_and(|s| s.archived))))
@@ -1242,6 +1239,17 @@ pub fn Conversation(model: Model) -> Element {
                                     col height:min-content {
                                         TranscriptMessage model:(model)
                                             message-id:(message.id.clone()) controller:(controller)
+                                    }
+                                }
+                                if session.get().is_some_and(|s| s.archived) {
+                                    col height:min-content label:"Archived chat message" {
+                                        MessageRow speaker:"Relay"
+                                            icon:(Some(relay_ui::icons::mark.relay)) {
+                                            AgentText {
+                                                Label
+                                                    text:"This chat has been archived. Unarchive it to continue."
+                                            }
+                                        }
                                     }
                                 }
                                 if thinking.get() {

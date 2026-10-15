@@ -637,7 +637,16 @@ impl Model {
             .or_else(|| {
                 id.strip_prefix("agent-draft-")
                     .and_then(|id| snapshot.agent_configs.iter().find(|c| c.id == id))
-                    .map(|c| c.draft_selection.clone())
+                    .map(|c| {
+                        let mut selection = c.draft_selection.clone();
+                        if selection.model.is_none() {
+                            selection.model = snapshot
+                                .effective_profile(c)
+                                .ok()
+                                .and_then(|p| p.model_selection().model);
+                        }
+                        selection
+                    })
             })
             .unwrap_or_default()
     }
@@ -1284,6 +1293,11 @@ impl Model {
         if !director_continuation && active >= usize::from(profile.max_workers) {
             return Err("No worker slots available".into());
         }
+        if !continuation && profile.model.is_empty() {
+            return Err(
+                "Choose a model in the agent configuration before creating a worker".into(),
+            );
+        }
         if self.worker_prompt.get().trim().is_empty() {
             return Err("Enter a prompt".into());
         }
@@ -1582,6 +1596,11 @@ impl Model {
     }
     pub fn save_profile(&self) {
         let profile = self.editor_profile.get_untracked();
+        if self.editor.get_untracked() == EditTarget::New && profile.model.is_empty() {
+            self.notice
+                .set("Choose a model before creating this agent".into());
+            return;
+        }
         if let Err(error) = profile.validate() {
             self.notice.set(error);
             return;
@@ -1635,7 +1654,11 @@ impl Model {
     pub fn modify_profile(&self, field: &str, update: impl FnOnce(&mut AgentProfile)) {
         self.editor_override_accepted.set(false);
         let mut profile = self.editor_profile.get_untracked();
+        let previous_harness = profile.harness;
         update(&mut profile);
+        if field == "harness" && profile.harness != previous_harness {
+            profile.model.clear();
+        }
         if self.editor.get_untracked() == EditTarget::New {
             self.editor_overrides.set(ProfileOverrides::between(
                 &self.editor_base.get_untracked(),
@@ -1644,7 +1667,13 @@ impl Model {
         } else if self.editor.get_untracked() != EditTarget::Defaults {
             self.editor_overrides.update(|overrides| match field {
                 "execution" => overrides.execution = Some(profile.execution.clone()),
-                "harness" => overrides.harness = Some(profile.harness),
+                "model" => overrides.model = Some(profile.model.clone()),
+                "harness" => {
+                    overrides.harness = Some(profile.harness);
+                    if previous_harness != profile.harness {
+                        overrides.model = None;
+                    }
+                }
                 "scope" => overrides.scope = Some(profile.scope.clone()),
                 "responsibilities" => {
                     overrides.responsibilities = Some(profile.responsibilities.clone())
@@ -1660,7 +1689,11 @@ impl Model {
     pub fn inherit(&self, field: &str) {
         self.editor_overrides.update(|o| match field {
             "execution" => o.execution = None,
-            "harness" => o.harness = None,
+            "model" => o.model = None,
+            "harness" => {
+                o.harness = None;
+                o.model = None;
+            }
             "scope" => o.scope = None,
             "responsibilities" => o.responsibilities = None,
             "completion" => o.completion = None,
@@ -1681,6 +1714,7 @@ impl Model {
         let overrides = self.editor_overrides.get();
         let overridden = match field {
             "execution" => overrides.execution.is_some(),
+            "model" => overrides.model.is_some(),
             "harness" => overrides.harness.is_some(),
             "scope" => overrides.scope.is_some(),
             "responsibilities" => overrides.responsibilities.is_some(),

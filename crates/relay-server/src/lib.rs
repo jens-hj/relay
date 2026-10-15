@@ -123,7 +123,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 17 {
+        if version > 18 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -143,7 +143,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 17;"
+             PRAGMA user_version = 18;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -213,9 +213,9 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
-        if version < 17 {
+        if version < 18 {
             // Normalize legacy snapshots with defaults for naming and waiting state.
-            // Schema 17 keeps older servers from restoring deleted branch data through receipts.
+            // Schema 18 protects explicit profile models from older servers.
             let json: String = connection
                 .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
                     r.get(0)
@@ -412,7 +412,10 @@ impl Store {
                     requested_by_run: None,
                 });
                 child.compactions.clear();
-                child.selection = Default::default();
+                child.selection = profile.model_selection();
+                if child.selection.model.is_none() {
+                    return Err(Error::invalid("Choose a model before creating this worker"));
+                }
                 let worker = child
                     .worker
                     .as_mut()
@@ -1551,6 +1554,10 @@ pub fn router_with_browser(
     Ok((
         Router::new()
             .route("/v1/boards/discover", post(discover_board))
+            .route(
+                "/v1/projects/{project}/catalog/{harness}",
+                get(commands::profile_catalog),
+            )
             .route("/v1/operations/reconcile", post(reconcile_lookup))
             .route(
                 "/v1/sessions/{session}/catalog",

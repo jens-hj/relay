@@ -179,6 +179,25 @@ pub(super) async fn discover(
     id: &str,
     force: bool,
 ) -> Result<HarnessCatalog, Error> {
+    discover_context(workspace, id, force, None).await
+}
+
+pub(super) async fn profile_catalog(
+    State(workspace): State<Workspace>,
+    axum::extract::Path((project, harness)): axum::extract::Path<(String, Harness)>,
+) -> Result<Json<HarnessCatalog>, Error> {
+    let key = format!("profile:{project}:{harness:?}");
+    Ok(Json(
+        discover_context(&workspace, &key, false, Some((&project, harness))).await?,
+    ))
+}
+
+async fn discover_context(
+    workspace: &Workspace,
+    id: &str,
+    force: bool,
+    profile_context: Option<(&str, Harness)>,
+) -> Result<HarnessCatalog, Error> {
     let _probe = workspace.catalog_probe.lock().await;
     let snapshot = workspace.snapshots.borrow().clone();
     // Example sessions never run a harness; they describe the demo catalog.
@@ -197,38 +216,45 @@ pub(super) async fn discover(
             .iter()
             .find(|d| d.id == agent_config_id)
     });
-    let (harness, project_id, worktree, connections, workspaces) = if let Some(session) = session {
-        let worker = session
-            .worker
-            .as_ref()
-            .ok_or_else(|| Error::invalid("Session has no harness"))?;
-        (
-            worker.harness,
-            session.project_id.as_str(),
-            worker.worktree.clone(),
-            session.connection_ids.clone(),
-            session.workspaces.clone(),
-        )
-    } else if let Some(director) = draft_director {
-        let project = snapshot
-            .project(&director.project_id)
-            .map_err(Error::invalid)?;
-        if project.fixture {
-            return Err(Error::invalid("Fixture agents cannot be started"));
-        }
-        let profile = snapshot
-            .effective_profile(director)
-            .map_err(Error::invalid)?;
-        (
-            profile.harness,
-            director.project_id.as_str(),
-            None,
-            Vec::new(),
-            Vec::new(),
-        )
-    } else {
-        return Err(Error::invalid("Live session not found"));
-    };
+    let (harness, project_id, worktree, connections, workspaces) =
+        if let Some((project_id, harness)) = profile_context {
+            let project = snapshot.project(project_id).map_err(Error::invalid)?;
+            if project.fixture {
+                return Ok(demo_catalog(id, harness));
+            }
+            (harness, project_id, None, Vec::new(), Vec::new())
+        } else if let Some(session) = session {
+            let worker = session
+                .worker
+                .as_ref()
+                .ok_or_else(|| Error::invalid("Session has no harness"))?;
+            (
+                worker.harness,
+                session.project_id.as_str(),
+                worker.worktree.clone(),
+                session.connection_ids.clone(),
+                session.workspaces.clone(),
+            )
+        } else if let Some(director) = draft_director {
+            let project = snapshot
+                .project(&director.project_id)
+                .map_err(Error::invalid)?;
+            if project.fixture {
+                return Err(Error::invalid("Fixture agents cannot be started"));
+            }
+            let profile = snapshot
+                .effective_profile(director)
+                .map_err(Error::invalid)?;
+            (
+                profile.harness,
+                director.project_id.as_str(),
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
+        } else {
+            return Err(Error::invalid("Live session not found"));
+        };
     let binary = harness::selected_binary(&snapshot, harness, &workspace.config);
     let cache_key = format!(
         "{id}:{harness:?}:{}:{connections:?}:{workspaces:?}:{worktree:?}",
@@ -554,6 +580,10 @@ fn add_models(catalog: &mut HarnessCatalog, data: &Value, harness: Harness) {
         .as_str() else {
             continue;
         };
+        let explicit_id = model["model"].as_str().unwrap_or(id);
+        if explicit_id.eq_ignore_ascii_case("default") {
+            continue;
+        }
         let efforts = if harness == Harness::Codex {
             model["supportedReasoningEfforts"]
                 .as_array()
@@ -572,7 +602,7 @@ fn add_models(catalog: &mut HarnessCatalog, data: &Value, harness: Harness) {
                 .collect()
         };
         catalog.models.push(HarnessModel {
-            id: model["model"].as_str().unwrap_or(id).into(),
+            id: explicit_id.into(),
             name: model["displayName"].as_str().unwrap_or(id).into(),
             efforts,
             default_effort: model["defaultReasoningEffort"].as_str().map(str::to_owned),
@@ -1245,5 +1275,32 @@ fn remap_anchors(parts: &mut [Part], fork: &str) {
             anchor.message_id = format!("fork-{fork}-{}", anchor.message_id);
             remap_anchors(parts, fork);
         }
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    #[test]
+    fn claude_catalog_omits_an_unresolved_default_but_keeps_a_resolved_model() {
+        let mut catalog = HarnessCatalog::default();
+        add_models(
+            &mut catalog,
+            &json!({"models": [
+                {"value": "default", "displayName": "Default"},
+                {"value": "default", "model": "claude-opus-test", "displayName": "Opus"},
+                {"value": "claude-haiku-test", "displayName": "Haiku"}
+            ]}),
+            Harness::ClaudeCode,
+        );
+        assert_eq!(
+            catalog
+                .models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-opus-test", "claude-haiku-test"]
+        );
     }
 }

@@ -773,14 +773,15 @@ impl Snapshot {
                 if !name.trim().is_empty() {
                     validate_text("Agent name", &name, 100)?;
                 }
-                self.validate_profile(
+                let profile = overrides.resolve(&self.template_profile(
                     &project_id,
-                    &overrides.resolve(&self.template_profile(
-                        &project_id,
-                        &template,
-                        &self.project(&project_id)?.defaults,
-                    )?),
-                )?;
+                    &template,
+                    &self.project(&project_id)?.defaults,
+                )?);
+                self.validate_profile(&project_id, &profile)?;
+                if profile.model.is_empty() {
+                    return Err("Choose a model before creating this agent".into());
+                }
                 self.agent_configs.push(AgentConfig {
                     automatic_name: name.trim().is_empty(),
                     draft_selection: HarnessSelection::default(),
@@ -808,6 +809,8 @@ impl Snapshot {
                     .iter()
                     .find(|d| d.id == agent_config_id)
                     .ok_or("Director not found")?;
+                let previous_profile = self.effective_profile(director)?;
+                let next_profile = overrides.resolve(&self.config_base(director)?);
                 self.validate_profile(
                     &director.project_id,
                     &overrides.resolve(&self.config_base(director)?),
@@ -817,6 +820,11 @@ impl Snapshot {
                     .iter_mut()
                     .find(|d| d.id == agent_config_id)
                     .unwrap();
+                if previous_profile.model != next_profile.model
+                    || previous_profile.harness != next_profile.harness
+                {
+                    director.draft_selection = HarnessSelection::default();
+                }
                 director.automatic_name = name.trim().is_empty();
                 director.name = if director.automatic_name {
                     "New agent".into()

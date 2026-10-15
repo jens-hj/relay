@@ -1147,7 +1147,10 @@ async fn execute(
             || has_skill_references(&parts)
             || plain_text(&parts).trim_start().starts_with('/'));
     let catalog = if needs_catalog {
-        Some(crate::commands::discover(workspace, session_id, true).await?)
+        tokio::select! {
+            result = crate::commands::discover(workspace, session_id, true) => Some(result?),
+            _ = stop.wait_for(|stopped| *stopped) => return Ok(()),
+        }
     } else {
         None
     };

@@ -82,6 +82,9 @@ impl Permission {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentProfile {
+    /// Empty only for legacy profiles that have not selected a model yet.
+    #[serde(default)]
+    pub model: String,
     #[serde(default)]
     pub execution: crate::ExecutionSettings,
     pub harness: Harness,
@@ -101,6 +104,12 @@ impl Default for AgentProfile {
 }
 
 impl AgentProfile {
+    pub fn model_selection(&self) -> crate::HarnessSelection {
+        crate::HarnessSelection {
+            model: (!self.model.is_empty()).then(|| self.model.clone()),
+            ..Default::default()
+        }
+    }
     pub fn worker(base: &Self) -> Self {
         let mut profile = base.clone();
         profile.responsibilities = vec![Task::Implement, Task::Verify];
@@ -113,6 +122,13 @@ impl AgentProfile {
         self.max_workers > 0 && self.permissions[&Task::Delegate] != Permission::Deny
     }
     pub fn validate(&self) -> Result<(), String> {
+        if self.model.eq_ignore_ascii_case("default")
+            || self.model.len() > 256
+            || self.model.trim() != self.model
+            || self.model.chars().any(char::is_control)
+        {
+            return Err("Choose a valid model identifier".into());
+        }
         if self.max_workers > 64 {
             return Err("Worker limit must be between 0 and 64".into());
         }
@@ -170,6 +186,8 @@ pub struct AgentTemplate {
 #[serde(deny_unknown_fields)]
 pub struct ProfileOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub execution: Option<crate::ExecutionSettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub harness: Option<Harness>,
@@ -188,6 +206,9 @@ pub struct ProfileOverrides {
 impl ProfileOverrides {
     pub fn between(base: &AgentProfile, profile: &AgentProfile) -> Self {
         Self {
+            model: (base.model != profile.model
+                || (base.harness != profile.harness && !profile.model.is_empty()))
+            .then(|| profile.model.clone()),
             execution: (base.execution != profile.execution).then(|| profile.execution.clone()),
             harness: (base.harness != profile.harness).then_some(profile.harness),
             scope: (base.scope != profile.scope).then(|| profile.scope.clone()),
@@ -201,6 +222,13 @@ impl ProfileOverrides {
     }
     pub fn resolve(&self, base: &AgentProfile) -> AgentProfile {
         AgentProfile {
+            model: self.model.clone().unwrap_or_else(|| {
+                if self.harness.is_some_and(|h| h != base.harness) {
+                    String::new()
+                } else {
+                    base.model.clone()
+                }
+            }),
             execution: self
                 .execution
                 .clone()
@@ -233,6 +261,50 @@ impl ProfileOverrides {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_choice_round_trips_in_profiles_and_harness_changes_require_a_new_choice() {
+        let base = AgentProfile {
+            model: "codex-model".into(),
+            ..AgentProfile::default()
+        };
+        let mut profile = base.clone();
+        profile.harness = Harness::ClaudeCode;
+        profile.model = "claude-model".into();
+        let overrides = ProfileOverrides::between(&base, &profile);
+        assert_eq!(overrides.resolve(&base), profile);
+        assert_eq!(
+            ProfileOverrides::from_toml(&overrides.to_toml()).unwrap(),
+            overrides
+        );
+        assert_eq!(
+            AgentProfile::from_toml(&profile.to_toml()).unwrap(),
+            profile
+        );
+        assert_eq!(
+            profile.model_selection().model.as_deref(),
+            Some("claude-model")
+        );
+        assert!(
+            ProfileOverrides {
+                harness: Some(Harness::ClaudeCode),
+                ..Default::default()
+            }
+            .resolve(&base)
+            .model
+            .is_empty()
+        );
+        let mut implicit = base.clone();
+        implicit.model = "default".into();
+        assert!(implicit.validate().is_err());
+        let mut legacy = serde_json::to_value(&base).unwrap();
+        legacy.as_object_mut().unwrap().remove("model");
+        assert!(
+            serde_json::from_value::<AgentProfile>(legacy)
+                .unwrap()
+                .model
+                .is_empty()
+        );
+    }
     #[test]
     fn worker_presets_and_instance_overrides_keep_delegation_explicit() {
         let director = AgentProfile::default();
@@ -272,7 +344,10 @@ mod tests {
         let command = crate::Command::SaveAgentTemplate {
             project_id: snapshot.projects[0].id.clone(),
             name: "Reviewer".into(),
-            profile: AgentProfile::worker(&AgentProfile::default()),
+            profile: AgentProfile {
+                model: "review-model".into(),
+                ..AgentProfile::worker(&AgentProfile::default())
+            },
         };
         snapshot.apply(command.clone(), "named", 0).unwrap();
         let stored: crate::Snapshot =

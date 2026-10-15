@@ -1501,6 +1501,7 @@ fn profile_controls_preserve_inheritance_and_reject_invalid_imports() {
     mounted.model.import_toml();
     assert!(mounted.model.notice.get_untracked().contains("unknown"));
     mounted.model.editor_name.set("Security director".into());
+    choose_fixture_profile_model(&mounted);
     mounted.model.save_profile();
     let request = mounted.commands.try_recv().unwrap();
     let mut snapshot = mounted.model.snapshot.get_untracked();
@@ -1525,7 +1526,10 @@ fn profile_controls_preserve_inheritance_and_reject_invalid_imports() {
 }
 
 fn live_snapshot() -> Snapshot {
-    let mut defaults = AgentProfile::default();
+    let mut defaults = AgentProfile {
+        model: "fixture-model".into(),
+        ..Default::default()
+    };
     defaults
         .permissions
         .insert(Task::Implement, Permission::Ask);
@@ -2001,7 +2005,7 @@ fn removed_board_items_keep_history_but_block_new_turns_until_restored() {
 }
 
 #[test]
-fn unmodified_default_director_can_delegate_automatically() {
+fn default_director_requires_a_model_then_can_delegate_automatically() {
     let mut mounted = mount(false, 1380.0);
     let mut snapshot = live_snapshot();
     snapshot.projects[0].defaults = AgentProfile::default();
@@ -2018,6 +2022,16 @@ fn unmodified_default_director_can_delegate_automatically() {
         .model
         .worker_prompt
         .set("Delegate this issue".into());
+    assert!(
+        mounted
+            .model
+            .worker_gate(false)
+            .unwrap_err()
+            .contains("Choose a model")
+    );
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot.projects[0].defaults.model = "fixture-model".into();
+    });
     assert!(mounted.model.worker_gate(false).is_ok());
     mounted.model.run_worker(false);
     assert!(matches!(
@@ -3226,7 +3240,10 @@ fn local_project_snapshot() -> Snapshot {
     let mut snapshot = live_snapshot();
     snapshot.projects[0].github = None;
     snapshot.projects[0].root = Some("/server/projects/relay".into());
-    snapshot.projects[0].defaults = AgentProfile::default();
+    snapshot.projects[0].defaults = AgentProfile {
+        model: "fixture-model".into(),
+        ..Default::default()
+    };
     for issue in &mut snapshot.issues {
         issue.reference = None;
     }
@@ -3397,6 +3414,7 @@ fn local_tasks_render_without_remote_reference_and_move_on_selected_board() {
 fn initial_workspace_choice_is_explicit_and_followup_keeps_recorded_resources() {
     let mut mounted = mount(false, 1380.0);
     let mut snapshot = local_project_snapshot();
+    snapshot.projects[0].defaults.model = "fixture-model".into();
     for (id, name) in [("repo", "Repository"), ("directory", "Directory")] {
         snapshot.connections.push(ProjectConnection {
             id: id.into(),
@@ -8276,12 +8294,21 @@ fn saved_agent_profiles_wait_for_metadata_and_retain_edits_made_during_save() {
     );
 }
 
+fn choose_fixture_profile_model(mounted: &Mounted) {
+    mounted.model.modify_profile("model", |profile| {
+        profile.model = "fixture-model".into();
+    });
+    mounted.model.editor_override_accepted.set(true);
+    mounted.settle();
+}
+
 #[test]
 fn new_root_agents_keep_the_selected_profile_and_open_after_metadata_arrives() {
     let mut mounted = mount(false, 1380.0);
     mounted.model.open_profile(EditTarget::New);
     mounted.model.select_agent_template("worker".into());
     mounted.model.editor_name.set("Independent worker".into());
+    choose_fixture_profile_model(&mounted);
     mounted.model.save_profile();
     let envelope = mounted.commands.try_recv().unwrap();
     assert!(
@@ -8361,6 +8388,7 @@ fn unnamed_root_agent_opens_a_chat_without_a_task_or_custom_name() {
     let mut mounted = mount(false, 1380.0);
     mounted.model.open_profile(EditTarget::New);
     mounted.settle();
+    choose_fixture_profile_model(&mounted);
     mounted.click("Create agent");
     let envelope = mounted.commands.try_recv().unwrap();
     assert!(
@@ -8391,6 +8419,86 @@ fn unnamed_root_agent_opens_a_chat_without_a_task_or_custom_name() {
             .messages
             .iter()
             .any(|m| m.session_id == mounted.model.session.get_untracked())
+    );
+}
+
+#[test]
+fn agent_configuration_requires_and_persists_an_explicit_harness_model() {
+    let mut mounted = mount_orchestration(1380.0);
+    mounted.click("New agent");
+    mounted
+        .model
+        .modify_profile("harness", |p| p.harness = Harness::ClaudeCode);
+    assert!(
+        mounted
+            .model
+            .editor_profile
+            .get_untracked()
+            .model
+            .is_empty()
+    );
+    mounted.model.save_profile();
+    assert!(mounted.commands.try_recv().is_err());
+    let choice = HarnessModel {
+        id: "claude-haiku-test".into(),
+        name: "Haiku Test".into(),
+        efforts: vec!["medium".into()],
+        default_effort: Some("medium".into()),
+        fast: false,
+    };
+    mounted.model.catalogs.update(|catalogs| {
+        catalogs.insert(
+            format!(
+                "profile:{}:{:?}",
+                mounted.model.project.get_untracked(),
+                Harness::ClaudeCode
+            ),
+            Ok(HarnessCatalog {
+                harness: Harness::ClaudeCode,
+                models: vec![choice],
+                ..Default::default()
+            }),
+        );
+    });
+    mounted.settle();
+    mounted.click("Select profile model");
+    mounted.click("Use profile model claude-haiku-test");
+    assert_eq!(
+        mounted.model.editor_profile.get_untracked().model,
+        "claude-haiku-test"
+    );
+    mounted.click("Override for this agent");
+    mounted.model.save_profile();
+    let envelope = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(&envelope.command, Command::CreateAgentConfig { overrides, .. } if overrides.model.as_deref() == Some("claude-haiku-test"))
+    );
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot
+        .apply(envelope.command, &envelope.request_id, 1)
+        .unwrap();
+    let config = snapshot.agent_configs.last().unwrap();
+    assert_eq!(
+        snapshot.effective_profile(config).unwrap().model.as_str(),
+        "claude-haiku-test"
+    );
+    let config_id = config.id.clone();
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_root_agent(config_id);
+    assert_eq!(
+        mounted.model.harness_selection().model.as_deref(),
+        Some("claude-haiku-test")
+    );
+    mounted
+        .model
+        .modify_profile("harness", |p| p.harness = Harness::Codex);
+    assert!(
+        mounted
+            .model
+            .editor_profile
+            .get_untracked()
+            .model
+            .is_empty()
     );
 }
 
@@ -8426,6 +8534,7 @@ fn agent_creation_uses_director_and_worker_profiles_and_preserves_parent_links()
     assert!(!has_label(&mounted, "Agent task"));
     assert!(mounted.model.editor_name.get_untracked().is_empty());
     mounted.settle();
+    choose_fixture_profile_model(&mounted);
     mounted.click("Create agent");
     assert!(
         matches!(mounted.commands.try_recv().unwrap().command, Command::StartChildAgent { parent_session_id, profile, name, prompt, approve_implementation } if parent_session_id == "session-plan" && !profile.can_delegate() && name.is_empty() && prompt.is_empty() && !approve_implementation)
@@ -8847,7 +8956,18 @@ fn archived_chat_is_hidden_by_default_readable_when_shown_and_cannot_send() {
     assert!(!tree_contains(&mounted));
     mounted.click("Show archived chats");
     assert!(tree_contains(&mounted));
-    assert!(has_label(&mounted, "Archived chat. Unarchive to continue."));
+    assert!(has_label(
+        &mounted,
+        "This chat has been archived. Unarchive it to continue."
+    ));
+    let archived = mounted.rect("Archived chat message");
+    let transcript = mounted.rect("Transcript");
+    assert!(archived.origin.y >= transcript.origin.y);
+    assert!(
+        archived.origin.y + archived.size.height
+            <= transcript.origin.y + transcript.size.height + 1.0
+    );
+    assert!(archived.origin.y + archived.size.height <= mounted.rect("Draft boundary").origin.y);
     crate::buffer::send(mounted.model);
     assert!(mounted.commands.try_recv().is_err());
     assert!(mounted.model.notice.get_untracked().contains("Unarchive"));
@@ -8862,7 +8982,7 @@ fn archived_chat_is_hidden_by_default_readable_when_shown_and_cannot_send() {
     mounted.settle();
     assert!(!has_label(
         &mounted,
-        "Archived chat. Unarchive to continue."
+        "This chat has been archived. Unarchive it to continue."
     ));
 }
 

@@ -145,7 +145,15 @@ fn paint_status_coloured(
         status.token()
     });
     match status {
-        AgentStatus::Idle => {}
+        AgentStatus::Idle => {
+            let hollow = Rect::from_xywh(at(1.5, 1.5).x, at(1.5, 1.5).y, 7.0 * unit, 7.0 * unit);
+            scene.shape(Shape::new(hollow).stroke(Stroke::new(unit, tint)));
+            scene.shape(
+                Shape::new(rect)
+                    .path(vec![local(3.0, 5.0), local(7.0, 5.0)], false)
+                    .stroke(Stroke::new(unit, tint)),
+            );
+        }
         AgentStatus::Working => {
             scene.shape(Shape::new(inner).fill(tint.alpha(tint.a * breath)));
         }

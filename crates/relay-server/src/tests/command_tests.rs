@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::Value;
 
-const CODEX: &str = r#"
+pub(crate) const CODEX: &str = r#"
 while IFS= read -r line; do
   printf '%s\n' "$line" >> '@CAPTURE@'
   id=$(printf '%s' "$line" | jq -c '.id')
@@ -1228,6 +1228,158 @@ async fn branch_archive_and_confirmed_deletion_remove_owned_files_and_persist_ov
         initial_receipt.starts_with("deleted:"),
         "Deleted initial prompts must not remain in command receipts"
     );
+}
+
+#[tokio::test]
+async fn profile_models_are_discovered_before_creation_and_passed_to_new_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, _, capture) = setup(dir.path()).await;
+    let token = uuid::Uuid::new_v4().to_string();
+    let (app, shutdown) = router_with_shutdown(
+        dir.path().join("db"),
+        token.clone(),
+        AgentProfile::default(),
+        (*w.config).clone(),
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+    let catalog: HarnessCatalog = client
+        .get(format!("{endpoint}/v1/projects/live/catalog/codex"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(catalog.models.iter().any(|m| m.id == "test-model"));
+    let read = || {
+        client
+            .get(format!("{endpoint}/v1/snapshot"))
+            .bearer_auth(&token)
+    };
+    let send = |command: CommandEnvelope| {
+        client
+            .post(format!("{endpoint}/v1/commands"))
+            .bearer_auth(&token)
+            .header("x-relay-protocol", PROTOCOL_VERSION.to_string())
+            .json(&command)
+    };
+    let before: Snapshot = read().send().await.unwrap().json().await.unwrap();
+    let invalid = env(
+        before.revision,
+        Command::CreateAgentConfig {
+            project_id: "live".into(),
+            name: "Explicit model".into(),
+            template: "director".into(),
+            overrides: Default::default(),
+        },
+    );
+    assert_eq!(
+        send(invalid).send().await.unwrap().status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let request = env(
+        before.revision,
+        Command::CreateAgentConfig {
+            project_id: "live".into(),
+            name: "Explicit model".into(),
+            template: "director".into(),
+            overrides: ProfileOverrides {
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+        },
+    );
+    let config_id = format!("agent-config-{}", request.request_id);
+    assert!(send(request).send().await.unwrap().status().is_success());
+    let configured: Snapshot = read().send().await.unwrap().json().await.unwrap();
+    let config = configured
+        .agent_configs
+        .iter()
+        .find(|c| c.id == config_id)
+        .unwrap();
+    assert!(config.draft_selection.model.is_none());
+    let profile = configured.effective_profile(config).unwrap();
+    assert_eq!(profile.model, "test-model");
+    let start = env(
+        configured.revision,
+        Command::StartRootAgent {
+            agent_config_id: config_id,
+            issue_id: None,
+            prompt: "Plan with the configured model".into(),
+            parts: vec![],
+            approve_implementation: false,
+        },
+    );
+    let session_id = format!("session-{}", start.request_id);
+    assert!(send(start).send().await.unwrap().status().is_success());
+    let completed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot: Snapshot = read().send().await.unwrap().json().await.unwrap();
+            if snapshot.sessions.iter().any(|s| {
+                s.id == session_id
+                    && s.worker
+                        .as_ref()
+                        .is_some_and(|w| w.status == WorkerStatus::Completed)
+            }) {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        completed
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .unwrap()
+            .selection
+            .model
+            .as_deref(),
+        Some("test-model")
+    );
+    let captured = std::fs::read_to_string(capture).unwrap();
+    let native = captured
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|v| v["method"] == "thread/start")
+        .next_back()
+        .unwrap();
+    assert_eq!(native["params"]["model"], "test-model");
+    let child = env(
+        completed.revision,
+        Command::StartChildAgent {
+            parent_session_id: session_id,
+            name: String::new(),
+            profile: AgentProfile::worker(&profile),
+            prompt: String::new(),
+            approve_implementation: false,
+        },
+    );
+    let child_id = format!("session-{}", child.request_id);
+    assert!(send(child).send().await.unwrap().status().is_success());
+    let children: Snapshot = read().send().await.unwrap().json().await.unwrap();
+    assert_eq!(
+        children
+            .sessions
+            .iter()
+            .find(|s| s.id == child_id)
+            .unwrap()
+            .selection
+            .model
+            .as_deref(),
+        Some("test-model")
+    );
+    shutdown.shutdown().await.unwrap();
+    task.abort();
 }
 
 #[tokio::test]

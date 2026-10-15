@@ -349,8 +349,7 @@ pub fn AgentTreeRow(
     }
     row.adopt(&outer);
     let actions = view! {
-        row width:max-content height:min-content self-align:(x:end y:center) align:center
-            gap:{px(4.0)}px pad:(right:{px(14.0)}px) {}
+        row width:max-content place:end align:center gap:{px(4.0)}px pad:(right:{px(14.0)}px) {}
     };
     if let Some(spawn) = on_spawn.filter(|_| !line.archived) {
         let id = line.id.clone();

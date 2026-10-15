@@ -3,7 +3,7 @@ use axum::{body::Bytes, extract::Path as RoutePath};
 use std::os::unix::fs::PermissionsExt;
 use std::{path::PathBuf, time::Duration};
 
-mod command_tests;
+pub(crate) mod command_tests;
 mod harness_tests;
 pub(super) fn live() -> Snapshot {
     let mut defaults = AgentProfile::default();
@@ -1020,7 +1020,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            17
+            18
         );
         drop(store);
         let mut reopened = Store::open(&db, AgentProfile::default()).unwrap();
@@ -1114,7 +1114,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 18)
+        .pragma_update(None, "user_version", 19)
         .unwrap();
     drop(store);
     let error = Store::open(&db, AgentProfile::default()).err().unwrap();
@@ -1124,7 +1124,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        18
+        19
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -2505,6 +2505,8 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >> rpc-input.jsonl
   case "$method" in
     initialize) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    model/list) printf '{"id":%s,"result":{"data":[{"id":"reported-model","displayName":"Reported model"}]}}\n' "$id" ;;
+    skills/list|mcpServerStatus/list) printf '{"id":%s,"result":{"data":[]}}\n' "$id" ;;
     thread/resume) printf '{"id":%s,"result":{"model":"reported-model","thread":{"id":"%s"}}}\n' "$id" "$thread" ;;
     turn/start)
       printf '{"method":"turn/started","params":{"threadId":"%s","turn":{"id":"turn-1"}}}\n' "$thread"
@@ -3094,6 +3096,7 @@ async fn first_director_message_preserves_images_through_process_input_and_retry
         &RuntimeConfig::default(),
     )
     .unwrap();
+    snapshot.projects[0].defaults.model = "reported-model".into();
     let agent_config_id = snapshot.agent_configs[0].id.clone();
     let w = workspace(
         &dir.path().join("db"),
@@ -3375,5 +3378,5 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 17);
+    assert_eq!(schema, 18);
 }

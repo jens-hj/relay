@@ -57,7 +57,7 @@ fn call(vm: ToolCallView, on_opening: OnOpening, actions: ToolActions) -> (Eleme
         AgentStatus::Waiting => status.needs_you,
         _ => colour,
     };
-    let embedded = opening_indicator(vm.opening, colour);
+    let embedded = opening_indicator(vm.opening, edge);
     let opening = vm.opening;
     let target = match &vm.detail {
         Some(ToolDetail::Message { target, .. }) => {
@@ -148,9 +148,9 @@ fn call(vm: ToolCallView, on_opening: OnOpening, actions: ToolActions) -> (Eleme
 }
 fn opening_indicator(opening: Opening, colour: ColorToken) -> Element {
     let subdued = move || {
-        let mut tint = mosaic::core::color::Oklch::from_color(mosaic::core::theme::color(colour));
-        tint.c *= 0.65;
-        tint.to_color()
+        let tint = mosaic::core::theme::color(colour);
+        let alpha = crate::tokens::srgb_alpha(tint, mosaic::core::theme::color(ground.panel), 0.35);
+        tint.alpha(alpha)
     };
     view! {
         row width:{px(36.0)}px shrink:0 {

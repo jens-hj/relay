@@ -35,6 +35,8 @@ while IFS= read -r line; do
   id=$(printf '%s' "$line" | jq -c '.id')
   case "$method" in
     initialize) printf '{"id":%s,"result":{}}\n' "$id" ;;
+    model/list) printf '{"id":%s,"result":{"data":[{"id":"test-model","displayName":"Test model"}]}}\n' "$id" ;;
+    skills/list|mcpServerStatus/list) printf '{"id":%s,"result":{"data":[]}}\n' "$id" ;;
     thread/start|thread/resume) printf '{"id":%s,"result":{"model":"test-model","thread":{"id":"fake-thread"}}}\n' "$id" ;;
     turn/start)
       # Neither the scoped secret nor the workspace credential is printed.
@@ -149,11 +151,38 @@ done
             })
             .unwrap();
         let agent_config_id = director.id.clone();
+        let route = if harness == Harness::Codex {
+            "codex"
+        } else {
+            "claude_code"
+        };
+        let catalog: HarnessCatalog = self
+            .client
+            .get(format!(
+                "{}/v1/projects/{}/catalog/{route}",
+                self.endpoint, director.project_id
+            ))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let model = catalog
+            .models
+            .first()
+            .expect("A boundary model is available")
+            .id
+            .clone();
         self.command(Command::UpdateAgentConfig {
             agent_config_id: agent_config_id.clone(),
             name: director.name.clone(),
             overrides: ProfileOverrides {
                 harness: Some(harness),
+                model: Some(model),
                 ..Default::default()
             },
         })

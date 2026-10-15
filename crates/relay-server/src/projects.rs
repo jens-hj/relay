@@ -817,13 +817,28 @@ pub(super) fn apply(
             parts: _,
             approve_implementation,
         } => {
-            let selection = snapshot
+            let mut selection = snapshot
                 .agent_configs
                 .iter()
                 .find(|c| c.id == agent_config_id)
                 .ok_or_else(|| Error::invalid("Agent configuration not found"))?
                 .draft_selection
                 .clone();
+            if selection.model.is_none() {
+                let config = snapshot
+                    .agent_configs
+                    .iter()
+                    .find(|c| c.id == agent_config_id)
+                    .unwrap();
+                selection.model = snapshot
+                    .effective_profile(config)
+                    .map_err(Error::invalid)?
+                    .model_selection()
+                    .model;
+            }
+            if selection.model.is_none() {
+                return Err(Error::invalid("Choose a model before starting this agent"));
+            }
             let action = start(
                 snapshot,
                 request,
@@ -851,6 +866,21 @@ pub(super) fn apply(
             approve_implementation,
             connection_ids,
         } => {
+            let agent = snapshot
+                .agent_configs
+                .iter()
+                .find(|c| c.id == agent_config_id)
+                .ok_or_else(|| Error::invalid("Agent configuration not found"))?;
+            if snapshot
+                .effective_profile(agent)
+                .map_err(Error::invalid)?
+                .model
+                .is_empty()
+            {
+                return Err(Error::invalid(
+                    "Choose a model in the agent configuration before creating a worker",
+                ));
+            }
             return start(
                 snapshot,
                 request,
@@ -1086,7 +1116,7 @@ fn start(
         fixture: false,
         connection_ids: ids,
         workspaces: vec![],
-        selection: Default::default(),
+        selection: profile.model_selection(),
         conversations: vec![],
         worker: Some(WorkerRun {
             model: None,
@@ -1946,6 +1976,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut s = Snapshot::default();
         let project = create(&mut s, &dir.path().join("project"), "Project");
+        s.projects[0].defaults.model = "planning-model".into();
         let director = s
             .agent_configs
             .iter()

@@ -13,10 +13,41 @@ use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::H
 #[derive(Clone)]
 pub enum Request {
     Catalog { session: String, force: bool },
+    ProfileCatalog { project: String, harness: Harness },
     Save { session: String, request: SaveDraft },
     Upload { asset: Asset, bytes: Arc<Vec<u8>> },
     Fetch(String),
     Forget(Vec<String>),
+}
+
+impl Request {
+    fn catalog_route(&self) -> (String, String, bool) {
+        let encode = |id: &str| {
+            percent_encoding::utf8_percent_encode(id, percent_encoding::NON_ALPHANUMERIC)
+                .to_string()
+        };
+        match self {
+            Self::Catalog { session, force } => (
+                session.clone(),
+                format!("v1/sessions/{}/catalog", encode(session)),
+                *force,
+            ),
+            Self::ProfileCatalog { project, harness } => (
+                format!("profile:{project}:{harness:?}"),
+                format!(
+                    "v1/projects/{}/catalog/{}",
+                    encode(project),
+                    if *harness == Harness::Codex {
+                        "codex"
+                    } else {
+                        "claude_code"
+                    }
+                ),
+                false,
+            ),
+            _ => unreachable!("not a catalogue request"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -73,10 +104,11 @@ pub fn start(config: Config, sender: StateSender<Update>) -> mpsc::UnboundedSend
                         None => break,
                     },
                     request = receiver.recv() => match request {
-                        Some(Request::Catalog {session,force}) => {
+                        Some(request @ (Request::Catalog {..} | Request::ProfileCatalog {..})) => {
+                            let (session,path,force)=request.catalog_route();
                             let client=client.clone();let config=config.clone();let events=events.clone();
                             tokio::spawn(async move {
-                            let path=format!("v1/sessions/{}/catalog",percent_encoding::utf8_percent_encode(&session,percent_encoding::NON_ALPHANUMERIC));
+
                             let request=if force {client.post(config.url(&path))}else{client.get(config.url(&path))};
                             let result=match request.bearer_auth(&config.token).header("X-Relay-Protocol",relay_core::PROTOCOL_VERSION.to_string()).send().await {
                                 Ok(response) if response.status().is_success()=>response.json::<HarnessCatalog>().await.map_err(|_|"Invalid harness catalog".into()),
