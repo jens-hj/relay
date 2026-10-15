@@ -165,6 +165,10 @@ pub fn agent_forest(
             node.model = identity;
             node.effort = effort;
             node.can_spawn = false;
+            node.can_delete = !snapshot
+                .sessions
+                .iter()
+                .any(|s| s.agent_config_id == config.id);
             node.selected = selected == format!("agent-draft-{}", config.id);
             forest.push(node);
         }

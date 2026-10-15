@@ -28,6 +28,8 @@ use std::rc::Rc;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AgentNode {
     pub archived: bool,
+    /// Offers confirmed deletion before a conversation has been started.
+    pub can_delete: bool,
     /// Stable identity, passed back to callbacks.
     pub id: String,
     pub name: String,
@@ -54,6 +56,7 @@ impl AgentNode {
     ) -> Self {
         AgentNode {
             archived: false,
+            can_delete: false,
             id: id.into(),
             name: name.into(),
             status,

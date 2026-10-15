@@ -278,7 +278,15 @@ impl Model {
         if !self.syncing.get_untracked() {
             self.confirmed_selection.set(None);
         }
-        let removed: std::collections::HashSet<_> = self
+        let removed_configs: Vec<_> = self
+            .snapshot
+            .get_untracked()
+            .agent_configs
+            .iter()
+            .filter(|old| !snapshot.agent_configs.iter().any(|c| c.id == old.id))
+            .map(|c| c.id.clone())
+            .collect();
+        let mut removed: std::collections::HashSet<_> = self
             .snapshot
             .get_untracked()
             .sessions
@@ -297,6 +305,19 @@ impl Model {
                 .retain(|c| message_ids.contains(&c.message_id));
         }
         self.snapshot.set(snapshot);
+        for id in &removed_configs {
+            removed.insert(format!("agent-draft-{id}"));
+            removed.insert(format!("config:{id}"));
+            self.collapsed_agents.update(|ids| {
+                ids.remove(&format!("config:{id}"));
+            });
+            if self.page.get_untracked() == Page::Profiles
+                && self.editor.get_untracked() == EditTarget::Config(id.clone())
+            {
+                self.select_project(self.project.get_untracked());
+                self.editor.set(EditTarget::Defaults);
+            }
+        }
         if !removed.is_empty() {
             crate::buffer::forget_sessions(*self, &removed);
             if self

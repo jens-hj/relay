@@ -152,7 +152,13 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     });
     let delete: Rc<dyn Fn(String)> = Rc::new(move |session_id| {
         model.submit(
-            Command::DeleteSessionBranch { session_id },
+            if let Some(id) = session_id.strip_prefix("config:") {
+                Command::RemoveAgentConfig {
+                    agent_config_id: id.into(),
+                }
+            } else {
+                Command::DeleteSessionBranch { session_id }
+            },
             model.snapshot.get_untracked().revision,
             crate::model::Saved::Action,
         );

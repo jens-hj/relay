@@ -394,7 +394,7 @@ pub fn AgentTreeRow(
         });
     }
 
-    if let Some(delete) = on_delete.filter(|_| line.archived) {
+    if let Some(delete) = on_delete.filter(|_| line.archived || line.can_delete) {
         let confirm = State::new(false);
         let id = line.id.clone();
         let action = view! {

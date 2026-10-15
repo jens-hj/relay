@@ -9076,3 +9076,96 @@ fn prelaunch_model_and_effort_render_before_any_message_is_sent() {
             .any(|s| s.id == draft)
     );
 }
+
+#[test]
+fn unused_chat_deletion_requires_confirmation_and_recovers_selection() {
+    for profile_open in [false, true] {
+        let mut mounted = mount(false, 1380.0);
+        let mut snapshot = mounted.model.snapshot.get_untracked();
+        let mut unused = snapshot.agent_configs[0].clone();
+        unused.id = "unused".into();
+        unused.name = "New director".into();
+        snapshot.agent_configs.push(unused);
+        snapshot.sessions.retain(|s| s.id == "session-plan");
+        mounted.model.receive(NetworkState {
+            snapshot,
+            connected: true,
+            ..Default::default()
+        });
+        mounted.model.open_root_agent("unused".into());
+        let draft_id = mounted.model.session.get_untracked();
+        crate::buffer::edit(mounted.model, &draft_id, vec![Part::text("Draft prompt")]);
+        crate::buffer::edit(
+            mounted.model,
+            "session-plan",
+            vec![Part::text("Keep draft")],
+        );
+        if profile_open {
+            mounted
+                .model
+                .open_profile(EditTarget::Config("unused".into()));
+        }
+        mounted.settle();
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Move,
+            position: mounted.rect("New director").center(),
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+        mounted.settle();
+        // Unstarted chats offer the same confirmed deletion control as archived chats.
+        mounted.click("Delete New director");
+        assert!(mounted.commands.try_recv().is_err());
+        mounted.click("Delete New director");
+        let request = mounted.commands.try_recv().unwrap();
+        assert!(
+            matches!(&request.command, Command::RemoveAgentConfig { agent_config_id } if agent_config_id == "unused")
+        );
+        mounted.model.receive(NetworkState {
+            snapshot: mounted.model.snapshot.get_untracked(),
+            connected: true,
+            outcome: Some((request.request_id.clone(), Err("Revision changed".into()))),
+            outcome_serial: 1,
+            ..Default::default()
+        });
+        mounted.settle();
+        assert_eq!(
+            plain_text(&crate::buffer::parts(mounted.model, &draft_id)),
+            "Draft prompt"
+        );
+        mounted.click("Delete New director");
+        let retry = mounted.commands.try_recv().unwrap();
+        let mut snapshot = mounted.model.snapshot.get_untracked();
+        snapshot.apply(retry.command, &retry.request_id, 1).unwrap();
+        mounted.model.receive(NetworkState {
+            snapshot,
+            connected: true,
+            outcome: Some((retry.request_id, Ok(()))),
+            outcome_serial: 2,
+            ..Default::default()
+        });
+        mounted.settle();
+        assert_eq!(mounted.model.page.get_untracked(), Page::Board);
+        assert!(
+            !mounted
+                .model
+                .buffer
+                .get_untracked()
+                .documents
+                .contains_key(&draft_id)
+        );
+        assert_eq!(
+            plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+            "Keep draft"
+        );
+        assert!(
+            !mounted
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .iter()
+                .any(|n| n.label.as_deref() == Some("Delete New director"))
+        );
+    }
+}

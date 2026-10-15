@@ -3380,3 +3380,66 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
         .unwrap();
     assert_eq!(schema, 18);
 }
+
+#[test]
+fn remove_unused_agent_config_is_persistent_and_preserves_session_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let mut original = live();
+    let mut unused = original.agent_configs[0].clone();
+    unused.id = "unused-director".into();
+    original.agent_configs.push(unused);
+    let w = workspace(&path, &original, config());
+    let mut store = w.store.lock().unwrap();
+    let request = env(
+        original.revision,
+        Command::RemoveAgentConfig {
+            agent_config_id: "unused-director".into(),
+        },
+    );
+    let (saved, action) = store.apply(request.clone(), &w.config).unwrap();
+    assert!(action.is_none());
+    let mut expected = original.clone();
+    expected.agent_configs.pop();
+    expected.revision += 1;
+    assert_eq!(saved, expected);
+    assert_eq!(store.apply(request, &w.config).unwrap().0, saved);
+    assert!(
+        store
+            .apply(
+                env(
+                    saved.revision,
+                    Command::RemoveAgentConfig {
+                        agent_config_id: "missing".into(),
+                    }
+                ),
+                &w.config
+            )
+            .is_err()
+    );
+    // Both director conversations and worker-only history prevent removal.
+    for role in [SessionRole::Root, SessionRole::Worker] {
+        let mut occupied = saved.clone();
+        occupied.sessions.retain(|s| s.role == role);
+        store.save(&occupied).unwrap();
+        assert!(
+            store
+                .apply(
+                    env(
+                        occupied.revision,
+                        Command::RemoveAgentConfig {
+                            agent_config_id: occupied.sessions[0].agent_config_id.clone(),
+                        }
+                    ),
+                    &w.config
+                )
+                .is_err()
+        );
+        assert_eq!(store.snapshot().unwrap(), occupied);
+    }
+    store.save(&saved).unwrap();
+    drop(store);
+    drop(w);
+    let reopened = Store::open(&path, AgentProfile::default()).unwrap();
+    assert_eq!(reopened.snapshot().unwrap(), saved);
+}

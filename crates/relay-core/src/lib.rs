@@ -483,6 +483,9 @@ pub enum Command {
         name: String,
         overrides: ProfileOverrides,
     },
+    RemoveAgentConfig {
+        agent_config_id: String,
+    },
     AddComment {
         message_id: String,
         quote: Option<String>,
@@ -853,6 +856,21 @@ impl Snapshot {
                             .collect();
                     }
                 }
+            }
+            Command::RemoveAgentConfig { agent_config_id } => {
+                let index = self
+                    .agent_configs
+                    .iter()
+                    .position(|c| c.id == agent_config_id)
+                    .ok_or("Agent configuration not found")?;
+                if self
+                    .sessions
+                    .iter()
+                    .any(|s| s.agent_config_id == agent_config_id)
+                {
+                    return Err("Only agents without sessions can be removed".into());
+                }
+                self.agent_configs.remove(index);
             }
             Command::AddComment {
                 message_id,

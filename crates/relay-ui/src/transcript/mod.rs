@@ -86,6 +86,7 @@ pub fn SpawnBlock(agents: Live<Vec<SpawnChild>>, on_open_tree: OnPress) -> Eleme
                 {
                     let line = crate::tree::AgentLine {
                         archived: false,
+                        can_delete: false,
                         can_spawn: false,
                         id: format!("spawn-{key:?}"), name: child.name.clone(), status: child.status,
                         harness: child.harness.unwrap_or(Harness::Codex), model: child.model.clone(),
