@@ -52,8 +52,8 @@ pub fn Ledger(
             }
             parent.adopt(&content);
             parent.adopt(&view! {
-                el nohit
-                    stroke:(width:{px(1.0)} color:ground.rule edges:edges offset:{px(if framed {-0.5} else {0.0})}) {}
+                el width:fill height:fill nohit label:"Ledger border"
+                    stroke:(width:{px(1.0)} color:ground.rule-strong edges:edges offset:{px(if framed {-0.5} else {0.0})}) {}
             });
         },
     );
@@ -79,9 +79,10 @@ fn ledger(
     let tall = !track && named.is_none();
     let named_cell = named.map(|name| {
         view! {
-            col height:1fr justify:start pad:(horizontal:{px(10.0)}px vertical:{px(9.0)}px) {
+            col height:min-content shrink:0 justify:start
+                pad:(horizontal:{px(10.0)}px vertical:{px(9.0)}px) {
                 CutCorner cut:(Cut::Small) corner:(Corner::TopRightBottomLeft)
-                    edge:(ground.rule_strong) {
+                    height:(Dimension::MinContent) shrink:0.0 edge:(ground.rule_strong) {
                     row height:{px(20.0)}px justify:between align:center
                         pad:(horizontal:{px(8.0)}px vertical:0px) label:"Selected effort" {
                         Label text:"EFFORT" role:(TextRole::Micro) weight:500 tone:(Tone::Muted)
@@ -179,9 +180,10 @@ fn ledger(
                 }
                 { if let Some(cell) = &named_cell { parent.adopt(cell); } }
                 if track {
-                    col height:1fr justify:between gap:{px(8.0)}px
+                    col height:1fr min-height:{px(66.0)}px shrink:0 justify:between gap:{px(8.0)}px
                         pad:(horizontal:{px(10.0)}px vertical:{px(9.0)}px) {
                         CutCorner cut:(Cut::Small) corner:(Corner::TopRightBottomLeft)
+                            height:(Dimension::MinContent) shrink:0.0 label:"Effort selection frame"
                             edge:(if e.at_max() { colour } else { ground.rule_strong }) {
                             row height:{px(20.0)}px justify:between align:center
                                 pad:(horizontal:{px(8.0)}px vertical:0px) {
@@ -339,30 +341,39 @@ pub fn Composer(
                 }
                 row height:min-content align:start {
                     { parent.adopt(&area); }
-                    col width:{px(62.0)}px shrink:0 height:min-content gap:{px(4.0)}px {
-                        button
-                            @click:{if content.get_untracked() && !pending.get_untracked() && !disabled.get_untracked() { send(); }}
-                            width:fill height:{px(40.0)}px radius:0px pad:0px align:center
-                            justify:center label:"Send message"
-                            disabled:{!content.get() || pending.get() || disabled.get()}
-                            fill:(Color::TRANSPARENT) font-color:ground.ink
-                            stroke:(width:{px(1.0)} color:ground.rule edges:(top right bottom left) offset:{px(-0.5)})
-                            hover { fill:ground.hover } pressed { fill:ground.pressed }
-                            focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
-                            if pending.get() {
-                                { parent.adopt(&pending_mark()); }
-                            } else {
-                                { parent.adopt(&crate::icons::icon_mark(crate::icons::mark.send, 20.0)); }
+                    stack width:{px(62.0)}px shrink:0 height:min-content {
+                        col height:min-content {
+                            button
+                                @click:{if content.get_untracked() && !pending.get_untracked() && !disabled.get_untracked() { send(); }}
+                                width:fill height:{px(40.0)}px radius:0px pad:0px align:center
+                                justify:center label:"Send message"
+                                disabled:{!content.get() || pending.get() || disabled.get()}
+                                fill:(Color::TRANSPARENT) font-color:ground.ink
+                                stroke:(width:0px color:{Color::TRANSPARENT})
+                                hover { fill:ground.hover } pressed { fill:ground.pressed }
+                                focused {
+                                    stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)})
+                                } {
+                                if pending.get() {
+                                    { parent.adopt(&pending_mark()); }
+                                } else {
+                                    { parent.adopt(&crate::icons::icon_mark(crate::icons::mark.send, 20.0)); }
+                                }
+                            }
+                            Hairline colour:(ground.rule_strong)
+                            button @click:{on_attach()} width:fill height:{px(40.0)}px align:center
+                                justify:center pad:0px radius:0px label:"Attach file"
+                                fill:(Color::TRANSPARENT) font-color:ground.ink
+                                stroke:(width:0px color:{Color::TRANSPARENT})
+                                hover { fill:ground.hover } pressed { fill:ground.pressed }
+                                focused {
+                                    stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)})
+                                } {
+                                { parent.adopt(&crate::marks::mark(crate::marks::Mark::Plus, 14.0, ground.ink)); }
                             }
                         }
-                        stack height:{px(40.0)}px {
-                            CellButton label:"Attach file" on-press:(on_attach)
-                                horizontal-inset:0.0 {
-                                Label text:"+" role:(TextRole::BodyLarge)
-                            }
-                            el nohit
-                                stroke:(width:{px(1.0)} color:ground.rule edges:(top right bottom left) offset:{px(-0.5)}) {}
-                        }
+                        el width:fill height:fill nohit label:"Composer actions border"
+                            stroke:(width:{px(1.0)} color:ground.rule-strong offset:{px(-0.5)}) {}
                     }
                 }
             }

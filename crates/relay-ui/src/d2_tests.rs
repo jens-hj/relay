@@ -101,6 +101,28 @@ fn failure_groups_stay_open_and_finished_groups_fold() {
     assert!(mounted.labels().iter().any(|l| l == "Failed"));
 }
 #[test]
+fn framed_ledger_preserves_effort_label_height_for_both_harnesses() {
+    for harness in [Harness::Codex, Harness::ClaudeCode] {
+        let mut settings = gallery::d2::settings(false);
+        settings.harness = harness;
+        let settings = State::new(settings);
+        let mounted = mount(Size::new(848.0, 600.0), || {
+            view! {
+                col justify:start {
+                    Ledger data:(settings) actions:(actions(settings)) framed:true
+                        height:(Dimension::MinContent)
+                }
+            }
+        });
+        let frame = mounted.rect("Effort selection frame");
+        assert!(frame.size.height >= 20.0, "{harness:?}: {frame:?}");
+        let ledger = mounted.rect("Agent ledger");
+        assert_eq!(mounted.rect("Ledger border"), ledger);
+        assert!(frame.max_y() <= ledger.max_y());
+    }
+}
+
+#[test]
 fn ledger_geometry_actions_and_editor_survive_collapse() {
     let state = State::new(gallery::d2::settings(false));
     let value = State::new("hello".to_owned());
@@ -814,6 +836,10 @@ fn inline_composer_puts_send_on_the_right_and_grows_with_the_draft() {
     assert!(send.origin.x >= editor.max_x());
     assert_eq!(send.origin.x, attach.origin.x);
     assert!(send.origin.y < attach.origin.y);
+    let actions = mounted.rect("Composer actions border");
+    assert_eq!(actions.origin, send.origin);
+    assert_eq!(actions.size.width, send.size.width);
+    assert_eq!(actions.max_y(), attach.max_y());
     assert!(mounted.rect("Expand agent settings").max_x() <= editor.origin.x);
     value.set(
         (0..50)
@@ -823,4 +849,5 @@ fn inline_composer_puts_send_on_the_right_and_grows_with_the_draft() {
     );
     mounted.settle();
     assert!(mounted.rect("Message").size.height > 500.0);
+    assert_eq!(mounted.rect("Composer actions border").size, actions.size);
 }
