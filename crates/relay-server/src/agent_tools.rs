@@ -1670,7 +1670,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 16);
+        assert_eq!(schema, 17);
         f.finish().await;
     }
     #[tokio::test]

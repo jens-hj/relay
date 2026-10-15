@@ -998,7 +998,7 @@ pub fn Conversation(model: Model) -> Element {
                         Label text:"Archived chat. Unarchive to continue." role:(TextRole::Caption) tone:(Tone::Muted)
                     }
                     Composer inline:true stacked:(relay_ui::Live::from(compact)) settings:(relay_ui::Live::from(ledger)) ledger-actions:(ledger_actions)
-                        gutter-width:(relay_ui::Live::fixed(274.0))
+                        gutter-width:(relay_ui::Live::fixed(212.0))
                         disabled:(relay_ui::Live::from(Derived::new(move || session.get().is_some_and(|s| s.archived))))
                         pending:(relay_ui::Live::from(Derived::new(move || model.submission_pending())))
                         on-send:(send) on-attach:(attach) editor:(Some(editor))
@@ -1218,7 +1218,7 @@ pub fn Conversation(model: Model) -> Element {
                         pad:(left:{px(if compact.get() {12.0} else {28.0})}px right:{px(if compact.get() {12.0} else {36.0})}px top:{px(28.0)}px bottom:{px(24.0)}px) {
                         col width:1fr max-width:{px(if compact.get() {848.0} else {994.0})}px
                             height:min-content
-                            pad:(left:{px(if compact.get() {0.0} else {146.0})}px) {
+                            pad:(left:{px(if compact.get() {0.0} else {84.0})}px right:{px(if compact.get() {0.0} else {62.0})}px) {
                             col width:1fr max-width:{px(848.0)}px height:min-content
                                 gap:{px(28.0)}px label:"Transcript" {
                                 if model.searching.get() && !model.search.get().is_empty() && !model.search_snippet.get().is_empty() {

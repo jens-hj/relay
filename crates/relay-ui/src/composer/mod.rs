@@ -335,36 +335,36 @@ pub fn Composer(
                         justify:{if controls_stacked.get() {Justify::Start} else {Justify::End}} {
                         Ledger data:(settings) actions:(ledger_actions) framed:true
                             height:(Dimension::MinContent)
-                        col width:{px(62.0)}px shrink:0 height:min-content gap:{px(4.0)}px {
-                            button
-                                @click:{if content.get_untracked() && !pending.get_untracked() && !disabled.get_untracked() { send(); }}
-                                width:fill height:{px(40.0)}px radius:0px pad:0px align:center
-                                justify:center label:"Send message"
-                                disabled:{!content.get() || pending.get() || disabled.get()}
-                                fill:(Color::TRANSPARENT) font-color:ground.ink
-                                stroke:(width:{px(1.0)} color:ground.rule edges:(top right bottom) offset:{px(-0.5)})
-                                hover { fill:ground.hover } pressed { fill:ground.pressed }
-                                focused {
-                                    stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)})
-                                } {
-                                if pending.get() {
-                                    { parent.adopt(&pending_mark()); }
-                                } else {
-                                    { parent.adopt(&crate::icons::icon_mark(crate::icons::mark.send, 20.0)); }
-                                }
+                    }
+                }
+                row height:min-content align:start {
+                    { parent.adopt(&area); }
+                    col width:{px(62.0)}px shrink:0 height:min-content gap:{px(4.0)}px {
+                        button
+                            @click:{if content.get_untracked() && !pending.get_untracked() && !disabled.get_untracked() { send(); }}
+                            width:fill height:{px(40.0)}px radius:0px pad:0px align:center
+                            justify:center label:"Send message"
+                            disabled:{!content.get() || pending.get() || disabled.get()}
+                            fill:(Color::TRANSPARENT) font-color:ground.ink
+                            stroke:(width:{px(1.0)} color:ground.rule edges:(top right bottom left) offset:{px(-0.5)})
+                            hover { fill:ground.hover } pressed { fill:ground.pressed }
+                            focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
+                            if pending.get() {
+                                { parent.adopt(&pending_mark()); }
+                            } else {
+                                { parent.adopt(&crate::icons::icon_mark(crate::icons::mark.send, 20.0)); }
                             }
-                            stack height:{px(40.0)}px {
-                                CellButton label:"Attach file" on-press:(on_attach)
-                                    horizontal-inset:0.0 {
-                                    Label text:"+" role:(TextRole::BodyLarge)
-                                }
-                                el nohit
-                                    stroke:(width:{px(1.0)} color:ground.rule edges:(top right bottom) offset:{px(-0.5)}) {}
+                        }
+                        stack height:{px(40.0)}px {
+                            CellButton label:"Attach file" on-press:(on_attach)
+                                horizontal-inset:0.0 {
+                                Label text:"+" role:(TextRole::BodyLarge)
                             }
+                            el nohit
+                                stroke:(width:{px(1.0)} color:ground.rule edges:(top right bottom left) offset:{px(-0.5)}) {}
                         }
                     }
                 }
-                { parent.adopt(&area); }
             }
         };
     }

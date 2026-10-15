@@ -14,6 +14,9 @@ use mosaic::render::{LineCap, LineJoin, Scene, Shape, Stroke};
 pub enum Mark {
     /// "+": New agent (12-unit box).
     Plus,
+    /// An archive tray with its lid.
+    Archive,
+    Trash,
     /// An arrow pointing up: Back to root (12-unit box).
     ArrowUp,
     /// Two bars: Pause (14-unit box, filled).
@@ -79,6 +82,34 @@ pub fn paint_mark(scene: &mut Scene, rect: Rect, mark: Mark, tint: Color) {
         Mark::Plus => {
             line(scene, &[(6.0, 1.0), (6.0, 11.0)], 1.3);
             line(scene, &[(1.0, 6.0), (11.0, 6.0)], 1.3);
+        }
+        Mark::Archive => {
+            line(
+                scene,
+                &[(2.0, 4.0), (2.0, 10.5), (10.0, 10.5), (10.0, 4.0)],
+                1.2,
+            );
+            line(
+                scene,
+                &[(1.0, 1.5), (11.0, 1.5), (11.0, 4.0), (1.0, 4.0), (1.0, 1.5)],
+                1.2,
+            );
+            line(scene, &[(4.5, 6.5), (7.5, 6.5)], 1.2);
+        }
+        Mark::Trash => {
+            line(
+                scene,
+                &[(3.0, 3.0), (3.0, 10.5), (9.0, 10.5), (9.0, 3.0)],
+                1.2,
+            );
+            line(scene, &[(1.5, 2.5), (10.5, 2.5)], 1.2);
+            line(
+                scene,
+                &[(4.5, 2.0), (4.5, 1.0), (7.5, 1.0), (7.5, 2.0)],
+                1.2,
+            );
+            line(scene, &[(5.0, 5.0), (5.0, 8.5)], 1.0);
+            line(scene, &[(7.0, 5.0), (7.0, 8.5)], 1.0);
         }
         Mark::ArrowUp => {
             line(scene, &[(6.0, 11.0), (6.0, 2.0)], 1.3);

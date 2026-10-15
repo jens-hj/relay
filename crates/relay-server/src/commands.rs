@@ -1054,6 +1054,114 @@ pub(super) fn cleanup_fork(fork: &Session) {
     }
 }
 
+/// Remove only linked Git worktrees whose branch identifies the deleted session.
+/// Connected directories and workspaces still used by another session survive.
+pub(super) fn delete_branch_workspaces(
+    before: &Snapshot,
+    after: &Snapshot,
+    ids: &std::collections::HashSet<String>,
+) -> Result<(), Error> {
+    let paths = |session: &Session| {
+        session
+            .workspaces
+            .iter()
+            .map(|w| w.path.clone())
+            .chain(session.worker.as_ref().and_then(|w| w.worktree.clone()))
+            .collect::<Vec<_>>()
+    };
+    let retained: Vec<_> = after
+        .sessions
+        .iter()
+        .flat_map(paths)
+        .map(std::path::PathBuf::from)
+        .collect();
+    let mut plan = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for session in before.sessions.iter().filter(|s| ids.contains(&s.id)) {
+        if session.fixture {
+            continue;
+        }
+        let owned_paths: Vec<_> = if session.workspaces.is_empty() {
+            paths(session)
+        } else {
+            session
+                .workspaces
+                .iter()
+                .filter(|space| space.repository)
+                .map(|space| space.path.clone())
+                .collect()
+        };
+        for raw in owned_paths {
+            let path = std::path::PathBuf::from(raw);
+            if !seen.insert(path.clone()) || !path.exists() || !path.join(".git").is_file() {
+                continue;
+            }
+            let canonical = path.canonicalize().map_err(Error::internal)?;
+            if retained.iter().any(|other| {
+                other
+                    .canonicalize()
+                    .ok()
+                    .is_some_and(|other| other.starts_with(&canonical))
+            }) {
+                continue;
+            }
+            let branch =
+                String::from_utf8(git_capture(&path, &["symbolic-ref", "--short", "HEAD"])?)
+                    .map_err(Error::internal)?
+                    .trim()
+                    .to_string();
+            if branch != format!("relay/{}", session.id)
+                && !branch.starts_with(&format!("relay/fork-{}-", session.id))
+            {
+                return Err(Error::invalid(
+                    "Session worktree branch changed; restore its Relay branch before deleting",
+                ));
+            }
+            let common = String::from_utf8(git_capture(
+                &path,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )?)
+            .map_err(Error::internal)?;
+            let root = std::path::Path::new(common.trim())
+                .parent()
+                .ok_or_else(|| Error::invalid("Repository root missing"))?
+                .to_path_buf();
+            plan.push((canonical, root, branch));
+        }
+    }
+    plan.sort_by_key(|(path, _, _)| std::cmp::Reverse(path.components().count()));
+    for (path, root, branch) in plan {
+        let path = path
+            .to_str()
+            .ok_or_else(|| Error::invalid("Non UTF-8 worktree path"))?;
+        git_capture(&root, &["worktree", "remove", "--force", path])?;
+        git_capture(&root, &["branch", "-D", &branch])?;
+    }
+    // Remove empty session containers, never recursively remove shared directories.
+    for session in before
+        .sessions
+        .iter()
+        .filter(|s| ids.contains(&s.id) && !s.fixture)
+    {
+        if let Some(root) = before
+            .projects
+            .iter()
+            .find(|p| p.id == session.project_id)
+            .and_then(|p| p.root.as_ref())
+            && std::path::Path::new(&session.id).components().count() == 1
+            && session.id != "."
+            && session.id != ".."
+        {
+            let _ = std::fs::remove_dir(
+                std::path::Path::new(root)
+                    .join(".relay/sessions")
+                    .join(&session.id),
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(super) struct ForkResources {
     pub workspace: Workspace,
     pub session: Session,

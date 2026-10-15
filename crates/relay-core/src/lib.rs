@@ -297,6 +297,9 @@ pub struct CommandEnvelope {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    DeleteSessionBranch {
+        session_id: String,
+    },
     SetSessionArchived {
         session_id: String,
         archived: bool,
@@ -584,6 +587,30 @@ impl Snapshot {
         Ok(())
     }
 
+    pub fn session_branch_ids(&self, session_id: &str) -> std::collections::HashSet<String> {
+        self.sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .into_iter()
+            .chain(self.descendants(session_id))
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    /// An archive never hides an executing agent or an executing descendant.
+    pub fn can_archive_session(&self, session_id: &str) -> bool {
+        if !self.sessions.iter().any(|s| s.id == session_id) {
+            return false;
+        }
+        let branch = self.session_branch_ids(session_id);
+        !self.sessions.iter().any(|s| {
+            branch.contains(&s.id)
+                && s.worker.as_ref().is_some_and(|w| {
+                    matches!(w.status, WorkerStatus::Running | WorkerStatus::Queued)
+                })
+        })
+    }
+
     /// Apply only to a candidate snapshot: the server commits it atomically after validation.
     pub fn apply(&mut self, command: Command, id: &str, now: u64) -> Result<(), String> {
         match command {
@@ -591,28 +618,70 @@ impl Snapshot {
                 session_id,
                 archived,
             } => {
-                let session = self
-                    .sessions
-                    .iter_mut()
-                    .find(|s| s.id == session_id)
-                    .ok_or("Session not found")?;
-                if archived
-                    && session.worker.as_ref().is_some_and(|w| {
-                        matches!(w.status, WorkerStatus::Running | WorkerStatus::Queued)
-                    })
-                {
-                    return Err("Stop the worker before archiving this chat".into());
+                if archived && !self.can_archive_session(&session_id) {
+                    return Err(
+                        "Stop this agent and its children before archiving this chat".into(),
+                    );
                 }
-                session.archived = archived;
+                if !self.sessions.iter().any(|s| s.id == session_id) {
+                    return Err("Session not found".into());
+                }
+                let branch = self.session_branch_ids(&session_id);
+                for session in &mut self.sessions {
+                    if branch.contains(&session.id) {
+                        session.archived = archived;
+                    }
+                }
                 if archived {
                     for turn in self.submissions.iter_mut().filter(|s| {
-                        s.session_id == session_id && s.state == SubmissionState::Queued
+                        branch.contains(&s.session_id) && s.state == SubmissionState::Queued
                     }) {
                         turn.state = SubmissionState::Paused;
                         turn.error = Some("Chat archived; unarchive and resume to continue".into());
                     }
                 }
             }
+            Command::DeleteSessionBranch { session_id } => {
+                let branch = self.session_branch_ids(&session_id);
+                if branch.is_empty() {
+                    return Err("Session not found".into());
+                }
+                if !self.can_archive_session(&session_id)
+                    || self
+                        .sessions
+                        .iter()
+                        .any(|s| branch.contains(&s.id) && !s.archived)
+                {
+                    return Err(
+                        "Archive this entire branch and stop its workers before deleting it".into(),
+                    );
+                }
+                let configs: std::collections::HashSet<_> = self
+                    .sessions
+                    .iter()
+                    .filter(|s| branch.contains(&s.id))
+                    .map(|s| s.agent_config_id.clone())
+                    .collect();
+                let messages: std::collections::HashSet<_> = self
+                    .messages
+                    .iter()
+                    .filter(|m| branch.contains(&m.session_id))
+                    .map(|m| m.id.clone())
+                    .collect();
+                self.sessions.retain(|s| !branch.contains(&s.id));
+                self.messages.retain(|m| !branch.contains(&m.session_id));
+                self.comments.retain(|c| !messages.contains(&c.message_id));
+                self.submissions.retain(|s| !branch.contains(&s.session_id));
+                self.usage_ledger
+                    .retain(|entry| !branch.contains(&entry.session_id));
+                self.tool_permissions
+                    .retain(|p| !branch.contains(&p.session_id));
+                self.agent_configs.retain(|c| {
+                    !configs.contains(&c.id)
+                        || self.sessions.iter().any(|s| s.agent_config_id == c.id)
+                });
+            }
+
             Command::CreateProject { .. }
             | Command::RenameProject { .. }
             | Command::AddConnection { .. }
@@ -865,6 +934,144 @@ mod archive_tests {
             serde_json::from_value::<Session>(serde_json::to_value(session).unwrap())
                 .unwrap()
                 .archived
+        );
+    }
+
+    #[test]
+    fn archive_rejects_running_descendants_even_when_the_parent_is_idle() {
+        let mut snapshot = demo_snapshot(AgentProfile::default());
+        let mut parent = snapshot.sessions[0].clone();
+        parent.id = "archive-parent".into();
+        parent.parent_session_id = None;
+        parent.worker = None;
+        let mut child = parent.clone();
+        child.id = "archive-child".into();
+        child.parent_session_id = Some(parent.id.clone());
+        child.worker = Some(WorkerRun {
+            model: None,
+            context_tokens: None,
+            context_window: None,
+            last_usage: None,
+            harness: Harness::Codex,
+            execution: None,
+            status: WorkerStatus::Running,
+            thread_id: None,
+            worktree: None,
+            branch: None,
+            base_commit: None,
+            error: None,
+            usage: None,
+            changes: None,
+        });
+        snapshot.sessions = vec![parent, child];
+        assert!(!snapshot.can_archive_session("archive-parent"));
+        assert!(
+            snapshot
+                .apply(
+                    Command::SetSessionArchived {
+                        session_id: "archive-parent".into(),
+                        archived: true
+                    },
+                    "archive",
+                    1
+                )
+                .is_err()
+        );
+        assert!(!snapshot.sessions[0].archived);
+        snapshot.sessions[1].worker.as_mut().unwrap().status = WorkerStatus::Queued;
+        assert!(!snapshot.can_archive_session("archive-parent"));
+        snapshot.sessions[1].worker.as_mut().unwrap().status = WorkerStatus::Completed;
+        assert!(snapshot.can_archive_session("archive-parent"));
+        snapshot
+            .apply(
+                Command::SetSessionArchived {
+                    session_id: "archive-parent".into(),
+                    archived: true,
+                },
+                "archive",
+                2,
+            )
+            .unwrap();
+        assert!(snapshot.sessions[0].archived);
+    }
+
+    #[test]
+    fn archive_and_delete_apply_to_descendants_and_preserve_ancestors_and_siblings() {
+        let mut snapshot = demo_snapshot(AgentProfile::default());
+        let mut ancestor = snapshot.sessions[0].clone();
+        ancestor.id = "ancestor".into();
+        ancestor.parent_session_id = None;
+        ancestor.worker = None;
+        let mut branch = ancestor.clone();
+        branch.id = "branch".into();
+        branch.parent_session_id = Some(ancestor.id.clone());
+        let mut child = branch.clone();
+        child.id = "child".into();
+        child.parent_session_id = Some(branch.id.clone());
+        let mut sibling = branch.clone();
+        sibling.id = "sibling".into();
+        snapshot.sessions = vec![ancestor, branch, child, sibling];
+        snapshot
+            .apply(
+                Command::SetSessionArchived {
+                    session_id: "branch".into(),
+                    archived: true,
+                },
+                "archive",
+                1,
+            )
+            .unwrap();
+        assert!(!snapshot.sessions[0].archived);
+        assert!(snapshot.sessions[1].archived && snapshot.sessions[2].archived);
+        assert!(!snapshot.sessions[3].archived);
+        snapshot
+            .apply(
+                Command::SetSessionArchived {
+                    session_id: "branch".into(),
+                    archived: false,
+                },
+                "unarchive",
+                2,
+            )
+            .unwrap();
+        assert!(snapshot.sessions.iter().all(|s| !s.archived));
+        assert!(
+            snapshot
+                .apply(
+                    Command::DeleteSessionBranch {
+                        session_id: "branch".into()
+                    },
+                    "delete",
+                    3
+                )
+                .is_err()
+        );
+        snapshot
+            .apply(
+                Command::SetSessionArchived {
+                    session_id: "branch".into(),
+                    archived: true,
+                },
+                "archive",
+                4,
+            )
+            .unwrap();
+        snapshot
+            .apply(
+                Command::DeleteSessionBranch {
+                    session_id: "branch".into(),
+                },
+                "delete",
+                5,
+            )
+            .unwrap();
+        assert_eq!(
+            snapshot
+                .sessions
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ancestor", "sibling"]
         );
     }
 

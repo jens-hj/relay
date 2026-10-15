@@ -235,6 +235,9 @@ pub fn AgentTreeRow(
     /// Creates a child of this agent.
     #[prop(optional)]
     on_spawn: Option<OnAgent>,
+    #[prop(optional)] on_archive: Option<OnAgent>,
+    #[prop(optional)] on_delete: Option<OnAgent>,
+    #[prop(default = Live::fixed(false))] can_archive: Live<bool>,
     /// Arrow-key navigation across the tree this row belongs to.
     #[prop(optional)]
     nav: Option<Rc<TreeNav>>,
@@ -345,9 +348,12 @@ pub fn AgentTreeRow(
         }
     }
     row.adopt(&outer);
+    let actions = view! {
+        row width:max-content height:min-content self-align:(x:end y:center) align:center
+            gap:{px(4.0)}px pad:(right:{px(14.0)}px) {}
+    };
     if let Some(spawn) = on_spawn.filter(|_| !line.archived) {
         let id = line.id.clone();
-        let interaction = row.interaction();
         let action = view! {
             button @click:{spawn(id.clone())} width:{px(26.0)}px height:{px(26.0)}px shrink:0
                 align:center justify:center pad:0px radius:0px fill:(under)
@@ -357,66 +363,63 @@ pub fn AgentTreeRow(
                 { parent.adopt(&crate::marks::mark(crate::marks::Mark::Plus, 12.0, ground.ink)); }
             }
         };
-        let button_interaction = action.interaction();
-        action.opacity(0.0);
-        let fade = Rc::new(std::cell::Cell::new(0.0f32));
-        let destination = Rc::new(std::cell::Cell::new(0.0f32));
-        let animating = Rc::new(std::cell::Cell::new(false));
-        let animated = action.clone();
-        Effect::new(move || {
-            destination.set(
-                if interaction.hovered() || interaction.focused() || button_interaction.focused() {
-                    1.0
-                } else {
-                    0.0
-                },
-            );
-            if animating.replace(true) {
-                return;
-            }
-            let (fade, destination, animating, target) = (
-                fade.clone(),
-                destination.clone(),
-                animating.clone(),
-                animated.clone(),
-            );
-            animated.animate(move |dt| {
-                let distance = destination.get() - fade.get();
-                let step = dt.as_secs_f32() / 0.12;
-                let next = fade.get() + distance.signum() * step.min(distance.abs());
-                fade.set(next);
-                target.opacity(next);
-                if (destination.get() - next).abs() < 0.001 {
-                    animating.set(false);
-                    mosaic::widgets::Tick::Done
-                } else {
-                    mosaic::widgets::Tick::Sleep(std::time::Duration::from_millis(16))
-                }
-            });
-        });
-        let hit = action.clone();
-        Effect::new(move || {
-            hit.hit_testable(
-                interaction.hovered() || interaction.focused() || button_interaction.focused(),
-            );
-        });
-        action.on_pointer(move |event, ctx| {
-            if matches!(
-                event.kind,
-                PointerEventKind::Down(_) | PointerEventKind::Click(_)
-            ) {
-                ctx.stop_propagation();
+        reveal_row_action(&row, &action);
+        actions.adopt(&view! {
+            Tooltip
+                text:(if line.can_spawn { "New Worker" } else { "New Worker · start this agent first" }) {
+                { parent.adopt(&action); }
             }
         });
-        row.adopt(&view! {
-            row align:center justify:end pad:(right:{px(14.0)}px) {
-                Tooltip
-                    text:(if line.can_spawn { "New Worker" } else { "New Worker · start this agent first" }) {
-                    { parent.adopt(&action); }
+    }
+
+    if let Some(archive) = on_archive.filter(|_| !line.archived) {
+        let id = line.id.clone();
+        let action = view! {
+            button @click:{archive(id.clone())} width:{px(26.0)}px height:{px(26.0)}px shrink:0
+                align:center justify:center pad:0px radius:0px fill:(under)
+                label:(format!("Archive {}", line.name)) hover { fill:ground.panel-raised }
+                focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
+                { parent.adopt(&crate::marks::mark(crate::marks::Mark::Archive, 12.0, ground.ink)); }
+            }
+        };
+        reveal_row_action(&row, &action);
+        actions.adopt(&view! {
+            row width:max-content height:min-content {
+                if can_archive.get() {
+                    let action = action.clone();
+                    Tooltip text:"Archive Branch" {
+                        { parent.adopt(&action); }
+                    }
                 }
             }
         });
     }
+
+    if let Some(delete) = on_delete.filter(|_| line.archived) {
+        let confirm = State::new(false);
+        let id = line.id.clone();
+        let action = view! {
+            button
+                @click:{if confirm.get_untracked() { delete(id.clone()); } else { confirm.set(true); }}
+                width:max-content min-width:{px(26.0)}px height:{px(26.0)}px shrink:0 align:center
+                justify:center pad:(horizontal:{px(7.0)}px vertical:0px) radius:0px fill:(under)
+                label:(format!("Delete {}", line.name)) hover { fill:ground.panel-raised }
+                focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
+                { parent.adopt(&crate::marks::mark(crate::marks::Mark::Trash, 12.0, ground.ink)); }
+                if confirm.get() {
+                    Label text:"Confirm Deletion" role:(TextRole::Label)
+                }
+            }
+        };
+        reveal_row_action(&row, &action);
+        actions.adopt(&view! {
+            Tooltip text:"Delete Branch Permanently" {
+                { parent.adopt(&action); }
+            }
+        });
+    }
+    row.adopt(&actions);
+
     {
         let open = on_open.clone();
         let id = line.id.clone();
@@ -583,4 +586,59 @@ pub fn FoldedBranch(
         LinkButton text:"Focus" on-press:(focus)
     });
     outer
+}
+
+fn reveal_row_action(row: &Element, action: &Element) {
+    let interaction = row.interaction();
+    let button_interaction = action.interaction();
+    action.opacity(0.0);
+    let fade = Rc::new(std::cell::Cell::new(0.0f32));
+    let destination = Rc::new(std::cell::Cell::new(0.0f32));
+    let animating = Rc::new(std::cell::Cell::new(false));
+    let animated = action.clone();
+    Effect::new(move || {
+        destination.set(
+            if interaction.hovered() || interaction.focused() || button_interaction.focused() {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        if animating.replace(true) {
+            return;
+        }
+        let (fade, destination, animating, target) = (
+            fade.clone(),
+            destination.clone(),
+            animating.clone(),
+            animated.clone(),
+        );
+        animated.animate(move |dt| {
+            let distance = destination.get() - fade.get();
+            let step = dt.as_secs_f32() / 0.12;
+            let next = fade.get() + distance.signum() * step.min(distance.abs());
+            fade.set(next);
+            target.opacity(next);
+            if (destination.get() - next).abs() < 0.001 {
+                animating.set(false);
+                mosaic::widgets::Tick::Done
+            } else {
+                mosaic::widgets::Tick::Sleep(std::time::Duration::from_millis(16))
+            }
+        });
+    });
+    let hit = action.clone();
+    Effect::new(move || {
+        hit.hit_testable(
+            interaction.hovered() || interaction.focused() || button_interaction.focused(),
+        );
+    });
+    action.on_pointer(move |event, ctx| {
+        if matches!(
+            event.kind,
+            PointerEventKind::Down(_) | PointerEventKind::Click(_)
+        ) {
+            ctx.stop_propagation();
+        }
+    });
 }

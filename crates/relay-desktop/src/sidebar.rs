@@ -131,6 +131,32 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     let review: Rc<dyn Fn(String)> = Rc::new(move |id| model.open_session(id));
     let new_agent: OnPress = Rc::new(move || model.open_profile(EditTarget::New));
     let spawn: Rc<dyn Fn(String)> = Rc::new(move |parent| model.open_new_worker(parent));
+    let archive: Rc<dyn Fn(String)> = Rc::new(move |session_id| {
+        model.submit(
+            Command::SetSessionArchived {
+                session_id,
+                archived: true,
+            },
+            model.snapshot.get_untracked().revision,
+            crate::model::Saved::Action,
+        );
+    });
+    let archivable = Derived::new(move || {
+        let snapshot = model.snapshot.get();
+        snapshot
+            .sessions
+            .iter()
+            .filter(|s| !s.archived && snapshot.can_archive_session(&s.id))
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>()
+    });
+    let delete: Rc<dyn Fn(String)> = Rc::new(move |session_id| {
+        model.submit(
+            Command::DeleteSessionBranch { session_id },
+            model.snapshot.get_untracked().revision,
+            crate::model::Saved::Action,
+        );
+    });
     let roots: relay_ui::Live<Vec<AgentNode>> = roots.into();
     let focused: relay_ui::Live<Option<String>> =
         Derived::new(move || model.agent_focus.get()).into();
@@ -149,7 +175,9 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
         AgentSidebar roots:(roots) width:(width) focus:(focused) root-indent:true framed:false
             on-new:(Some(new_agent)) on-spawn:(Some(spawn)) on-open:(Some(open))
             on-toggle:(Some(toggle)) on-focus:(Some(focus)) on-approve:(Some(approve))
-            on-review:(Some(review)) filter-controls:(Some(archive_control)) {
+            on-review:(Some(review)) filter-controls:(Some(archive_control))
+            on-archive:(Some(archive)) archivable:(relay_ui::Live::from(archivable))
+            on-delete:(Some(delete)) {
             if !usage.get().is_empty() {
                 UsageFoot harnesses:(relay_ui::Live::from(usage))
             }

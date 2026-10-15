@@ -262,6 +262,9 @@ pub fn AgentSidebar(
     focus: Live<Option<String>>,
     #[prop(optional)] on_new: Option<OnPress>,
     #[prop(optional)] on_spawn: Option<OnAgent>,
+    #[prop(optional)] on_archive: Option<OnAgent>,
+    #[prop(optional)] on_delete: Option<OnAgent>,
+    #[prop(default = Live::fixed(Vec::new()))] archivable: Live<Vec<String>>,
     #[prop(optional)] on_open: Option<OnAgent>,
     #[prop(optional)] on_toggle: Option<OnToggle>,
     #[prop(optional)] on_focus: Option<OnFocus>,
@@ -443,11 +446,13 @@ pub fn AgentSidebar(
         Effect::new(move || nav.set_lines(lines.get()));
     }
     {
-        let (open, toggle, nav, spawn) = (
+        let (open, toggle, nav, spawn, archive, delete) = (
             on_open.clone(),
             toggle.clone(),
             nav.clone(),
             on_spawn.clone(),
+            on_archive.clone(),
+            on_delete.clone(),
         );
         let focus_branch = set_focus.clone();
         tree.keyed(
@@ -456,9 +461,15 @@ pub fn AgentSidebar(
                 let built = match line {
                     TreeLine::Agent(agent) => {
                         let (open, toggle, nav) = (open.clone(), toggle.clone(), nav.clone());
+                        let candidates = archivable.clone();
+                        let id = agent.id.clone();
+                        let can_archive: Live<bool> =
+                            Derived::new(move || candidates.get().contains(&id)).into();
                         view! {
                             AgentTreeRow line:(agent.clone()) on-open:(open)
                                 on-spawn:(spawn.clone()) on-toggle:(Some(toggle)) nav:(Some(nav))
+                                on-archive:(archive.clone()) can-archive:(can_archive)
+                                on-delete:(delete.clone())
                         }
                     }
                     TreeLine::Folded(folded) => {

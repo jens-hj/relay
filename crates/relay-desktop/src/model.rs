@@ -278,7 +278,38 @@ impl Model {
         if !self.syncing.get_untracked() {
             self.confirmed_selection.set(None);
         }
+        let removed: std::collections::HashSet<_> = self
+            .snapshot
+            .get_untracked()
+            .sessions
+            .iter()
+            .filter(|old| !snapshot.sessions.iter().any(|s| s.id == old.id))
+            .map(|s| s.id.clone())
+            .collect();
+        if !removed.is_empty() {
+            snapshot
+                .messages
+                .retain(|m| !removed.contains(&m.session_id));
+            let message_ids: std::collections::HashSet<_> =
+                snapshot.messages.iter().map(|m| m.id.clone()).collect();
+            snapshot
+                .comments
+                .retain(|c| message_ids.contains(&c.message_id));
+        }
         self.snapshot.set(snapshot);
+        if !removed.is_empty() {
+            crate::buffer::forget_sessions(*self, &removed);
+            if self
+                .agent_focus
+                .get_untracked()
+                .is_some_and(|id| removed.contains(&id))
+            {
+                self.agent_focus.set(None);
+            }
+            if removed.contains(&self.session.get_untracked()) {
+                self.select_project(self.project.get_untracked());
+            }
+        }
         let new_search = update.search_serial > self.search_serial.get_untracked();
         if new_search {
             self.search_serial.set(update.search_serial);

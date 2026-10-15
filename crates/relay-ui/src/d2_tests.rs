@@ -797,7 +797,7 @@ fn ledger_effort_click_is_grey_until_confirmed_and_rejection_restores_selection(
 }
 
 #[test]
-fn inline_composer_puts_controls_in_the_gutter_and_grows_with_the_draft() {
+fn inline_composer_puts_send_on_the_right_and_grows_with_the_draft() {
     let mut settings = gallery::d2::settings(true);
     settings.pending_effort = None;
     let value = State::new("Draft".to_owned());
@@ -811,10 +811,10 @@ fn inline_composer_puts_controls_in_the_gutter_and_grows_with_the_draft() {
     let send = mounted.rect("Send message");
     let attach = mounted.rect("Attach file");
     let editor = mounted.rect("Message");
-    assert!(send.max_x() <= editor.origin.x);
+    assert!(send.origin.x >= editor.max_x());
     assert_eq!(send.origin.x, attach.origin.x);
     assert!(send.origin.y < attach.origin.y);
-    assert!(mounted.rect("Expand agent settings").max_x() <= send.origin.x);
+    assert!(mounted.rect("Expand agent settings").max_x() <= editor.origin.x);
     value.set(
         (0..50)
             .map(|i| format!("Line {i}"))

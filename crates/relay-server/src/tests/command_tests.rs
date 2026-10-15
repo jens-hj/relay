@@ -998,6 +998,239 @@ async fn example_sessions_describe_the_demo_catalog_without_a_harness() {
 }
 
 #[tokio::test]
+async fn branch_archive_and_confirmed_deletion_remove_owned_files_and_persist_over_http() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, id, _) = setup(dir.path()).await;
+    let mut snapshot = w.snapshots.borrow().clone();
+    let parent = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap()
+        .clone();
+    let parent_path = PathBuf::from(parent.worker.as_ref().unwrap().worktree.as_ref().unwrap());
+    let child_id = "session-delete-child";
+    let (child_path, child_branch, _) = runtime::prepare(&w.config, child_id).unwrap();
+    let mut child = parent.clone();
+    child.id = child_id.into();
+    child.parent_session_id = Some(id.clone());
+    child.worker.as_mut().unwrap().worktree = Some(child_path.clone());
+    child.worker.as_mut().unwrap().branch = Some(child_branch.clone());
+    child.workspaces.clear();
+    child.workspaces.push(SessionWorkspace {
+        connection_id: "repository".into(),
+        path: child_path.clone(),
+        repository: true,
+        branch: Some(child_branch),
+        base_commit: None,
+        changes: None,
+    });
+    let shared = dir.path().join("shared-directory");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::write(shared.join("keep.txt"), "shared data").unwrap();
+    child.workspaces.push(SessionWorkspace {
+        connection_id: "shared".into(),
+        path: shared.to_str().unwrap().into(),
+        repository: false,
+        branch: None,
+        base_commit: None,
+        changes: None,
+    });
+    snapshot.sessions.push(child);
+    w.store.lock().unwrap().save(&snapshot).unwrap();
+    let draft = Draft {
+        session_id: child_id.into(),
+        parts: vec![Part::text("delete this draft")],
+        ..Default::default()
+    };
+    w.store
+        .lock()
+        .unwrap()
+        .connection
+        .execute(
+            "INSERT INTO drafts(session_id,draft) VALUES(?1,?2)",
+            params![child_id, serde_json::to_string(&draft).unwrap()],
+        )
+        .unwrap();
+    std::fs::write(
+        parent_path.join("delete-parent.txt"),
+        "unsaved parent change",
+    )
+    .unwrap();
+    std::fs::write(
+        Path::new(&child_path).join("delete-child.txt"),
+        "unsaved child change",
+    )
+    .unwrap();
+    let unaffected: Vec<_> = snapshot
+        .sessions
+        .iter()
+        .filter(|s| s.id != id && s.id != child_id)
+        .map(|s| s.id.clone())
+        .collect();
+    let token = uuid::Uuid::new_v4().to_string();
+    let (app, shutdown) = router_with_shutdown(
+        dir.path().join("db"),
+        token.clone(),
+        AgentProfile::default(),
+        (*w.config).clone(),
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+    let send = |command: CommandEnvelope| {
+        client
+            .post(format!("{endpoint}/v1/commands"))
+            .bearer_auth(&token)
+            .header("x-relay-protocol", PROTOCOL_VERSION.to_string())
+            .json(&command)
+    };
+    let snapshot: Snapshot = client
+        .get(format!("{endpoint}/v1/snapshot"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rejected = send(env(
+        snapshot.revision,
+        Command::DeleteSessionBranch {
+            session_id: id.clone(),
+        },
+    ))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        send(env(
+            snapshot.revision,
+            Command::SetSessionArchived {
+                session_id: id.clone(),
+                archived: true
+            }
+        ))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success()
+    );
+    let archived: Snapshot = client
+        .get(format!("{endpoint}/v1/snapshot"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        archived
+            .sessions
+            .iter()
+            .filter(|s| s.id == id || s.id == child_id)
+            .all(|s| s.archived)
+    );
+    let deletion = env(
+        archived.revision,
+        Command::DeleteSessionBranch {
+            session_id: id.clone(),
+        },
+    );
+    git(Path::new(&child_path), &["branch", "-m", "user-kept"]);
+    assert_eq!(
+        send(deletion.clone()).send().await.unwrap().status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert!(
+        parent_path.exists(),
+        "Validate the whole removal plan before deleting any worktrees"
+    );
+    assert!(Path::new(&child_path).exists());
+    git(
+        Path::new(&child_path),
+        &["branch", "-m", "relay/session-delete-child"],
+    );
+    assert!(
+        send(deletion.clone())
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    assert!(
+        send(deletion).send().await.unwrap().status().is_success(),
+        "retry must be idempotent"
+    );
+    let remaining: Snapshot = client
+        .get(format!("{endpoint}/v1/snapshot"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !remaining
+            .sessions
+            .iter()
+            .any(|s| s.id == id || s.id == child_id)
+    );
+    assert!(
+        unaffected
+            .iter()
+            .all(|id| remaining.sessions.iter().any(|s| &s.id == id))
+    );
+    assert!(
+        !remaining
+            .messages
+            .iter()
+            .any(|m| m.session_id == id || m.session_id == child_id)
+    );
+    assert!(!parent_path.exists());
+    assert!(!Path::new(&child_path).exists());
+    assert!(shared.join("keep.txt").exists());
+    shutdown.shutdown().await.unwrap();
+    task.abort();
+    let store = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
+    assert!(
+        !store
+            .snapshot()
+            .unwrap()
+            .sessions
+            .iter()
+            .any(|s| s.id == id || s.id == child_id)
+    );
+    assert!(
+        !conversation::read_drafts(&store.connection)
+            .unwrap()
+            .iter()
+            .any(|d| d.session_id == child_id)
+    );
+    let initial_receipt: String = store
+        .connection
+        .query_row(
+            "SELECT request FROM receipts WHERE request_id=?1",
+            [id.strip_prefix("session-").unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        initial_receipt.starts_with("deleted:"),
+        "Deleted initial prompts must not remain in command receipts"
+    );
+}
+
+#[tokio::test]
 async fn archived_chat_is_readable_but_cannot_execute_until_unarchived() {
     let dir = tempfile::tempdir().unwrap();
     let (w, id, _) = setup(dir.path()).await;

@@ -313,6 +313,32 @@ pub fn parts(model: Model, session: &str) -> Vec<Part> {
         .unwrap_or_default()
 }
 
+pub fn forget_sessions(model: Model, removed: &std::collections::HashSet<String>) {
+    let mut state = model.buffer.get_untracked();
+    state.documents.retain(|id, _| !removed.contains(id));
+    state.last_queued.retain(|id, _| !removed.contains(id));
+    state
+        .promote_after_ack
+        .retain(|id, _| !removed.contains(id));
+    let mut retained = BTreeSet::new();
+    for doc in state.documents.values() {
+        retained.extend(
+            assets(&doc.parts)
+                .into_iter()
+                .chain(assets(&doc.remote.parts))
+                .chain(doc.recovery.iter().flat_map(|p| assets(p)))
+                .chain(doc.finalize.iter().flat_map(|p| assets(p)))
+                .map(|a| a.id.clone()),
+        );
+    }
+    for message in &model.snapshot.get_untracked().messages {
+        retained.extend(assets(&message.parts).into_iter().map(|a| a.id.clone()));
+    }
+    state.blobs.retain(|id, _| retained.contains(id));
+    state.uploads.retain(|id, _| retained.contains(id));
+    commit(model, state);
+}
+
 pub fn edit(model: Model, session: &str, parts: Vec<Part>) {
     model.command_feedback.set(String::new());
     let mut state = model.buffer.get_untracked();

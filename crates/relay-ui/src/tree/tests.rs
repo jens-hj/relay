@@ -1,4 +1,5 @@
 use super::*;
+use crate::Live;
 use crate::model::{Effort, ModelHue, ModelIdentity};
 use crate::testing::mount;
 use mosaic::prelude::*;
@@ -17,6 +18,66 @@ fn chain() -> Vec<AgentNode> {
     let b = node("b", AgentStatus::Working).children(vec![c]);
     let a = node("a", AgentStatus::Working).children(vec![b, node("w", AgentStatus::Waiting)]);
     vec![node("root", AgentStatus::Working).children(vec![a])]
+}
+
+#[test]
+fn archive_action_is_only_available_for_eligible_sessions_and_does_not_open_them() {
+    let archived = State::new(String::new());
+    let opened = State::new(false);
+    let eligible = State::new(vec!["idle".to_string()]);
+    let on_archive: OnAgent = Rc::new(move |id| archived.set(id));
+    let on_open: OnAgent = Rc::new(move |_| opened.set(true));
+    let mounted = mount(Size::new(320.0, 500.0), || {
+        view! {
+            AgentSidebar
+                roots:(Live::fixed(vec![node("idle", AgentStatus::Idle), node("running", AgentStatus::Working)]))
+                archivable:(Live::from(eligible)) on-archive:(Some(on_archive))
+                on-open:(Some(on_open))
+        }
+    });
+    assert!(mounted.labels().contains(&"Archive idle".to_string()));
+    assert!(!mounted.labels().contains(&"Archive running".to_string()));
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Move,
+        position: mounted.rect("idle").center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: std::time::Duration::ZERO,
+    });
+    mounted.settle();
+    mounted.click_label("Archive idle");
+    assert_eq!(archived.get_untracked(), "idle");
+    assert!(!opened.get_untracked());
+    eligible.set(Vec::new());
+    mounted.settle();
+    assert!(!mounted.labels().contains(&"Archive idle".to_string()));
+}
+
+#[test]
+fn archived_branch_requires_two_delete_clicks() {
+    let deleted = State::new(String::new());
+    let callback: OnAgent = Rc::new(move |id| deleted.set(id));
+    let mut archived = node("archived", AgentStatus::Done);
+    archived.archived = true;
+    let mounted = mount(Size::new(320.0, 500.0), || {
+        view! {
+            AgentSidebar roots:(Live::fixed(vec![archived])) on-delete:(Some(callback))
+        }
+    });
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Move,
+        position: mounted.rect("archived").center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: std::time::Duration::ZERO,
+    });
+    mounted.settle();
+    assert!(!mounted.has("Confirm Deletion"));
+    mounted.click_label("Delete archived");
+    assert!(deleted.get_untracked().is_empty());
+    assert!(mounted.has("Confirm Deletion"));
+    mounted.click_label("Delete archived");
+    assert_eq!(deleted.get_untracked(), "archived");
 }
 
 #[test]

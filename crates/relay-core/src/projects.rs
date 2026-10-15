@@ -1,7 +1,7 @@
 //! Named workspaces, independent resources, and board membership.
 use crate::*;
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardDiscovery {

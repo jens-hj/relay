@@ -20,6 +20,7 @@ mod agent_tools;
 mod claude;
 mod commands;
 mod conversation;
+mod deletion;
 mod github;
 mod harness;
 mod process;
@@ -122,7 +123,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 16 {
+        if version > 17 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -142,7 +143,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 16;"
+             PRAGMA user_version = 17;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -212,9 +213,9 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
-        if version < 16 {
+        if version < 17 {
             // Normalize legacy snapshots with defaults for naming and waiting state.
-            // Schema 16 prevents older servers from dropping the new agent lifecycle state.
+            // Schema 17 keeps older servers from restoring deleted branch data through receipts.
             let json: String = connection
                 .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
                     r.get(0)
@@ -304,7 +305,7 @@ impl Store {
             .optional()
             .map_err(Error::internal)?;
         if let Some(receipt) = receipt {
-            if receipt != request {
+            if receipt != request && receipt != deletion::redacted_receipt(&request) {
                 return Err(Error::invalid(
                     "request_id was already used for a different command",
                 ));
@@ -341,6 +342,14 @@ impl Store {
         }
         let mut action = None;
         match envelope.command {
+            Command::DeleteSessionBranch { session_id } => {
+                deletion::delete(
+                    &transaction,
+                    &mut snapshot,
+                    &session_id,
+                    &envelope.request_id,
+                )?;
+            }
             Command::StartChildAgent {
                 parent_session_id,
                 name,

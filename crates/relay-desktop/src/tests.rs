@@ -6111,6 +6111,10 @@ fn conversation_tracks_constrain_recorded_text_and_draft_to_the_reading_width() 
     mounted.click("Collapse agent settings");
     let folded = mounted.rect("Next message");
     assert!((folded.origin.x - draft.rect.origin.x).abs() < 1.0);
+    for action in ["Send message", "Attach file"] {
+        let button = mounted.rect(action);
+        assert!(button.origin.x >= folded.origin.x + folded.size.width);
+    }
 }
 
 #[test]
@@ -7619,10 +7623,10 @@ fn session_header_shows_only_recorded_values() {
     mounted.click("Session usage and provenance");
     assert!(has_label(&mounted, "Worktree"));
     assert!(!has_label(&mounted, "Thread"));
-    // The inline draft sends from the left gutter beside its ledger.
+    // Send stays to the right of the inline draft.
     let draft = mounted.rect("Next message");
     let send = mounted.rect("Send message");
-    assert!(send.max_x() <= draft.origin.x);
+    assert!(send.origin.x >= draft.max_x());
     assert!(has_label(&mounted, "Stop"));
 }
 
@@ -8758,6 +8762,70 @@ fn effort_selection_feedback_tracks_the_command_response_and_chat() {
 }
 
 #[test]
+fn deleted_branch_clears_local_drafts_and_leaves_unrelated_drafts_intact() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    let branch = snapshot.session_branch_ids("session-plan");
+    let other = snapshot
+        .sessions
+        .iter()
+        .find(|s| !branch.contains(&s.id))
+        .unwrap()
+        .id
+        .clone();
+    crate::buffer::edit(
+        mounted.model,
+        "session-plan",
+        vec![Part::text("remove draft")],
+    );
+    crate::buffer::edit(mounted.model, &other, vec![Part::text("keep draft")]);
+    for session in &mut snapshot.sessions {
+        if let Some(worker) = &mut session.worker {
+            worker.status = WorkerStatus::Completed;
+        }
+    }
+    snapshot
+        .apply(
+            Command::SetSessionArchived {
+                session_id: "session-plan".into(),
+                archived: true,
+            },
+            "archive",
+            1,
+        )
+        .unwrap();
+    snapshot
+        .apply(
+            Command::DeleteSessionBranch {
+                session_id: "session-plan".into(),
+            },
+            "delete",
+            2,
+        )
+        .unwrap();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(
+        !mounted
+            .model
+            .buffer
+            .get_untracked()
+            .documents
+            .contains_key("session-plan")
+    );
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, &other)),
+        "keep draft"
+    );
+    assert_eq!(mounted.model.page.get_untracked(), Page::Board);
+}
+
+#[test]
 fn archived_chat_is_hidden_by_default_readable_when_shown_and_cannot_send() {
     let mut mounted = mount(false, 1380.0);
     mounted.model.snapshot.update(|snapshot| {
@@ -8808,7 +8876,7 @@ fn draft_shares_the_transcript_viewport_and_has_a_full_width_boundary() {
     assert_eq!(boundary.size.width, viewport.size.width);
     assert_eq!(boundary.origin.x, viewport.origin.x);
     let editor = mounted.rect("Next message");
-    assert!(mounted.rect("Send message").origin.x < editor.origin.x);
+    assert!(mounted.rect("Send message").origin.x >= editor.origin.x + editor.size.width);
     let ledger_height = mounted.rect("Agent ledger").size.height;
     crate::buffer::edit(
         mounted.model,
