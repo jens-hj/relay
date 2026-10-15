@@ -160,20 +160,42 @@ impl Document {
         state: &(TextStyle, bool, Option<String>),
     ) {
         let start = self.runs.last().map_or(0, |r| r.display.end);
-        // Preserve character boundaries through entities, escapes and the
-        // whitespace normalization required for inline code by CommonMark.
+        // Match source bytes in order, allowing newline normalization. Code
+        // may additionally omit container prefixes on continuation lines.
+        // OffsetIter emits decoded entities as individual spans: treat a
+        // transformed span atomically rather than searching its spelling for
+        // characters that merely resemble the decoded output.
         let raw = &self.source[source.clone()];
         let mut consumed = 0;
+        let mut aligned = true;
         let mut source_points = Vec::new();
         for (display, ch) in text.char_indices() {
-            let found = raw[consumed..]
-                .char_indices()
-                .find(|(_, c)| *c == ch || (ch == ' ' && matches!(*c, '\n' | '\r')));
-            let offset = found.map_or(consumed, |(offset, _)| consumed + offset);
-            source_points.push((display, source.start + offset));
-            if let Some((_, c)) = found {
-                consumed = offset + c.len_utf8();
+            let remaining = &raw[consumed..];
+            let next = if remaining.starts_with(ch) {
+                Some((0, ch.len_utf8()))
+            } else if ch == ' ' && remaining.starts_with(['\r', '\n']) {
+                Some((0, 1))
+            } else if ch == '\n' && remaining.starts_with('\r') {
+                Some((0, if remaining.starts_with("\r\n") { 2 } else { 1 }))
+            } else if state.1 {
+                remaining
+                    .char_indices()
+                    .find(|(_, c)| *c == ch || (ch == ' ' && matches!(*c, '\n' | '\r')))
+                    .map(|(offset, c)| (offset, c.len_utf8()))
+            } else {
+                None
+            };
+            if let Some((offset, length)) = next {
+                source_points.push((display, source.start + consumed + offset));
+                consumed += offset + length;
+            } else {
+                aligned = false;
+                break;
             }
+        }
+        if !aligned || (!state.1 && consumed != raw.len()) {
+            source_points.clear();
+            source_points.push((0, source.start));
         }
         source_points.push((text.len(), source.end));
         self.runs.push(Run {
@@ -267,19 +289,22 @@ impl Document {
         width: f32,
         point: Vector2,
     ) -> Option<String> {
-        let offset = self.shape(fonts, Some(width)).hit(point)?;
-        let run = self
+        let links = self
             .runs
             .iter()
-            .find(|r| r.display.contains(&offset) && r.link.is_some())?;
-        let range = run.display.clone();
-        let link = run.link.clone();
-        self.shape(fonts, Some(width))
-            .selection_rects(range.start, range.end)
-            .iter()
-            .any(|rect| rect.contains(point))
-            .then_some(link)
-            .flatten()
+            .filter_map(|run| run.link.clone().map(|url| (run.display.clone(), url)))
+            .collect::<Vec<_>>();
+        let shaped = self.shape(fonts, Some(width));
+        // Caret hits round the right half of a final glyph to the offset just
+        // after the link. Link activation instead uses the actual run bounds,
+        // including each wrapped line, without expanding into neighboring text.
+        links.into_iter().find_map(|(range, url)| {
+            shaped
+                .selection_rects(range.start, range.end)
+                .iter()
+                .any(|rect| rect.contains(point))
+                .then_some(url)
+        })
     }
     pub fn unit(
         &mut self,
@@ -311,7 +336,7 @@ impl Document {
         let offset = self.display_offset(source);
         let shaped = self.shape(fonts, Some(width));
         let text = shaped.text();
-        let target = match motion {
+        let mut target = match motion {
             CaretMotion::Left => text[..offset]
                 .grapheme_indices(true)
                 .next_back()
@@ -332,7 +357,25 @@ impl Document {
                     )
                     .start
             }
-            CaretMotion::WordRight => shaped.word_at(offset).end,
+            CaretMotion::WordRight => {
+                // Match Mosaic's Unicode/AppKit word boundaries, but seek a
+                // word ending strictly after the caret. word_at includes the
+                // word's right edge for double-click selection and can stall.
+                let separated: String = text
+                    .chars()
+                    .map(|c| match c {
+                        ':' => '!',
+                        '\u{FE55}' => '\u{FE57}',
+                        '\u{FF1A}' => '\u{FF01}',
+                        c => c,
+                    })
+                    .collect();
+                separated
+                    .unicode_word_indices()
+                    .map(|(start, word)| start + word.len())
+                    .find(|end| *end > offset)
+                    .unwrap_or(text.len())
+            }
             CaretMotion::Up | CaretMotion::Down => {
                 let caret = shaped.caret_rect(offset);
                 let y = caret.origin.y
@@ -349,7 +392,20 @@ impl Document {
             CaretMotion::TextStart => 0,
             CaretMotion::TextEnd => text.len(),
         };
-        self.source_offset(target)
+        // An entity can decode to multiple graphemes but has no intermediate
+        // source caret position. Walk past the entire source atom, rather
+        // than repeatedly mapping the first displayed grapheme back to it.
+        if matches!(motion, CaretMotion::Right) {
+            while target < text.len() && self.source_offset(target) <= source {
+                target += text[target..].graphemes(true).next().unwrap().len();
+            }
+        }
+        let mapped = self.source_offset(target);
+        if matches!(motion, CaretMotion::Right | CaretMotion::WordRight) {
+            mapped.max(source)
+        } else {
+            mapped
+        }
     }
 }
 pub fn safe_url(value: &str) -> bool {
@@ -389,6 +445,258 @@ mod tests {
     }
     fn visible(doc: &Document) -> String {
         doc.runs.iter().map(|r| r.text.as_str()).collect()
+    }
+    #[test]
+    fn decoded_entity_does_not_steal_a_later_literal_source_position() {
+        let doc = Document::new("&copy; ©");
+        assert_eq!(visible(&doc), "© ©");
+        assert_eq!(doc.source_offset(0), 0);
+        assert_eq!(doc.offset_with_affinity("©".len(), true), "&copy;".len());
+        assert_eq!(doc.source_offset("© ".len()), "&copy; ".len());
+    }
+    #[test]
+    fn decoded_entities_are_atomic_source_spans_even_when_their_names_contain_output() {
+        for (encoded, decoded) in [
+            ("&semi;", ";"),
+            ("&fjlig;", "fj"),
+            ("&#169;", "©"),
+            ("&#xA9;", "©"),
+            ("&NotEqualTilde;", "≂\u{338}"),
+        ] {
+            let source = format!("{encoded} {decoded}");
+            let doc = Document::new(&source);
+            assert_eq!(visible(&doc), format!("{decoded} {decoded}"));
+            assert_eq!(doc.display_offset(0), 0, "{encoded}");
+            for (offset, _) in decoded.char_indices() {
+                assert_eq!(doc.source_offset(offset), 0, "{encoded} at {offset}");
+            }
+            assert_eq!(doc.offset_with_affinity(decoded.len(), true), encoded.len());
+            assert_eq!(doc.source_offset(decoded.len() + 1), encoded.len() + 1);
+            let (start, end) = doc.selection_range(0, encoded.len());
+            assert_eq!(&source[start..end], encoded);
+            assert_eq!(doc.selection_range(encoded.len(), 0), (end, start));
+        }
+    }
+    #[test]
+    fn entity_selection_copies_the_whole_source_and_caret_crosses_its_decoded_graphemes() {
+        use mosaic::text::CaretMotion::{Left, Right};
+        let mut fonts = fonts();
+        for (encoded, decoded) in [("&fjlig;", "fj"), ("&NotEqualTilde;", "≂\u{338}")] {
+            let source = format!("{encoded} x");
+            let mut doc = Document::new(&source);
+            let visible_end = doc.source_offset(decoded.len());
+            let (start, end) = doc.selection_range(doc.source_offset(0), visible_end);
+            assert_eq!((start, end), (0, encoded.len()));
+            let mut editor = mosaic::text::EditBuffer::new(TextStyle::new(13.0));
+            editor.set_text(&mut fonts, &source);
+            editor.set_selection_bytes(&mut fonts, start, end);
+            assert_eq!(editor.selected_text().as_deref(), Some(encoded));
+            assert_eq!(source.get(start..end), Some(encoded)); // anchored reply quote
+            assert_eq!(doc.display_offset(0), 0);
+            let expected = doc.shape(&mut fonts, Some(600.0)).caret_rect(0);
+            assert_eq!(doc.caret(&mut fonts, 600.0, 0), expected);
+            assert_eq!(
+                doc.motion(&mut fonts, 600.0, 0, Right),
+                encoded.len(),
+                "{encoded}"
+            );
+            assert_eq!(
+                doc.motion(&mut fonts, 600.0, encoded.len(), Left),
+                0,
+                "{encoded}"
+            );
+        }
+    }
+    #[test]
+    fn repeated_shift_right_and_reverse_left_cross_atomic_entity_next_to_plain_text() {
+        use mosaic::text::CaretMotion::{Left, Right};
+        let mut fonts = fonts();
+        let source = "&fjlig; xy";
+        let mut doc = Document::new(source);
+        assert_eq!(doc.motion(&mut fonts, 600.0, 0, Right), 7);
+        assert_eq!(doc.motion(&mut fonts, 600.0, 7, Left), 0);
+        let mut editor = mosaic::text::EditBuffer::new(TextStyle::new(13.0));
+        editor.set_text(&mut fonts, source);
+        editor.set_selection_bytes(&mut fonts, 0, 0);
+        let mut remembered = (0, 0);
+        for (expected_head, copied) in [
+            (7, "&fjlig;"),
+            (8, "&fjlig; "),
+            (9, "&fjlig; x"),
+            (10, source),
+            (10, source),
+        ] {
+            let (anchor, head) = selection(&editor, remembered);
+            let head = doc.motion(&mut fonts, 600.0, head, Right);
+            remembered = doc.selection_range(anchor, head);
+            editor.set_selection_bytes(&mut fonts, remembered.0, remembered.1);
+            assert_eq!(remembered, (0, expected_head));
+            assert_eq!(editor.selected_text().as_deref(), Some(copied));
+        }
+        editor.set_selection_bytes(&mut fonts, source.len(), source.len());
+        remembered = (source.len(), source.len());
+        for (expected_head, copied) in [(9, "y"), (8, "xy"), (7, " xy"), (0, source), (0, source)] {
+            let (anchor, head) = selection(&editor, remembered);
+            let head = doc.motion(&mut fonts, 600.0, head, Left);
+            remembered = doc.selection_range(anchor, head);
+            editor.set_selection_bytes(&mut fonts, remembered.0, remembered.1);
+            assert_eq!(remembered, (source.len(), expected_head));
+            assert_eq!(editor.selected_text().as_deref(), Some(copied));
+        }
+        let mut head = source.len();
+        for expected in [9, 8, 7, 0, 0] {
+            head = doc.motion(&mut fonts, 600.0, head, Left);
+            assert_eq!(head, expected);
+        }
+    }
+    #[test]
+    fn word_right_advances_past_word_end_boundaries() {
+        let mut fonts = fonts();
+        let mut doc = Document::new("one two");
+        use mosaic::text::CaretMotion::WordRight;
+        assert_eq!(doc.motion(&mut fonts, 600.0, 0, WordRight), 3);
+        assert_eq!(doc.motion(&mut fonts, 600.0, 3, WordRight), 7);
+        assert_eq!(doc.motion(&mut fonts, 600.0, 7, WordRight), 7);
+        let mut doc = Document::new("**one**  `λ:two`!");
+        let mut position = 0;
+        for expected in [
+            "**one**".len(),
+            "**one**  `λ".len(),
+            "**one**  `λ:two`!".len() - 1,
+            "**one**  `λ:two`!".len(),
+        ] {
+            position = doc.motion(&mut fonts, 600.0, position, WordRight);
+            assert_eq!(position, expected);
+        }
+    }
+    #[test]
+    fn repeated_shift_alt_right_extends_selection_through_word_boundaries() {
+        use mosaic::text::CaretMotion::WordRight;
+        let mut fonts = fonts();
+        let source = "**one** `two` three";
+        let mut doc = Document::new(source);
+        let mut editor = mosaic::text::EditBuffer::new(TextStyle::new(13.0));
+        editor.set_text(&mut fonts, source);
+        editor.set_selection_bytes(&mut fonts, 0, 0);
+        let mut remembered = (0, 0);
+        for expected in [
+            "one",
+            "one** `two",
+            "one** `two` three",
+            "one** `two` three",
+        ] {
+            // The source controller handles Shift+Alt+Right by moving the
+            // active end by WordRight and preserving its remembered anchor.
+            let (anchor, head) = selection(&editor, remembered);
+            let head = doc.motion(&mut fonts, 600.0, head, WordRight);
+            remembered = doc.selection_range(anchor, head);
+            editor.set_selection_bytes(&mut fonts, remembered.0, remembered.1);
+            assert_eq!(editor.selected_text().as_deref(), Some(expected));
+            assert_eq!(remembered.0, source.find("one").unwrap());
+        }
+    }
+    #[test]
+    fn final_glyph_right_half_is_inside_its_link_including_wrapped_and_styled_labels() {
+        let mut fonts = fonts();
+        for (source, label, width) in [
+            ("[go](https://example.com)", "go", 400.0),
+            ("[go](https://example.com) tail", "go", 400.0),
+            (
+                "[go](https://example.com)[next](https://other.example)",
+                "go",
+                400.0,
+            ),
+            ("[go**W**](https://example.com) tail", "goW", 400.0),
+            (
+                "[wrapped long label](https://example.com) tail",
+                "wrapped long label",
+                60.0,
+            ),
+            ("[go©](https://example.com) tail", "go©", 400.0),
+        ] {
+            let mut doc = Document::new(source);
+            let last = label.char_indices().next_back().unwrap().0;
+            let shaped = doc.shape(&mut fonts, Some(width));
+            let glyph = shaped.selection_rects(last, label.len()).pop().unwrap();
+            let point = Vector2::new(glyph.origin.x + glyph.size.width * 0.85, glyph.center().y);
+            assert_eq!(shaped.hit(point), Some(label.len()), "{source}");
+            assert_eq!(
+                doc.link_at(&mut fonts, width, point).as_deref(),
+                Some("https://example.com"),
+                "{source}"
+            );
+        }
+    }
+    #[test]
+    fn one_character_links_include_both_halves_and_styled_boundaries_but_not_outside_points() {
+        let mut fonts = fonts();
+        let mut doc = Document::new("[x](https://example.com) tail");
+        let rect = doc.shape(&mut fonts, Some(600.0)).selection_rects(0, 1)[0];
+        for fraction in [0.25, 0.85] {
+            let point = Vector2::new(rect.origin.x + rect.size.width * fraction, rect.center().y);
+            assert_eq!(
+                doc.link_at(&mut fonts, 600.0, point).as_deref(),
+                Some("https://example.com")
+            );
+        }
+        for point in [
+            Vector2::new(rect.origin.x - 0.25, rect.center().y),
+            Vector2::new(rect.max_x() + 0.25, rect.center().y),
+            Vector2::new(rect.center().x, rect.origin.y - 0.25),
+            Vector2::new(rect.center().x, rect.max_y() + 0.25),
+        ] {
+            assert!(doc.link_at(&mut fonts, 600.0, point).is_none());
+        }
+        for source in [
+            "[**x**y](https://example.com) tail",
+            "[x](https://example.com)[y](https://other.example) tail",
+        ] {
+            let mut doc = Document::new(source);
+            for (range, url) in [
+                (0..1, "https://example.com"),
+                (
+                    1..2,
+                    if source.contains("other.example") {
+                        "https://other.example"
+                    } else {
+                        "https://example.com"
+                    },
+                ),
+            ] {
+                let rect = doc
+                    .shape(&mut fonts, Some(600.0))
+                    .selection_rects(range.start, range.end)[0];
+                for fraction in [0.25, 0.85] {
+                    let point =
+                        Vector2::new(rect.origin.x + rect.size.width * fraction, rect.center().y);
+                    assert_eq!(
+                        doc.link_at(&mut fonts, 600.0, point).as_deref(),
+                        Some(url),
+                        "{source}"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn escapes_code_and_crlf_keep_literal_source_boundaries() {
+        for (source, rendered, first) in [
+            (r"\* *", "* *", 1),
+            (r"\&semi; ;", "&semi; ;", 1),
+            ("`&fjlig; fj`", "&fjlig; fj", 1),
+            ("`` a\r\nλ b ``", "a  λ b", 3),
+        ] {
+            let doc = Document::new(source);
+            assert_eq!(visible(&doc), rendered);
+            assert_eq!(doc.source_offset(0), first);
+            for needle in ["*", ";", "fj", "λ", "b"] {
+                if let Some(display) = rendered.rfind(needle) {
+                    let raw = source.rfind(needle).unwrap();
+                    assert_eq!(doc.source_offset(display), raw, "{source:?}: {needle}");
+                    assert_eq!(doc.display_offset(raw), display, "{source:?}: {needle}");
+                }
+            }
+        }
     }
     #[test]
     fn ui_scale_changes_refresh_cached_styles_and_geometry() {
