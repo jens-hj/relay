@@ -9912,3 +9912,134 @@ fn browser_deployment_toast_refresh_is_explicit_and_controls_fit_a_short_scaled_
     mounted.click("Dismiss update notification");
     assert!(!has_label(&mounted, "Update notification"));
 }
+
+#[test]
+fn markdown_transcript_copies_source_and_anchors_replies_across_inline_attachments() {
+    let mounted = mount(false, 1380.0);
+    let before =
+        "# Heading\n\n[issue #124](https://github.com/jens-hj/relay/issues/124) and `λ code`";
+    let after = "**After** the file\n\n```rust\nlet answer = 42;\n```";
+    let parts = vec![
+        Part::text(before),
+        Part {
+            id: "markdown-asset-part".into(),
+            kind: PartKind::Asset {
+                asset: Asset {
+                    id: "markdown-asset".into(),
+                    name: "notes.txt".into(),
+                    media_type: "text/plain".into(),
+                    size: 0,
+                },
+            },
+        },
+        Part::text(after),
+    ];
+    let mut original = plain_text(&parts);
+    mounted.model.snapshot.update(|s| {
+        let message = s.messages.iter_mut().find(|m| m.id == "m1").unwrap();
+        message.body = original.clone();
+        message.parts = parts;
+    });
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let fields = mounted.rects("Message m1");
+    assert_eq!(fields.len(), 2);
+    let file = mounted.rect("Attachment notes.txt");
+    assert!(fields[0].origin.y + fields[0].size.height <= file.origin.y + 0.5);
+    assert!(file.origin.y + file.size.height <= fields[1].origin.y + 0.5);
+    // Grow existing parts with unchanged IDs, shifting the later source range.
+    let after = format!("{after}\n\n[Streamed](https://example.com)");
+    mounted.model.snapshot.update(|s| {
+        let message = s.messages.iter_mut().find(|m| m.id == "m1").unwrap();
+        if let PartKind::Text { text } = &mut message.parts[0].kind {
+            text.push_str("\nEarlier part grew.");
+        }
+        if let PartKind::Text { text } = &mut message.parts[2].kind {
+            *text = after.clone();
+        }
+        message.body = plain_text(&message.parts);
+        original = message.body.clone();
+    });
+    mounted.settle();
+    let fields = mounted.rects("Message m1");
+    // Focus the second source surface without activating a link, then select/copy.
+    let position = fields[1].origin + Vector2::new(2.0, 2.0);
+    for kind in [
+        PointerEventKind::Down(PointerButton::Primary),
+        PointerEventKind::Up(PointerButton::Primary),
+    ] {
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind,
+            position,
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+    }
+    mounted.settle();
+    mounted.key(Key::Character("a".into()), true);
+    mounted.key(Key::Character("c".into()), true);
+    assert_eq!(mounted.ui.clipboard_text().as_deref(), Some(after.as_str()));
+    // Reverse-drag within the rendered fence: the quote must index the original
+    // body after the preceding Markdown and file, without either fence marker.
+    let field = mounted.rects("Message m1")[1];
+    let mut document = crate::markdown::Document::new(&after);
+    let answer = after.find("answer").unwrap();
+    let start = document
+        .caret(
+            &mut mounted.ui.fonts().borrow_mut(),
+            field.size.width,
+            answer,
+        )
+        .center()
+        + field.origin;
+    let end = document
+        .caret(
+            &mut mounted.ui.fonts().borrow_mut(),
+            field.size.width,
+            answer + 6,
+        )
+        .center()
+        + field.origin;
+    for (kind, position) in [
+        (PointerEventKind::Down(PointerButton::Primary), end),
+        (PointerEventKind::Move, start),
+        (PointerEventKind::Up(PointerButton::Primary), start),
+    ] {
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind,
+            position,
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::from_secs(1),
+        });
+    }
+    mounted.settle();
+    mounted.key(Key::Character("c".into()), true);
+    assert_eq!(mounted.ui.clipboard_text().as_deref(), Some("answer"));
+    mounted.key(Key::Character("Reply".into()), false);
+    let draft = crate::buffer::parts(mounted.model, "session-plan");
+    let PartKind::Reply { anchor, parts } = &draft[0].kind else {
+        panic!("missing reply")
+    };
+    assert_eq!(anchor.message_id, "m1");
+    assert_eq!(anchor.quote, "answer");
+    assert_eq!(anchor.start, original.find(&after).unwrap() + answer);
+    assert_eq!(anchor.end, anchor.start + 6);
+    assert_eq!(plain_text(parts), "Reply");
+    mounted.click_nth("Go to reply source", 0);
+    mounted.key(Key::Character("c".into()), true);
+    assert_eq!(mounted.ui.clipboard_text().as_deref(), Some("answer"));
+    assert_eq!(
+        mounted
+            .model
+            .snapshot
+            .get_untracked()
+            .messages
+            .iter()
+            .find(|m| m.id == "m1")
+            .unwrap()
+            .body,
+        original
+    );
+}

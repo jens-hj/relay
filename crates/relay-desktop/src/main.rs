@@ -9,6 +9,7 @@ mod command_ui;
 mod controls;
 mod conversation;
 mod icons;
+mod markdown;
 mod model;
 mod network;
 mod panels;

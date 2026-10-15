@@ -44,6 +44,7 @@ pub enum Location {
         message: String,
         start: usize,
         end: Option<usize>,
+        part: Option<String>,
     },
     Draft(String),
 }
@@ -58,6 +59,7 @@ struct History {
 #[derive(Default)]
 pub struct Controller {
     surfaces: BTreeMap<String, (Element, Rc<RefCell<EditBuffer>>)>,
+    source_locations: BTreeMap<String, Location>,
     messages: BTreeMap<String, Element>,
     undo: Vec<History>,
     redo: Vec<History>,
@@ -114,22 +116,57 @@ fn current_text(model: Model, location: &Location) -> String {
         Location::Draft(id) => {
             text_part(&buffer::parts(model, &model.session.get()), id).unwrap_or_default()
         }
-        Location::Source {
-            message,
-            start,
-            end,
-        } => model
+        Location::Source { message, .. } => model
             .snapshot
             .get()
             .messages
             .iter()
             .find(|m| &m.id == message)
             .and_then(|m| {
-                m.body
-                    .get(*start..end.unwrap_or(m.body.len()))
-                    .map(str::to_owned)
+                let (start, end) = source_range(m, location)?;
+                m.body.get(start..end).map(str::to_owned)
             })
             .unwrap_or_default(),
+    }
+}
+
+fn source_range(message: &Message, location: &Location) -> Option<(usize, usize)> {
+    let Location::Source {
+        message: message_id,
+        start,
+        end,
+        part,
+    } = location
+    else {
+        return None;
+    };
+    if &message.id != message_id {
+        return None;
+    }
+    fn find(parts: &[Part], id: &str, mut offset: usize) -> Option<(usize, usize)> {
+        for part in parts {
+            match &part.kind {
+                PartKind::Text { text } if part.id == id => {
+                    return Some((offset, offset + text.len()));
+                }
+                PartKind::Reply { anchor, parts } => {
+                    if let Some(range) = find(
+                        parts,
+                        id,
+                        offset + format!("Reply to “{}”:\n", anchor.quote).len(),
+                    ) {
+                        return Some(range);
+                    }
+                }
+                _ => {}
+            }
+            offset += plain_text(std::slice::from_ref(part)).len();
+        }
+        None
+    }
+    match part {
+        Some(id) => find(&message.parts, id, 0),
+        None => Some((*start, end.unwrap_or(message.body.len()))),
     }
 }
 fn remember(controller: &Shared, parts: Vec<Part>) {
@@ -208,7 +245,7 @@ pub fn begin_reply(
     selection: (usize, usize),
     insert: &str,
 ) {
-    let Location::Source { message, start, .. } = location else {
+    let Location::Source { message, .. } = location else {
         return;
     };
     if model.history.get_untracked().preview_ids.contains(message) {
@@ -220,6 +257,9 @@ pub fn begin_reply(
     }
     let snapshot = model.snapshot.get_untracked();
     let Some(source) = snapshot.messages.iter().find(|m| &m.id == message) else {
+        return;
+    };
+    let Some((start, _)) = source_range(source, location) else {
         return;
     };
     let (mut begin, mut end) = (start + selection.0, start + selection.1);
@@ -679,17 +719,24 @@ fn go_to_source(model: Model, controller: &Shared, anchor: &relay_core::Anchor) 
         return;
     }
     let prefix = format!("source-{}-", anchor.message_id);
-    let selected = controller
-        .borrow()
+    let snapshot = model.snapshot.get_untracked();
+    let Some(message) = snapshot.messages.iter().find(|m| m.id == anchor.message_id) else {
+        return;
+    };
+    let state = controller.borrow();
+    let selected = state
         .surfaces
         .iter()
         .filter_map(|(key, (field, editor))| {
-            key.strip_prefix(&prefix)
-                .and_then(|offset| offset.parse::<usize>().ok())
+            key.starts_with(&prefix)
+                .then(|| state.source_locations.get(key))
+                .flatten()
+                .and_then(|location| source_range(message, location).map(|(start, _)| start))
                 .filter(|offset| *offset <= anchor.start)
                 .map(|offset| (offset, field.clone(), editor.clone()))
         })
         .max_by_key(|(offset, _, _)| *offset);
+    drop(state);
     if let Some((offset, field, editor)) = selected {
         let fonts = model.ui.get_untracked().fonts();
         editor.borrow_mut().set_selection_bytes(
@@ -1717,7 +1764,7 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
                     if message.get().is_some_and(|m|m.parts.is_empty()) {
                         col height:min-content {
                             BufferText model:(model) controller:(controller)
-                                location:(Location::Source {message:message_id.get(),start:0,end:None})
+                                location:(Location::Source {message:message_id.get(),start:0,end:None,part:None})
                                 mirror:false
                         }
                     } else {
@@ -1821,7 +1868,7 @@ fn RecordedPart(
             view! {
                 col height:min-content {
                     BufferText model:(model) controller:(controller)
-                        location:(Location::Source {message:message_id.clone(),start:offset,end:Some(offset+text.len())})
+                        location:(Location::Source {message:message_id.clone(),start:offset,end:Some(offset+text.len()),part:Some(part.id.clone())})
                         mirror:false
                 }
             }
@@ -2059,7 +2106,15 @@ pub(crate) fn BufferText(
     };
     field.text_style(buffer_text_style());
     let key = match &location {
-        Location::Source { message, start, .. } => format!("source-{message}-{start}"),
+        Location::Source {
+            message,
+            start,
+            part,
+            ..
+        } => format!(
+            "source-{message}-{}",
+            part.clone().unwrap_or_else(|| start.to_string())
+        ),
         Location::Draft(id) => format!("{}-{id}", if mirror { "inline" } else { "draft" }),
     };
     field.focusable(true).accepts_text(true).selectable(false);
@@ -2070,6 +2125,12 @@ pub(crate) fn BufferText(
     field.role(mosaic::widgets::a11y::Role::TextInput);
     let fonts = model.ui.get_untracked().fonts();
     let editor = Rc::new(RefCell::new(EditBuffer::new(buffer_text_style())));
+    let source_cursor = Rc::new(Cell::new((0, 0)));
+    let markdown = matches!(location, Location::Source { .. }).then(|| {
+        Rc::new(RefCell::new(crate::markdown::Document::new(&current_text(
+            model, &location,
+        ))))
+    });
     editor
         .borrow_mut()
         .set_text(&mut fonts.borrow_mut(), &current_text(model, &location));
@@ -2077,10 +2138,17 @@ pub(crate) fn BufferText(
         .borrow_mut()
         .surfaces
         .insert(key.clone(), (field.clone(), editor.clone()));
+    if matches!(location, Location::Source { .. }) {
+        controller
+            .borrow_mut()
+            .source_locations
+            .insert(key.clone(), location.clone());
+    }
     let cleanup = controller.clone();
     let cleanup_key = key.clone();
     mosaic::core::reactive::on_cleanup(move || {
         cleanup.borrow_mut().surfaces.remove(&cleanup_key);
+        cleanup.borrow_mut().source_locations.remove(&cleanup_key);
     });
     let repaint = field.clone();
     let observed = editor.clone();
@@ -2090,8 +2158,12 @@ pub(crate) fn BufferText(
     let focus_key = key.clone();
     let follow = Rc::new(Cell::new(false));
     let focus_follow = follow.clone();
+    let observe_markdown = markdown.clone();
     field.style_dyn(move || {
         let text = current_text(model, &observe_location);
+        if let Some(document) = &observe_markdown {
+            document.borrow_mut().update(&text);
+        }
         let mut editor = observed.borrow_mut();
         if editor.text() != text {
             let selection = editor.selection_bytes();
@@ -2150,8 +2222,17 @@ pub(crate) fn BufferText(
     });
     let measured = editor.clone();
     let measure_fonts = fonts.clone();
+    let measure_markdown = markdown.clone();
     field.measure(move |available| {
         let mut fonts = measure_fonts.borrow_mut();
+        if let Some(document) = &measure_markdown {
+            let size = document
+                .borrow_mut()
+                .shape(&mut fonts, available.width.definite())
+                .metrics()
+                .size;
+            return Size::new(size.width.max(1.0), size.height.max(px(24.0)));
+        }
         let mut buffer = measured.borrow_mut();
         buffer.set_style(&mut fonts, buffer_text_style());
         buffer.set_wrap_width(&mut fonts, available.width.definite());
@@ -2171,12 +2252,22 @@ pub(crate) fn BufferText(
     let layout_controller = controller.clone();
     let layout_key = key.clone();
     let layout_interaction = field.interaction();
+    let layout_markdown = markdown.clone();
+    let layout_cursor = source_cursor.clone();
     field.on_layout(move |rect| {
         if layout_interaction.focused() && layout_follow.replace(false) {
             let mut fonts = layout_fonts.borrow_mut();
             let mut editor = layout_editor.borrow_mut();
             editor.set_wrap_width(&mut fonts, Some(rect.size.width));
-            let caret = editor.caret_rect(&mut fonts);
+            let caret = if let Some(document) = &layout_markdown {
+                document.borrow_mut().caret(
+                    &mut fonts,
+                    rect.size.width,
+                    crate::markdown::selection(&editor, layout_cursor.get()).1,
+                )
+            } else {
+                editor.caret_rect(&mut fonts)
+            };
             let state = layout_controller.borrow();
             let viewport = if layout_key.starts_with("draft-") {
                 state.draft_viewport.as_ref()
@@ -2188,12 +2279,47 @@ pub(crate) fn BufferText(
             }
         }
     });
+    let paint_markdown = markdown.clone();
+    let paint_cursor = source_cursor.clone();
     field.paint(move |ctx| {
         let mut fonts = paint_fonts.borrow_mut();
         let mut buffer = painted.borrow_mut();
         buffer.set_style(&mut fonts, buffer_text_style());
         buffer.set_wrap_width(&mut fonts, Some(ctx.rect.size.width));
         let origin = ctx.rect.origin;
+        if let Some(document) = &paint_markdown {
+            let mut document = document.borrow_mut();
+            let mut backgrounds = document
+                .runs
+                .iter()
+                .filter(|r| r.code)
+                .map(|r| (r.display.clone(), color(ground.hover)))
+                .collect::<Vec<_>>();
+            let query = if model.searching.get_untracked() {
+                model.search.get_untracked()
+            } else {
+                String::new()
+            };
+            if !query.is_empty() {
+                backgrounds.extend(buffer.text().match_indices(&query).map(|(offset, _)| {
+                    (
+                        document.display_offset(offset)
+                            ..document.display_offset(offset + query.len()),
+                        color(status.needs_you),
+                    )
+                }));
+            }
+            let shaped = document.shape(&mut fonts, Some(ctx.rect.size.width));
+            for (range, fill) in backgrounds {
+                for rect in shaped.selection_rects(range.start, range.end) {
+                    ctx.scene.shape(
+                        Visual::new()
+                            .fill(fill)
+                            .shape(Rect::new(origin + rect.origin, rect.size)),
+                    );
+                }
+            }
+        }
         let shared = paint_controller
             .borrow()
             .selection
@@ -2218,6 +2344,14 @@ pub(crate) fn BufferText(
                         Some(ctx.rect.size.width),
                     )
                     .selection_rects(start, end)
+            } else if let Some(document) = &paint_markdown {
+                let mut document = document.borrow_mut();
+                let (start, end) = buffer.selection_bytes();
+                let start = document.display_offset(start);
+                let end = document.display_offset(end);
+                document
+                    .shape(&mut fonts, Some(ctx.rect.size.width))
+                    .selection_rects(start, end)
             } else {
                 buffer.selection_rects(&mut fonts)
             };
@@ -2229,10 +2363,29 @@ pub(crate) fn BufferText(
                 );
             }
         }
-        ctx.scene
-            .glyphs(buffer.place(&mut fonts, ctx.text_color.clone(), origin, ctx.scale));
+        if let Some(document) = &paint_markdown {
+            let mut document = document.borrow_mut();
+            let shaped = document.shape(&mut fonts, Some(ctx.rect.size.width));
+            ctx.scene
+                .glyphs(shaped.place(&mut fonts, ctx.text_color.clone(), origin, ctx.scale));
+            for rect in shaped.decorations(origin, ctx.scale) {
+                ctx.scene
+                    .shape(Visual::new().fill(color(ground.ink)).shape(rect));
+            }
+        } else {
+            ctx.scene
+                .glyphs(buffer.place(&mut fonts, ctx.text_color.clone(), origin, ctx.scale));
+        }
         if interaction.focused() {
-            let caret = buffer.caret_rect(&mut fonts);
+            let caret = if let Some(document) = &paint_markdown {
+                document.borrow_mut().caret(
+                    &mut fonts,
+                    ctx.rect.size.width,
+                    crate::markdown::selection(&buffer, paint_cursor.get()).1,
+                )
+            } else {
+                buffer.caret_rect(&mut fonts)
+            };
             let resized = std::mem::take(&mut paint_controller.borrow_mut().resize_follow);
             let state = paint_controller.borrow();
             let viewport = if paint_key.starts_with("draft-") {
@@ -2260,8 +2413,18 @@ pub(crate) fn BufferText(
     let ime = editor.clone();
     let ime_fonts = fonts.clone();
     let ime_field = field.clone();
+    let ime_markdown = markdown.clone();
+    let ime_cursor = source_cursor.clone();
     field.ime_area(move || {
-        let rect = ime.borrow_mut().caret_rect(&mut ime_fonts.borrow_mut());
+        let rect = if let Some(document) = &ime_markdown {
+            document.borrow_mut().caret(
+                &mut ime_fonts.borrow_mut(),
+                ime_field.layout_rect().size.width,
+                crate::markdown::selection(&ime.borrow(), ime_cursor.get()).1,
+            )
+        } else {
+            ime.borrow_mut().caret_rect(&mut ime_fonts.borrow_mut())
+        };
         Rect::new(ime_field.layout_rect().origin + rect.origin, rect.size)
     });
     let contents = editor.clone();
@@ -2280,6 +2443,9 @@ pub(crate) fn BufferText(
     let pointer_controller = controller.clone();
     let pointer_key = key.clone();
     let pointer_location = location.clone();
+    let pointer_markdown = markdown.clone();
+    let pointer_cursor = source_cursor.clone();
+    let pressed_link = Rc::new(RefCell::new(None::<(String, Vector2)>));
     field.on_pointer(move |event, ctx| {
         let mut fonts = pointer_fonts.borrow_mut();
         let mut editor = pointer.borrow_mut();
@@ -2288,28 +2454,86 @@ pub(crate) fn BufferText(
                 ctx.request_focus();
                 pointer_controller.borrow_mut().selection = None;
                 dragging.set(true);
-                editor.caret_to(
-                    &mut fonts,
-                    event.position - pointer_field.layout_rect().origin,
-                    event.modifiers.shift,
-                );
+                if let Some(document) = &pointer_markdown {
+                    let rect = pointer_field.layout_rect();
+                    let point = event.position - rect.origin;
+                    let mut document = document.borrow_mut();
+                    *pressed_link.borrow_mut() = document
+                        .link_at(&mut fonts, rect.size.width, point)
+                        .map(|url| (url, event.position));
+                    let offset = document.hit(&mut fonts, rect.size.width, point);
+                    let anchor = if event.modifiers.shift {
+                        crate::markdown::selection(&editor, pointer_cursor.get()).0
+                    } else {
+                        offset
+                    };
+                    let (anchor, offset) = document.selection_range(anchor, offset);
+                    editor.set_selection_bytes(&mut fonts, anchor, offset);
+                    pointer_cursor.set((anchor, offset));
+                } else {
+                    editor.caret_to(
+                        &mut fonts,
+                        event.position - pointer_field.layout_rect().origin,
+                        event.modifiers.shift,
+                    );
+                }
                 if let Location::Draft(id) = &pointer_location {
                     pointer_controller.borrow_mut().pointer_anchor =
                         Some((id.clone(), editor.caret_offset(), mirror));
                 }
-                if ctx.press_count() == 2 {
+                if ctx.press_count() >= 2
+                    && let Some(document) = &pointer_markdown
+                {
+                    let (start, end) = document.borrow_mut().unit(
+                        &mut fonts,
+                        pointer_field.layout_rect().size.width,
+                        editor.caret_offset(),
+                        ctx.press_count() > 2,
+                    );
+                    editor.set_selection_bytes(&mut fonts, start, end);
+                    pointer_cursor.set((start, end));
+                } else if ctx.press_count() == 2 {
                     editor.select_word(&mut fonts);
                 } else if ctx.press_count() > 2 {
                     editor.select_line(&mut fonts);
                 }
                 ctx.stop_propagation();
             }
-            PointerEventKind::Move if dragging.get() => editor.caret_to(
-                &mut fonts,
-                event.position - pointer_field.layout_rect().origin,
-                true,
-            ),
+            PointerEventKind::Move if dragging.get() => {
+                if pressed_link.borrow().as_ref().is_some_and(|(_, origin)| {
+                    (event.position.x - origin.x).abs() >= px(4.0)
+                        || (event.position.y - origin.y).abs() >= px(4.0)
+                }) {
+                    pressed_link.borrow_mut().take();
+                }
+                if let Some(document) = &pointer_markdown {
+                    let rect = pointer_field.layout_rect();
+                    let mut document = document.borrow_mut();
+                    let offset =
+                        document.hit(&mut fonts, rect.size.width, event.position - rect.origin);
+                    let anchor = crate::markdown::selection(&editor, pointer_cursor.get()).0;
+                    let (anchor, offset) = document.selection_range(anchor, offset);
+                    editor.set_selection_bytes(&mut fonts, anchor, offset);
+                    pointer_cursor.set((anchor, offset));
+                } else {
+                    editor.caret_to(
+                        &mut fonts,
+                        event.position - pointer_field.layout_rect().origin,
+                        true,
+                    );
+                }
+            }
             PointerEventKind::Up(PointerButton::Primary) | PointerEventKind::Cancel => {
+                if matches!(event.kind, PointerEventKind::Up(_))
+                    && let Some((url, origin)) = pressed_link.borrow_mut().take()
+                    && (event.position.x - origin.x).abs() < px(4.0)
+                    && (event.position.y - origin.y).abs() < px(4.0)
+                    && !event.modifiers.shift
+                    && ctx.press_count() == 1
+                {
+                    crate::markdown::open_url(&url);
+                }
+                pressed_link.borrow_mut().take();
                 dragging.set(false);
                 editor.finish_selection();
             }
@@ -2385,6 +2609,8 @@ pub(crate) fn BufferText(
     let key_field = field.clone();
     let key_controller = controller.clone();
     let key_follow = follow.clone();
+    let key_markdown = markdown.clone();
+    let key_cursor = source_cursor.clone();
     field.on_key(move |event, ctx| {
         if !matches!(event.kind, KeyEventKind::Down { .. }) {
             return;
@@ -2601,8 +2827,41 @@ pub(crate) fn BufferText(
                 _ => None,
             };
             if let Some(motion) = motion {
-                let before = editor.caret_offset();
-                editor.move_caret(&mut fonts, motion, event.modifiers.shift);
+                let before = if key_markdown.is_some() {
+                    crate::markdown::selection(&editor, key_cursor.get()).1
+                } else {
+                    editor.caret_offset()
+                };
+                if let Some(document) = &key_markdown {
+                    let (a, b) = editor.selection_bytes();
+                    let offset = if !event.modifiers.shift
+                        && a != b
+                        && matches!(motion, CaretMotion::Left | CaretMotion::Right)
+                    {
+                        if matches!(motion, CaretMotion::Left) {
+                            a
+                        } else {
+                            b
+                        }
+                    } else {
+                        document.borrow_mut().motion(
+                            &mut fonts,
+                            key_field.layout_rect().size.width,
+                            before,
+                            motion,
+                        )
+                    };
+                    let anchor = if event.modifiers.shift {
+                        crate::markdown::selection(&editor, key_cursor.get()).0
+                    } else {
+                        offset
+                    };
+                    let (anchor, offset) = document.borrow().selection_range(anchor, offset);
+                    editor.set_selection_bytes(&mut fonts, anchor, offset);
+                    key_cursor.set((anchor, offset));
+                } else {
+                    editor.move_caret(&mut fonts, motion, event.modifiers.shift);
+                }
                 if event.modifiers.shift
                     && let Location::Draft(id) = &location
                 {
@@ -2976,14 +3235,19 @@ mod layout_regression {
                 }
             });
         });
-        for width in [480.0, 1100.0, 480.0, 848.0] {
+        for (width, chunk) in [
+            (480.0, "\n[Streamed"),
+            (1100.0, " reply](https://example.com)"),
+            (480.0, "\n\n**Done**"),
+            (848.0, "\n\n```rust\nlet x = 1;\n```"),
+        ] {
             model.snapshot.update(|s| {
                 s.messages
                     .iter_mut()
                     .find(|m| m.id == "reply")
                     .unwrap()
                     .body
-                    .push_str("\nStreamed reply line.")
+                    .push_str(chunk)
             });
             for _ in 0..12 {
                 flush();
@@ -3030,9 +3294,9 @@ mod layout_regression {
                         continue;
                     }
                     let rect = field.layout_rect();
-                    let metrics = buffer
-                        .borrow_mut()
-                        .metrics(&mut ui.fonts().borrow_mut())
+                    let metrics = crate::markdown::Document::new(&buffer.borrow().text())
+                        .shape(&mut ui.fonts().borrow_mut(), Some(rect.size.width))
+                        .metrics()
                         .size;
                     assert!(
                         metrics.height <= rect.size.height + 0.5,
