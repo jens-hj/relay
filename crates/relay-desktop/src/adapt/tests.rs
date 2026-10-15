@@ -13,6 +13,70 @@ fn demo() -> Snapshot {
     snapshot
 }
 
+#[test]
+fn spawn_receipts_and_observed_calls_share_one_transcript_entry_in_either_order() {
+    let snapshot = demo();
+    let mut native = snapshot
+        .messages
+        .iter()
+        .find(|m| m.id == "t-spawn")
+        .unwrap()
+        .clone();
+    native.id = "native-spawn".into();
+    let mut receipt = native.clone();
+    receipt.id = "agent-tool-receipt".into();
+    receipt.author = "Relay".into();
+    receipt.kind = "tool".into();
+    for messages in [
+        vec![native.clone(), receipt.clone()],
+        vec![receipt.clone(), native.clone()],
+    ] {
+        let visible = transcript_messages(&messages, "session-plan");
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, "native-spawn");
+        let counts = fingerprint(&messages, "session-plan");
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts[0].kind, UiKind::Spawn);
+        assert_eq!(counts[0].count, 1);
+        assert_eq!(messages.len(), 2);
+    }
+    assert_eq!(
+        transcript_messages(&[receipt.clone()], "session-plan").len(),
+        1
+    );
+    let mut other_run = native.clone();
+    other_run.tool.as_mut().unwrap().run_id.push_str("-other");
+    assert_eq!(
+        transcript_messages(&[receipt.clone(), other_run], "session-plan").len(),
+        2
+    );
+    let mut other_child = native.clone();
+    other_child.tool.as_mut().unwrap().detail = Some(relay_core::ToolDetail::Spawn {
+        child_session_id: Some("different-child".into()),
+    });
+    assert_eq!(
+        transcript_messages(&[receipt.clone(), other_child], "session-plan").len(),
+        2
+    );
+    let mut unrelated = native.clone();
+    unrelated.session_id = "another-session".into();
+    assert_eq!(
+        transcript_messages(&[receipt.clone(), unrelated], "session-plan").len(),
+        1
+    );
+    let mut unknown = native.clone();
+    unknown.tool.as_mut().unwrap().detail = None;
+    assert_eq!(
+        transcript_messages(&[receipt.clone(), unknown], "session-plan").len(),
+        2
+    );
+    receipt.body = "Recorded context must remain visible".into();
+    assert_eq!(
+        transcript_messages(&[receipt, native], "session-plan").len(),
+        2
+    );
+}
+
 fn forest(snapshot: &Snapshot) -> Vec<AgentNode> {
     agent_forest(
         snapshot,

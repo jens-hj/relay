@@ -1350,7 +1350,7 @@ pub fn Conversation(model: Model) -> Element {
                                 }
                                 if model.snapshot.get().messages.iter().any(|m|m.session_id==model.session.get()) {
                                     col height:min-content min-width:0px gap:0px {
-                                        for (_, message) in {model.snapshot.get().messages.into_iter().filter(|m|m.session_id==model.session.get()).map(|m|(m.id.clone(),m)).collect::<Vec<_>>()} {
+                                        for (_, message) in {crate::adapt::transcript_messages(&model.snapshot.get().messages, &model.session.get()).into_iter().map(|m|(m.id.clone(),m.clone())).collect::<Vec<_>>()} {
                                             col height:min-content {
                                                 TranscriptMessage model:(model)
                                                     message-id:(message.id.clone())
@@ -1610,11 +1610,7 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
         let snapshot = model.snapshot.get();
         let id = message_id.get();
         let mut previous = None;
-        for message in snapshot
-            .messages
-            .iter()
-            .filter(|m| m.session_id == model.session.get())
-        {
+        for message in crate::adapt::transcript_messages(&snapshot.messages, &model.session.get()) {
             let tool = message.tool.is_some()
                 || matches!(message.kind.as_str(), "command_execution" | "file_change");
             if message.id == id {
@@ -1658,15 +1654,13 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
     let continues = move || {
         let snapshot = model.snapshot.get();
         let id = message_id.get();
-        let Some(index) = snapshot.messages.iter().position(|m| m.id == id) else {
+        let messages = crate::adapt::transcript_messages(&snapshot.messages, &model.session.get());
+        let Some(index) = messages.iter().position(|m| m.id == id) else {
             return false;
         };
-        let current = &snapshot.messages[index];
-        snapshot.messages[..index]
-            .iter()
-            .rev()
-            .find(|m| m.session_id == current.session_id)
-            .is_some_and(|previous| speaker_of(previous) == speaker_of(current))
+        index
+            .checked_sub(1)
+            .is_some_and(|previous| speaker_of(messages[previous]) == speaker_of(messages[index]))
     };
     let speaker = Derived::new(move || {
         if continues() {

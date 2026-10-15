@@ -7180,6 +7180,53 @@ fn mount_orchestration(width: f32) -> Mounted {
     mounted
 }
 
+#[test]
+fn spawn_receipt_and_harness_event_render_one_child_and_keep_the_fallback() {
+    let mounted = mount_orchestration(1380.0);
+    mounted.model.open_session("session-plan".into());
+    let mut native = mounted
+        .model
+        .snapshot
+        .get_untracked()
+        .messages
+        .into_iter()
+        .find(|m| m.id == "t-spawn")
+        .unwrap();
+    native.id = "native-spawn".into();
+    let mut receipt = native.clone();
+    receipt.id = "agent-tool-receipt".into();
+    receipt.author = "Relay".into();
+    receipt.kind = "tool".into();
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.messages = vec![receipt.clone()]);
+    mounted.settle();
+    assert_eq!(mounted.rects("Spawned 1 agents").len(), 1);
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.messages.push(native.clone()));
+    mounted.settle();
+    assert_eq!(mounted.rects("Spawned 1 agents").len(), 1);
+    assert!(has_label(&mounted, "Tool call native-spawn"));
+    assert!(!has_label(&mounted, "Tool call agent-tool-receipt"));
+    assert_eq!(mounted.model.snapshot.get_untracked().messages.len(), 2);
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.messages = vec![native.clone(), receipt.clone()]);
+    mounted.settle();
+    assert_eq!(mounted.rects("Spawned 1 agents").len(), 1);
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.messages = vec![receipt]);
+    mounted.settle();
+    assert_eq!(mounted.rects("Spawned 1 agents").len(), 1);
+    assert!(has_label(&mounted, "Tool call agent-tool-receipt"));
+}
+
 fn focused_label(mounted: &Mounted) -> Option<String> {
     let focused = mounted.ui.focused()?.id();
     mounted

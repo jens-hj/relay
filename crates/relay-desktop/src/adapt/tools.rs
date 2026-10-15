@@ -11,7 +11,42 @@ use relay_ui::prelude::{
     ToolCallView, ToolCount, ToolDetail, WaitAgent,
 };
 use relay_ui::tokens::ToolKind;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// The server's durable spawn receipt is a fallback for harnesses that omit
+/// tool events. Prefer the observed call when both identify the same child.
+/// Keep the underlying messages untouched for history and replay.
+pub fn transcript_messages<'a>(messages: &'a [Message], session: &str) -> Vec<&'a Message> {
+    fn spawn(message: &Message) -> Option<(&str, &str)> {
+        let tool = message.tool.as_ref()?;
+        if tool.kind != Kind::Spawn {
+            return None;
+        }
+        match &tool.detail {
+            Some(Measured::Spawn {
+                child_session_id: Some(child),
+            }) => Some((&tool.run_id, child)),
+            _ => None,
+        }
+    }
+    let receipt = |m: &Message| {
+        m.author == "Relay"
+            && m.id.starts_with("agent-tool-")
+            && m.kind == "tool"
+            && m.body.is_empty()
+            && m.parts.is_empty()
+    };
+    let observed: BTreeSet<_> = messages
+        .iter()
+        .filter(|m| m.session_id == session && !receipt(m))
+        .filter_map(spawn)
+        .collect();
+    messages
+        .iter()
+        .filter(|m| m.session_id == session)
+        .filter(|m| !receipt(m) || spawn(m).is_none_or(|key| !observed.contains(&key)))
+        .collect()
+}
 
 /// Lines of tool output kept in a summary's tail.
 const TAIL: usize = 6;
@@ -382,9 +417,8 @@ pub fn tool_view(
 /// calls the transcript shows them as.
 pub fn fingerprint(messages: &[Message], session_id: &str) -> Vec<ToolCount> {
     let mut counts: Vec<ToolCount> = Vec::new();
-    for tool in messages
-        .iter()
-        .filter(|m| m.session_id == session_id)
+    for tool in transcript_messages(messages, session_id)
+        .into_iter()
         .filter_map(|m| crate::tool_activity::with_legacy_tool(m.clone()).tool)
     {
         let kind = ui_kind(tool.kind);
