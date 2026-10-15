@@ -47,14 +47,15 @@ pub fn model_identity(id: &str) -> ModelIdentity {
                 )
             })
         });
-    let claude = ["opus", "sonnet", "haiku"]
+    let claude = ["opus", "sonnet", "haiku", "fable"]
         .into_iter()
         .find_map(|name| family_of(name).map(|index| (name, index)));
     let (family, vendor, hue, skip) = if let Some((name, index)) = claude {
         let hue = match name {
             "opus" => ModelHue::Opus,
             "sonnet" => ModelHue::Sonnet,
-            _ => ModelHue::Haiku,
+            "haiku" => ModelHue::Haiku,
+            _ => ModelHue::Neutral,
         };
         (capitalize(name), "CLAUDE", hue, vec![index])
     } else if words.first().is_some_and(|word| word.starts_with("gpt")) {
@@ -230,7 +231,29 @@ pub fn selection_model(
                 .filter(|catalog| harness.is_none_or(|h| catalog.harness == h))
                 .find_map(find)
         });
-    let identity = effective.map(model_identity);
+    let identity = effective.map(|id| {
+        let mut identity = model_identity(id);
+        // Moving Claude aliases (e.g. "opus") omit the version from their ID,
+        // but their catalogue display names carry it. An explicit version wins.
+        if identity.version.is_empty() {
+            let candidates = catalog_model
+                .as_ref()
+                .map(|model| model.name.as_str())
+                .into_iter()
+                .chain(reported);
+            for candidate in candidates {
+                let resolved = model_identity(candidate);
+                if resolved.family == identity.family
+                    && resolved.vendor == identity.vendor
+                    && !resolved.version.is_empty()
+                {
+                    identity.version = resolved.version;
+                    break;
+                }
+            }
+        }
+        identity
+    });
     let effort = catalog_model.and_then(|model| effort(selection, &model));
     (identity, effort)
 }

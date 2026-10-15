@@ -585,3 +585,82 @@ fn selected_model_and_effort_override_the_last_reported_model_together() {
         "never borrow steps from the previously reported model"
     );
 }
+
+#[test]
+fn claude_alias_versions_come_from_catalog_names_without_overriding_explicit_versions() {
+    for family in ["opus", "sonnet", "haiku", "fable"] {
+        let selected = HarnessSelection {
+            model: Some(family.into()),
+            ..Default::default()
+        };
+        let catalogs = BTreeMap::from([(
+            "profile:project:ClaudeCode".into(),
+            Ok(HarnessCatalog {
+                harness: relay_core::Harness::ClaudeCode,
+                models: vec![HarnessModel {
+                    id: family.into(),
+                    name: format!("{family} 5.5"),
+                    efforts: vec![],
+                    default_effort: None,
+                    fast: false,
+                }],
+                ..Default::default()
+            }),
+        )]);
+        let identity = selection_model(
+            &selected,
+            Some("claude-opus-4-6"),
+            "chat",
+            Some(relay_core::Harness::ClaudeCode),
+            &catalogs,
+        )
+        .0
+        .unwrap();
+        assert_eq!(identity.version, "5.5");
+        assert_eq!(identity.hue, model_identity(family).hue);
+    }
+    let selected = HarnessSelection {
+        model: Some("claude-opus-4-6".into()),
+        ..Default::default()
+    };
+    let identity = selection_model(
+        &selected,
+        Some("claude-opus-5-5"),
+        "chat",
+        Some(relay_core::Harness::ClaudeCode),
+        &BTreeMap::new(),
+    )
+    .0
+    .unwrap();
+    assert_eq!(identity.version, "4.6");
+    let alias = HarnessSelection {
+        model: Some("haiku".into()),
+        ..Default::default()
+    };
+    assert!(
+        selection_model(
+            &alias,
+            Some("claude-opus-5-5"),
+            "chat",
+            Some(relay_core::Harness::ClaudeCode),
+            &BTreeMap::new()
+        )
+        .0
+        .unwrap()
+        .version
+        .is_empty()
+    );
+    assert_eq!(
+        selection_model(
+            &alias,
+            Some("claude-haiku-5-5"),
+            "chat",
+            Some(relay_core::Harness::ClaudeCode),
+            &BTreeMap::new()
+        )
+        .0
+        .unwrap()
+        .version,
+        "5.5"
+    );
+}
