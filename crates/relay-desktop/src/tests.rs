@@ -9169,3 +9169,596 @@ fn unused_chat_deletion_requires_confirmation_and_recovers_selection() {
         );
     }
 }
+
+#[test]
+fn incoming_messages_keep_the_focused_input_and_send_control_visible() {
+    for (width, height) in [(820.0, 900.0), (1380.0, 640.0)] {
+        let mut mounted = mount(false, width);
+        mounted.size.height = height;
+        mounted.model.open_session("session-plan".into());
+        mounted.model.snapshot.update(|snapshot| {
+            snapshot.messages.push(Message {
+                id: "focused-stream".into(),
+                session_id: "session-plan".into(),
+                author: "Agent".into(),
+                kind: "assistant".into(),
+                body: "line\n".repeat(80),
+                parts: vec![],
+                tool: None,
+            });
+        });
+        mounted.settle();
+        mounted.click("Next message");
+        mounted
+            .ui
+            .dispatch_ime(ImeEvent::Commit("Draft stays here".into()));
+        mounted.settle();
+        let input = mounted.rect("Next message");
+        let send = mounted.rect("Send message");
+        for append in [false, true, false] {
+            mounted.model.snapshot.update(|snapshot| {
+                if append {
+                    snapshot.messages.push(Message {
+                        id: "focused-new-message".into(),
+                        session_id: "session-plan".into(),
+                        author: "Agent".into(),
+                        kind: "assistant".into(),
+                        body: "new message\n".repeat(30),
+                        parts: vec![],
+                        tool: None,
+                    });
+                } else {
+                    snapshot
+                        .messages
+                        .iter_mut()
+                        .find(|m| m.id == "focused-stream")
+                        .unwrap()
+                        .body
+                        .push_str(&"streamed line\n".repeat(40));
+                }
+            });
+            mounted.settle();
+            let current = mounted.rect("Next message");
+            assert!(
+                (current.origin.y - input.origin.y).abs() < 2.0,
+                "input shifted at width {width}: {input:?} -> {current:?}"
+            );
+            let current_send = mounted.rect("Send message");
+            assert!((current_send.origin.y - send.origin.y).abs() < 2.0);
+            assert!(current_send.max_y() <= mounted.size.height);
+            assert!(current.max_y() <= mounted.size.height);
+            assert_eq!(
+                plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+                "Draft stays here"
+            );
+        }
+    }
+}
+
+fn draft_labels(mounted: &Mounted) -> Vec<String> {
+    mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .filter_map(|node| node.label.filter(|label| label.starts_with("Draft text")))
+        .collect()
+}
+
+#[test]
+fn pasted_image_splits_text_at_the_cursor_and_supports_typing_and_arrows_on_both_sides() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let label = draft_labels(&mounted).remove(0);
+    type_in(&mounted, &label, "Before λAfter");
+    mounted.ui.dispatch_ime(ImeEvent::SetSelection {
+        start: "Before λ".len(),
+        end: "Before λ".len(),
+    });
+    let target = crate::conversation::attachment_target(mounted.model).unwrap();
+    let image = Part {
+        id: "inline-image".into(),
+        kind: PartKind::Asset {
+            asset: Asset {
+                id: "image-asset".into(),
+                name: "image.png".into(),
+                media_type: "image/png".into(),
+                size: 1,
+            },
+        },
+    };
+    target.insert(mounted.model, vec![image.clone()]).unwrap();
+    mounted.settle();
+    let parts = crate::buffer::parts(mounted.model, "session-plan");
+    assert_eq!(parts.len(), 3);
+    assert_eq!(plain_text(&parts[..1]), "Before λ");
+    assert_eq!(parts[1], image);
+    assert_eq!(plain_text(&parts[2..]), "After");
+    assert_eq!(mounted.ui.text_input_contents().unwrap().selection, (0, 0));
+    mounted
+        .ui
+        .dispatch_ime(ImeEvent::Commit("Continued ".into()));
+    mounted.settle();
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")[2..]),
+        "Continued After"
+    );
+    mounted.key(Key::Home, false);
+    mounted.key(Key::ArrowLeft, false);
+    assert_eq!(mounted.ui.text_input_contents().unwrap().text, "Before λ");
+    mounted.key(Key::ArrowRight, false);
+    assert_eq!(
+        mounted.ui.text_input_contents().unwrap().text,
+        "Continued After"
+    );
+    mounted.key(Key::Character("z".into()), true);
+    mounted.key(Key::Character("z".into()), true);
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "Before λAfter"
+    );
+    assert!(
+        !crate::buffer::parts(mounted.model, "session-plan")
+            .iter()
+            .any(|p| matches!(p.kind, PartKind::Asset { .. }))
+    );
+    mounted.key(Key::Character("y".into()), true);
+    assert_eq!(
+        crate::buffer::parts(mounted.model, "session-plan")[1],
+        image
+    );
+}
+
+#[test]
+fn drafts_ending_in_an_image_have_a_cursor_position_after_the_image() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    crate::buffer::edit(
+        mounted.model,
+        "session-plan",
+        vec![
+            Part::text("Before"),
+            Part {
+                id: "last-image".into(),
+                kind: PartKind::Asset {
+                    asset: Asset {
+                        id: "last-asset".into(),
+                        name: "last.png".into(),
+                        media_type: "image/png".into(),
+                        size: 1,
+                    },
+                },
+            },
+        ],
+    );
+    mounted.settle();
+    let labels = draft_labels(&mounted);
+    assert_eq!(labels.len(), 2);
+    mounted.focus(&labels[0]);
+    mounted.key(Key::End, false);
+    mounted.key(Key::ArrowRight, false);
+    assert_eq!(mounted.ui.text_input_contents().unwrap().text, "");
+    mounted.ui.dispatch_ime(ImeEvent::Commit("After".into()));
+    mounted.settle();
+    let parts = crate::buffer::parts(mounted.model, "session-plan");
+    assert_eq!(parts.len(), 3);
+    assert!(matches!(&parts[1].kind, PartKind::Asset { .. }));
+    assert_eq!(plain_text(&parts[2..]), "After");
+}
+
+#[test]
+fn asynchronous_attachment_keeps_its_captured_selection_and_rejects_changed_drafts() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let label = draft_labels(&mounted).remove(0);
+    type_in(&mounted, &label, "Before selected After");
+    mounted
+        .ui
+        .dispatch_ime(ImeEvent::SetSelection { start: 7, end: 15 });
+    let target = crate::conversation::attachment_target(mounted.model).unwrap();
+    mounted
+        .ui
+        .dispatch_ime(ImeEvent::SetSelection { start: 0, end: 0 });
+    target
+        .insert(mounted.model, vec![Part::text("inserted")])
+        .unwrap();
+    mounted.settle();
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "Before inserted After"
+    );
+    let pending = crate::conversation::attachment_target(mounted.model).unwrap();
+    mounted.key(Key::Character("a".into()), true);
+    mounted
+        .ui
+        .dispatch_ime(ImeEvent::Commit("changed anchor".into()));
+    mounted.settle();
+    let before = crate::buffer::parts(mounted.model, "session-plan");
+    assert!(
+        pending
+            .insert(mounted.model, vec![Part::text("stale")])
+            .is_err()
+    );
+    assert_eq!(crate::buffer::parts(mounted.model, "session-plan"), before);
+    let pending = crate::conversation::attachment_target(mounted.model).unwrap();
+    mounted.model.open_session("session-review".into());
+    mounted.settle();
+    assert!(
+        pending
+            .insert(mounted.model, vec![Part::text("wrong chat")])
+            .is_err()
+    );
+    assert_eq!(crate::buffer::parts(mounted.model, "session-plan"), before);
+}
+
+#[test]
+fn typing_during_image_read_is_retained_after_the_image() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let label = draft_labels(&mounted).remove(0);
+    type_in(&mounted, &label, "Before ");
+    let target = crate::conversation::attachment_target(mounted.model).unwrap();
+    mounted
+        .ui
+        .dispatch_ime(ImeEvent::Commit("after image".into()));
+    mounted.settle();
+    let image = Part {
+        id: "pending-image".into(),
+        kind: PartKind::Asset {
+            asset: Asset {
+                id: "pending-asset".into(),
+                name: "pending.png".into(),
+                media_type: "image/png".into(),
+                size: 1,
+            },
+        },
+    };
+    target.insert(mounted.model, vec![image.clone()]).unwrap();
+    mounted.settle();
+    let parts = crate::buffer::parts(mounted.model, "session-plan");
+    assert_eq!(plain_text(&parts[..1]), "Before ");
+    assert_eq!(parts[1], image);
+    assert_eq!(plain_text(&parts[2..]), "after image");
+    mounted.ui.dispatch_ime(ImeEvent::Commit(" more".into()));
+    mounted.settle();
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")[2..]),
+        "after image more"
+    );
+}
+
+#[test]
+fn queued_and_paused_messages_render_images_between_their_text_and_preserve_edits() {
+    for state in [SubmissionState::Queued, SubmissionState::Paused] {
+        let mounted = mount(false, 1380.0);
+        mounted.model.open_session("session-plan".into());
+        mounted
+            .model
+            .snapshot
+            .update(|snapshot| snapshot.messages.retain(|m| m.session_id != "session-plan"));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(4, 2, image::Rgba([120, 170, 200, 255]))
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let picture = crate::buffer::insert_asset(
+            mounted.model,
+            "queued.png".into(),
+            "image/png".into(),
+            bytes.into_inner(),
+        )
+        .unwrap();
+        let parts = vec![
+            Part::text("Text before the queued image"),
+            picture,
+            Part::text("Text after the queued image"),
+        ];
+        mounted.model.snapshot.update(|snapshot| {
+            snapshot.submissions.push(Submission {
+                id: "queued-picture".into(),
+                session_id: "session-plan".into(),
+                parts: parts.clone(),
+                state,
+                approve_implementation: false,
+                error: None,
+                interrupts_run: None,
+                last_edit_request: None,
+            })
+        });
+        mounted.settle();
+        let queued = mounted.rect("Queued message");
+        let images: Vec<_> = mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .filter(|node| node.role == Role::Image && queued.contains(node.rect.center()))
+            .collect();
+        assert_eq!(images.len(), 1);
+        let before = mounted.rect("Text before the queued image");
+        let after = mounted.rect("Text after the queued image");
+        assert!(before.max_y() <= images[0].rect.origin.y);
+        assert!(images[0].rect.max_y() <= after.origin.y);
+        assert!(images[0].rect.size.height > 0.0);
+        assert!(!has_label(&mounted, "Remove inline file"));
+        mounted.rect("Cancel queued message");
+        mounted.rect("Send queued message now");
+        // Same part ID with changed text must refresh the queue preview.
+        mounted.model.snapshot.update(|snapshot| {
+            if let PartKind::Text { text } =
+                &mut snapshot.submissions.last_mut().unwrap().parts[0].kind
+            {
+                *text = "Updated queued text".into();
+            }
+        });
+        mounted.settle();
+        assert!(has_label(&mounted, "Updated queued text"));
+        assert!(!has_label(&mounted, "Text before the queued image"));
+        let updated = mounted
+            .model
+            .snapshot
+            .get_untracked()
+            .submissions
+            .last()
+            .unwrap()
+            .parts
+            .clone();
+        mounted.click("Edit queued message");
+        assert_eq!(crate::buffer::parts(mounted.model, "session-plan"), updated);
+    }
+}
+
+#[test]
+fn queued_reply_images_fetch_missing_bytes_and_appear_when_received() {
+    use crate::buffer_network::Request;
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted
+        .model
+        .snapshot
+        .update(|snapshot| snapshot.messages.retain(|m| m.session_id != "session-plan"));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(tx));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_pixel(4, 2, image::Rgba([120, 170, 200, 255]))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    let bytes = bytes.into_inner();
+    let asset = Asset {
+        id: "remote-queued-image".into(),
+        name: "remote.png".into(),
+        media_type: "image/png".into(),
+        size: bytes.len() as u64,
+    };
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot.submissions.push(Submission {
+            id: "queued-reply".into(),
+            session_id: "session-plan".into(),
+            parts: vec![Part {
+                id: "reply-part".into(),
+                kind: PartKind::Reply {
+                    anchor: relay_core::Anchor {
+                        message_id: "source".into(),
+                        start: 0,
+                        end: 5,
+                        quote: "Quote".into(),
+                    },
+                    parts: vec![
+                        Part::text("Reply before image"),
+                        Part {
+                            id: "reply-image".into(),
+                            kind: PartKind::Asset {
+                                asset: asset.clone(),
+                            },
+                        },
+                        Part::text("Reply after image"),
+                    ],
+                },
+            }],
+            state: SubmissionState::Paused,
+            approve_implementation: false,
+            error: Some("Queue paused".into()),
+            interrupts_run: None,
+            last_edit_request: None,
+        })
+    });
+    mounted.settle();
+    assert!(matches!(rx.try_recv().unwrap(), Request::Fetch(id) if id == asset.id));
+    assert!(rx.try_recv().is_err());
+    assert!(has_label(&mounted, "Preview remote.png"));
+    assert!(has_label(&mounted, "Queue paused"));
+    mounted.model.buffer.update(|buffer| {
+        buffer
+            .blobs
+            .insert(asset.id.clone(), std::sync::Arc::new(bytes));
+    });
+    mounted.settle();
+    let queued = mounted.rect("Queued message");
+    let image = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|node| node.role == Role::Image && queued.contains(node.rect.center()))
+        .unwrap();
+    assert!(mounted.rect("Reply before image").max_y() <= image.rect.origin.y);
+    assert!(image.rect.max_y() <= mounted.rect("Reply after image").origin.y);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn pasted_text_file_has_an_inline_preview_and_allows_typing_after_it() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let label = draft_labels(&mounted).remove(0);
+    type_in(&mounted, &label, "Before file");
+    let target = crate::conversation::attachment_target(mounted.model).unwrap();
+    let file = crate::buffer::insert_asset(
+        mounted.model,
+        "test-attachment.txt".into(),
+        "text/plain".into(),
+        b"Hi".to_vec(),
+    )
+    .unwrap();
+    target.insert(mounted.model, vec![file.clone()]).unwrap();
+    mounted.settle();
+    mounted
+        .ui
+        .dispatch_ime(ImeEvent::Commit("After file".into()));
+    mounted.settle();
+    let parts = crate::buffer::parts(mounted.model, "session-plan");
+    assert_eq!(plain_text(&parts[..1]), "Before file");
+    assert_eq!(parts[1], file);
+    assert_eq!(plain_text(&parts[2..]), "After file");
+    mounted.key(Key::Home, false);
+    mounted.key(Key::ArrowLeft, false);
+    assert_eq!(
+        mounted.ui.text_input_contents().unwrap().text,
+        "Before file"
+    );
+    mounted.key(Key::ArrowRight, false);
+    assert_eq!(mounted.ui.text_input_contents().unwrap().text, "After file");
+    mounted.click("Preview test-attachment.txt");
+    let frame = mounted.rect("Attachment test-attachment.txt");
+    assert!(frame.contains(mounted.rect("Hi").center()));
+    assert!(frame.contains(mounted.rect("Remove inline file").center()));
+    assert_eq!(crate::buffer::parts(mounted.model, "session-plan"), parts);
+}
+
+fn deployed_build(digit: &str) -> BuildInfo {
+    BuildInfo {
+        version: BuildInfo::current().version,
+        revision: digit.repeat(40),
+    }
+}
+
+#[test]
+fn deployment_notifications_compare_loaded_build_and_dismiss_each_revision_once() {
+    let mounted = mount(false, 1380.0);
+    assert!(mounted.model.available_update().is_none());
+    let mut loaded = BuildInfo::current();
+    loaded.revision = loaded
+        .revision
+        .trim_end_matches("-local")
+        .trim_end_matches("-dirty")
+        .into();
+    mounted.model.server_build.set(Some(loaded.clone()));
+    assert!(mounted.model.available_update().is_none());
+    for unknown in ["", "unknown", "development"] {
+        mounted.model.server_build.set(Some(BuildInfo {
+            version: loaded.version.clone(),
+            revision: unknown.into(),
+        }));
+        assert!(mounted.model.available_update().is_none());
+    }
+    let first = deployed_build("a");
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        server_build: Some(first.clone()),
+        ..Default::default()
+    });
+    assert_eq!(mounted.model.available_update(), Some(first.clone()));
+    // A temporary failed version poll or reconnect must not remove the notice.
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: false,
+        ..Default::default()
+    });
+    assert_eq!(mounted.model.available_update(), Some(first.clone()));
+    mounted.model.dismissed_update.set(Some(first.clone()));
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        server_build: Some(first),
+        ..Default::default()
+    });
+    assert!(mounted.model.available_update().is_none());
+    let second = deployed_build("b");
+    mounted.model.server_build.set(Some(second.clone()));
+    assert_eq!(mounted.model.available_update(), Some(second));
+    mounted.model.server_build.set(Some(loaded));
+    assert!(mounted.model.available_update().is_none());
+}
+
+#[test]
+fn deployment_toast_preserves_draft_focus_and_composer_position_on_every_page() {
+    for width in [390.0, 1380.0] {
+        let mounted = mount(false, width);
+        mounted.model.open_session("session-plan".into());
+        mounted.settle();
+        let label = draft_labels(&mounted).remove(0);
+        type_in(&mounted, &label, "Keep my unfinished message");
+        let before = mounted.rect("Next message");
+        let focused = mounted.ui.focused().unwrap().id();
+        let parts = crate::buffer::parts(mounted.model, "session-plan");
+        mounted.model.server_build.set(Some(deployed_build("a")));
+        mounted.settle();
+        assert!(has_label(&mounted, "New Version Available"));
+        assert_eq!(mounted.ui.focused().unwrap().id(), focused);
+        assert_eq!(mounted.rect("Next message"), before);
+        assert_eq!(crate::buffer::parts(mounted.model, "session-plan"), parts);
+        mounted.click(&label);
+        assert_eq!(mounted.ui.focused().unwrap().id(), focused);
+        mounted.click("Dismiss update notification");
+        assert!(!has_label(&mounted, "Update notification"));
+        mounted.model.server_build.set(Some(deployed_build("a")));
+        mounted.settle();
+        assert!(!has_label(&mounted, "Update notification"));
+        mounted.model.page.set(Page::Settings);
+        mounted.model.server_build.set(Some(deployed_build("b")));
+        mounted.settle();
+        assert!(has_label(&mounted, "Update notification"));
+        assert_eq!(crate::buffer::parts(mounted.model, "session-plan"), parts);
+    }
+}
+
+#[test]
+fn browser_deployment_toast_refresh_is_explicit_and_controls_fit_a_short_scaled_viewport() {
+    use crate::ui::{UpdateToast, UpdateToastProps};
+    let mut mounted = mount(false, 390.0);
+    mounted.size.height = 260.0;
+    mounted.model.preferences.update(|p| p.scale = 2.0);
+    mounted
+        ._scope
+        .run(|| crate::settings::bind(mounted.model, AppContext::detached()));
+    crate::buffer::edit(
+        mounted.model,
+        "session-plan",
+        vec![Part::text("Unsaved draft")],
+    );
+    let refreshed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let requested = refreshed.clone();
+    mounted._scope.run(|| {
+        let _ambient = mounted.ui.enter();
+        mounted.ui.mount(&view! {
+            UpdateToast model:(mounted.model) viewport-height:(State::new(260.0)) browser:true
+                on-refresh:(Some(std::rc::Rc::new(move || requested.set(true)) as relay_ui::prelude::OnPress))
+        });
+    });
+    mounted.model.server_build.set(Some(deployed_build("a")));
+    mounted.settle();
+    assert!(!refreshed.get());
+    for label in ["Refresh Relay", "Dismiss update notification"] {
+        let rect = mounted.rect(label);
+        assert!(
+            rect.origin.x >= 0.0 && rect.max_x() <= mounted.size.width,
+            "{label}: {rect:?}"
+        );
+        assert!(
+            rect.origin.y >= 0.0 && rect.max_y() <= mounted.size.height,
+            "{label}: {rect:?}"
+        );
+    }
+    mounted.click("Refresh Relay");
+    assert!(refreshed.get());
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "Unsaved draft"
+    );
+    mounted.click("Dismiss update notification");
+    assert!(!has_label(&mounted, "Update notification"));
+}

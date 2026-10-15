@@ -1,6 +1,7 @@
 //! The conversation's relay-ui parts: the session header, tool calls, spawn
 //! and approval blocks, queued turns, and the ledger's settings.
 
+use crate::conversation::{InlineAsset, InlineAssetProps};
 use crate::ui::press;
 use crate::ui::{NavigationButton, NavigationButtonProps};
 use crate::window_chrome::{WindowControlsSpace, WindowControlsSpaceProps};
@@ -308,9 +309,11 @@ pub(crate) fn QueuedTurn(model: Model, submission: String) -> Element {
                 col width:1fr min-width:0px height:min-content gap:0px {
                     col height:min-content gap:{px(8.0)}px
                         pad:(horizontal:{px(12.0)}px vertical:{px(9.0)}px) {
-                        Label
-                            text:(Derived::new(move || current.get().map(|s| plain_text(&s.parts)).unwrap_or_default()))
-                            role:(TextRole::Body)
+                        for (_, part) in { current.get().map(|s| s.parts.into_iter().map(|part| ((part.id.clone(), format!("{part:?}")), part)).collect::<Vec<_>>()).unwrap_or_default() } {
+                            col height:min-content min-width:0px {
+                                QueuedPart model:(model) part:(part.clone())
+                            }
+                        }
                         if current.get().is_some_and(|s| s.error.is_some()) {
                             Label
                                 text:(Derived::new(move || current.get().and_then(|s| s.error).unwrap_or_default()))
@@ -328,6 +331,41 @@ pub(crate) fn QueuedTurn(model: Model, submission: String) -> Element {
                 }
             }
         }
+    }
+}
+
+/// Read-only structured content; attachments share the chat's preview and fetch path.
+#[component]
+fn QueuedPart(model: Model, part: Part) -> Element {
+    match part.kind {
+        PartKind::Text { text } => view! {
+            col height:min-content min-width:0px {
+                Label text:(text) role:(TextRole::Body)
+            }
+        },
+        PartKind::Asset { asset } => view! {
+            col height:min-content min-width:0px {
+                InlineAsset model:(model) asset:(asset) part-id:(None) controller:(None)
+                    mirror:false
+            }
+        },
+        PartKind::Skill { skill } => view! {
+            col height:min-content {
+                Label text:(format!("${}", skill.name)) role:(TextRole::Body)
+            }
+        },
+        PartKind::Reply { anchor, parts } => view! {
+            col height:min-content min-width:0px gap:{px(6.0)}px pad:(left:{px(14.0)}px)
+                stroke:(width:{px(2.0)} color:ground.hairline edges:left) {
+                Label text:(format!("↩ {}", anchor.quote)) role:(TextRole::Caption)
+                    tone:(Tone::Muted)
+                for (_, nested) in { parts.iter().cloned().map(|part| (part.id.clone(), part)).collect::<Vec<_>>() } {
+                    col height:min-content min-width:0px {
+                        QueuedPart model:(model) part:(nested.clone())
+                    }
+                }
+            }
+        },
     }
 }
 

@@ -75,7 +75,7 @@ pub struct Controller {
     history_scroll_seen: bool,
 }
 
-type Shared = Rc<RefCell<Controller>>;
+pub(crate) type Shared = Rc<RefCell<Controller>>;
 pub(crate) type ControllerState = State<Shared>;
 
 fn text_part(parts: &[Part], id: &str) -> Option<String> {
@@ -313,6 +313,102 @@ fn insert_parts(
         ));
     }
     buffer::edit(model, &session, parts);
+}
+
+/// Capture the insertion point before a browser file read yields.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) struct AttachmentTarget {
+    session: String,
+    controller: Shared,
+    part: String,
+    selection: (usize, usize),
+    text: String,
+    mirror: bool,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn attachment_target(model: Model) -> Option<AttachmentTarget> {
+    let controller = model.conversation_controller.get_untracked()?;
+    let state = controller.borrow();
+    let editable = |key: &str| key.starts_with("draft-") || key.starts_with("inline-");
+    let target = state
+        .surfaces
+        .iter()
+        .find(|(key, (field, _))| editable(key) && field.interaction().focused())
+        .or_else(|| {
+            state
+                .caret
+                .as_ref()
+                .and_then(|(key, _)| state.surfaces.get_key_value(key))
+                .filter(|(key, _)| editable(key))
+        })
+        .or_else(|| {
+            state
+                .surfaces
+                .iter()
+                .filter(|(key, _)| key.starts_with("draft-"))
+                .max_by(|(_, (a, _)), (_, (b, _))| {
+                    a.layout_rect()
+                        .origin
+                        .y
+                        .total_cmp(&b.layout_rect().origin.y)
+                })
+        })?;
+    let (key, (_, editor)) = target;
+    let mirror = key.starts_with("inline-");
+    let part = key
+        .strip_prefix(if mirror { "inline-" } else { "draft-" })?
+        .to_owned();
+    let editor = editor.borrow();
+    Some(AttachmentTarget {
+        session: model.session.get_untracked(),
+        controller: controller.clone(),
+        part,
+        selection: editor.selection_bytes(),
+        text: editor.text(),
+        mirror,
+    })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl AttachmentTarget {
+    pub(crate) fn insert(self, model: Model, parts: Vec<Part>) -> Result<(), String> {
+        if model.session.get_untracked() != self.session
+            || model
+                .conversation_controller
+                .get_untracked()
+                .is_none_or(|current| !Rc::ptr_eq(&current, &self.controller))
+        {
+            return Err("Conversation changed while reading files; paste them again.".into());
+        }
+        let current =
+            text_part(&buffer::parts(model, &self.session), &self.part).unwrap_or_default();
+        // Keystrokes arriving during the file read belong after the pasted
+        // image. Preserve them when they were inserted at the captured cursor.
+        let continued = current.len().saturating_sub(self.text.len());
+        if current != self.text
+            && !(self.selection.0 == self.selection.1
+                && current.len() >= self.text.len()
+                && current.starts_with(&self.text[..self.selection.0])
+                && current.ends_with(&self.text[self.selection.1..]))
+        {
+            return Err("Draft changed while reading files; paste them again.".into());
+        }
+        insert_parts(
+            model,
+            &self.controller,
+            &self.part,
+            self.selection,
+            parts,
+            self.mirror,
+        );
+        if continued > 0
+            && let Some((_, offset)) = &mut self.controller.borrow_mut().requested
+        {
+            *offset = continued;
+        }
+        Ok(())
+    }
 }
 
 fn document_edge(controller: &Shared, fonts: &mut mosaic::text::FontContext, end: bool) {
@@ -649,6 +745,19 @@ fn delete_boundary(parts: &mut Vec<Part>, id: &str, backward: bool) -> Option<(S
 #[component]
 pub fn Conversation(model: Model) -> Element {
     let controller = State::new(Rc::new(RefCell::new(Controller::default())));
+    let mounted_controller = controller.get_untracked();
+    model
+        .conversation_controller
+        .set(Some(mounted_controller.clone()));
+    mosaic::core::reactive::on_cleanup(move || {
+        if model
+            .conversation_controller
+            .get_untracked()
+            .is_some_and(|current| Rc::ptr_eq(&current, &mounted_controller))
+        {
+            model.conversation_controller.set(None);
+        }
+    });
     let empty = State::new(uuid::Uuid::new_v4().to_string());
     let menu = State::new(false);
     let discovery_feedback = Derived::new(move || crate::command_ui::discovery_feedback(model));
@@ -802,7 +911,11 @@ pub fn Conversation(model: Model) -> Element {
             col height:min-content min-width:0px gap:{px(6.0)}px {
                 for (_, part) in {
                     let parts=buffer::parts(model,&model.session.get());
-                    let parts=if parts.is_empty(){vec![Part{id:empty.get(),kind:PartKind::Text{text:String::new()}}]}else{parts};
+                    let mut parts=parts;
+                    if !parts.last().is_some_and(|p| matches!(p.kind, PartKind::Text { .. })) {
+                        let id = parts.last().map(|part| format!("{}-after-{}", empty.get(), part.id)).unwrap_or_else(|| empty.get());
+                        parts.push(Part{id,kind:PartKind::Text{text:String::new()}});
+                    }
                     parts.into_iter().map(|p|(p.id.clone(),p)).collect::<Vec<_>>()
                 } {
                     col height:min-content {
@@ -1315,8 +1428,11 @@ pub fn Conversation(model: Model) -> Element {
                 document_scroll.content().on_layout(move |rect| {
                     let height = follow_scroll.root().layout_rect().size.height;
                     let extent_changed = previous.get().is_none_or(|(content, viewport)| (content - rect.size.height).abs() > 0.5 || (viewport - height).abs() > 0.5);
-                    let focused = layout_controller.borrow().surfaces.values().find(|(field, _)| field.interaction().focused()).map(|(field, _)| field.clone());
-                    if extent_changed && let Some(field) = &focused { layout_controller.borrow_mut().resize_follow = true; field.paint_dirty(); }
+                    let focused = layout_controller.borrow().surfaces.iter().find(|(_, (field, _))| field.interaction().focused()).map(|(key, (field, _))| (key.starts_with("draft-"), field.clone()));
+                    // Revealing only the caret can leave the rest of the input
+                    // below the viewport, so draft focus must preserve bottom-follow.
+                    let focused_draft = focused.as_ref().is_some_and(|(draft, _)| *draft);
+                    if extent_changed && let Some((_, field)) = &focused { layout_controller.borrow_mut().resize_follow = true; field.paint_dirty(); }
                     let was_at_bottom = previous.get().is_none_or(|(content, viewport)|
                         follow_scroll.offset().y >= (content - viewport).max(0.0) - px(4.0));
                     previous.set(Some((rect.size.height, height)));
@@ -1329,7 +1445,7 @@ pub fn Conversation(model: Model) -> Element {
                         if let Some(field)=layout_controller.borrow().messages.get(&key) && let Some(rect)=model.ui.get_untracked().inspection_rect(field.id()) {
                             follow_scroll.scroll_to(Vector2::new(0.0,follow_scroll.offset().y+rect.origin.y-y));
                         }
-                    } else if was_at_bottom && focused.is_none() && !model.history.get_untracked().has_newer {
+                    } else if was_at_bottom && (focused.is_none() || focused_draft) && !model.history.get_untracked().has_newer {
                         follow_scroll.scroll_to(Vector2::new(0.0, (rect.size.height - height).max(0.0)));
                     }
                     if let Some(anchor)=model.source_anchor.get_untracked()
@@ -1807,7 +1923,7 @@ fn remove_draft_part(model: Model, controller: &Shared, id: &str, mirror: bool) 
 }
 
 #[component]
-fn InlineAsset(
+pub(crate) fn InlineAsset(
     model: Model,
     asset: Asset,
     part_id: Option<String>,
@@ -1819,11 +1935,14 @@ fn InlineAsset(
     let asset = State::new(asset);
     let part_id = State::new(part_id);
     let root = view! {
-        col height:min-content gap:{px(6.0)}px {
-            row height:{px(32.0)}px gap:{px(8.0)}px align:center {
-                row width:max-content {
+        col height:min-content min-width:0px gap:0px
+            label:(format!("Attachment {}", asset.get_untracked().name))
+            stroke:(width:{px(1.0)} color:ground.rule-strong offset:{px(-1.0)}) {
+            row height:{px(32.0)}px gap:0px align:center
+                stroke:(width:{if preview.get() {px(1.0)} else {0.0}} color:ground.rule-strong edges:bottom) {
+                row width:1fr min-width:0px {
                     CellButton label:(format!("Preview {}", asset.get_untracked().name))
-                        selected:(preview) horizontal-inset:(8.0)
+                        selected:(preview) start:true horizontal-inset:(8.0)
                         on-press:(press(move || { buffer::fetch(model, &asset.get_untracked()); preview.set(!preview.get_untracked()); })) {
                         Label
                             text:(Derived::new(move || format!("{} · {} KiB", asset.get().name, asset.get().size.div_ceil(1024))))
@@ -1831,14 +1950,17 @@ fn InlineAsset(
                     }
                 }
                 if part_id.get().is_some() {
-                    IconCell label:"Remove inline file"
-                        on-press:(press(move || if let Some(controller) = controller { remove_draft_part(model, &controller.get_untracked(), part_id.get_untracked().as_ref().unwrap(), mirror); })) {
-                        Label text:"×" role:(TextRole::Label)
+                    row width:{px(32.0)}px shrink:0
+                        stroke:(width:{px(1.0)} color:ground.rule-strong edges:left) {
+                        CellButton label:"Remove inline file" horizontal-inset:(0.0)
+                            on-press:(press(move || if let Some(controller) = controller { remove_draft_part(model, &controller.get_untracked(), part_id.get_untracked().as_ref().unwrap(), mirror); })) {
+                            Label text:"×" role:(TextRole::Label)
+                        }
                     }
                 }
             }
             if preview.get() {
-                col height:min-content {
+                col height:min-content min-width:0px pad:{px(8.0)}px {
                     if model.buffer.get().blobs.contains_key(&asset.get().id) {
                         col height:min-content {
                             if asset.get().media_type.starts_with("image/") {

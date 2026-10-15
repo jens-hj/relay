@@ -49,3 +49,11 @@ pub fn demo() -> bool {
         false
     }
 }
+
+/// Reload only after the user chooses to load the deployed browser build.
+pub fn refresh() {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(window) = web_sys::window() {
+        let _ = window.location().reload();
+    }
+}

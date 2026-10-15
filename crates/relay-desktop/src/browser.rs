@@ -109,7 +109,14 @@ fn receive_files(model: crate::model::Model, files: Vec<web_sys::File>) {
             .set("Open a conversation before adding files".into());
         return;
     }
+    let Some(target) = crate::conversation::attachment_target(model) else {
+        model
+            .notice
+            .set("Focus the message before adding files".into());
+        return;
+    };
     wasm_bindgen_futures::spawn_local(async move {
+        let mut inserted = Vec::new();
         for file in files {
             if file.size() > relay_core::ASSET_LIMIT as f64 {
                 model.notice.set("File exceeds 20 MiB".into());
@@ -122,31 +129,28 @@ fn receive_files(model: crate::model::Model, files: Vec<web_sys::File>) {
                 } else {
                     file.type_()
                 };
-                let mut parts = crate::buffer::parts(model, &session);
-                let existing: u64 = parts
+                let parts = crate::buffer::parts(model, &session);
+                let existing: u64 = relay_core::assets(&parts)
                     .iter()
-                    .filter_map(|p| {
-                        if let relay_core::PartKind::Asset { asset } = &p.kind {
-                            Some(asset.size)
-                        } else {
-                            None
-                        }
-                    })
+                    .map(|asset| asset.size)
                     .sum();
-                if existing + bytes.len() as u64 > relay_core::DRAFT_ASSET_LIMIT {
+                let added: u64 = relay_core::assets(&inserted).iter().map(|a| a.size).sum();
+                if existing + added + bytes.len() as u64 > relay_core::DRAFT_ASSET_LIMIT {
                     model.notice.set("Draft files exceed 64 MiB".into());
                     continue;
                 }
                 match crate::buffer::insert_asset(model, file.name(), media, bytes) {
-                    Ok(part) => {
-                        parts.push(part);
-                        crate::buffer::edit(model, &session, parts.clone());
-                    }
+                    Ok(part) => inserted.push(part),
                     Err(error) => model.notice.set(error),
                 }
             } else {
                 model.notice.set("Cannot read the selected file".into());
             }
+        }
+        if !inserted.is_empty()
+            && let Err(error) = target.insert(model, inserted)
+        {
+            model.notice.set(error);
         }
     });
 }

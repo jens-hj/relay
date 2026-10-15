@@ -401,8 +401,9 @@ pub fn AgentTreeRow(
             button
                 @click:{if confirm.get_untracked() { delete(id.clone()); } else { confirm.set(true); }}
                 width:max-content min-width:{px(26.0)}px height:{px(26.0)}px shrink:0 align:center
-                justify:center pad:(horizontal:{px(7.0)}px vertical:0px) radius:0px fill:(under)
-                label:(format!("Delete {}", line.name)) hover { fill:ground.panel-raised }
+                justify:center gap:{px(6.0)}px pad:(horizontal:{px(7.0)}px vertical:0px) radius:0px
+                fill:(under) label:(format!("Delete {}", line.name))
+                hover { fill:ground.panel-raised }
                 focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
                 { parent.adopt(&crate::marks::mark(crate::marks::Mark::Trash, 12.0, ground.ink)); }
                 if confirm.get() {

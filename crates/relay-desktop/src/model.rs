@@ -46,6 +46,7 @@ struct Pending {
 #[derive(Clone, Copy)]
 pub struct Model {
     pub server_build: State<Option<BuildInfo>>,
+    pub dismissed_update: State<Option<BuildInfo>>,
     pub window: State<WindowHandle>,
     pub window_gesture: State<Option<crate::window_chrome::NativeGesture>>,
     pub harness_refresh: State<Option<UnboundedSender<()>>>,
@@ -70,6 +71,7 @@ pub struct Model {
     pub command_argument: State<String>,
     pub command_model: State<String>,
     pub buffer: State<crate::buffer::BufferState>,
+    pub conversation_controller: State<Option<crate::conversation::Shared>>,
     pub buffer_requests: State<Option<UnboundedSender<crate::buffer_network::Request>>>,
     pub preferences: State<crate::settings::Preferences>,
     pub collapsed_agents: State<BTreeSet<String>>,
@@ -163,12 +165,14 @@ impl Model {
             harnesses: State::new(vec![]),
             harness_error: State::new(String::new()),
             server_build: State::new(None),
+            dismissed_update: State::new(None),
             catalogs: State::new(Default::default()),
             completion: State::new(None),
             command_flow: State::new(String::new()),
             command_argument: State::new(String::new()),
             command_model: State::new(String::new()),
             buffer: State::new(crate::buffer::BufferState::default()),
+            conversation_controller: State::new(None),
             buffer_requests: State::new(None),
             preferences: State::new(crate::settings::Preferences::default()),
             collapsed_agents: State::new(BTreeSet::new()),
@@ -240,10 +244,30 @@ impl Model {
             outcome_serial: State::new(0),
         }
     }
+    pub fn available_update(&self) -> Option<BuildInfo> {
+        fn revision(build: &BuildInfo) -> Option<&str> {
+            let value = build
+                .revision
+                .strip_suffix("-local")
+                .or_else(|| build.revision.strip_suffix("-dirty"))
+                .unwrap_or(&build.revision);
+            (value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .then_some(value)
+        }
+        let deployed = self.server_build.get()?;
+        let loaded = BuildInfo::current();
+        let same = revision(&loaded)?.eq_ignore_ascii_case(revision(&deployed)?)
+            && loaded.version == deployed.version;
+        (!same && self.dismissed_update.get().as_ref() != Some(&deployed)).then_some(deployed)
+    }
+
     pub fn receive(&self, update: NetworkState) {
         self.harnesses.set(update.harnesses.clone());
         self.harness_error.set(update.harness_error.clone());
-        self.server_build.set(update.server_build.clone());
+        // Failed polls and reconnects do not erase the last deployed identity.
+        if let Some(build) = &update.server_build {
+            self.server_build.set(Some(build.clone()));
+        }
         let select = !update
             .snapshot
             .projects

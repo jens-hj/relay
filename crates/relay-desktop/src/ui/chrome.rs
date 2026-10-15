@@ -3,6 +3,7 @@
 //! workspace notice.
 
 use super::*;
+use crate::panels::{BoundedPanel, BoundedPanelProps};
 use crate::window_chrome::{WindowControlsSpace, WindowControlsSpaceProps};
 use relay_ui::prelude::{CellButton, CellButtonProps, Label, LabelProps, TextRole, Tone, UiText};
 use relay_ui::surfaces::{
@@ -149,4 +150,63 @@ pub(crate) fn Notice(model: Model) -> Element {
         },
     );
     host
+}
+
+/// A deployment notice above the page; it neither takes focus nor changes layout.
+#[component]
+pub(crate) fn UpdateToast(
+    model: Model,
+    viewport_height: State<f32>,
+    #[prop(default = cfg!(target_arch = "wasm32"))] browser: bool,
+    #[prop(optional)] on_refresh: Option<relay_ui::prelude::OnPress>,
+) -> Element {
+    let update = Derived::new(move || model.available_update());
+    let refresh = State::new(on_refresh.unwrap_or_else(|| Rc::new(crate::platform::refresh)));
+    let width = State::new(0.0f32);
+    let top = Derived::new(move || {
+        px(if model.mobile_navigation.get() {
+            12.0
+        } else {
+            64.0
+        })
+    });
+    let body_limit = Derived::new(move || (viewport_height.get() - top.get() - px(56.0)).max(0.0));
+    // The host occupies no hit area; its overflowing panel remains interactive.
+    view! {
+        col height:0px align:end @layout:{move |rect:Rect| width.set(rect.size.width)} {
+            if update.get().is_some() {
+                col width:{(width.get() - px(24.0)).max(0.0).min(px(480.0))}px height:min-content
+                    min-width:0px shrink:0 gap:0px translate:(x:{-px(12.0)}px y:{top.get()}px)
+                    fill:ground.panel-raised label:"Update notification"
+                    stroke:(width:{px(1.0)} color:ground.rule-strong offset:{px(-1.0)}) {
+                    BoundedPanel limit:(body_limit) {
+                        col height:min-content min-width:0px gap:{px(6.0)}px pad:{px(12.0)}px {
+                            Label text:"New Version Available" role:(TextRole::Body) weight:500
+                            Label
+                                text:(if browser { "Refresh Relay to load the update." } else { "Update and restart Relay to use the new version." })
+                                role:(TextRole::Label) tone:(Tone::Muted)
+                        }
+                    }
+                    row height:{px(44.0)}px shrink:0 gap:0px
+                        stroke:(width:{px(1.0)} color:ground.rule edges:top) {
+                        if browser {
+                            row width:1fr min-width:0px {
+                                CellButton label:"Refresh Relay"
+                                    on-press:(refresh.get_untracked()) {
+                                    Label text:"Refresh" role:(TextRole::Label)
+                                }
+                            }
+                        }
+                        row width:1fr min-width:0px
+                            stroke:(width:{if browser {px(1.0)} else {0.0}} color:ground.rule edges:left) {
+                            CellButton label:"Dismiss update notification"
+                                on-press:(press(move || model.dismissed_update.set(update.get_untracked()))) {
+                                Label text:"Dismiss" role:(TextRole::Label)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

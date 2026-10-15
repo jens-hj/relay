@@ -34,6 +34,7 @@ pub(crate) use status::*;
 
 pub fn shell(model: Model) -> Element {
     let width = State::new(1280.0f32);
+    let height = State::new(900.0f32);
     let drawer_drag = State::new(None::<f32>);
     let mobile = Derived::new(move || crate::platform::compact_navigation(width.get()));
     Effect::new(move || {
@@ -45,7 +46,7 @@ pub fn shell(model: Model) -> Element {
         stack width:{model.browser_viewport.get().map_or(Dimension::Fill, |size| Dimension::Px(size.width))}
             height:{model.browser_viewport.get().map_or(Dimension::Fill, |size| Dimension::Px(size.height))}
             fill:ground.page safe-area:all pad:(top:{model.browser_top_clearance.get()}px) clip font-family:monospace font-color:ground.ink font-size:{px(14.0)}px {
-            row @layout:{ move |rect: Rect| width.set(rect.size.width) } {
+            row @layout:{ move |rect: Rect| { width.set(rect.size.width); height.set(rect.size.height); } } {
                 col width:{if mobile.get() {Dimension::Px(0.0)} else {Dimension::MaxContent}} shrink:0 {
                     if !mobile.get() {
                         Sidebar model:(model) viewport:(width)
@@ -101,6 +102,7 @@ pub fn shell(model: Model) -> Element {
                     }
                 }
             }
+            UpdateToast model:(model) viewport-height:(height)
             if crate::window_chrome::DRAWS_WINDOW_BUTTONS {
                 row width:max-content height:min-content
                     translate:(x:{width.get() - crate::window_chrome::window_controls_width()}px y:0px) {
