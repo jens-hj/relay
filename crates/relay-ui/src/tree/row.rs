@@ -214,7 +214,7 @@ impl TreeNav {
 
 /// One agent: expand caret, status, harness, name, child count, then the
 /// model and its effort steps, or for a collapsed manager the waiting count
-/// and a status bar of everything inside. Working rows carry a violet wash
+/// and a status bar of everything inside. Working rows carry a model-colored wash
 /// that reaches as far as the effort; waiting rows an amber wash.
 ///
 /// The row is focusable: Enter opens it, Right expands and Left collapses;
@@ -259,6 +259,7 @@ pub fn AgentTreeRow(
             let level = line.effort.map_or(0, |effort| effort.level());
             row.adopt(&view! {
                 Wash reach:(live_reach(level)) over:(under)
+                    colour:(line.model.as_ref().map(|model| model.hue.token()))
             });
         }
         AgentStatus::Waiting => {

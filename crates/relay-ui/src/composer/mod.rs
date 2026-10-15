@@ -27,21 +27,43 @@ fn quiet_send(fill: bool) -> Color {
     }
 }
 #[component]
-pub fn Ledger(data: Live<LedgerView>, actions: LedgerActions) -> Element {
+pub fn Ledger(
+    data: Live<LedgerView>,
+    actions: LedgerActions,
+    #[prop(default = false)] framed: bool,
+) -> Element {
     let width_data = data.clone();
+    let animation_clock = Rc::new(std::cell::Cell::new(0.0f64));
+    let edges = if framed {
+        StrokeEdges::ALL
+    } else {
+        StrokeEdges::RIGHT
+    };
     let host = view! {
-        col width:{px(if width_data.get().collapsed { 66.0 } else { 212.0 })}px shrink:0
-            stroke:(width:{px(1.0)} color:ground.rule edges:right) {}
+        stack width:{px(if width_data.get().collapsed { 66.0 } else { 212.0 })}px shrink:0
+            label:"Agent ledger" {}
     };
     host.switch(
         move || data.get(),
         move |parent, vm| {
-            parent.adopt(&ledger(vm.clone(), actions.clone()));
+            let content = ledger(vm.clone(), actions.clone(), animation_clock.clone());
+            if framed {
+                content.style_dyn(|| Style::default().size(Dimension::Fill, Dimension::MinContent));
+            }
+            parent.adopt(&content);
+            parent.adopt(&view! {
+                el nohit
+                    stroke:(width:{px(1.0)} color:ground.rule edges:edges offset:{px(if framed {-0.5} else {0.0})}) {}
+            });
         },
     );
     host
 }
-fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
+fn ledger(
+    vm: LedgerView,
+    actions: LedgerActions,
+    animation_clock: Rc<std::cell::Cell<f64>>,
+) -> Element {
     let colour = vm.model.hue.token();
     let mut e = vm.effort;
     if let Some(step) = vm.pending_effort {
@@ -84,6 +106,7 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
                         Dither colour:(colour) gradient:(Gradient::Corner)
                             reach:(MODEL_GLOW_COLLAPSED_REACH) opacity:(MODEL_GLOW_OPACITY) seed:3
                             breath:(Some(Breath::GLOW)) flowing:true
+                            animation-clock:(Some(animation_clock.clone()))
                         CellButton label:(label) on-press:(toggle.clone()) horizontal-inset:0.0 {
                             col width:max-content align:center justify:between
                                 pad:(vertical:{px(10.0)}px horizontal:0px) gap:{px(5.0)}px {
@@ -126,6 +149,7 @@ fn ledger(vm: LedgerView, actions: LedgerActions) -> Element {
                         Dither colour:(colour) gradient:(Gradient::Corner)
                             reach:(MODEL_GLOW_OPEN_REACH) opacity:(MODEL_GLOW_OPACITY) seed:3
                             breath:(Some(Breath::GLOW)) flowing:true
+                            animation-clock:(Some(animation_clock.clone()))
                         CellButton label:(format!("Model: {}. Change model", vm.model.name()))
                             on-press:(actions.change_model) horizontal-inset:0.0 {
                             row height:min-content align:end gap:{px(7.0)}px
@@ -215,6 +239,9 @@ pub fn ReplyStrip(quote: UiText, on_source: OnPress, on_remove: OnPress) -> Elem
 pub fn Composer(
     #[prop(default = false)] inline: bool,
     #[prop(default = Live::fixed(false))] stacked: Live<bool>,
+    /// Fixed control gutter, keeping the draft aligned when the ledger folds.
+    #[prop(default = Live::fixed(0.0))]
+    gutter_width: Live<f32>,
     #[prop(default = Live::fixed(116.0))] minimum_height: Live<f32>,
     settings: Live<LedgerView>,
     ledger_actions: LedgerActions,
@@ -295,34 +322,44 @@ pub fn Composer(
         Label text:(hint) role:(TextRole::Micro) tone:(Tone::Faint)
     });
     if inline {
+        let controls_stacked = stacked.clone();
+        // The grid cell follows the draft height. Its column keeps the controls
+        // at their natural height instead of passing that height to the ledger.
         return view! {
-            grid
-                cols:{if stacked.get() { GridTracks::new([GridTrack::fr(1.0)]) } else { GridTracks::new([GridTrack::MaxContent, GridTrack::fr(1.0)]) }}
+            grid align:start
+                cols:{if stacked.get() { GridTracks::new([GridTrack::fr(1.0)]) } else { GridTracks::new([if gutter_width.get() > 0.0 { px(gutter_width.get()).into() } else { GridTrack::MaxContent }, GridTrack::fr(1.0)]) }}
                 height:min-content min-height:{px(minimum_height.get())}px font-family:monospace
                 font-color:ground.ink {
-                row width:max-content height:min-content align:start {
-                    Ledger data:(settings) actions:(ledger_actions) height:(Dimension::MinContent)
-                    col width:{px(62.0)}px shrink:0 height:min-content gap:{px(4.0)}px
-                        pad:(top:{px(12.0)}px) {
-                        Label text:"You" role:(TextRole::Label) tone:(Tone::Muted) weight:500
-                        button
-                            @click:{if content.get_untracked() && !pending.get_untracked() && !disabled.get_untracked() { send(); }}
-                            width:fill height:{px(40.0)}px radius:0px pad:0px align:center
-                            justify:center label:"Send message"
-                            disabled:{!content.get() || pending.get() || disabled.get()}
-                            fill:(Color::TRANSPARENT) font-color:ground.ink
-                            hover { fill:ground.hover } pressed { fill:ground.pressed }
-                            focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
-                            if pending.get() {
-                                { parent.adopt(&pending_mark()); }
-                            } else {
-                                text font-size:{px(22.0)}px {"↑"}
+                col justify:start {
+                    row height:min-content align:start
+                        justify:{if controls_stacked.get() {Justify::Start} else {Justify::End}} {
+                        Ledger data:(settings) actions:(ledger_actions) framed:true
+                            height:(Dimension::MinContent)
+                        col width:{px(62.0)}px shrink:0 height:min-content gap:{px(4.0)}px {
+                            button
+                                @click:{if content.get_untracked() && !pending.get_untracked() && !disabled.get_untracked() { send(); }}
+                                width:fill height:{px(40.0)}px radius:0px pad:0px align:center
+                                justify:center label:"Send message"
+                                disabled:{!content.get() || pending.get() || disabled.get()}
+                                fill:(Color::TRANSPARENT) font-color:ground.ink
+                                stroke:(width:{px(1.0)} color:ground.rule edges:(top right bottom) offset:{px(-0.5)})
+                                hover { fill:ground.hover } pressed { fill:ground.pressed }
+                                focused {
+                                    stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)})
+                                } {
+                                if pending.get() {
+                                    { parent.adopt(&pending_mark()); }
+                                } else {
+                                    { parent.adopt(&crate::icons::icon_mark(crate::icons::mark.send, 20.0)); }
+                                }
                             }
-                        }
-                        row height:{px(40.0)}px {
-                            CellButton label:"Attach file" on-press:(on_attach)
-                                horizontal-inset:0.0 {
-                                Label text:"+" role:(TextRole::BodyLarge)
+                            stack height:{px(40.0)}px {
+                                CellButton label:"Attach file" on-press:(on_attach)
+                                    horizontal-inset:0.0 {
+                                    Label text:"+" role:(TextRole::BodyLarge)
+                                }
+                                el nohit
+                                    stroke:(width:{px(1.0)} color:ground.rule edges:(top right bottom) offset:{px(-0.5)}) {}
                             }
                         }
                     }
@@ -355,7 +392,7 @@ pub fn Composer(
                     if pending.get() {
                         { parent.adopt(&pending_mark()); }
                     } else {
-                        text font-size:{px(22.0)}px {"↑"}
+                        { parent.adopt(&crate::icons::icon_mark(crate::icons::mark.send, 20.0)); }
                     }
                 }
             }

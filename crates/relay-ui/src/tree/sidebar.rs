@@ -266,6 +266,9 @@ pub fn AgentSidebar(
     #[prop(optional)] on_toggle: Option<OnToggle>,
     #[prop(optional)] on_focus: Option<OnFocus>,
     #[prop(optional)] on_filter: Option<OnFilter>,
+    /// Additional controls directly below the status filters.
+    #[prop(optional)]
+    filter_controls: Option<Element>,
     #[prop(optional)] on_approve: Option<OnAgent>,
     #[prop(optional)] on_review: Option<OnAgent>,
     /// The sidebar foot.
@@ -494,6 +497,7 @@ pub fn AgentSidebar(
                 parent.adopt(&crumb_host);
             }
             StatusCounts tally:(tally) active:(filter_value) on-filter:(Some(set_filter))
+            { if let Some(controls) = filter_controls { parent.adopt(&controls); } }
             NeedsYou approvals:(waiting) on-approve:(on_approve) on-review:(on_review)
             {
                 parent.adopt(&section);

@@ -48,9 +48,8 @@ fn AgentProfileSelector(model: Model) -> Element {
     let trigger = view! {
         button @click:{open.set(!open.get_untracked())} label:"Select agent profile"
             width:max-content height:min-content min-width:0px align:center gap:{px(8.0)}px pad:0px
-            radius:0px fill:(Color::TRANSPARENT) stroke:(width:0px color:ground.ink)
-            hover { fill:ground.hover }
-            focused { stroke:(width:{px(1.0)} color:ground.ink edges:bottom) } {
+            radius:0px fill:(Color::TRANSPARENT) stroke:(width:0px color:{Color::TRANSPARENT})
+            hover { fill:ground.hover } focused { fill:ground.hover } {
             row width:max-content min-width:0px height:min-content clip {
                 SerifTitle text:(Derived::new(move || model.agent_template_name()))
                     size:(SerifSize::Large)
@@ -114,7 +113,8 @@ fn ProfileChangeActions(model: Model) -> Element {
     view! {
         row width:max-content shrink:0 {
             row width:{px(40.0)}px {
-                Tooltip text:"Override for this agent" height:(Dimension::Fill) {
+                Tooltip text:"Override for this agent" width:(Dimension::Fill)
+                    height:(Dimension::Fill) {
                     CellButton label:"Override for this agent" rule:(Rule::Left)
                         horizontal-inset:0.0 selected:(model.editor_override_accepted)
                         on-press:(press(move || model.editor_override_accepted.set(true))) {
@@ -123,7 +123,8 @@ fn ProfileChangeActions(model: Model) -> Element {
                 }
             }
             stack width:{px(40.0)}px {
-                Tooltip text:"Save as new profile" height:(Dimension::Fill) {
+                Tooltip text:"Save as new profile" width:(Dimension::Fill)
+                    height:(Dimension::Fill) {
                     CellButton label:"Save as new profile" rule:(Rule::Left) horizontal-inset:0.0
                         on-press:(press(move || open.set(!open.get_untracked()))) {
                         icon size:{px(14.0)}px plus-icon
@@ -133,7 +134,8 @@ fn ProfileChangeActions(model: Model) -> Element {
                     align:(OverlayAlign::End)
             }
             row width:{px(40.0)}px {
-                Tooltip text:"Discard profile changes" height:(Dimension::Fill) {
+                Tooltip text:"Discard profile changes" width:(Dimension::Fill)
+                    height:(Dimension::Fill) {
                     CellButton label:"Discard profile changes" rule:(Rule::Left)
                         horizontal-inset:0.0
                         on-press:(press(move || model.discard_profile_changes())) {

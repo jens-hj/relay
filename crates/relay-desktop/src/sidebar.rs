@@ -134,11 +134,22 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     let roots: relay_ui::Live<Vec<AgentNode>> = roots.into();
     let focused: relay_ui::Live<Option<String>> =
         Derived::new(move || model.agent_focus.get()).into();
+    let archive_control = view! {
+        row height:{px(32.0)}px shrink:0
+            stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+            CellButton label:"Show archived chats" selected:(model.show_archived)
+                on-press:(press(move || model.show_archived.set(!model.show_archived.get_untracked()))) {
+                Label
+                    text:(Derived::new(move || if model.show_archived.get() { "✓ Show archived".to_string() } else { "Show archived".to_string() }))
+                    role:(TextRole::Label) tone:(Tone::Muted)
+            }
+        }
+    };
     let agents = view! {
         AgentSidebar roots:(roots) width:(width) focus:(focused) root-indent:true framed:false
             on-new:(Some(new_agent)) on-spawn:(Some(spawn)) on-open:(Some(open))
             on-toggle:(Some(toggle)) on-focus:(Some(focus)) on-approve:(Some(approve))
-            on-review:(Some(review)) {
+            on-review:(Some(review)) filter-controls:(Some(archive_control)) {
             if !usage.get().is_empty() {
                 UsageFoot harnesses:(relay_ui::Live::from(usage))
             }
@@ -149,15 +160,6 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
         stack width:{px(width)}px shrink:0 fill:ground.panel clip label:"Sidebar" {
             col {
                 NavigationHead model:(model) menu:(menu)
-                row height:{px(32.0)}px
-                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                    CellButton label:"Show archived chats" selected:(model.show_archived)
-                        on-press:(press(move || model.show_archived.set(!model.show_archived.get_untracked()))) {
-                        Label
-                            text:(Derived::new(move || if model.show_archived.get() { "✓ Show archived".to_string() } else { "Show archived".to_string() }))
-                            role:(TextRole::Label) tone:(Tone::Muted)
-                    }
-                }
                 if menu.get() {
                     ProjectMenu model:(model) menu:(menu)
                 }

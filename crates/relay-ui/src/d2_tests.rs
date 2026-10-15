@@ -207,6 +207,29 @@ fn approval_and_spawn_callbacks_are_accessible() {
     assert!(approved.get_untracked());
 }
 #[test]
+fn approval_arguments_wrap_and_keep_actions_below_all_lines() {
+    let mounted = mount(Size::new(420.0, 700.0), || {
+        view! {
+            ApprovalBlock
+                data:(ApprovalView {
+                requester: Some("Worker".into()), path: None,
+                heading: "Approval Requested · Write".into(),
+                command: Some(format!("{{\n  \"content\": \"{}\",\n  \"file_path\": \"/workspace/approval-test.txt\"\n}}", "Long approval content ".repeat(8))),
+                why: None, touches: None, blocks: None,
+            })
+                on-approve:(noop()) on-reject:(noop()) on-review-diff:(noop())
+        }
+    });
+    let heading = mounted.rect("Approval Requested · Write");
+    let arguments = mounted.rect("Approval arguments");
+    let approve = mounted.rect("Approve");
+    assert!(arguments.size.height > 4.0 * 18.0);
+    assert!(arguments.origin.y >= heading.origin.y + heading.size.height);
+    assert!(approve.origin.y >= arguments.origin.y + arguments.size.height);
+    assert!(arguments.origin.x >= 0.0);
+    assert!(arguments.origin.x + arguments.size.width <= 420.0);
+}
+#[test]
 fn picker_reports_option_identity() {
     let selected = State::new(String::new());
     let select: Rc<dyn Fn(String)> = Rc::new(move |id| selected.set(id));

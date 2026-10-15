@@ -186,11 +186,12 @@ pub fn ControlBlock(
 }
 
 /// The 88px session header: the path in muted mono and the session name in
-/// the serif; while the session works, a violet dither fills the whole
+/// the serif; while the session works, a model-colored dither fills the whole
 /// height, reaching as far as the effort level; then the context gauge and
 /// the control block flush right.
 #[component]
 pub fn SessionHeader(
+    #[prop(optional)] model_hue: Option<crate::model::ModelHue>,
     /// Ancestor names, root first.
     #[prop(optional)]
     path: Vec<String>,
@@ -225,6 +226,7 @@ pub fn SessionHeader(
         move |parent| {
             parent.adopt(&view! {
                 Wash reach:(live_reach(level)) opacity:0.14 over:(ground.page)
+                    colour:(model_hue.map(|hue| hue.token()))
             });
         },
     );

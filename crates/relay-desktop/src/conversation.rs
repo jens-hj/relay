@@ -906,7 +906,7 @@ pub fn Conversation(model: Model) -> Element {
             row height:min-content shrink:0
                 pad:(left:{px(if compact.get() {12.0} else {28.0})}px right:{px(if compact.get() {12.0} else {36.0})}px bottom:{px(20.0)}px)
                 justify:center {
-                col width:1fr max-width:{px(848.0)}px height:min-content gap:0px label:"Inline composer" {
+                col width:1fr max-width:{px(if compact.get() {848.0} else {994.0})}px height:min-content gap:0px label:"Inline composer" {
             if model.buffer.get().approval_needed {
                 BoundedPanel limit:(auxiliary_limit) {
                     grid height:min-content gap:0px align:center
@@ -998,6 +998,7 @@ pub fn Conversation(model: Model) -> Element {
                         Label text:"Archived chat. Unarchive to continue." role:(TextRole::Caption) tone:(Tone::Muted)
                     }
                     Composer inline:true stacked:(relay_ui::Live::from(compact)) settings:(relay_ui::Live::from(ledger)) ledger-actions:(ledger_actions)
+                        gutter-width:(relay_ui::Live::fixed(274.0))
                         disabled:(relay_ui::Live::from(Derived::new(move || session.get().is_some_and(|s| s.archived))))
                         pending:(relay_ui::Live::from(Derived::new(move || model.submission_pending())))
                         on-send:(send) on-attach:(attach) editor:(Some(editor))
@@ -1215,50 +1216,55 @@ pub fn Conversation(model: Model) -> Element {
                 col height:min-content {
                     row height:min-content justify:center
                         pad:(left:{px(if compact.get() {12.0} else {28.0})}px right:{px(if compact.get() {12.0} else {36.0})}px top:{px(28.0)}px bottom:{px(24.0)}px) {
-                        col width:1fr max-width:{px(848.0)}px height:min-content gap:{px(28.0)}px
-                            label:"Transcript" {
-                            if model.searching.get() && !model.search.get().is_empty() && !model.search_snippet.get().is_empty() {
-                                row height:min-content {
-                                    text font-size:{px(12.0)}px font-color:ground.muted
-                                        {model.search_snippet.get()}
+                        col width:1fr max-width:{px(if compact.get() {848.0} else {994.0})}px
+                            height:min-content
+                            pad:(left:{px(if compact.get() {0.0} else {146.0})}px) {
+                            col width:1fr max-width:{px(848.0)}px height:min-content
+                                gap:{px(28.0)}px label:"Transcript" {
+                                if model.searching.get() && !model.search.get().is_empty() && !model.search_snippet.get().is_empty() {
+                                    row height:min-content {
+                                        text font-size:{px(12.0)}px font-color:ground.muted
+                                            {model.search_snippet.get()}
+                                    }
                                 }
-                            }
-                            if model.transport_requests.get().is_some() {
-                                row height:{px(22.0)}px align:center {
-                                    text font-size:{px(12.0)}px font-color:ground.muted
-                                        {if !model.history_error.get().is_empty() {model.history_error.get()} else if model.history_loading.get() {"Loading conversation…".into()} else {String::new()}}
-                                    if !model.history_error.get().is_empty() {
-                                        row width:{px(100.0)}px height:min-content {
-                                            { parent.adopt(&action_cell("Retry loading history", "Retry", || false, move || model.retry_history())); }
+                                if model.transport_requests.get().is_some() {
+                                    row height:{px(22.0)}px align:center {
+                                        text font-size:{px(12.0)}px font-color:ground.muted
+                                            {if !model.history_error.get().is_empty() {model.history_error.get()} else if model.history_loading.get() {"Loading conversation…".into()} else {String::new()}}
+                                        if !model.history_error.get().is_empty() {
+                                            row width:{px(100.0)}px height:min-content {
+                                                { parent.adopt(&action_cell("Retry loading history", "Retry", || false, move || model.retry_history())); }
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            for (_, message) in {model.snapshot.get().messages.into_iter().filter(|m|m.session_id==model.session.get()).map(|m|(m.id.clone(),m)).collect::<Vec<_>>()} {
-                                col height:min-content {
-                                    TranscriptMessage model:(model) message-id:(message.id.clone())
-                                        controller:(controller)
+                                for (_, message) in {model.snapshot.get().messages.into_iter().filter(|m|m.session_id==model.session.get()).map(|m|(m.id.clone(),m)).collect::<Vec<_>>()} {
+                                    col height:min-content {
+                                        TranscriptMessage model:(model)
+                                            message-id:(message.id.clone()) controller:(controller)
+                                    }
                                 }
-                            }
-                            if thinking.get() {
-                                ThinkingLine effort:(relay_ui::Live::from(thinking_level))
-                                    hue:(relay_ui::Live::from(thinking_hue))
-                            }
-                            for (_, permission) in {approvals.get().into_iter().map(|p|(p.id.clone(),p)).collect::<Vec<_>>()} {
-                                col height:min-content {
-                                    PendingApproval model:(model) permission:(permission.clone())
-                                        on-review:(review.clone())
+                                if thinking.get() {
+                                    ThinkingLine effort:(relay_ui::Live::from(thinking_level))
+                                        hue:(relay_ui::Live::from(thinking_hue))
                                 }
-                            }
-                            for (_, queued) in {model.snapshot.get().submissions.into_iter().filter(|s|s.session_id==model.session.get() && matches!(s.state,SubmissionState::Queued|SubmissionState::Paused)).map(|s|(s.id.clone(),s)).collect::<Vec<_>>()} {
-                                col height:min-content {
-                                    QueuedTurn model:(model) submission:(queued.id.clone())
+                                for (_, permission) in {approvals.get().into_iter().map(|p|(p.id.clone(),p)).collect::<Vec<_>>()} {
+                                    col height:min-content {
+                                        PendingApproval model:(model)
+                                            permission:(permission.clone())
+                                            on-review:(review.clone())
+                                    }
                                 }
-                            }
-                            if model.snapshot.get().submissions.iter().any(|s|s.session_id==model.session.get() && s.state==SubmissionState::Paused) && session.get().and_then(|s|s.worker).is_some_and(|w|!matches!(w.status,WorkerStatus::Queued|WorkerStatus::Running)) {
-                                row height:min-content pad:(left:{px(128.0)}px) {
-                                    row width:{px(160.0)}px height:min-content {
-                                        { parent.adopt(&action_cell("Resume paused queue", "Resume queue", || false, move || model.submit(Command::ResumeQueue { session_id: model.session.get_untracked() }, model.snapshot.get_untracked().revision, crate::model::Saved::Action))); }
+                                for (_, queued) in {model.snapshot.get().submissions.into_iter().filter(|s|s.session_id==model.session.get() && matches!(s.state,SubmissionState::Queued|SubmissionState::Paused)).map(|s|(s.id.clone(),s)).collect::<Vec<_>>()} {
+                                    col height:min-content {
+                                        QueuedTurn model:(model) submission:(queued.id.clone())
+                                    }
+                                }
+                                if model.snapshot.get().submissions.iter().any(|s|s.session_id==model.session.get() && s.state==SubmissionState::Paused) && session.get().and_then(|s|s.worker).is_some_and(|w|!matches!(w.status,WorkerStatus::Queued|WorkerStatus::Running)) {
+                                    row height:min-content pad:(left:{px(128.0)}px) {
+                                        row width:{px(160.0)}px height:min-content {
+                                            { parent.adopt(&action_cell("Resume paused queue", "Resume queue", || false, move || model.submit(Command::ResumeQueue { session_id: model.session.get_untracked() }, model.snapshot.get_untracked().revision, crate::model::Saved::Action))); }
+                                        }
                                     }
                                 }
                             }

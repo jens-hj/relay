@@ -19,6 +19,7 @@ use std::rc::Rc;
 /// What the session header shows; rebuilt only when it changes.
 #[derive(Clone, Debug, PartialEq)]
 struct HeaderView {
+    model_hue: Option<relay_ui::model::ModelHue>,
     path: Vec<String>,
     title: String,
     status: AgentStatus,
@@ -38,6 +39,7 @@ fn header_view(model: Model) -> HeaderView {
     let Some(session) = snapshot.sessions.iter().find(|s| s.id == id) else {
         let draft = model.page.get() == crate::model::Page::AgentStart;
         return HeaderView {
+            model_hue: None,
             path: Vec::new(),
             title: if draft {
                 "Agent conversation".into()
@@ -54,6 +56,9 @@ fn header_view(model: Model) -> HeaderView {
         };
     };
     HeaderView {
+        model_hue: adapt::session_model(session, &model.catalogs.get())
+            .0
+            .map(|model| model.hue),
         path: adapt::ancestor_path(&snapshot, &id),
         title: session.title.clone(),
         status: adapt::session_status(&snapshot, session),
@@ -113,9 +118,10 @@ pub(crate) fn SessionHead(model: Model, menu: State<bool>, compact: Derived<bool
             parent.adopt(&view! {
                 col width:1fr min-width:0px {
                     SessionHeader path:(view.path.clone()) title:(view.title.clone())
-                        status:(view.status) effort:(view.effort) context:(view.context.clone())
-                        on-compact:(compact) below:(view.below.clone()) on-below:(below)
-                        on-pause:(pause) paused:(view.paused) on-stop:(stop)
+                        model-hue:(view.model_hue) status:(view.status) effort:(view.effort)
+                        context:(view.context.clone()) on-compact:(compact)
+                        below:(view.below.clone()) on-below:(below) on-pause:(pause)
+                        paused:(view.paused) on-stop:(stop)
                 }
             });
         },

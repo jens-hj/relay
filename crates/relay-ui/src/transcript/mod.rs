@@ -133,7 +133,14 @@ pub fn ApprovalBlock(
                               }
                               { if let Some(path) = vm.path { parent.adopt(&view! { Ellipsis text:(path) role:(TextRole::Label) tone:(Tone::Muted) }); } }
                               Label text:(vm.heading) role:(TextRole::BodyLarge) weight:600
-                              { if let Some(cmd) = vm.command { parent.adopt(&view! { CodeBlock lines:(vec![CodeLine { text:cmd, ..Default::default() }]) }); } }
+                              { if let Some(cmd) = vm.command { parent.adopt(&view! {
+                                  col height:min-content min-width:0px
+                                      pad:(vertical:{px(6.0)}px horizontal:{px(12.0)}px)
+                                      fill:ground.code stroke:(width:{px(1.0)} color:ground.hairline) {
+                                      text label:"Approval arguments" height:min-content min-width:0px font-family:monospace
+                                          font-size:{px(12.0)}px line-height:1.55 {cmd.clone()}
+                                  }
+                              }); } }
                               { if let Some(why) = vm.why { parent.adopt(&view! { text font-size:{px(12.0)}px line-height:1.55 {why.clone()} }); } }
                               { if let Some(touches) = vm.touches { parent.adopt(&view! { KeyValue entries:(vec![("touches".into(), touches)]) }); } }
                               row width:max-content height:min-content gap:{px(10.0)}px {

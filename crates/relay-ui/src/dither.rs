@@ -336,11 +336,14 @@ pub fn Dither(
     /// All grains spawn at the dense edge, drift, and fade over their lifetime.
     #[prop(default = true)]
     flowing: bool,
+    /// Keeps the animation phase when its owner rebuilds this decorative layer.
+    #[prop(optional)]
+    animation_clock: Option<Rc<Cell<f64>>>,
 ) -> Element {
     let wash = view! {
         el width:fill height:fill nohit {}
     };
-    let elapsed = Rc::new(Cell::new(0.0f64));
+    let elapsed = animation_clock.unwrap_or_else(|| Rc::new(Cell::new(0.0f64)));
     if flowing || breath.is_some() {
         let elapsed = elapsed.clone();
         let target = wash.clone();
@@ -416,6 +419,9 @@ pub fn Dither(
 /// approval (the amber gradient). Covers its parent; never hit-tests.
 #[component]
 pub fn Wash(
+    /// Overrides the signal's tint while preserving its particle animation.
+    #[prop(optional)]
+    colour: Option<ColorToken>,
     /// Live (violet) or NeedsYou (amber).
     #[prop(default = Signal::Live)]
     signal: Signal,
@@ -434,7 +440,7 @@ pub fn Wash(
         _ => (Gradient::Horizontal, 7),
     };
     view! {
-        Dither colour:(signal.token()) gradient:(gradient) reach:(reach) opacity:(opacity)
-            seed:(seed) over:(over)
+        Dither colour:(colour.unwrap_or_else(|| signal.token())) gradient:(gradient) reach:(reach)
+            opacity:(opacity) seed:(seed) over:(over)
     }
 }

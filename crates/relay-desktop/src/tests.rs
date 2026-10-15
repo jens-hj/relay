@@ -3185,7 +3185,7 @@ fn inline_permission_answers_exact_run_and_disappears_when_expired() {
         ..Default::default()
     });
     mounted.settle();
-    let description = mounted.rect("notes.txt");
+    let description = mounted.rect("Approval arguments");
     let request = mounted.rect("Approval request");
     assert!(
         description.size.height > 0.0,
@@ -6103,6 +6103,14 @@ fn conversation_tracks_constrain_recorded_text_and_draft_to_the_reading_width() 
         "draft {:?} within the reading column {column:?}",
         draft.rect
     );
+    assert!(
+        (draft.rect.origin.x - text.origin.x - 16.0).abs() < 1.0,
+        "draft text must align with the message body padding: {:?} {text:?}",
+        draft.rect
+    );
+    mounted.click("Collapse agent settings");
+    let folded = mounted.rect("Next message");
+    assert!((folded.origin.x - draft.rect.origin.x).abs() < 1.0);
 }
 
 #[test]
@@ -8801,6 +8809,19 @@ fn draft_shares_the_transcript_viewport_and_has_a_full_width_boundary() {
     assert_eq!(boundary.origin.x, viewport.origin.x);
     let editor = mounted.rect("Next message");
     assert!(mounted.rect("Send message").origin.x < editor.origin.x);
+    let ledger_height = mounted.rect("Agent ledger").size.height;
+    crate::buffer::edit(
+        mounted.model,
+        "session-plan",
+        vec![Part::text("Draft line\n".repeat(40))],
+    );
+    mounted.settle();
+    assert!(
+        (mounted.rect("Agent ledger").size.height - ledger_height).abs() < 1.0,
+        "ledger grew from {ledger_height} to {:?}",
+        mounted.rect("Agent ledger")
+    );
+    assert!(mounted.rect("Next message").size.height > ledger_height);
     let controller = mounted.model.ui.get_untracked().inspection_snapshot();
     assert!(
         !controller
