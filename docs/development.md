@@ -224,4 +224,6 @@ External-network transport is tracked in [issue #26](https://github.com/jens-hj/
 
 Validation includes `cargo test -p relay-server transport::tests`, headless native paging/acknowledgement tests, `cargo check --target wasm32-unknown-unknown -p relay-desktop`, and `just check`, all inside this flake’s development environment. The transport test serves an archive exceeding 3.35 MB through a TCP proxy with 1 Mbit/s downstream bandwidth and 150 ms initial round-trip delay; it checks acknowledgements below 1 KiB and one second, bounded initial history, and exact retry without duplicate mutation.
 
+See [deployment](deployment.md) for independent activation, rollback safeguards, and resumable public verification.
+
 An isolated Chromium/WebGPU run with a 3,743,289-byte archive observed a 4,724-byte metadata reset, a 190,168-byte initial history update, and a 76-byte command acknowledgement received in 201 ms. No full-snapshot client requests were observed, and the independent ping route was exercised. Chromium’s software adapter hit the pinned Mosaic GPU timer’s “Buffer is already mapped” panic; the transport run therefore masked the optional `timestamp-query` adapter feature. This is a graphics validation limitation, not an acceptance claim for ordinary browser GPU timing. No dependency pin was changed.

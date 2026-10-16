@@ -196,6 +196,14 @@ test:
 lint:
     cargo clippy --locked --workspace --all-targets -- -D warnings
 
+# Run the deployment helper; activation still requires explicit authorization.
+deploy *args:
+    nix develop .#web --command python3 -B nix/deploy-relay.py "$@"
+
+# Check deployment decisions without changing live services or data.
+deploy-check:
+    nix develop .#web --command python3 -B -m unittest discover -s nix -p test_deploy_relay.py
+
 # Format Rust, Mosaic views, and Nix files.
 fmt:
     just --fmt
@@ -215,4 +223,4 @@ nix-check:
     nix flake check --no-build
 
 # Run the project's validation commands.
-check: test lint fmt-check nix-check
+check: test deploy-check lint fmt-check nix-check
