@@ -9711,6 +9711,61 @@ fn queued_gutter_actions_fit_short_messages_and_work_with_keyboard_at_each_scale
         let text = mounted.rect("Short message");
         let number = mounted.rect("01");
         assert!(queued.size.height <= 88.0 * scale, "{queued:?}");
+        let tree = mounted.ui.inspection_snapshot();
+        let number_node = tree
+            .nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some("01"))
+            .unwrap();
+        let number_cell = tree.node(number_node.parent.unwrap()).unwrap().rect;
+        assert!((number.center().y - number_cell.center().y).abs() < 0.1);
+        assert!((number.center().y - (queued.origin.y + 10.0 * scale)).abs() < 0.1);
+        let number_glyphs: Vec<_> = mounted
+            .ui
+            .scene()
+            .cmds
+            .iter()
+            .filter_map(|command| match command {
+                mosaic::render::PaintCmd::Glyphs(run) => Some(&run.glyphs),
+                _ => None,
+            })
+            .flatten()
+            .filter(|glyph| number_cell.contains(glyph.dest.center()))
+            .map(|glyph| glyph.dest)
+            .collect();
+        assert_eq!(number_glyphs.len(), 2, "expected both painted digits");
+        for glyph in number_glyphs {
+            assert!(
+                (glyph.center().y - number_cell.center().y).abs() < 0.1,
+                "scale={scale}: number glyph={glyph:?}, cell={number_cell:?}"
+            );
+        }
+        // Inspect the rendered SVG leaf, not just its full-height wrapper or hit target.
+        for label in labels {
+            let button = tree
+                .nodes
+                .iter()
+                .find(|n| n.label.as_deref() == Some(label))
+                .unwrap();
+            let mut descendants = button.children.clone();
+            let mut glyphs = Vec::new();
+            while let Some(id) = descendants.pop() {
+                let node = tree.node(id).unwrap();
+                descendants.extend(&node.children);
+                if node.role == Role::Image {
+                    glyphs.push(node.rect);
+                }
+            }
+            assert_eq!(glyphs.len(), 1, "{label}: expected one SVG glyph");
+            let glyph = glyphs[0];
+            assert!((glyph.size.height - 12.0 * scale).abs() < 0.1);
+            assert!((glyph.center().x - button.rect.center().x).abs() < 0.1);
+            assert!(
+                (glyph.center().y - button.rect.center().y).abs() < 0.1,
+                "scale={scale}, {label}: glyph={glyph:?}, button={:?}",
+                button.rect
+            );
+        }
         mounted.ui.dispatch_pointer(PointerEvent {
             kind: PointerEventKind::Move,
             position: mounted.rect(labels[0]).center(),

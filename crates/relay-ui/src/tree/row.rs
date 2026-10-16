@@ -406,7 +406,7 @@ pub fn AgentTreeRow(
                 shrink:0 align:center justify:center pad:0px radius:0px fill:(under)
                 label:(format!("Edit {}", line.name)) hover { fill:ground.panel-raised }
                 focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
-                { parent.adopt(&crate::marks::mark(crate::marks::Mark::Pencil, 12.0, ground.ink)); }
+                { parent.adopt(&crate::icons::icon_mark(crate::icons::mark.edit, 12.0)); }
             }
         };
         let visible = reveal_row_action(&row, &action, Live::fixed(false));

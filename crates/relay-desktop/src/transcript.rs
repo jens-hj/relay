@@ -306,7 +306,7 @@ pub(crate) fn QueuedTurn(model: Model, submission: String) -> Element {
                 stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {
                 col width:{px(34.0)}px height:min-content shrink:0 gap:0px {
                     row height:{px(20.0)}px shrink:0 align:center justify:center {
-                        Label text:(position) role:(TextRole::Caption) tone:(Tone::Muted) weight:500
+                        { parent.adopt(&queued_position(model, position)); }
                     }
                     {
                         parent.adopt(&queued_action("Cancel queued message", relay_ui::icons::mark.remove, Tone::Signal(relay_ui::tokens::Signal::Failed), move || model.submit(Command::CancelTurn { submission_id: id.get_untracked() }, model.snapshot.get_untracked().revision, crate::model::Saved::Action)));
@@ -469,6 +469,40 @@ pub(crate) fn choose_effort(model: Model, step: u8) {
     );
 }
 
+/// Center the painted digits, whose ink is asymmetric inside the font's line box.
+fn queued_position(model: Model, position: Derived<String>) -> Element {
+    let host = view! {
+        el width:fill height:fill nohit label:{position.get()} font-family:monospace
+            font-size:{px(TextRole::Caption.size())}px font-weight:500 font-color:ground.muted {}
+    };
+    host.role(Role::Label);
+    let repaint = host.clone();
+    Effect::new(move || {
+        let _ = position.get();
+        repaint.content_dirty();
+    });
+    let fonts = model.ui.get_untracked().fonts();
+    host.paint(move |ctx| {
+        let mut fonts = fonts.borrow_mut();
+        let shaped = fonts.shape(&position.get_untracked(), &ctx.text_style, None);
+        let origin = Vector2::new(ctx.rect.center().x - shaped.metrics().size.width / 2.0, 0.0);
+        let mut run = shaped.place(&mut fonts, ctx.text_color.clone(), origin, ctx.scale);
+        let Some(first) = run.glyphs.first() else {
+            return;
+        };
+        let bounds = run
+            .glyphs
+            .iter()
+            .fold(first.dest, |bounds, glyph| bounds.union(glyph.dest));
+        let offset = Vector2::new(0.0, ctx.rect.center().y - bounds.center().y);
+        for glyph in &mut run.glyphs {
+            glyph.dest = glyph.dest.translate(offset);
+        }
+        ctx.scene.glyphs(run);
+    });
+    host
+}
+
 /// A compact action in the queue-number gutter, described on hover and focus.
 fn queued_action(
     label: &'static str,
@@ -481,7 +515,8 @@ fn queued_action(
             row width:{px(34.0)}px height:{px(20.0)}px shrink:0 {
                 CellButton label:(label) rule:(Rule::Top) horizontal-inset:(0.0)
                     on-press:(press(handler)) {
-                    row width:max-content font-color:{mosaic::core::theme::color(tone.token())} {
+                    row width:max-content height:min-content
+                        font-color:{mosaic::core::theme::color(tone.token())} {
                         { parent.adopt(&relay_ui::icons::icon_mark(icon, 12.0)); }
                     }
                 }
