@@ -9,6 +9,7 @@ mod command_ui;
 mod controls;
 mod conversation;
 mod icons;
+mod latest;
 mod markdown;
 mod model;
 mod network;
@@ -83,7 +84,7 @@ fn run(config: network::Config) -> Result<(), String> {
         .clear(relay_ui::tokens::ground.page)
         .run(move |ui, context| {
             relay_ui::install(ui);
-            let (updates, sender) = state_channel(network::NetworkState::default());
+            let (updates, sender) = latest::channel(network::NetworkState::default());
             let (commands, harness_refresh, transport_requests) =
                 network::start(config.clone(), sender);
             let model = model::Model::new(ui, commands);
@@ -138,7 +139,9 @@ fn run(config: network::Config) -> Result<(), String> {
             settings::bind(model, context.clone());
             let setup_offered = State::new(false);
             Effect::new(move || {
-                model.receive(updates.get());
+                if let Some(update) = updates.take() {
+                    model.receive(update);
+                }
                 if model.connected.get_untracked() && !setup_offered.get_untracked() {
                     setup_offered.set(true);
                     if !platform::demo()

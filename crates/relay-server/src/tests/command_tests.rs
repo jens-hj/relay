@@ -1489,7 +1489,7 @@ async fn archived_chat_is_readable_but_cannot_execute_until_unarchived() {
 }
 
 #[tokio::test]
-async fn prelaunch_selection_is_saved_and_used_for_the_first_turn() {
+async fn stale_creates_and_first_turn_use_current_selection_and_run_once() {
     let dir = tempfile::tempdir().unwrap();
     let (w, _, capture) = setup(dir.path()).await;
     let before = w.store.lock().unwrap().snapshot().unwrap();
@@ -1533,6 +1533,60 @@ async fn prelaunch_selection_is_saved_and_used_for_the_first_turn() {
         .await
         .unwrap();
     let config = before.agent_configs[0].id.clone();
+    for command in [
+        Command::SaveAgentTemplate {
+            project_id: before.projects[0].id.clone(),
+            name: "Concurrent profile".into(),
+            profile: AgentProfile::worker(&before.projects[0].defaults),
+        },
+        Command::CreateAgentConfig {
+            project_id: before.projects[0].id.clone(),
+            name: "Concurrent agent".into(),
+            template: "worker".into(),
+            overrides: ProfileOverrides {
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+        },
+    ] {
+        let request = env(0, command);
+        for _ in 0..2 {
+            let response = client
+                .post(format!("{endpoint}/v1/commands"))
+                .bearer_auth(&token)
+                .header("x-relay-protocol", PROTOCOL_VERSION)
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+        }
+    }
+    let before: Snapshot = client
+        .get(format!("{endpoint}/v1/snapshot"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        before
+            .agent_templates
+            .iter()
+            .filter(|p| p.name == "Concurrent profile")
+            .count(),
+        1
+    );
+    assert_eq!(
+        before
+            .agent_configs
+            .iter()
+            .filter(|a| a.name == "Concurrent agent")
+            .count(),
+        1
+    );
     let selected = HarnessSelection {
         model: Some("test-model".into()),
         effort: Some("high".into()),
@@ -1563,8 +1617,10 @@ async fn prelaunch_selection_is_saved_and_used_for_the_first_turn() {
         .await
         .unwrap();
     assert_eq!(saved.agent_configs[0].draft_selection, selected);
+    // The selection and completed worker have advanced the workspace since
+    // the client opened its draft. Starting an independent chat remains safe.
     let request = env(
-        saved.revision,
+        0,
         Command::StartRootAgent {
             agent_config_id: config.clone(),
             issue_id: Some(saved.issues[0].id.clone()),
@@ -1592,6 +1648,16 @@ async fn prelaunch_selection_is_saved_and_used_for_the_first_turn() {
         .json()
         .await
         .unwrap();
+    let duplicate = client
+        .post(format!("{endpoint}/v1/commands"))
+        .bearer_auth(&token)
+        .header("x-relay-protocol", PROTOCOL_VERSION)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert!(duplicate.status().is_success());
+    assert_eq!(launched.sessions.iter().filter(|s| s.id == id).count(), 1);
     let agent = launched.sessions.iter().find(|s| s.id == id).unwrap();
     assert!(agent.automatic_name);
     let Command::StartRootAgent { prompt, .. } = &request.command else {

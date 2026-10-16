@@ -6,7 +6,7 @@ use wasm_bindgen_futures::spawn_local;
 
 pub fn start(
     config: Config,
-    ui: StateSender<NetworkState>,
+    ui: crate::latest::Sender<NetworkState>,
 ) -> (
     mpsc::UnboundedSender<CommandEnvelope>,
     mpsc::UnboundedSender<()>,

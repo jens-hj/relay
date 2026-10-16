@@ -39,6 +39,20 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::sync::watch;
 
+// These commands append request-ID-owned records or consume a separately
+// versioned draft. Their transactional handlers validate current references,
+// permissions, profiles and run state. Replacements still need an exact revision.
+fn accepts_stale_workspace_revision(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::SaveAgentTemplate { .. }
+            | Command::CreateAgentConfig { .. }
+            | Command::StartRootAgent { .. }
+            | Command::StartSession { .. }
+            | Command::SubmitTurn { .. }
+    )
+}
+
 #[derive(Debug)]
 pub struct Error {
     status: StatusCode,
@@ -312,8 +326,9 @@ impl Store {
             }
             return Ok((snapshot, None));
         }
-        if snapshot.revision != envelope.expected_revision
-            && !matches!(envelope.command, Command::SubmitTurn { .. })
+        if envelope.expected_revision > snapshot.revision
+            || (snapshot.revision != envelope.expected_revision
+                && !accepts_stale_workspace_revision(&envelope.command))
         {
             return Err(Error::new(
                 StatusCode::CONFLICT,

@@ -235,9 +235,13 @@ pub fn AgentTreeRow(
     /// Creates a child of this agent.
     #[prop(optional)]
     on_spawn: Option<OnAgent>,
+    #[prop(optional)] on_edit: Option<OnAgent>,
     #[prop(optional)] on_archive: Option<OnAgent>,
     #[prop(optional)] on_delete: Option<OnAgent>,
     #[prop(default = Live::fixed(false))] can_archive: Live<bool>,
+    /// Keep overflowing actions within the tree's vertical viewport.
+    #[prop(optional)]
+    action_viewport: Option<State<Rect>>,
     /// Arrow-key navigation across the tree this row belongs to.
     #[prop(optional)]
     nav: Option<Rc<TreeNav>>,
@@ -344,79 +348,146 @@ pub fn AgentTreeRow(
             content.adopt(&view! {
                 EffortTrack levels:(effort.levels) current:(effort.track_step())
                     tiers:(effort.tiers) colour:(model.hue.token()) size:(TrackSize::Compact)
+                    orientation:(Orientation::Vertical)
             });
         }
     }
     row.adopt(&outer);
     let actions = view! {
-        row width:max-content place:end align:center gap:{px(4.0)}px pad:(right:{px(14.0)}px) {}
+        row width:0px height:{px(ROW_HEIGHT)}px place:end align:center
+            label:(format!("Actions for {}", line.name)) {}
     };
+    // Escape the scroll viewport and sidebar clips without taking row space.
+    actions.overlay(true);
+    if let Some(viewport) = action_viewport {
+        let bounds = State::new(Rect::default());
+        row.on_layout(move |rect| bounds.set(rect));
+        let actions = actions.clone();
+        Effect::new(move || {
+            let row = bounds.get();
+            let viewport = viewport.get();
+            // Hide partial rows too: controls must never cover the header or footer.
+            let visible = row.size.height > 0.0
+                && row.origin.y >= viewport.origin.y
+                && row.max_y() <= viewport.max_y();
+            actions.opacity(if visible { 1.0 } else { 0.0 });
+            actions.hit_testable(visible);
+        });
+    }
     if let Some(spawn) = on_spawn.filter(|_| !line.archived) {
         let id = line.id.clone();
         let action = view! {
-            button @click:{spawn(id.clone())} width:{px(26.0)}px height:{px(26.0)}px shrink:0
-                align:center justify:center pad:0px radius:0px fill:(under)
+            button @click:{spawn(id.clone())} width:{px(ROW_HEIGHT)}px height:{px(ROW_HEIGHT)}px
+                shrink:0 align:center justify:center pad:0px radius:0px fill:(under)
                 disabled:{!line.can_spawn} label:(format!("New worker for {}", line.name))
                 hover { fill:ground.panel-raised }
                 focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
                 { parent.adopt(&crate::marks::mark(crate::marks::Mark::Plus, 12.0, ground.ink)); }
             }
         };
-        reveal_row_action(&row, &action, Live::fixed(false));
-        actions.adopt(&view! {
+        let visible = reveal_row_action(&row, &action, Live::fixed(false));
+        let host = view! {
             Tooltip
                 text:(if line.can_spawn { "New Worker" } else { "New Worker · start this agent first" }) {
                 { parent.adopt(&action); }
             }
+        };
+        let hit_host = host.clone();
+        Effect::new(move || {
+            hit_host.hit_testable(visible.get());
         });
+        actions.adopt(&host);
+    }
+
+    if let Some(edit) = on_edit {
+        let id = line.id.clone();
+        let action = view! {
+            button @click:{edit(id.clone())} width:{px(ROW_HEIGHT)}px height:{px(ROW_HEIGHT)}px
+                shrink:0 align:center justify:center pad:0px radius:0px fill:(under)
+                label:(format!("Edit {}", line.name)) hover { fill:ground.panel-raised }
+                focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
+                { parent.adopt(&crate::marks::mark(crate::marks::Mark::Pencil, 12.0, ground.ink)); }
+            }
+        };
+        let visible = reveal_row_action(&row, &action, Live::fixed(false));
+        let host = view! {
+            Tooltip text:"Edit Profile" {
+                { parent.adopt(&action); }
+            }
+        };
+        let hit_host = host.clone();
+        Effect::new(move || {
+            hit_host.hit_testable(visible.get());
+        });
+        actions.adopt(&host);
     }
 
     if let Some(archive) = on_archive.filter(|_| !line.archived) {
         let id = line.id.clone();
-        let action = view! {
-            button @click:{archive(id.clone())} width:{px(26.0)}px height:{px(26.0)}px shrink:0
-                align:center justify:center pad:0px radius:0px fill:(under)
-                label:(format!("Archive {}", line.name)) hover { fill:ground.panel-raised }
-                focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
-                { parent.adopt(&crate::marks::mark(crate::marks::Mark::Archive, 12.0, ground.ink)); }
-            }
+        let name = line.name.clone();
+        let row = row.clone();
+        let host = view! {
+            row width:max-content height:min-content shrink:0 {}
         };
-        reveal_row_action(&row, &action, Live::fixed(false));
-        actions.adopt(&view! {
-            row width:max-content height:min-content {
-                if can_archive.get() {
-                    let action = action.clone();
-                    Tooltip text:"Archive Branch" {
-                        { parent.adopt(&action); }
-                    }
+        host.show(move || can_archive.get(), move |parent| {
+            let archive = archive.clone();
+            let id = id.clone();
+            let name = name.clone();
+            let action = view! {
+                button @click:{archive(id.clone())} width:{px(ROW_HEIGHT)}px
+                    height:{px(ROW_HEIGHT)}px shrink:0 align:center justify:center pad:0px
+                    radius:0px fill:(under) label:(format!("Archive {name}"))
+                    hover { fill:ground.panel-raised }
+                    focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
+                    { parent.adopt(&crate::marks::mark(crate::marks::Mark::Archive, 12.0, ground.ink)); }
                 }
-            }
+            };
+            // Reconcile the hover bindings with this conditional button.
+            let scope = Scope::new(|| {});
+            let visible = scope.run(|| reveal_row_action(&row, &action, Live::fixed(false)));
+            action.on_exit(move |_, done| { scope.dispose(); done.finish(); });
+            let tooltip = view! {
+                Tooltip text:"Archive Branch" {
+                    { parent.adopt(&action); }
+                }
+            };
+            let hit_host = tooltip.clone();
+            scope.run(|| Effect::new(move || { hit_host.hit_testable(visible.get()); }));
+            parent.adopt(&tooltip);
         });
+        actions.adopt(&host);
     }
 
     if let Some(delete) = on_delete.filter(|_| line.archived || line.can_delete) {
         let confirm = State::new(false);
         let id = line.id.clone();
+        let name = line.name.clone();
         let action = view! {
             button
                 @click:{if confirm.get_untracked() { delete(id.clone()); } else { confirm.set(true); }}
-                width:max-content min-width:{px(26.0)}px height:{px(26.0)}px shrink:0 align:center
-                justify:center gap:{px(6.0)}px pad:(horizontal:{px(7.0)}px vertical:0px) radius:0px
-                fill:(under) label:(format!("Delete {}", line.name))
+                width:{px(ROW_HEIGHT)}px height:{px(ROW_HEIGHT)}px shrink:0 align:center
+                justify:center pad:0px radius:0px fill:(under)
+                label:{if confirm.get() { format!("Confirm deletion of {name}") } else { format!("Delete {name}") }}
                 hover { fill:ground.panel-raised }
                 focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
-                { parent.adopt(&crate::marks::mark(crate::marks::Mark::Trash, 12.0, ground.ink)); }
                 if confirm.get() {
-                    Label text:"Confirm Deletion" role:(TextRole::Label)
+                    { parent.adopt(&crate::marks::mark(crate::marks::Mark::Check, 12.0, ground.ink)); }
+                } else {
+                    { parent.adopt(&crate::marks::mark(crate::marks::Mark::Trash, 12.0, ground.ink)); }
                 }
             }
         };
-        reveal_row_action(&row, &action, confirm.into());
-        actions.adopt(&view! {
-            Tooltip text:"Delete Branch Permanently" {
+        let visible = reveal_row_action(&row, &action, confirm.into());
+        let host = view! {
+            Tooltip text:"Delete Branch Permanently (Two Clicks)" {
                 { parent.adopt(&action); }
             }
+        };
+        let hit_host = host.clone();
+        Effect::new(move || {
+            hit_host.hit_testable(visible.get());
         });
+        actions.adopt(&host);
     }
     row.adopt(&actions);
 
@@ -590,7 +661,7 @@ pub fn FoldedBranch(
 
 // Row focus follows pointer selection; only the action's own focus reveals it.
 // Preserve a press or pending confirmation after the pointer leaves.
-fn reveal_row_action(row: &Element, action: &Element, confirming: Live<bool>) {
+fn reveal_row_action(row: &Element, action: &Element, confirming: Live<bool>) -> Derived<bool> {
     let interaction = row.interaction();
     let button_interaction = action.interaction();
     let visible = Derived::new(move || {
@@ -641,4 +712,5 @@ fn reveal_row_action(row: &Element, action: &Element, confirming: Live<bool>) {
             ctx.stop_propagation();
         }
     });
+    visible
 }

@@ -16,6 +16,8 @@ pub enum Mark {
     Plus,
     /// An archive tray with its lid.
     Archive,
+    /// A pencil for editing.
+    Pencil,
     Trash,
     /// An arrow pointing up: Back to root (12-unit box).
     ArrowUp,
@@ -82,6 +84,21 @@ pub fn paint_mark(scene: &mut Scene, rect: Rect, mark: Mark, tint: Color) {
         Mark::Plus => {
             line(scene, &[(6.0, 1.0), (6.0, 11.0)], 1.3);
             line(scene, &[(1.0, 6.0), (11.0, 6.0)], 1.3);
+        }
+        Mark::Pencil => {
+            line(
+                scene,
+                &[
+                    (2.0, 8.0),
+                    (8.5, 1.5),
+                    (10.5, 3.5),
+                    (4.0, 10.0),
+                    (1.5, 10.5),
+                    (2.0, 8.0),
+                ],
+                1.2,
+            );
+            line(scene, &[(7.0, 3.0), (9.0, 5.0)], 1.2);
         }
         Mark::Archive => {
             line(

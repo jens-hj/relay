@@ -793,6 +793,9 @@ fn request_sending_and_send_pending_clear_on_ack_and_conflicts_keep_actions() {
     mounted.key(Key::Escape, false);
     assert!(mounted.model.notice.get_untracked().is_empty());
     assert!(mounted.model.can_retry());
+    for label in ["Review conflict for new request", "Retry original request"] {
+        assert!(mounted.rect(label).size.width > 0.0);
+    }
     mounted.model.retry_pending();
     assert!(mounted.model.sending() && mounted.model.submission_pending());
 }
@@ -2129,6 +2132,49 @@ fn known_conflict_requires_explicit_new_request_rebase_and_retains_draft() {
         serde_json::to_value(&rebased.command).unwrap(),
         serde_json::to_value(&original.command).unwrap()
     );
+}
+
+#[test]
+fn first_message_explains_an_unresolved_request_and_retains_its_draft() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(live_snapshot());
+    mounted.model.issue.set(Some("issue-2".into()));
+    mounted.model.worker_prompt.set("Original prompt".into());
+    mounted.model.worker_approval.set(true);
+    mounted.model.run_worker(false);
+    let original = mounted.commands.try_recv().unwrap();
+    mounted.model.receive(NetworkState {
+        snapshot: mounted.model.snapshot.get_untracked(),
+        connected: true,
+        outcome: Some((original.request_id, Err("Revision conflict".into()))),
+        outcome_serial: 1,
+        outcome_conflict: true,
+        ..Default::default()
+    });
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    let mut config = snapshot.agent_configs[0].clone();
+    config.id = "unrelated-draft".into();
+    snapshot.agent_configs.push(config);
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_root_agent("unrelated-draft".into());
+    let draft = mounted.model.session.get_untracked();
+    assert_eq!(mounted.model.page.get_untracked(), Page::AgentStart);
+    crate::buffer::edit(mounted.model, &draft, vec![Part::text("Keep this draft")]);
+    mounted.model.notice.set(String::new());
+    crate::buffer::send(mounted.model);
+    assert_eq!(
+        mounted.model.notice.get_untracked(),
+        "Resolve the previous request before sending another message"
+    );
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, &draft)),
+        "Keep this draft"
+    );
+    assert!(mounted.model.can_retry());
+    assert!(mounted.commands.try_recv().is_err());
+    mounted.settle();
+    mounted.key(Key::Escape, false);
+    assert!(mounted.rect("Review conflict for new request").size.width > 0.0);
 }
 
 #[test]
@@ -7355,11 +7401,11 @@ fn deep_branches_fold_and_focus_re_roots_the_tree_with_a_breadcrumb() {
         mounted.model.agent_focus.get_untracked().as_deref(),
         Some("session-backfill")
     );
-    assert!(has_label(&mounted, "depth 3"));
+    assert!(has_label(&mounted, "Depth 3"));
     assert!(has_label(&mounted, "Verify backfill"));
     assert!(has_row(&mounted, "Index check"));
     assert!(!has_row(&mounted, "Migration tests"));
-    mounted.click("Back to root");
+    mounted.click("Back to Root");
     assert_eq!(mounted.model.agent_focus.get_untracked(), None);
     assert!(has_row(&mounted, "Migration tests"));
     // Collapsing a manager hides its branch and keeps what waits below it.
@@ -9094,6 +9140,81 @@ fn archived_chat_is_hidden_by_default_readable_when_shown_and_cannot_send() {
     crate::buffer::send(mounted.model);
     assert!(mounted.commands.try_recv().is_err());
     assert!(mounted.model.notice.get_untracked().contains("Unarchive"));
+    let row = mounted.rect("Archived transcript test");
+    let delete = mounted.rect("Delete Archived transcript test");
+    let edit = mounted.rect("Edit Archived transcript test");
+    assert_eq!(edit.origin.x, row.max_x());
+    assert_eq!(edit.origin.x, mounted.rect("Sidebar").max_x());
+    assert_eq!(delete.origin.x, edit.max_x());
+    assert_eq!(delete.size.width, row.size.height);
+    assert_eq!(delete.size.height, row.size.height);
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Move,
+        position: row.center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: Duration::ZERO,
+    });
+    mounted.settle();
+    // Exercise the mounted desktop's Sidebar clip and scroll clip, with an
+    // opaque ordinary sibling painted later at the overflow coordinates.
+    let sibling_clicks = State::new(0);
+    let sibling_fill = Color::new(1.0, 0.0, 1.0, 1.0);
+    let sibling = mounted
+        .ui
+        .root()
+        .child(Style::default().size(delete.size.width, delete.size.height));
+    sibling.translate(delete.origin);
+    sibling.visual(mosaic::widgets::Visual::new().fill(sibling_fill));
+    sibling.on_pointer(move |event, _| {
+        if matches!(event.kind, PointerEventKind::Click(PointerButton::Primary)) {
+            sibling_clicks.update(|count| *count += 1);
+        }
+    });
+    mounted.settle();
+    assert_eq!(sibling.layout_rect(), delete);
+    let scene = mounted.ui.scene();
+    let mut clips = Vec::new();
+    let mut sibling_paint = None;
+    let mut action_paint = None;
+    for (index, command) in scene.cmds.iter().enumerate() {
+        match command {
+            mosaic::render::PaintCmd::PushClip(clip) => clips.push(*clip),
+            mosaic::render::PaintCmd::PopClip => {
+                clips.pop();
+            }
+            mosaic::render::PaintCmd::Shape(shape) if shape.rect == delete => {
+                if shape.fill.as_solid() == Some(sibling_fill) {
+                    sibling_paint = Some(index);
+                } else if shape.fill.as_solid().is_some() {
+                    assert!(
+                        clips.iter().all(|clip| clip.contains(delete.center())),
+                        "Desktop ancestors must not clip the overflowing action"
+                    );
+                    action_paint = Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        action_paint.unwrap() > sibling_paint.unwrap(),
+        "Session actions must paint above later ordinary desktop siblings"
+    );
+    drop(scene);
+    mounted.click("Delete Archived transcript test");
+    assert!(mounted.commands.try_recv().is_err());
+    assert_eq!(
+        mounted.rect("Confirm deletion of Archived transcript test"),
+        delete
+    );
+    mounted.click("Confirm deletion of Archived transcript test");
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::DeleteSessionBranch { session_id } if session_id == "session-plan"
+    ));
+    assert_eq!(sibling_clicks.get_untracked(), 0);
+    sibling.remove();
     mounted.model.snapshot.update(|snapshot| {
         snapshot
             .sessions
@@ -9238,9 +9359,16 @@ fn unused_chat_deletion_requires_confirmation_and_recovers_selection() {
         });
         mounted.settle();
         // Unstarted chats offer the same confirmed deletion control as archived chats.
+        let row = mounted.rect("New director");
+        let delete = mounted.rect("Delete New director");
+        assert!(delete.origin.x >= row.max_x());
+        assert!(delete.origin.x >= mounted.rect("Sidebar").max_x());
+        assert_eq!(delete.size.width, row.size.height);
+        assert_eq!(delete.size.height, row.size.height);
         mounted.click("Delete New director");
         assert!(mounted.commands.try_recv().is_err());
-        mounted.click("Delete New director");
+        assert_eq!(mounted.rect("Confirm deletion of New director"), delete);
+        mounted.click("Confirm deletion of New director");
         let request = mounted.commands.try_recv().unwrap();
         assert!(
             matches!(&request.command, Command::RemoveAgentConfig { agent_config_id } if agent_config_id == "unused")
@@ -9257,7 +9385,7 @@ fn unused_chat_deletion_requires_confirmation_and_recovers_selection() {
             plain_text(&crate::buffer::parts(mounted.model, &draft_id)),
             "Draft prompt"
         );
-        mounted.click("Delete New director");
+        mounted.click("Confirm deletion of New director");
         let retry = mounted.commands.try_recv().unwrap();
         let mut snapshot = mounted.model.snapshot.get_untracked();
         snapshot.apply(retry.command, &retry.request_id, 1).unwrap();
@@ -9609,10 +9737,15 @@ fn queued_gutter_actions_fit_short_messages_and_work_with_keyboard_at_each_scale
             timestamp: Duration::ZERO,
         });
         mounted.settle();
-        let mut bottom = number.max_y();
+        let mut bottom = queued.origin.y + 20.0 * scale;
         for label in labels {
             let button = mounted.rect(label);
-            assert!(button.origin.y >= bottom - 0.1, "{label}: {button:?}");
+            assert!(
+                (button.origin.y - bottom).abs() < 0.1,
+                "{label}: {button:?}"
+            );
+            assert!((button.origin.x - queued.origin.x).abs() < 0.1);
+            assert!((button.size.width - 34.0 * scale).abs() < 0.1);
             assert!(button.max_x() < text.origin.x, "{label} stays in gutter");
             assert!(button.origin.x >= queued.origin.x && button.max_y() <= queued.max_y() + 0.1);
             assert!(
@@ -9633,6 +9766,22 @@ fn queued_gutter_actions_fit_short_messages_and_work_with_keyboard_at_each_scale
             );
             assert_control_hit(&mounted, label);
         }
+        // Long content grows the message without stretching the action cells.
+        mounted.model.snapshot.update(|snapshot| {
+            snapshot.submissions.last_mut().unwrap().parts =
+                vec![Part::text("Long queued content. ".repeat(200))];
+        });
+        mounted.settle();
+        assert!(mounted.rect("Queued message").size.height > queued.size.height);
+        for label in labels {
+            let button = mounted.rect(label);
+            assert!((button.size.height - 20.0 * scale).abs() < 0.1);
+            assert!((button.size.width - 34.0 * scale).abs() < 0.1);
+        }
+        mounted.model.snapshot.update(|snapshot| {
+            snapshot.submissions.last_mut().unwrap().parts = vec![Part::text("Short message")];
+        });
+        mounted.settle();
         // Focus traverses the three controls in their visual order.
         mounted.focus(labels[0]);
         mounted.key(Key::Tab, false);
@@ -10210,4 +10359,69 @@ fn markdown_transcript_copies_source_and_anchors_replies_across_inline_attachmen
             .body,
         original
     );
+}
+
+#[test]
+fn sidebar_edit_targets_the_clicked_session_or_config_without_selecting_it() {
+    for kind in ["root", "worker", "archived", "draft"] {
+        let mut mounted = mount_orchestration(1380.0);
+        let mut snapshot = mounted.model.snapshot.get_untracked();
+        let mut config = snapshot.agent_configs[0].clone();
+        config.id = "edit-target".into();
+        config.name = if kind == "worker" {
+            "Worker config"
+        } else {
+            "Edit target"
+        }
+        .into();
+        config.automatic_name = false;
+        snapshot.agent_configs.push(config);
+        if kind != "draft" {
+            let mut session = snapshot.sessions[0].clone();
+            session.id = "edit-session".into();
+            session.agent_config_id = "edit-target".into();
+            session.title = "Edit target".into();
+            session.role = if kind == "worker" {
+                SessionRole::Worker
+            } else {
+                SessionRole::Root
+            };
+            session.parent_session_id = (kind == "worker").then(|| "session-plan".into());
+            session.archived = kind == "archived";
+            snapshot.sessions.push(session);
+        }
+        mounted.model.receive(NetworkState {
+            snapshot,
+            connected: true,
+            ..Default::default()
+        });
+        mounted.model.show_archived.set(true);
+        mounted.model.open_session("session-plan".into());
+        mounted.settle();
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Move,
+            position: tree_row(&mounted, "Edit target").center(),
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+        mounted.settle();
+        mounted.click("Edit Edit target");
+        assert_eq!(
+            mounted.model.editor.get_untracked(),
+            EditTarget::Config("edit-target".into()),
+            "{kind}"
+        );
+        assert_eq!(
+            mounted.model.session.get_untracked(),
+            "session-plan",
+            "{kind}"
+        );
+        assert_eq!(mounted.model.page.get_untracked(), Page::Profiles);
+        mounted.model.editor_name.set("Updated target".into());
+        mounted.model.save_profile();
+        assert!(matches!(mounted.commands.try_recv().unwrap().command,
+            Command::UpdateAgentConfig { agent_config_id, name, .. }
+                if agent_config_id == "edit-target" && name == "Updated target"));
+    }
 }

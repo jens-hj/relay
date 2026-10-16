@@ -40,6 +40,26 @@ pub(crate) fn cancelled() -> Result<(), Error> {
         Ok(())
     }
 }
+/// Lower worker CPU priority before exec so harness tools inherit it, including
+/// descendants that create their own process groups. Never raise an inherited
+/// lower priority or change the server thread's priority.
+pub(crate) fn background_worker(command: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    unsafe {
+        // Only async-signal-safe syscalls in the child between fork and exec.
+        command.pre_exec(|| {
+            let inherited = libc::getpriority(libc::PRIO_PROCESS, 0);
+            if inherited < 10 && libc::setpriority(libc::PRIO_PROCESS, 0, 10) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    // Other platforms retain their existing launch behavior.
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
 pub(crate) struct Capture {
     pub bytes: Vec<u8>,
     pub status: ExitStatus,
@@ -211,4 +231,63 @@ pub(crate) fn capture(
         status,
         truncated,
     })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[tokio::test]
+    async fn background_worker_priority_is_inherited_without_renicing_server() {
+        let parent_priority = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+        for inherited in [None, Some(19)] {
+            let mut command = tokio::process::Command::new("sh");
+            command
+                .args(["-c", "sleep 30 & printf '%s\\n' \"$!\"; wait"])
+                .stdout(Stdio::piped())
+                .kill_on_drop(true)
+                .process_group(0);
+            if let Some(priority) = inherited {
+                unsafe {
+                    command.pre_exec(move || {
+                        if libc::setpriority(libc::PRIO_PROCESS, 0, priority) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+            }
+            background_worker(&mut command);
+            let mut child = command.spawn().unwrap();
+            let pid = child.id().unwrap();
+            let _guard = crate::runtime::ProcessGuard {
+                owned: Some((pid, crate::runtime::process_identity(pid).unwrap())),
+            };
+            let mut output = BufReader::new(child.stdout.take().unwrap());
+            let mut line = String::new();
+            tokio::time::timeout(Duration::from_secs(5), output.read_line(&mut line))
+                .await
+                .unwrap()
+                .unwrap();
+            let descendant: u32 = line.trim().parse().unwrap();
+            let expected = inherited.unwrap_or(parent_priority).max(10);
+            assert_eq!(
+                unsafe { libc::getpriority(libc::PRIO_PROCESS, pid) },
+                expected
+            );
+            assert_eq!(
+                unsafe { libc::getpriority(libc::PRIO_PROCESS, descendant) },
+                expected
+            );
+            assert_eq!(unsafe { libc::getpgid(pid as i32) }, pid as i32);
+            assert_eq!(unsafe { libc::getpgid(descendant as i32) }, pid as i32);
+            assert_eq!(
+                unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) },
+                parent_priority
+            );
+            crate::runtime::terminate(&mut child).await;
+            assert!(!child.wait().await.unwrap().success());
+        }
+    }
 }

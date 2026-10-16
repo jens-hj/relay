@@ -117,6 +117,22 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
             model.open_session(id);
         }
     });
+    let edit: Rc<dyn Fn(String)> = Rc::new(move |id| {
+        let config = if let Some(config) = id.strip_prefix("config:") {
+            Some(config.to_string())
+        } else {
+            model
+                .snapshot
+                .get_untracked()
+                .sessions
+                .iter()
+                .find(|session| session.id == id)
+                .map(|session| session.agent_config_id.clone())
+        };
+        if let Some(config) = config {
+            model.open_profile(EditTarget::Config(config));
+        }
+    });
     let toggle: Rc<dyn Fn(String, bool)> = Rc::new(move |id, open| {
         model.collapsed_agents.update(|ids| {
             if open {
@@ -179,11 +195,11 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     };
     let agents = view! {
         AgentSidebar roots:(roots) width:(width) focus:(focused) root-indent:true framed:false
-            on-new:(Some(new_agent)) on-spawn:(Some(spawn)) on-open:(Some(open))
-            on-toggle:(Some(toggle)) on-focus:(Some(focus)) on-approve:(Some(approve))
-            on-review:(Some(review)) filter-controls:(Some(archive_control))
-            on-archive:(Some(archive)) archivable:(relay_ui::Live::from(archivable))
-            on-delete:(Some(delete)) {
+            on-edit:(Some(edit)) on-new:(Some(new_agent)) on-spawn:(Some(spawn))
+            on-open:(Some(open)) on-toggle:(Some(toggle)) on-focus:(Some(focus))
+            on-approve:(Some(approve)) on-review:(Some(review))
+            filter-controls:(Some(archive_control)) on-archive:(Some(archive))
+            archivable:(relay_ui::Live::from(archivable)) on-delete:(Some(delete)) {
             if !usage.get().is_empty() {
                 UsageFoot harnesses:(relay_ui::Live::from(usage))
             }

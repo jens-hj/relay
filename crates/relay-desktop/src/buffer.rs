@@ -498,7 +498,13 @@ fn send_first(model: Model) {
     let session_id = model.session.get_untracked();
     let mut state = model.buffer.get_untracked();
     let parts = parts(model, &session_id);
-    if !has_content(&parts) || model.busy.get_untracked() || model.can_retry() {
+    if !has_content(&parts) || model.busy.get_untracked() {
+        return;
+    }
+    if model.can_retry() {
+        model
+            .notice
+            .set("Resolve the previous request before sending another message".into());
         return;
     }
     if !model.connected.get_untracked() {

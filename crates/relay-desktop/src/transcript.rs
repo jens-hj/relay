@@ -304,9 +304,10 @@ pub(crate) fn QueuedTurn(model: Model, submission: String) -> Element {
         MessageRow speaker:(relay_ui::Live::from(speaker)) {
             row height:min-content min-width:0px label:"Queued message"
                 stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {
-                col width:{px(34.0)}px height:min-content shrink:0 align:center
-                    pad:(horizontal:0px vertical:{px(4.0)}px) {
-                    Label text:(position) role:(TextRole::Caption) tone:(Tone::Muted) weight:500
+                col width:{px(34.0)}px height:min-content shrink:0 gap:0px {
+                    row height:{px(20.0)}px shrink:0 align:center justify:center {
+                        Label text:(position) role:(TextRole::Caption) tone:(Tone::Muted) weight:500
+                    }
                     {
                         parent.adopt(&queued_action("Cancel queued message", relay_ui::icons::mark.remove, Tone::Signal(relay_ui::tokens::Signal::Failed), move || model.submit(Command::CancelTurn { submission_id: id.get_untracked() }, model.snapshot.get_untracked().revision, crate::model::Saved::Action)));
                         parent.adopt(&queued_action("Edit queued message", relay_ui::icons::mark.edit, Tone::Signal(relay_ui::tokens::Signal::NeedsYou), move || buffer::edit_queued(model, &id.get_untracked())));
@@ -477,8 +478,9 @@ fn queued_action(
 ) -> Element {
     view! {
         Tooltip text:(label) {
-            row width:{px(26.0)}px height:{px(20.0)}px shrink:0 {
-                CellButton label:(label) horizontal-inset:(0.0) on-press:(press(handler)) {
+            row width:{px(34.0)}px height:{px(20.0)}px shrink:0 {
+                CellButton label:(label) rule:(Rule::Top) horizontal-inset:(0.0)
+                    on-press:(press(handler)) {
                     row width:max-content font-color:{mosaic::core::theme::color(tone.token())} {
                         { parent.adopt(&relay_ui::icons::icon_mark(icon, 12.0)); }
                     }

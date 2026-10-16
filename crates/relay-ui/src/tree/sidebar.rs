@@ -207,7 +207,7 @@ pub fn NeedsYou(
 }
 
 /// The breadcrumb of a focused branch: a back-to-root cell, the ancestors'
-/// path, the branch name in the serif, and a chip with its true depth.
+/// path, the branch name in the serif, and its true depth.
 #[component]
 pub fn FocusCrumb(
     /// Ancestor names, root first.
@@ -216,20 +216,28 @@ pub fn FocusCrumb(
     depth: usize,
     on_back: OnPress,
 ) -> Element {
+    let name_label = name.clone();
     view! {
-        row height:min-content shrink:0 gap:{px(12.0)}px align:center
-            pad:(left:{px(12.0)}px right:{px(12.0)}px top:{px(12.0)}px bottom:{px(14.0)}px)
+        row height:min-content shrink:0 align:center
             stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
-            IconCell label:"Back to root" on-press:(on_back) {
+            button @click:{on_back()} label:"Back to Root" width:{px(44.0)}px height:fill shrink:0
+                align:center justify:center radius:0px pad:0px fill:(Color::TRANSPARENT)
+                stroke:(width:{px(1.0)} color:ground.hairline edges:right)
+                hover { fill:ground.hover } pressed { fill:ground.pressed }
+                focused { stroke:+(width:{px(1.0)} color:ground.ink offset:{px(-2.0)}) } {
                 {
                     parent.adopt(&mark(Mark::ArrowUp, 12.0, ground.ink));
                 }
             }
-            col width:1fr min-width:0px height:min-content gap:{px(4.0)}px {
+            col width:1fr min-width:0px height:min-content gap:{px(4.0)}px
+                pad:(left:{px(12.0)}px right:{px(12.0)}px top:{px(12.0)}px bottom:{px(14.0)}px) {
                 PathText segments:(path)
-                SerifTitle text:(name) size:(SerifSize::Medium)
+                row min-width:0px height:min-content clip label:{name_label.clone()} {
+                    SerifTitle text:(name) size:(SerifSize::Medium)
+                }
             }
-            Chip text:(format!("depth {depth}"))
+            text shrink:0 font-size:{px(11.0)}px font-weight:500 font-color:ground.muted
+                pad:(right:{px(12.0)}px) {format!("Depth {depth}")}
         }
     }
 }
@@ -262,6 +270,7 @@ pub fn AgentSidebar(
     focus: Live<Option<String>>,
     #[prop(optional)] on_new: Option<OnPress>,
     #[prop(optional)] on_spawn: Option<OnAgent>,
+    #[prop(optional)] on_edit: Option<OnAgent>,
     #[prop(optional)] on_archive: Option<OnAgent>,
     #[prop(optional)] on_delete: Option<OnAgent>,
     #[prop(default = Live::fixed(Vec::new()))] archivable: Live<Vec<String>>,
@@ -435,6 +444,11 @@ pub fn AgentSidebar(
         },
     );
 
+    let viewport = State::new(Rect::default());
+    let tree_viewport = view! {
+        col height:1fr min-height:0px {}
+    };
+    tree_viewport.on_layout(move |rect| viewport.set(rect));
     let tree = view! {
         col height:min-content pad:(top:{px(2.0)}px bottom:{px(14.0)}px) {}
     };
@@ -446,11 +460,12 @@ pub fn AgentSidebar(
         Effect::new(move || nav.set_lines(lines.get()));
     }
     {
-        let (open, toggle, nav, spawn, archive, delete) = (
+        let (open, toggle, nav, spawn, edit, archive, delete) = (
             on_open.clone(),
             toggle.clone(),
             nav.clone(),
             on_spawn.clone(),
+            on_edit.clone(),
             on_archive.clone(),
             on_delete.clone(),
         );
@@ -468,8 +483,9 @@ pub fn AgentSidebar(
                         view! {
                             AgentTreeRow line:(agent.clone()) on-open:(open)
                                 on-spawn:(spawn.clone()) on-toggle:(Some(toggle)) nav:(Some(nav))
-                                on-archive:(archive.clone()) can-archive:(can_archive)
-                                on-delete:(delete.clone())
+                                on-edit:(edit.clone()) on-archive:(archive.clone())
+                                can-archive:(can_archive) on-delete:(delete.clone())
+                                action-viewport:(Some(viewport))
                         }
                     }
                     TreeLine::Folded(folded) => {
@@ -488,6 +504,11 @@ pub fn AgentSidebar(
     let filter_value: Live<Option<AgentStatus>> = filter.into();
     let tally: Live<StatusTally> = tally.into();
     let waiting: Live<Vec<Approval>> = waiting.into();
+    tree_viewport.adopt(&view! {
+        scroll {
+            { parent.adopt(&tree); }
+        }
+    });
     view! {
         col width:{px(width)}px shrink:0 fill:ground.panel font-color:ground.ink label:"Agents"
             stroke:(width:{px(if framed { 1.0 } else { 0.0 })} color:ground.hairline offset:{px(-1.0)}) {
@@ -513,13 +534,7 @@ pub fn AgentSidebar(
             {
                 parent.adopt(&section);
             }
-            col height:1fr min-height:0px {
-                scroll {
-                    {
-                        parent.adopt(&tree);
-                    }
-                }
-            }
+            { parent.adopt(&tree_viewport); }
             col height:min-content shrink:0 {
                 children
             }

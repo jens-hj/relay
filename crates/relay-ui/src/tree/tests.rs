@@ -34,14 +34,18 @@ fn assert_action_visible(mounted: &crate::testing::Mounted, label: &str, visible
 
 #[test]
 fn selected_row_actions_require_hover_or_button_focus() {
+    let edited = State::new(String::new());
+    let opened = State::new(false);
     let spawned = State::new(false);
     let archived = State::new(false);
     let deleted = State::new(false);
-    let mounted = mount(Size::new(380.0, 300.0), || {
+    let mounted = mount(Size::new(520.0, 300.0), || {
         let mut root = node("selected", AgentStatus::Idle).selected();
         root.can_delete = true;
         view! {
             AgentSidebar roots:(Live::fixed(vec![root]))
+                on-edit:(Some(Rc::new(move |id| edited.set(id)) as OnAgent))
+                on-open:(Some(Rc::new(move |_| opened.set(true)) as OnAgent))
                 on-spawn:(Some(Rc::new(move |_| spawned.set(true)) as OnAgent))
                 on-archive:(Some(Rc::new(move |_| archived.set(true)) as OnAgent))
                 archivable:(Live::fixed(vec!["selected".into()]))
@@ -50,6 +54,7 @@ fn selected_row_actions_require_hover_or_button_focus() {
     });
     let labels = [
         "New worker for selected",
+        "Edit selected",
         "Archive selected",
         "Delete selected",
     ];
@@ -65,6 +70,18 @@ fn selected_row_actions_require_hover_or_button_focus() {
     mounted.hover(mounted.rect("selected").center());
     for label in labels {
         assert_action_visible(&mounted, label, true);
+    }
+    let row = mounted.rect("selected");
+    let mut edge = row.max_x();
+    for label in labels {
+        let action = mounted.rect(label);
+        assert_eq!(action.origin.x, edge);
+        assert_eq!(action.size, Size::new(row.size.height, row.size.height));
+        mounted.hover(action.center());
+        for other in labels {
+            assert_action_visible(&mounted, other, true);
+        }
+        edge = action.max_x();
     }
     mounted.ui.dispatch_pointer(PointerEvent {
         kind: PointerEventKind::Down(PointerButton::Primary),
@@ -85,7 +102,11 @@ fn selected_row_actions_require_hover_or_button_focus() {
     mounted.hover(mounted.rect("selected").center());
     mounted.click_label(labels[0]);
     assert!(spawned.get_untracked());
+    opened.set(false);
     mounted.click_label(labels[1]);
+    assert_eq!(edited.get_untracked(), "selected");
+    assert!(!opened.get_untracked());
+    mounted.click_label(labels[2]);
     assert!(archived.get_untracked());
     // Return focus to the row; Tab must still reach the invisible buttons.
     mounted.click_label("selected");
@@ -94,15 +115,22 @@ fn selected_row_actions_require_hover_or_button_focus() {
         mounted.key(Key::Tab);
         assert_eq!(mounted.focused_label().as_deref(), Some(label));
         assert_action_visible(&mounted, label, true);
+        if label == "Edit selected" {
+            edited.set(String::new());
+            opened.set(false);
+            mounted.key(Key::Enter);
+            assert_eq!(edited.get_untracked(), "selected");
+            assert!(!opened.get_untracked());
+        }
     }
     mounted.key(Key::Enter);
     assert!(!deleted.get_untracked());
-    assert!(mounted.has("Confirm Deletion"));
+    assert_action_visible(&mounted, "Confirm deletion of selected", true);
     // A pending confirmation stays usable even after focus and hover leave.
     mounted.click_label("selected");
     mounted.hover(Vector2::new(379.0, 299.0));
-    assert_action_visible(&mounted, labels[2], true);
-    mounted.click_label(labels[2]);
+    assert_action_visible(&mounted, "Confirm deletion of selected", true);
+    mounted.click_label("Confirm deletion of selected");
     assert!(deleted.get_untracked());
 }
 
@@ -141,7 +169,7 @@ fn archive_action_is_only_available_for_eligible_sessions_and_does_not_open_them
     let on_archive: OnAgent = Rc::new(move |id| archived.set(id));
     let on_open: OnAgent = Rc::new(move |_| opened.set(true));
     let on_spawn: OnAgent = Rc::new(|_| {});
-    let mounted = mount(Size::new(320.0, 500.0), || {
+    let mounted = mount(Size::new(520.0, 500.0), || {
         view! {
             AgentSidebar
                 roots:(Live::fixed(vec![node("idle", AgentStatus::Idle), node("running", AgentStatus::Working)]))
@@ -156,8 +184,10 @@ fn archive_action_is_only_available_for_eligible_sessions_and_does_not_open_them
     let spawn = mounted.rect("New worker for idle");
     assert!((archive.center().y - row.center().y).abs() < 0.01);
     assert!((spawn.center().y - row.center().y).abs() < 0.01);
-    assert!((row.max_x() - archive.max_x() - 14.0).abs() < 0.01);
-    assert!(spawn.max_x() < archive.origin.x);
+    assert!((spawn.origin.x - row.max_x()).abs() < 0.01);
+    assert!((spawn.max_x() - archive.origin.x).abs() < 0.01);
+    assert_eq!(spawn.size.width, row.size.height);
+    assert_eq!(archive.size, spawn.size);
     mounted.ui.dispatch_pointer(PointerEvent {
         kind: PointerEventKind::Move,
         position: mounted.rect("idle").center(),
@@ -172,17 +202,32 @@ fn archive_action_is_only_available_for_eligible_sessions_and_does_not_open_them
     eligible.set(Vec::new());
     mounted.settle();
     assert!(!mounted.labels().contains(&"Archive idle".to_string()));
+    eligible.set(vec!["idle".into()]);
+    mounted.settle();
+    mounted.hover(mounted.rect("idle").center());
+    archived.set(String::new());
+    mounted.click_label("Archive idle");
+    assert_eq!(archived.get_untracked(), "idle");
+    assert!(!opened.get_untracked());
 }
 
 #[test]
 fn archived_branch_requires_two_delete_clicks() {
+    let edited = State::new(String::new());
     let deleted = State::new(String::new());
     let callback: OnAgent = Rc::new(move |id| deleted.set(id));
     let mut archived = node("archived", AgentStatus::Done);
     archived.archived = true;
-    let mounted = mount(Size::new(320.0, 500.0), || {
+    let mounted = mount(Size::new(520.0, 500.0), || {
+        let mut roots = vec![archived];
+        roots.extend((0..20).map(|i| node(&format!("other-{i}"), AgentStatus::Idle)));
+        roots[10] = node("lower", AgentStatus::Done);
+        roots[10].archived = true;
         view! {
-            AgentSidebar roots:(Live::fixed(vec![archived])) on-delete:(Some(callback))
+            AgentSidebar roots:(Live::fixed(roots)) on-delete:(Some(callback))
+                on-edit:(Some(Rc::new(move |id| edited.set(id)) as OnAgent)) {
+                el height:24px shrink:0 label:"Test footer" {}
+            }
         }
     });
     mounted.ui.dispatch_pointer(PointerEvent {
@@ -193,16 +238,72 @@ fn archived_branch_requires_two_delete_clicks() {
         timestamp: std::time::Duration::ZERO,
     });
     mounted.settle();
-    assert!(!mounted.has("Confirm Deletion"));
+    mounted.click_label("Edit archived");
+    assert_eq!(edited.get_untracked(), "archived");
+    edited.set(String::new());
+    let initial = mounted.rect("Delete archived");
+    assert_action_visible(&mounted, "Actions for archived", true);
+    assert_action_visible(&mounted, "Delete archived", true);
     mounted.click_label("Delete archived");
     assert!(deleted.get_untracked().is_empty());
-    assert!(mounted.has("Confirm Deletion"));
+    assert_action_visible(&mounted, "Confirm deletion of archived", true);
     let row = mounted.rect("archived");
-    let button = mounted.rect("Delete archived");
+    let button = mounted.rect("Confirm deletion of archived");
+    assert_eq!(button, initial);
     assert!((button.center().y - row.center().y).abs() < 0.01);
-    assert!((row.max_x() - button.max_x() - 14.0).abs() < 0.01);
-    mounted.click_label("Delete archived");
+    assert!((button.origin.x - mounted.rect("Edit archived").max_x()).abs() < 0.01);
+    assert_eq!(button.size.width, row.size.height);
+    assert_eq!(button.size.height, row.size.height);
+    mounted.click_label("Confirm deletion of archived");
     assert_eq!(deleted.get_untracked(), "archived");
+    deleted.set(String::new());
+    // A confirming, focused action must not escape over the header when scrolled.
+    for delta in [-10.0, -80.0] {
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Wheel {
+                delta: Vector2::new(0.0, delta),
+            },
+            position: Vector2::new(row.center().x, row.center().y + 100.0),
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: std::time::Duration::ZERO,
+        });
+        mounted.settle();
+        assert!(mounted.rect("archived").origin.y < row.origin.y);
+        assert_action_visible(&mounted, "Actions for archived", false);
+        mounted.click_label("Edit archived");
+        assert!(edited.get_untracked().is_empty());
+        mounted.click_label("Confirm deletion of archived");
+        assert!(deleted.get_untracked().is_empty());
+    }
+    let scroll_at = Vector2::new(row.center().x, row.center().y + 100.0);
+    let wheel = |delta| {
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Wheel {
+                delta: Vector2::new(0.0, delta),
+            },
+            position: scroll_at,
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: std::time::Duration::ZERO,
+        });
+        mounted.settle();
+    };
+    wheel(-250.0);
+    mounted.hover(mounted.rect("lower").center());
+    mounted.click_label("Delete lower");
+    assert_action_visible(&mounted, "Confirm deletion of lower", true);
+    let lower = mounted.rect("lower");
+    let footer = mounted.rect("Test footer");
+    // Move a confirming row partly, then fully, below the viewport.
+    wheel(footer.origin.y - lower.origin.y - lower.size.height / 2.0);
+    assert_action_visible(&mounted, "Actions for lower", false);
+    mounted.click_label("Confirm deletion of lower");
+    assert!(deleted.get_untracked().is_empty());
+    wheel(50.0);
+    assert_action_visible(&mounted, "Actions for lower", false);
+    mounted.click_label("Confirm deletion of lower");
+    assert!(deleted.get_untracked().is_empty());
 }
 
 #[test]
@@ -424,25 +525,45 @@ fn status_cells_filter_the_tree() {
 fn focus_reroots_with_a_breadcrumb_and_depth() {
     let focused = Rc::new(RefCell::new(Vec::<Option<String>>::new()));
     let seen = focused.clone();
-    let mounted = mount(Size::new(800.0, 900.0), move || {
+    let mounted = mount(Size::new(240.0, 900.0), move || {
         let on_focus: OnFocus = Rc::new(move |id| seen.borrow_mut().push(id));
         let roots = chain();
         view! {
             row {
-                AgentSidebar roots:(roots) on-focus:(Some(on_focus))
+                AgentSidebar roots:(roots) width:(240.0) on-focus:(Some(on_focus))
             }
         }
     });
     assert!(mounted.has("2 more levels · 2 agents"));
     mounted.click_label("Focus");
     assert_eq!(focused.borrow().as_slice(), [Some("c".to_string())]);
-    assert!(mounted.has("depth 3"));
+    assert!(mounted.has("Depth 3"));
     assert!(mounted.has("root / a / b"));
-    assert!(mounted.has("Back to root"));
+    assert!(mounted.has("Back to Root"));
+    let back = mounted.rect("Back to Root");
+    let path = mounted.rect("root / a / b");
+    let depth = mounted.rect("Depth 3");
+    assert_eq!(back.size.width, 44.0);
+    assert!(
+        back.size.height > 32.0,
+        "back action fills the header height"
+    );
+    assert!(back.origin.y < path.origin.y);
+    assert!(back.max_y() > depth.max_y());
+    assert!(path.size.width > 0.0);
+    assert!(path.max_x() <= depth.origin.x);
+    assert!(depth.max_x() <= 240.0);
     assert!(mounted.has("e"), "the folded levels show once focused");
     assert!(mounted.has("1 working"));
-    mounted.click_label("Back to root");
-    assert!(!mounted.has("depth 3"));
+    for _ in 0..30 {
+        if mounted.focused_label().as_deref() == Some("Back to Root") {
+            break;
+        }
+        mounted.key(Key::Tab);
+    }
+    assert_eq!(mounted.focused_label().as_deref(), Some("Back to Root"));
+    mounted.key(Key::Enter);
+    assert!(!mounted.has("Depth 3"));
     assert_eq!(focused.borrow().last(), Some(&None));
 }
 
@@ -612,7 +733,7 @@ fn status_words_show_in_full_at_the_design_width() {
 fn spawn_overlay_reserves_no_space_and_archived_rows_remain_readable() {
     let root = node("overlay", AgentStatus::Done).model(
         ModelIdentity::new("Sol", "6.1", ModelHue::Sol),
-        Effort::new(5, 2),
+        Effort::new(5, 2).with_tiers(2, 2),
     );
     let TreeLine::Agent(line) = flatten(&[root], Flatten::default()).remove(0) else {
         panic!("agent row");
@@ -635,6 +756,12 @@ fn spawn_overlay_reserves_no_space_and_archived_rows_remain_readable() {
     });
     let before = mounted.rects("Effort 3 of 5");
     assert_eq!(before.len(), 3);
+    for (index, rect) in before.iter().enumerate() {
+        assert_eq!(rect.size, Size::new(3.0, 33.0));
+        let row_top = index as f32 * 34.0;
+        assert!(rect.origin.y >= row_top);
+        assert!(rect.origin.y + rect.size.height <= row_top + 34.0);
+    }
     assert!(
         before
             .iter()

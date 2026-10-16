@@ -104,9 +104,12 @@ pub(crate) fn Notice(model: Model) -> Element {
     };
     host.switch(
         move || {
-            let notice = model.notice.get();
+            let mut notice = model.notice.get();
+            let retry = model.can_retry();
+            if notice.is_empty() && retry {
+                notice = "Resolve the previous request before submitting another action. Your draft is retained.".into();
+            }
             (!notice.is_empty()).then(|| {
-                let retry = model.can_retry();
                 (
                     notice,
                     model.can_rebase(),
@@ -140,10 +143,12 @@ pub(crate) fn Notice(model: Model) -> Element {
                     Rc::new(move || model.retry_pending()),
                 ));
             }
-            actions.push((
-                "Dismiss".into(),
-                Rc::new(move || model.notice.set(String::new())),
-            ));
+            if !retry {
+                actions.push((
+                    "Dismiss".into(),
+                    Rc::new(move || model.notice.set(String::new())),
+                ));
+            }
             parent.adopt(&view! {
                 NoticeStrip text:(text) actions:(actions) detail:(summary.map(UiText::from))
             });

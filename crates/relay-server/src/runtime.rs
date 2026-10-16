@@ -1419,6 +1419,7 @@ async fn execute(
             });
         }
     }
+    crate::process::background_worker(&mut cmd);
     // Launch and stop reservation are serialized by the same store lock.
     let mut child = {
         let store = workspace.store.lock().map_err(Error::internal)?;

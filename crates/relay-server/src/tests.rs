@@ -180,6 +180,226 @@ fn each_turn_checks_current_scope_permissions_harness_and_limit() {
     assert!(runtime::authorize_turn(&s, &issue, &d, true, &c).is_err());
 }
 #[test]
+fn stale_independent_creates_preserve_background_state_and_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let initial = live();
+    let mut store = Store::open(&path, AgentProfile::default()).unwrap();
+    store.save(&initial).unwrap();
+    let mut background = initial.clone();
+    background.revision += 10;
+    background.sessions[0].title = "Background worker update".into();
+    store.save(&background).unwrap();
+    let commands = [
+        Command::SaveAgentTemplate {
+            project_id: initial.projects[0].id.clone(),
+            name: "Concurrent profile".into(),
+            profile: AgentProfile::worker(&initial.projects[0].defaults),
+        },
+        Command::CreateAgentConfig {
+            project_id: initial.projects[0].id.clone(),
+            name: "Concurrent agent".into(),
+            template: "worker".into(),
+            overrides: ProfileOverrides {
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+        },
+    ];
+    for command in commands {
+        let request = env(initial.revision, command);
+        let (saved, _) = store.apply(request.clone(), &config()).unwrap();
+        assert_eq!(saved.sessions, background.sessions);
+        let (duplicate, action) = store.apply(request.clone(), &config()).unwrap();
+        assert_eq!(duplicate, saved);
+        assert!(action.is_none());
+        let mut reused = request;
+        reused.expected_revision = saved.revision;
+        assert!(store.apply(reused, &config()).is_err());
+    }
+    let current = store.snapshot().unwrap();
+    assert_eq!(current.agent_configs.len(), initial.agent_configs.len() + 1);
+    assert_eq!(
+        current.agent_templates.len(),
+        initial.agent_templates.len() + 1
+    );
+    let duplicate_name = Command::SaveAgentTemplate {
+        project_id: initial.projects[0].id.clone(),
+        name: "Concurrent profile".into(),
+        profile: AgentProfile::worker(&initial.projects[0].defaults),
+    };
+    assert_eq!(
+        store
+            .apply(env(initial.revision, duplicate_name), &config())
+            .err()
+            .unwrap()
+            .code,
+        "invalid"
+    );
+    let future = Command::CreateAgentConfig {
+        project_id: initial.projects[0].id.clone(),
+        name: "Future agent".into(),
+        template: "worker".into(),
+        overrides: ProfileOverrides::default(),
+    };
+    assert_eq!(
+        store
+            .apply(env(current.revision + 1, future), &config())
+            .err()
+            .unwrap()
+            .code,
+        "conflict"
+    );
+    let edit = Command::UpdateAgentConfig {
+        agent_config_id: current.agent_configs[0].id.clone(),
+        name: "Overwrite".into(),
+        overrides: current.agent_configs[0].overrides.clone(),
+    };
+    let edit_revision = current.revision;
+    let (current, _) = store
+        .apply(env(edit_revision, edit.clone()), &config())
+        .unwrap();
+    assert_eq!(
+        store
+            .apply(env(edit_revision, edit), &config())
+            .err()
+            .unwrap()
+            .code,
+        "conflict"
+    );
+    let invalid = Command::CreateAgentConfig {
+        project_id: "removed-project".into(),
+        name: "Invalid".into(),
+        template: "worker".into(),
+        overrides: ProfileOverrides::default(),
+    };
+    assert_eq!(
+        store
+            .apply(env(initial.revision, invalid), &config())
+            .err()
+            .unwrap()
+            .code,
+        "invalid"
+    );
+    assert_eq!(store.snapshot().unwrap(), current);
+    drop(store);
+    assert_eq!(
+        Store::open(&path, AgentProfile::default())
+            .unwrap()
+            .snapshot()
+            .unwrap(),
+        current
+    );
+}
+
+#[test]
+fn stale_first_turn_validates_current_permissions_and_reserves_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut initial = live();
+    initial.agent_configs[0].draft_selection.model = Some("test-model".into());
+    let w = workspace(&dir.path().join("db"), &initial, config());
+    let mut store = w.store.lock().unwrap();
+    let request = env(
+        initial.revision,
+        Command::StartRootAgent {
+            agent_config_id: initial.agent_configs[0].id.clone(),
+            issue_id: Some(initial.issues[0].id.clone()),
+            prompt: "First draft during compilation".into(),
+            parts: vec![Part::text("First draft during compilation")],
+            approve_implementation: true,
+        },
+    );
+    let mut background = initial.clone();
+    background.revision += 10;
+    store.save(&background).unwrap();
+    let (saved, action) = store.apply(request.clone(), &w.config).unwrap();
+    assert!(matches!(action, Some(Action::Run { .. })));
+    let (duplicate, action) = store.apply(request.clone(), &w.config).unwrap();
+    assert_eq!(duplicate, saved);
+    assert!(action.is_none());
+    assert_eq!(saved.sessions.len(), initial.sessions.len() + 1);
+    assert_eq!(saved.submissions.len(), initial.submissions.len() + 1);
+    let mut denied = saved.clone();
+    denied.projects[0].fixture = true;
+    denied.revision += 1;
+    store.save(&denied).unwrap();
+    let mut next = request;
+    next.request_id = uuid::Uuid::new_v4().to_string();
+    assert_eq!(store.apply(next, &w.config).err().unwrap().code, "invalid");
+    assert_eq!(store.snapshot().unwrap(), denied);
+}
+
+#[tokio::test]
+async fn stale_submit_preserves_draft_conflicts_and_duplicate_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let initial = live();
+    let w = workspace(&dir.path().join("db"), &initial, config());
+    let session_id = {
+        let mut store = w.store.lock().unwrap();
+        let (started, _) = store
+            .apply(env(initial.revision, start(&initial)), &w.config)
+            .unwrap();
+        started.sessions.last().unwrap().id.clone()
+    };
+    let parts = vec![Part::text("Queue while another worker compiles")];
+    let Json(draft) = conversation::save_draft(
+        State(w.clone()),
+        RoutePath(session_id.clone()),
+        Json(SaveDraft {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            expected_revision: 0,
+            parts: parts.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    let run_id = w
+        .store
+        .lock()
+        .unwrap()
+        .run_id(&session_id)
+        .unwrap()
+        .unwrap();
+    w.update_run(&session_id, &run_id, |snapshot| {
+        runtime::event(
+            snapshot,
+            &session_id,
+            &serde_json::json!({
+                "type": "thread.started", "thread_id": "background-thread"
+            }),
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let mut store = w.store.lock().unwrap();
+    let request = env(
+        initial.revision,
+        Command::SubmitTurn {
+            session_id,
+            draft_revision: draft.revision,
+            parts,
+            approve_implementation: true,
+        },
+    );
+    let (saved, action) = store.apply(request.clone(), &w.config).unwrap();
+    assert!(action.is_none());
+    assert_eq!(
+        saved.submissions.last().unwrap().state,
+        SubmissionState::Queued
+    );
+    let (duplicate, action) = store.apply(request.clone(), &w.config).unwrap();
+    assert_eq!(duplicate, saved);
+    assert!(action.is_none());
+    let mut stale_draft = request;
+    stale_draft.request_id = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        store.apply(stale_draft, &w.config).err().unwrap().code,
+        "draft_conflict"
+    );
+    assert_eq!(store.snapshot().unwrap(), saved);
+}
+
+#[test]
 fn duplicate_receipts_reserve_once_and_revision_conflicts_do_not_reserve() {
     let dir = tempfile::tempdir().unwrap();
     let s = live();

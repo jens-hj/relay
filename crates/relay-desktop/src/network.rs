@@ -1,6 +1,5 @@
 #[cfg(not(target_arch = "wasm32"))]
 use futures_util::{SinkExt, StreamExt};
-use mosaic::prelude::StateSender;
 use relay_core::{
     ApiError, CommandAck, CommandEnvelope, HistoryState, Snapshot, StreamEvent, StreamRequest,
 };
@@ -96,7 +95,7 @@ enum Event {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn start(
     config: Config,
-    ui: StateSender<NetworkState>,
+    ui: crate::latest::Sender<NetworkState>,
 ) -> (
     mpsc::UnboundedSender<CommandEnvelope>,
     mpsc::UnboundedSender<()>,
@@ -643,6 +642,41 @@ pub use web::*;
 #[cfg(test)]
 mod connection_telemetry_tests {
     use super::*;
+
+    #[test]
+    fn coalesced_workspace_updates_retain_the_command_acknowledgement() {
+        let scope = mosaic::prelude::Scope::new(|| {});
+        scope.run(|| {
+            let mut state = NetworkState::default();
+            let (receiver, sender) = crate::latest::channel(state.clone());
+            receiver.take();
+            receive_event(
+                &mut state,
+                Event::Outcome(
+                    "request".into(),
+                    Ok(CommandAck {
+                        request_id: "request".into(),
+                        committed_revision: 1,
+                    }),
+                    false,
+                    false,
+                ),
+            );
+            for revision in 1..=128 {
+                state.snapshot.revision = revision;
+                receive_event(&mut state, Event::RoundTrip(revision));
+                assert!(sender.send(state.clone()).is_ok());
+            }
+            let latest = receiver.take().unwrap();
+            assert_eq!(latest.snapshot.revision, 128);
+            assert_eq!(latest.acknowledged_revision, 1);
+            assert_eq!(latest.outcome, Some(("request".into(), Ok(()))));
+            assert_eq!(latest.outcome_serial, 1);
+            assert!(receiver.take().is_none());
+        });
+        scope.dispose();
+    }
+
     #[test]
     fn samples_are_bounded_and_disconnect_preserves_history_and_deadlines() {
         let mut state = NetworkState::default();
