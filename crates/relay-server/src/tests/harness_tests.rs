@@ -258,10 +258,14 @@ done
     .unwrap();
     let worktree = Path::new(worker(&completed, &id).worktree.as_ref().unwrap());
     let target_dir = std::fs::read_to_string(worktree.join("cargo-target-dir")).unwrap();
-    if std::env::var_os("CARGO_TARGET_DIR").is_none()
-        && std::env::var_os(crate::build_output::SHARED_CACHE_ENV).is_none()
+    if crate::build_output::shared_target(
+        Path::new("/"),
+        std::env::var_os("CARGO_TARGET_DIR").as_deref(),
+        std::env::var_os(crate::build_output::SHARED_CACHE_ENV).as_deref(),
+    )
+    .is_some()
     {
-        // The shared build cache reaches the harness environment and its sandbox.
+        // An enabled shared build cache reaches the harness environment and its sandbox.
         let cache = dir
             .path()
             .join("project")
@@ -2038,7 +2042,7 @@ const CLAUDE_DETAIL_EVENTS: &str = r#"{"type":"assistant","message":{"id":"m1","
 "#;
 
 #[test]
-fn harness_environment_uses_shared_build_cache_unless_overridden() {
+fn harness_environment_shares_build_cache_only_when_enabled() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("project");
     std::fs::create_dir(&root).unwrap();
@@ -2049,8 +2053,29 @@ fn harness_environment_uses_shared_build_cache_unless_overridden() {
             .find(|(key, _)| *key == "CARGO_TARGET_DIR")
             .and_then(|(_, value)| value.map(|v| v.to_owned()))
     };
+    // Off by default, and when explicitly disabled.
+    for setting in [None, Some("0"), Some("off"), Some("")] {
+        let mut cmd = tokio::process::Command::new("true");
+        assert!(
+            crate::build_output::configure(
+                &mut cmd,
+                Some(&root_text),
+                None,
+                setting.map(std::ffi::OsStr::new)
+            )
+            .is_none()
+        );
+        assert_eq!(target_env(&cmd), None);
+    }
+    assert!(!root.join(".relay").exists());
     let mut cmd = tokio::process::Command::new("true");
-    let cache = crate::build_output::configure(&mut cmd, Some(&root_text), None, None).unwrap();
+    let cache = crate::build_output::configure(
+        &mut cmd,
+        Some(&root_text),
+        None,
+        Some(std::ffi::OsStr::new("1")),
+    )
+    .unwrap();
     let expected = root
         .canonicalize()
         .unwrap()
@@ -2058,15 +2083,17 @@ fn harness_environment_uses_shared_build_cache_unless_overridden() {
     assert_eq!(cache, expected.display().to_string());
     assert_eq!(target_env(&cmd), Some(expected.clone().into_os_string()));
     assert!(expected.is_dir());
-    // An inherited override and the opt-out both leave the environment untouched.
-    for (existing, setting) in [
-        (Some(std::ffi::OsStr::new("/custom/target")), None),
-        (None, Some(std::ffi::OsStr::new("0"))),
-        (None, Some(std::ffi::OsStr::new("off"))),
-    ] {
+    // An inherited override takes precedence over the opt-in.
+    for setting in ["1", "on"] {
         let mut cmd = tokio::process::Command::new("true");
         assert!(
-            crate::build_output::configure(&mut cmd, Some(&root_text), existing, setting).is_none()
+            crate::build_output::configure(
+                &mut cmd,
+                Some(&root_text),
+                Some(std::ffi::OsStr::new("/custom/target")),
+                Some(std::ffi::OsStr::new(setting))
+            )
+            .is_none()
         );
         assert_eq!(target_env(&cmd), None);
     }
@@ -2082,7 +2109,10 @@ fn harness_environment_uses_shared_build_cache_unless_overridden() {
         .is_some()
     );
     let mut cmd = tokio::process::Command::new("true");
-    assert!(crate::build_output::configure(&mut cmd, None, None, None).is_none());
+    assert!(
+        crate::build_output::configure(&mut cmd, None, None, Some(std::ffi::OsStr::new("1")))
+            .is_none()
+    );
     assert_eq!(target_env(&cmd), None);
 }
 

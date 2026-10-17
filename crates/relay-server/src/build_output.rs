@@ -1,16 +1,18 @@
-//! Build output shared across session worktrees and reclaimed when sessions are archived.
+//! Build output optionally shared across session worktrees and reclaimed when sessions are archived.
 use crate::Error;
 use relay_core::Snapshot;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
-/// Set to `0`, `false`, or `off` to give each worktree its own Cargo `target/`.
+/// Set to `1`, `true`, `on`, or `yes` to share one Cargo target directory across a
+/// project's worktrees. Off by default: concurrent builds of the same crates in
+/// different worktrees overwrite each other's binaries in a shared directory.
 pub(crate) const SHARED_CACHE_ENV: &str = "RELAY_SHARED_BUILD_CACHE";
 const CARGO_TARGET_DIR: &str = "CARGO_TARGET_DIR";
 
-/// The per-project Cargo target directory, unless the harness environment already
-/// chooses one or the shared cache is disabled.
+/// The per-project Cargo target directory when the shared cache is enabled and the
+/// harness environment does not already choose one.
 pub(crate) fn shared_target(
     project_root: &Path,
     existing: Option<&OsStr>,
@@ -19,10 +21,10 @@ pub(crate) fn shared_target(
     if existing.is_some_and(|value| !value.is_empty()) {
         return None;
     }
-    if setting.is_some_and(|value| {
+    if !setting.is_some_and(|value| {
         matches!(
             value.to_string_lossy().trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "off" | "no"
+            "1" | "true" | "on" | "yes"
         )
     }) {
         return None;
@@ -35,7 +37,7 @@ pub(crate) fn shared_target(
     )
 }
 
-/// Points a harness at the project's shared target directory and returns it so the
+/// When enabled, points a harness at the project's shared target directory and returns it so the
 /// sandbox can make it writable. Failure to create it leaves the default behaviour.
 pub(crate) fn configure(
     cmd: &mut tokio::process::Command,

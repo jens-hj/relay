@@ -87,7 +87,7 @@ The default server address is `127.0.0.1:7331`. Both processes require the token
 | `RELAY_GITHUB_PROJECT_NUMBER` | Server | Projects v2 number from the board URL |
 | `RELAY_REPO_PATH` | Server | Legacy bootstrap checkout on the server; New Project manages named roots and connections |
 | `RELAY_CODEX_BIN` / `RELAY_CLAUDE_BIN` | Server | Optional executable overrides; saved Harnesses configuration takes precedence |
-| `RELAY_SHARED_BUILD_CACHE` | Server | Agents share `ROOT/.relay/cache/cargo-target` as `CARGO_TARGET_DIR`; `0` gives each worktree its own `target/`. An existing `CARGO_TARGET_DIR` takes precedence |
+| `RELAY_SHARED_BUILD_CACHE` | Server | Off by default: each worktree builds into its own `target/`. `1` makes agents share `ROOT/.relay/cache/cargo-target` as `CARGO_TARGET_DIR`; concurrent builds in different worktrees can then overwrite each other's test binaries. An existing `CARGO_TARGET_DIR` takes precedence. Use a compiler cache such as `sccache` to share dependencies safely |
 | `RELAY_BACKGROUND_TASK_LIMIT_SECS` | Server | Longest wait, in seconds, for Claude Code background tasks after a turn's result; default 3600 |
 | `RELAY_WORKER_SCOPE` | Server | `auto` runs each harness in a memory-limited systemd user scope when one can be created; `off` launches harnesses directly |
 | `RELAY_WORKER_MEMORY_HIGH` / `RELAY_WORKER_MEMORY_MAX` | Server | Per-worker scope `MemoryHigh` (throttle) and `MemoryMax` (OOM kill) limits; bytes with `K`/`M`/`G`/`T`, a percentage of RAM, or `infinity`. Defaults `30%` and `40%` |
