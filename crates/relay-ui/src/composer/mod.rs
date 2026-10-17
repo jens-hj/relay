@@ -16,8 +16,8 @@ pub struct LedgerActions {
 }
 // The corner radius is relative to cell width, including in the narrow strip.
 // Keep identity visible throughout the same 3.6-second breathing cycle.
-pub(crate) const MODEL_GLOW_OPEN_REACH: f32 = 0.62;
-pub(crate) const MODEL_GLOW_COLLAPSED_REACH: f32 = 1.7;
+pub(crate) const MODEL_GLOW_OPEN_REACH: f32 = 0.85;
+pub(crate) const MODEL_GLOW_COLLAPSED_REACH: f32 = 2.3;
 pub(crate) const MODEL_GLOW_OPACITY: f32 = 0.8;
 fn quiet_send(fill: bool) -> Color {
     let dark = mosaic::core::theme::color(ground.page).to_srgb8()[0] < 128;

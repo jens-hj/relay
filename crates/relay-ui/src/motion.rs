@@ -23,10 +23,10 @@ impl Breath {
         high: 1.0,
         low: 0.45,
     };
-    /// The model glow: 0.32 → 0.6 over 3.6 s (dimmest at rest).
+    /// The model glow: 0.45 → 0.6 over 3.6 s (dimmest at rest).
     pub const GLOW: Breath = Breath {
         period: 3.6,
-        high: 0.32,
+        high: 0.45,
         low: 0.6,
     };
 

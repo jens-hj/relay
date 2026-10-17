@@ -38,7 +38,14 @@ impl Flow {
         let size = (1.0 / scale).max(0.7);
         let reach = (spec.width * spec.reach).min(spec.width).max(0.0);
         // More births overlap at the emitter without changing grain size.
-        let count = ((reach * spec.height / (size * size) * 0.9) as usize).min(48_000);
+        // The model glow radiates from one corner, so it needs extra births
+        // to stay dense across its reach.
+        let density = if spec.gradient == Gradient::Corner {
+            1.6
+        } else {
+            0.9
+        };
+        let count = ((reach * spec.height / (size * size) * density) as usize).min(48_000);
         let mut particles = Vec::with_capacity(count);
         let mut state = spec.seed as u32;
         let mut random = || {
@@ -92,7 +99,12 @@ impl Flow {
                 dx,
                 dy,
                 lifetime,
-                decay: if usage { 2.0 } else { 4.0 },
+                decay: match spec.gradient {
+                    Gradient::Usage => 2.0,
+                    // The model glow keeps more ink through its tail.
+                    Gradient::Corner => 2.5,
+                    _ => 4.0,
+                },
                 offset: random() * lifetime,
             });
         }
@@ -234,6 +246,26 @@ mod tests {
             }
             assert!(at_phase(usage, 0.99999) < 0.00001);
         }
+    }
+
+    #[test]
+    fn model_glow_carries_more_and_longer_lived_grains_than_a_wash() {
+        let corner = Flow::new(&DitherSpec::new(144.0, 40.0, 1.0, Gradient::Corner, 1.0));
+        let horizontal = Flow::new(&DitherSpec::new(
+            144.0,
+            40.0,
+            1.0,
+            Gradient::Horizontal,
+            1.0,
+        ));
+        assert!(corner.particles.len() > horizontal.particles.len() * 3 / 2);
+        assert!(
+            corner
+                .particles
+                .iter()
+                .zip(&horizontal.particles)
+                .all(|(corner, horizontal)| corner.decay < horizontal.decay)
+        );
     }
 
     #[test]
