@@ -389,18 +389,8 @@ pub fn execution_problem(model: Model) -> Option<String> {
     if matches!(&profile.scope,AgentScope::Issues{issue_ids} if !issue_ids.contains(&issue.id)) {
         return Some("Issue is outside agent scope".into());
     }
-    let active = snapshot
-        .sessions
-        .iter()
-        .filter(|s| {
-            s.id != session.id
-                && s.agent_config_id == session.agent_config_id
-                && s.worker.as_ref().is_some_and(|w| {
-                    matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running)
-                })
-        })
-        .count();
-    if active >= usize::from(profile.max_workers) {
+    // Only the parent's slots govern this session; its own children never block it.
+    if snapshot.worker_slot(session).is_err() {
         return Some("No worker slots available".into());
     }
     if !matches!(worker.status, WorkerStatus::Queued | WorkerStatus::Running)

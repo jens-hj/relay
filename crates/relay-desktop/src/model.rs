@@ -1287,12 +1287,15 @@ impl Model {
             .find(|d| d.id == agent_config_id && d.project_id == issue.project_id)
             .ok_or("Select a project director")?;
         let profile = snapshot.effective_profile(director)?;
+        // Standalone workers share the configuration's slots; delegated
+        // children occupy their parents' slots instead.
         let active = snapshot
             .sessions
             .iter()
             .filter(|s| {
                 s.agent_config_id == agent_config_id
-                    && s.role != SessionRole::Root
+                    && s.role == SessionRole::Worker
+                    && s.parent_session_id.is_none()
                     && s.worker.as_ref().is_some_and(|w| {
                         matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running)
                     })
@@ -1328,14 +1331,18 @@ impl Model {
             }
             _ => {}
         }
-        let director_continuation = continuation
-            && self
-                .snapshot
-                .get()
-                .sessions
-                .iter()
-                .any(|s| s.id == self.session.get() && s.role == SessionRole::Root);
-        if !director_continuation && active >= usize::from(profile.max_workers) {
+        // A continued session needs only its parent's slot; its own children
+        // never block it. A new board worker takes a standalone slot.
+        let snapshot = self.snapshot.get();
+        let free = match snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == self.session.get())
+        {
+            Some(session) if continuation => snapshot.worker_slot(session).is_ok(),
+            _ => active < usize::from(profile.max_workers),
+        };
+        if !free {
             return Err("No worker slots available".into());
         }
         if !continuation && profile.model.is_empty() {

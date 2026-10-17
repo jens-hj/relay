@@ -177,19 +177,6 @@ pub(super) fn authorize_session(
     }
     let effective = profile(snapshot, session)?;
     let mut candidate = snapshot.clone();
-    candidate.sessions.retain(|s| s.id != session.id);
-    let root_limit = candidate
-        .effective_profile(
-            candidate
-                .agent_configs
-                .iter()
-                .find(|d| d.id == session.agent_config_id)
-                .ok_or_else(|| Error::invalid("Agent configuration missing"))?,
-        )
-        .map_err(Error::invalid)?
-        .max_workers;
-    let mut effective = effective;
-    effective.max_workers = root_limit;
     let overrides = ProfileOverrides::between(
         &candidate
             .config_base(
@@ -208,7 +195,7 @@ pub(super) fn authorize_session(
         .find(|d| d.id == session.agent_config_id)
         .ok_or_else(|| Error::invalid("Director missing"))?
         .overrides = overrides;
-    runtime::authorize_session(
+    runtime::authorize_issue(
         &candidate,
         session
             .issue_id
@@ -216,9 +203,11 @@ pub(super) fn authorize_session(
             .ok_or_else(|| Error::invalid("Linked issue missing"))?,
         &session.agent_config_id,
         approved,
-        &session.role,
         config,
-    )
+    )?;
+    // The session occupies a slot of its parent (or configuration, when
+    // standalone); its own descendants only limit what it may spawn.
+    snapshot.worker_slot(session).map_err(Error::invalid)
 }
 fn root<'a>(snapshot: &'a Snapshot, id: &'a str) -> &'a str {
     snapshot.ancestors(id).last().map_or(id, |s| s.id.as_str())
@@ -666,31 +655,10 @@ async fn spawn(
     if effective.permissions[&Task::Delegate] == Permission::Deny {
         return Err(Error::invalid("Parent denies delegation"));
     }
-    let root_limit = snapshot
-        .effective_profile(
-            snapshot
-                .agent_configs
-                .iter()
-                .find(|d| d.id == parent.agent_config_id)
-                .ok_or_else(|| Error::invalid("Agent configuration missing"))?,
-        )
-        .map_err(Error::invalid)?
-        .max_workers;
-    if snapshot
-        .sessions
-        .iter()
-        .filter(|s| {
-            s.agent_config_id == parent.agent_config_id
-                && s.role == SessionRole::Worker
-                && s.worker
-                    .as_ref()
-                    .is_some_and(|w| runtime::active(&w.status))
-        })
-        .count()
-        >= usize::from(effective.max_workers.min(root_limit))
-    {
-        return Err(Error::invalid("Current director worker limit reached"));
-    }
+    // The child needs a free slot under the parent and each of its ancestors.
+    snapshot
+        .child_slot(&parent.id, None)
+        .map_err(Error::invalid)?;
     let mut permissions = effective.permissions.clone();
     let widened = args
         .permissions
@@ -2142,7 +2110,8 @@ mod tests {
             Permission::Allow
         );
         f.change(|s| {
-            s.projects[0].defaults.max_workers = 7;
+            // The root occupies no slot, so six descendants fill a limit of six.
+            s.projects[0].defaults.max_workers = 6;
         });
         assert!(
             call(
@@ -2157,6 +2126,109 @@ mod tests {
             .is_err()
         );
         assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 7);
+        f.finish().await;
+    }
+    /// Adds an active child cloned from `parent` without launching it.
+    fn active_child(s: &mut Snapshot, parent: &str, id: &str) {
+        let mut child = s.sessions.iter().find(|s| s.id == parent).unwrap().clone();
+        child.id = id.into();
+        child.role = SessionRole::Worker;
+        child.parent_session_id = Some(parent.into());
+        child.worker.as_mut().unwrap().status = WorkerStatus::Running;
+        s.sessions.push(child);
+    }
+    /// Synthetic children have no process, so settle them before shutdown.
+    fn settle(f: &Fixture, ids: &[&str]) {
+        f.change(|s| {
+            for session in s
+                .sessions
+                .iter_mut()
+                .filter(|s| ids.contains(&s.id.as_str()))
+            {
+                session.worker.as_mut().unwrap().status = WorkerStatus::Completed;
+            }
+        });
+    }
+    fn turn_allowed(f: &Fixture, id: &str) -> bool {
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let session = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
+        authorize_session(&snapshot, session, true, &f.workspace.config).is_ok()
+    }
+    #[tokio::test]
+    async fn director_turns_are_not_blocked_by_their_own_full_slots() {
+        let f = Fixture::new(Permission::Allow);
+        f.change(|s| {
+            s.projects[0].defaults.max_workers = 2;
+            active_child(s, &f.caller, "child-1");
+            active_child(s, &f.caller, "child-2");
+        });
+        // A standalone director occupies its configuration's slot, never its own.
+        assert!(turn_allowed(&f, &f.caller));
+        f.change(|s| {
+            let root = s.sessions.iter_mut().find(|s| s.id == f.caller).unwrap();
+            root.role = SessionRole::Root;
+        });
+        assert!(turn_allowed(&f, &f.caller));
+        // Spawning past the limit is still rejected.
+        assert!(
+            f.call("spawn_agent", json!({"title":"Overflow","task":"Test"}))
+                .await
+                .is_err()
+        );
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 3);
+        // A freed slot admits the next worker.
+        f.change(|s| {
+            let child = s.sessions.iter_mut().find(|s| s.id == "child-2").unwrap();
+            child.worker.as_mut().unwrap().status = WorkerStatus::Completed;
+        });
+        assert!(
+            f.call("spawn_agent", json!({"title":"Next","task":"Test"}))
+                .await
+                .is_ok()
+        );
+        settle(&f, &["child-1"]);
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn nested_director_counts_once_against_its_parent() {
+        let f = Fixture::new(Permission::Allow);
+        f.change(|s| {
+            s.projects[0].defaults.max_workers = 3;
+            active_child(s, &f.caller, "nested");
+            let mut profile = s.effective_profile(&s.agent_configs[0]).unwrap();
+            profile.max_workers = 1;
+            let nested = s.sessions.iter_mut().find(|s| s.id == "nested").unwrap();
+            nested.profile = Some(profile);
+            active_child(s, "nested", "grandchild");
+        });
+        // The nested director's own slot is full, yet its turn may run.
+        assert!(turn_allowed(&f, "nested"));
+        assert!(turn_allowed(&f, "grandchild"));
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        assert!(snapshot.child_slot("nested", None).is_err());
+        assert!(snapshot.child_slot(&f.caller, None).is_ok());
+        // With one sibling the parent's three slots are full: the nested
+        // director, its grandchild and the sibling. Each may still run.
+        f.change(|s| active_child(s, &f.caller, "sibling"));
+        assert!(turn_allowed(&f, "nested"));
+        assert!(turn_allowed(&f, "sibling"));
+        assert!(turn_allowed(&f, &f.caller));
+        assert!(
+            f.workspace
+                .snapshots
+                .borrow()
+                .child_slot(&f.caller, None)
+                .is_err()
+        );
+        // A fourth active descendant would exceed the parent's limit, so the
+        // nested director cannot resume while it is inactive.
+        f.change(|s| {
+            active_child(s, &f.caller, "extra");
+            let nested = s.sessions.iter_mut().find(|s| s.id == "nested").unwrap();
+            nested.worker.as_mut().unwrap().status = WorkerStatus::Completed;
+        });
+        assert!(!turn_allowed(&f, "nested"));
+        settle(&f, &["grandchild", "sibling", "extra"]);
         f.finish().await;
     }
     #[tokio::test]

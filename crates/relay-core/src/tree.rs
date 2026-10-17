@@ -1,6 +1,6 @@
 //! Pure queries over the sub-agent tree formed by `Session::parent_session_id`.
 //! Parent links come from persisted data, so every walk is cycle-safe.
-use crate::{Session, Snapshot, ToolPermission, WorkerStatus};
+use crate::{Session, SessionRole, Snapshot, ToolPermission, WorkerStatus};
 use std::collections::BTreeSet;
 
 /// Worker states across a subtree. Sessions without a run count as idle.
@@ -130,12 +130,91 @@ impl Snapshot {
             .filter(|p| p.decision.is_none() && !p.expired && ids.contains(p.session_id.as_str()))
             .collect()
     }
+
+    /// Whether `parent_id` can take one more active descendant. The parent and
+    /// every ancestor need a free slot under their own `max_workers`, each
+    /// capped by the agent configuration's limit. `exclude` is the session
+    /// asking for the slot, so its own activity is not counted twice.
+    pub fn child_slot(&self, parent_id: &str, exclude: Option<&str>) -> Result<(), String> {
+        let parent = self.session(parent_id).ok_or("Parent agent missing")?;
+        for owner in std::iter::once(parent).chain(self.ancestors(parent_id)) {
+            let config = self
+                .agent_configs
+                .iter()
+                .find(|d| d.id == owner.agent_config_id)
+                .ok_or("Agent configuration missing")?;
+            let limit = self
+                .session_profile(owner)?
+                .max_workers
+                .min(self.effective_profile(config)?.max_workers);
+            let used = self
+                .descendants(&owner.id)
+                .into_iter()
+                .filter(|s| Some(s.id.as_str()) != exclude && active(s))
+                .count();
+            if used >= usize::from(limit) {
+                return Err("Current director worker limit reached".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a standalone worker (a parentless `Worker` session started from
+    /// the board) can take a slot of its agent configuration. Standalone
+    /// workers share that pool; their descendants never count against it.
+    pub fn standalone_slot(
+        &self,
+        agent_config_id: &str,
+        exclude: Option<&str>,
+    ) -> Result<(), String> {
+        let config = self
+            .agent_configs
+            .iter()
+            .find(|d| d.id == agent_config_id)
+            .ok_or("Agent configuration missing")?;
+        let used = self
+            .sessions
+            .iter()
+            .filter(|s| {
+                Some(s.id.as_str()) != exclude
+                    && s.agent_config_id == agent_config_id
+                    && s.parent_session_id.is_none()
+                    && s.role == SessionRole::Worker
+                    && active(s)
+            })
+            .count();
+        if used >= usize::from(self.effective_profile(config)?.max_workers) {
+            return Err("Current director worker limit reached".into());
+        }
+        Ok(())
+    }
+
+    /// Whether a session may run a turn. A child occupies one slot of each
+    /// ancestor, a root session occupies none, and a standalone worker
+    /// occupies one slot of its configuration. A session's own descendants
+    /// never block its turns.
+    pub fn worker_slot(&self, session: &Session) -> Result<(), String> {
+        match session.parent_session_id.as_deref() {
+            Some(parent) => self.child_slot(parent, Some(&session.id)),
+            None if session.role == SessionRole::Worker => {
+                self.standalone_slot(&session.agent_config_id, Some(&session.id))
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+fn active(session: &Session) -> bool {
+    session
+        .worker
+        .as_ref()
+        .is_some_and(|w| matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Harness, SessionRole, WorkerRun};
+    use crate::{Harness, WorkerRun};
 
     fn session(id: &str, parent: Option<&str>, status: Option<WorkerStatus>) -> Session {
         Session {

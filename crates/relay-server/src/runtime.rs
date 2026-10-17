@@ -347,12 +347,31 @@ fn matches_repository(remote: &str, reference: &IssueRef) -> bool {
     })
 }
 
+/// Checks for starting a new parentless session. A standalone worker takes a
+/// slot of its configuration; a root session takes none.
 pub(crate) fn authorize_session(
     snapshot: &Snapshot,
     issue_id: &str,
     agent_config_id: &str,
     approved: bool,
     role: &SessionRole,
+    config: &RuntimeConfig,
+) -> Result<(), Error> {
+    authorize_issue(snapshot, issue_id, agent_config_id, approved, config)?;
+    if *role == SessionRole::Worker {
+        snapshot
+            .standalone_slot(agent_config_id, None)
+            .map_err(Error::invalid)?;
+    }
+    Ok(())
+}
+/// Scope, board and permission checks shared by every turn; worker slots are
+/// checked by the caller because they depend on the session's place in its tree.
+pub(crate) fn authorize_issue(
+    snapshot: &Snapshot,
+    issue_id: &str,
+    agent_config_id: &str,
+    approved: bool,
     config: &RuntimeConfig,
 ) -> Result<(), Error> {
     let issue_id = snapshot.canonical_issue_id(issue_id);
@@ -450,18 +469,6 @@ pub(crate) fn authorize_session(
             ));
         }
         _ => {}
-    }
-    let count = snapshot
-        .sessions
-        .iter()
-        .filter(|s| {
-            s.agent_config_id == agent_config_id
-                && s.role == SessionRole::Worker
-                && s.worker.as_ref().is_some_and(|w| active(&w.status))
-        })
-        .count();
-    if *role == SessionRole::Worker && count >= usize::from(profile.max_workers) {
-        return Err(Error::invalid("Current director worker limit reached"));
     }
     Ok(())
 }
