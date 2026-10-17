@@ -622,6 +622,12 @@ fn spawn_rows_use_tree_anatomy_and_hide_unknown_harness() {
         }
     });
     assert_eq!(mounted.rect("Unknown harness").size.height, 34.0);
+    // The tree action fills the header's trailing cell, flush with its edges.
+    let open = mounted.rect("Open in tree");
+    let row = mounted.rect("Unknown harness");
+    assert_eq!(open.size.height, 36.0);
+    assert_eq!(open.max_x(), row.max_x());
+    assert!(open.size.width > 60.0);
     assert!(mounted.labels().iter().any(|label| label == "Sol 6.1"));
     assert!(!mounted.labels().iter().any(|label| label == "CODEX"));
 }

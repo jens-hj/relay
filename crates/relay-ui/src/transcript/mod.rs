@@ -76,12 +76,18 @@ pub fn SpawnBlock(agents: Live<Vec<SpawnChild>>, on_open_tree: OnPress) -> Eleme
     let count = agents.clone();
     view! {
         col height:min-content stroke:(width:{px(1.0)} color:ground.hairline) {
-            row height:{px(36.0)}px align:center pad:(horizontal:{px(14.0)}px vertical:0px)
+            row height:{px(36.0)}px align:center
                 stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-                Label text:(Derived::new(move || format!("Spawned {} agents", count.get().len())))
-                    role:(TextRole::Label) weight:500
-                el width:1fr height:1px {}
-                LinkButton text:"Open in tree" on-press:(on_open_tree)
+                row width:1fr min-width:0px align:center
+                    pad:(horizontal:{px(14.0)}px vertical:0px) {
+                    Label
+                        text:(Derived::new(move || format!("Spawned {} agents", count.get().len())))
+                        role:(TextRole::Label) weight:500
+                }
+                CellButton label:"Open in tree" on-press:(on_open_tree) rule:(Rule::Left)
+                    width:max-content shrink:0 {
+                    Label text:"Open in tree" role:(TextRole::Label) weight:500
+                }
             }
             for (key, child) in { agents.get().into_iter().enumerate().map(|(i, c)| ((i, format!("{c:?}")), c)) } {
                 {
