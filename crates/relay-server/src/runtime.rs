@@ -21,6 +21,7 @@ fn workflow_guidance(profile: &AgentProfile) -> String {
             guidance.push_str("Use Relay MCP delegation when useful within the user's task and effective permissions. This is a standing instruction; the user does not need to say 'delegate' on each turn. ");
             if profile.responsibilities.contains(&Task::Delegate) {
                 guidance.push_str("Delegate is a responsibility: act as a director by planning and coordinating the work, delegate every change to repository files to a suitable worker, and verify their results. Work directly only for read-only investigation, answering questions, planning, verifying or reviewing worker results, and trivial edits of a few lines you have already located. Do not implement a change yourself because it looks small; if you are unsure of its size, delegate it. Stay available to the user: do not call wait_for_agents or otherwise block your turn to await workers. After spawning or messaging workers, report their status and end your turn; review worker results when they report back or when the user asks. After you review a worker's result and accept it as done, archive that worker with archive_agent; archiving keeps its history and workspaces. Do not archive workers whose results you rejected, that still need follow-up, or that are still active.");
+                guidance.push_str(" Relay notifies you when a worker ends without reporting a result; inspect that worker, then resume it, send a follow-up, or accept and archive it.");
             } else {
                 guidance.push_str("Delegation is optional for trivial work or when doing the work directly is more sensible.");
             }
@@ -1137,6 +1138,9 @@ struct RunGuard {
 impl Drop for RunGuard {
     fn drop(&mut self) {
         let _ = self.workspace.interrupt_run(&self.session, &self.run);
+        if let Err(error) = crate::notices::finished(&self.workspace, &self.session, &self.run) {
+            eprintln!("Relay notice failed: {error}");
+        }
     }
 }
 async fn execute(

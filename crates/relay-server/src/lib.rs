@@ -24,6 +24,7 @@ mod conversation;
 mod deletion;
 mod github;
 mod harness;
+mod notices;
 mod process;
 mod projects;
 mod providers;
@@ -108,6 +109,10 @@ struct Store {
     connection: Connection,
     controls: HashMap<String, watch::Sender<bool>>,
     closing: bool,
+    /// Runs stopped by an ancestor's stop; their parents get no notice.
+    ancestor_stops: HashMap<String, String>,
+    /// Pending end-of-turn notices, keyed by parent session.
+    notices: HashMap<String, Vec<notices::Notice>>,
 }
 
 impl Store {
@@ -122,7 +127,17 @@ impl Store {
     fn stop_controls(&mut self, snapshot: &Snapshot, session_id: &str) {
         self.stop_control(session_id);
         for session in snapshot.descendants(session_id) {
+            // The cascade's origin already knows, so its descendants send no notice.
+            self.mark_ancestor_stop(&session.id);
             self.stop_control(&session.id);
+        }
+    }
+    /// The active run of `id` is being stopped by an ancestor, which already knows.
+    fn mark_ancestor_stop(&mut self, id: &str) {
+        if self.controls.contains_key(id)
+            && let Ok(Some(run)) = self.run_id(id)
+        {
+            self.ancestor_stops.insert(id.into(), run);
         }
     }
     fn open(path: &Path, defaults: AgentProfile) -> Result<Self, Error> {
@@ -254,6 +269,8 @@ impl Store {
             connection,
             controls: HashMap::new(),
             closing: false,
+            ancestor_stops: HashMap::new(),
+            notices: HashMap::new(),
         })
     }
     fn snapshot(&self) -> Result<Snapshot, Error> {

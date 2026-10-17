@@ -328,7 +328,7 @@ pub(super) fn pause(snapshot: &mut Snapshot, session: &str, reason: &str) {
     }
 }
 
-fn authorize(
+pub(super) fn authorize(
     snapshot: &Snapshot,
     session: &str,
     approved: bool,
@@ -674,7 +674,7 @@ pub(super) fn apply(
     Ok(None)
 }
 
-fn reserve(snapshot: &mut Snapshot, session: &str, id: &str, parts: &[Part]) {
+pub(super) fn reserve(snapshot: &mut Snapshot, session: &str, id: &str, parts: &[Part]) {
     let agent = snapshot
         .sessions
         .iter_mut()
@@ -706,7 +706,12 @@ fn reserve(snapshot: &mut Snapshot, session: &str, id: &str, parts: &[Part]) {
     snapshot.messages.push(Message {
         id: format!("prompt-{id}"),
         session_id: session.into(),
-        author: "You".into(),
+        author: if id.starts_with(crate::notices::PREFIX) {
+            "Relay"
+        } else {
+            "You"
+        }
+        .into(),
         kind: "prompt".into(),
         body: plain_text(parts),
         parts: parts.to_vec(),

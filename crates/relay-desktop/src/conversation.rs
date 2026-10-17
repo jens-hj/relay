@@ -358,7 +358,7 @@ fn transcript_index(model: Model) -> Derived<Rc<TranscriptIndex>> {
             }
             let mut previous: Option<(String, bool)> = None;
             for message in crate::adapt::transcript_messages(&snapshot.messages, &session) {
-                let speaker = if message.kind == "prompt" {
+                let speaker = if message.kind == "prompt" && message.author != "Relay" {
                     "You"
                 } else {
                     &message.author
@@ -4272,6 +4272,7 @@ mod tests {
                     projected_message("empty-after-named", "", "assistant"),
                     projected_message("prompt", "", "prompt"),
                     projected_message("next-prompt", "Different raw author", "prompt"),
+                    projected_message("relay-notice", "Relay", "prompt"),
                 ]
             });
             let index = transcript_index(model);
@@ -4284,6 +4285,7 @@ mod tests {
                     ("empty-after-named", "", false, 28.0),
                     ("prompt", "You", false, 28.0),
                     ("next-prompt", "", true, 28.0),
+                    ("relay-notice", "Relay", false, 28.0),
                 ],
             );
             let empty =

@@ -485,6 +485,7 @@ async fn call(
                 .checked_add(1)
                 .ok_or_else(|| Error::invalid("Revision exhausted"))?;
             store.save(&current)?;
+            store.mark_ancestor_stop(&args.agent);
             store.stop_controls(&current, &args.agent);
             workspace.snapshots.send_replace(current);
             Ok(json!({"agent":args.agent,"stop_requested":true}))
@@ -2787,6 +2788,210 @@ mod tests {
                 .submissions
                 .iter()
                 .any(|s| s.id == queued && s.state == SubmissionState::Paused)
+        );
+        Shutdown {
+            workspace: f.workspace.clone(),
+        }
+        .shutdown()
+        .await
+        .unwrap();
+    }
+    fn notices(f: &Fixture) -> Vec<Submission> {
+        f.workspace
+            .snapshots
+            .borrow()
+            .submissions
+            .iter()
+            .filter(|s| s.session_id == f.caller && s.id.starts_with(crate::notices::PREFIX))
+            .cloned()
+            .collect()
+    }
+    /// Waits for every listed child to end, then past the batching window.
+    async fn await_ended(f: &Fixture, children: &[&str]) {
+        let mut events = f.workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let ended = children.iter().all(|id| {
+                    events
+                        .borrow()
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == *id)
+                        .and_then(|s| s.worker.as_ref())
+                        .is_some_and(|w| !runtime::active(&w.status))
+                });
+                if ended {
+                    break;
+                }
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+    }
+    async fn spawn_child(f: &Fixture, title: &str) -> String {
+        f.call("spawn_agent", json!({"title":title,"task":"Test"}))
+            .await
+            .unwrap()["agent"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+    async fn stop_worker(f: &Fixture, session: &str, include_descendants: bool) {
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let envelope = crate::tests::env(
+            snapshot.revision,
+            Command::StopWorker {
+                session_id: session.into(),
+                include_descendants,
+            },
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer test-token".parse().unwrap());
+        let _ = command(State(f.workspace.clone()), headers, Ok(Json(envelope)))
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn failed_and_completed_children_without_results_notify_the_parent() {
+        for status in ["failed", "completed"] {
+            let f = Fixture::new(Permission::Allow);
+            let native = crate::tests::command_tests::CODEX
+                .replace(
+                    "@CAPTURE@",
+                    f._directory.path().join("capture").to_str().unwrap(),
+                )
+                .replace("test-model", "fixture-model")
+                .replace(
+                    r#""id":"test-turn","status":"completed""#,
+                    &format!(r#""id":"test-turn","status":"{status}""#),
+                );
+            std::fs::write(&f.workspace.config.codex, format!("#!/bin/sh\n{native}")).unwrap();
+            let child = spawn_child(&f, "Quiet child").await;
+            await_ended(&f, &[&child]).await;
+            let notices = notices(&f);
+            assert_eq!(notices.len(), 1, "{status}");
+            // The parent is running, so the notice waits for its next turn.
+            assert_eq!(notices[0].state, SubmissionState::Queued);
+            let text = plain_text(&notices[0].parts);
+            assert!(text.contains("Quiet child"), "{text}");
+            assert!(text.contains(&child), "{text}");
+            assert!(
+                text.contains(&format!("{status}, no result reported")),
+                "{text}"
+            );
+            assert!(text.contains("Worktree: "), "{text}");
+            f.finish().await;
+        }
+    }
+    #[tokio::test]
+    async fn stopped_children_notify_once_per_batch_unless_they_reported() {
+        let f = Fixture::new(Permission::Allow);
+        let first = spawn_child(&f, "First").await;
+        let second = spawn_child(&f, "Second").await;
+        let reporter = spawn_child(&f, "Reporter").await;
+        let reporter_run = f
+            .workspace
+            .store
+            .lock()
+            .unwrap()
+            .run_id(&reporter)
+            .unwrap()
+            .unwrap();
+        call(
+            &f.workspace,
+            &reporter,
+            &reporter_run,
+            "report_result",
+            json!({"summary":"Done"}),
+            &mut f.stop.clone(),
+        )
+        .await
+        .unwrap();
+        stop_worker(&f, &reporter, false).await;
+        stop_worker(&f, &first, false).await;
+        stop_worker(&f, &second, false).await;
+        await_ended(&f, &[&first, &second, &reporter]).await;
+        let notices = notices(&f);
+        assert_eq!(notices.len(), 1);
+        let text = plain_text(&notices[0].parts);
+        assert!(text.starts_with("Relay: 2 workers ended"), "{text}");
+        assert!(text.contains("First") && text.contains("Second"), "{text}");
+        assert!(text.contains("stopped, no result reported"), "{text}");
+        assert!(!text.contains("Reporter"), "{text}");
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn ancestor_stops_do_not_notify_per_child() {
+        let f = Fixture::new(Permission::Allow);
+        let directed = spawn_child(&f, "Directed").await;
+        f.call("stop_agent", json!({"agent":directed}))
+            .await
+            .unwrap();
+        await_ended(&f, &[&directed]).await;
+        assert!(notices(&f).is_empty());
+        let child = spawn_child(&f, "Child").await;
+        let child_run = f
+            .workspace
+            .store
+            .lock()
+            .unwrap()
+            .run_id(&child)
+            .unwrap()
+            .unwrap();
+        let grandchild = call(
+            &f.workspace,
+            &child,
+            &child_run,
+            "spawn_agent",
+            json!({"title":"Grandchild","task":"Test"}),
+            &mut f.stop.clone(),
+        )
+        .await
+        .unwrap()["agent"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        stop_worker(&f, &f.caller, true).await;
+        await_ended(&f, &[&child, &grandchild]).await;
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        assert!(
+            !snapshot
+                .submissions
+                .iter()
+                .any(|s| s.id.starts_with(crate::notices::PREFIX))
+        );
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn idle_parent_starts_a_relay_authored_notice_turn() {
+        let f = Fixture::new(Permission::Allow);
+        let child = spawn_child(&f, "Child").await;
+        f.change(|s| {
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .worker
+                .as_mut()
+                .unwrap()
+                .status = WorkerStatus::Completed
+        });
+        stop_worker(&f, &child, false).await;
+        await_ended(&f, &[&child]).await;
+        let notices = notices(&f);
+        assert_eq!(notices.len(), 1);
+        assert_ne!(notices[0].state, SubmissionState::Queued);
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let prompt = snapshot
+            .messages
+            .iter()
+            .find(|m| m.id == format!("prompt-{}", notices[0].id))
+            .unwrap();
+        assert_eq!(
+            (prompt.author.as_str(), prompt.kind.as_str()),
+            ("Relay", "prompt")
         );
         Shutdown {
             workspace: f.workspace.clone(),
