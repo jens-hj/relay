@@ -38,6 +38,16 @@ impl Harness {
             Self::Cursor => crate::icons::harness.cursor,
         }
     }
+
+    /// The identity colour of its usage bars: terracotta for Claude Code,
+    /// blue for Codex, ink for harnesses without one.
+    pub fn tint(self) -> ColorToken {
+        match self {
+            Self::Codex => crate::tokens::harness.codex,
+            Self::ClaudeCode => crate::tokens::harness.claude_code,
+            Self::Copilot | Self::Cursor => crate::tokens::ground.ink,
+        }
+    }
 }
 
 /// A harness glyph drawn in the surrounding text colour (24-unit artwork,

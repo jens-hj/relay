@@ -29,6 +29,8 @@ mosaic::scheme! {
         },
         /// State of an agent or call.
         status { live:Color, needs-you:Color, failed:Color, full-steam:Color },
+        /// Which harness a usage bar measures.
+        harness { claude-code:Color, codex:Color },
         /// Which model thinks.
         model { sol:Color, opus:Color, sonnet:Color, haiku:Color, astra:Color, luna:Color, terra:Color },
         /// Which tool type was called.
@@ -155,12 +157,21 @@ pub struct Statuses {
     pub full_steam: Color,
 }
 
+/// Resolved harness identity colours.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Harnesses {
+    pub claude_code: Color,
+    pub codex: Color,
+}
+
 /// One theme variant's colours, for imperative painting and tests. Views
 /// should prefer the scheme tokens so they follow theme switches.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     pub ground: Ground,
     pub status: Statuses,
+    /// Usage bar fills, Anthropic terracotta and a contrasting blue.
+    pub harness: Harnesses,
     /// Indexed by [`ModelFamily`].
     pub model: [Color; 7],
     /// Indexed by [`ToolKind`].
@@ -207,6 +218,10 @@ impl Palette {
             needs_you: hex(0xE3B266),
             failed: hex(0xE07A6E),
             full_steam: hex(0x9BD7A9),
+        },
+        harness: Harnesses {
+            claude_code: hex(0xD97757),
+            codex: hex(0x5AAEF0),
         },
         model: [
             hex(0x65C98C),
@@ -268,6 +283,10 @@ impl Palette {
             failed: hex(0xB23A2A),
             full_steam: hex(0x26703F),
         },
+        harness: Harnesses {
+            claude_code: hex(0x9E4A2B),
+            codex: hex(0x1F63A8),
+        },
         model: [
             hex(0x1B6F41),
             hex(0x9A3F93),
@@ -327,6 +346,10 @@ impl Palette {
             failed: hex(0xF5938A),
             full_steam: hex(0xACE8BA),
         },
+        harness: Harnesses {
+            claude_code: hex(0xF0906F),
+            codex: hex(0x7CC4FF),
+        },
         model: [
             hex(0x7FE0A5),
             hex(0xF2AAEA),
@@ -385,6 +408,10 @@ impl Palette {
             needs_you: hex(0x6E4706),
             failed: hex(0x96291C),
             full_steam: hex(0x1C5A31),
+        },
+        harness: Harnesses {
+            claude_code: hex(0x853A1F),
+            codex: hex(0x154F86),
         },
         model: [
             hex(0x145A33),
@@ -627,6 +654,7 @@ pub fn theme(variant: ThemeVariant, scale: f32) -> UiTheme {
     let p = variant.palette();
     let g = p.ground;
     let s = p.status;
+    let h = p.harness;
     let [sol, opus, sonnet, haiku, astra, luna, terra] = p.model;
     let [
         plan,
@@ -658,6 +686,7 @@ pub fn theme(variant: ThemeVariant, scale: f32) -> UiTheme {
             selected:(g.selected), hover:(g.hover), pressed:(g.pressed), inverse:(g.inverse),
         },
         status { live:(s.live), needs-you:(s.needs_you), failed:(s.failed), full-steam:(s.full_steam) },
+        harness { claude-code:(h.claude_code), codex:(h.codex) },
         model { sol:sol, opus:opus, sonnet:sonnet, haiku:haiku, astra:astra, luna:luna, terra:terra },
         tool {
             plan:plan, create:create, edit:edit, test:test, search:search, fetch:fetch,

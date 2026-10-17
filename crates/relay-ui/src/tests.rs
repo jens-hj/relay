@@ -463,6 +463,13 @@ fn every_theme_variant_meets_contrast() {
                 let ratio = contrast(palette.signal(signal), surface);
                 assert!(ratio >= 4.5, "{name}: {signal:?} is {ratio}");
             }
+            for (harness, tint) in [
+                ("Claude Code", palette.harness.claude_code),
+                ("Codex", palette.harness.codex),
+            ] {
+                let ratio = contrast(tint, surface);
+                assert!(ratio >= 4.5, "{name}: {harness} is {ratio}");
+            }
             for family in ModelFamily::ALL {
                 let ratio = contrast(palette.model(family), surface);
                 assert!(ratio >= 4.5, "{name}: {family:?} is {ratio}");

@@ -55,6 +55,72 @@ fn claude(insight: UsageInsight) -> HarnessUsage {
     }
 }
 
+/// The opaque colours painted inside the bar labelled `label`.
+fn bar_colours(mounted: &crate::testing::Mounted, label: &str) -> Vec<(f32, f32, f32)> {
+    let bar = mounted.rect(label);
+    mounted
+        .ui
+        .scene()
+        .cmds
+        .iter()
+        .filter_map(|cmd| match cmd {
+            mosaic::render::PaintCmd::Shape(shape)
+                if bar.contains(shape.rect.origin)
+                    && bar.contains(
+                        shape.rect.origin
+                            + Vector2::new(shape.rect.size.width, shape.rect.size.height),
+                    ) =>
+            {
+                shape.fill.as_solid()
+            }
+            _ => None,
+        })
+        .filter(|fill| fill.a > 0.0)
+        .map(|fill| (fill.r, fill.g, fill.b))
+        .collect()
+}
+
+#[test]
+fn each_harness_fills_its_bars_with_its_colour_until_a_threshold() {
+    let codex = HarnessUsage {
+        harness: Harness::Codex,
+        session: Some(UsageWindow::new(35.0, 5 * HOUR)),
+        week: Some(UsageWindow::new(86.0, 7 * 24 * HOUR)),
+        insight: UsageInsight::default(),
+    };
+    let mounted = mount(Size::new(380.0, 300.0), move || {
+        view! {
+            col justify:end {
+                UsageFoot harnesses:(vec![claude(UsageInsight::default()), codex])
+            }
+        }
+    });
+    for _ in 0..12 {
+        mounted.ui.tick(Duration::from_millis(40));
+        mounted.settle();
+    }
+    let rgb = |token: ColorToken| {
+        let c = mosaic::core::theme::color(token);
+        (c.r, c.g, c.b)
+    };
+    let ink = rgb(crate::tokens::ground.ink);
+    for (label, tint) in [
+        (
+            "62 percent used, 40 percent of the window elapsed",
+            Harness::ClaudeCode.tint(),
+        ),
+        ("48 percent used", Harness::ClaudeCode.tint()),
+        ("35 percent used", Harness::Codex.tint()),
+        ("86 percent used", crate::tokens::Signal::NeedsYou.token()),
+    ] {
+        let colours = bar_colours(&mounted, label);
+        let count = colours.iter().filter(|c| **c == rgb(tint)).count();
+        assert!(count > 1, "{label}: cap and particles in its tint");
+        assert!(!colours.contains(&ink), "{label}: no ink particles");
+    }
+    assert_ne!(rgb(Harness::ClaudeCode.tint()), rgb(Harness::Codex.tint()));
+}
+
 #[test]
 fn windows_report_elapsed_and_rate_units() {
     let session = UsageWindow::new(62.0, 5 * HOUR).elapsed(2 * HOUR);

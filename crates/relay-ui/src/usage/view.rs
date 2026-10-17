@@ -4,6 +4,7 @@
 use super::forecast::{Forecast, Verdict};
 use super::{HarnessUsage, OnApply, UsageInsight, UsageWindow};
 use crate::marks::sized_text;
+use crate::model::Harness;
 use crate::prelude::*;
 use crate::tokens::{Signal, ground, px, thresholds};
 use mosaic::core::theme::color;
@@ -16,6 +17,15 @@ fn level_token(used: f32) -> ColorToken {
     thresholds::level(used).token()
 }
 
+/// The fill of a bar: the harness colour while there is room, then the
+/// amber and red levels.
+fn fill_token(used: f32, harness: Option<Harness>) -> ColorToken {
+    match (thresholds::level(used), harness) {
+        (thresholds::Level::Room, Some(harness)) => harness.tint(),
+        (level, _) => level.token(),
+    }
+}
+
 fn rect(scene: &mut Scene, rect: Rect, tint: Color) {
     scene.shape(Shape::new(rect).fill(tint));
 }
@@ -25,6 +35,7 @@ fn rect(scene: &mut Scene, rect: Rect, tint: Color) {
 /// the box and the track's top edge.
 fn dithered_bar(
     used: f32,
+    tint: ColorToken,
     thickness: f32,
     height: f32,
     label: String,
@@ -32,7 +43,6 @@ fn dithered_bar(
 ) -> Element {
     let inset = (height - thickness) / 2.0;
     let fraction = (used / 100.0).clamp(0.0, 1.0);
-    let tint = level_token(used);
     let track = view! {
         el width:fill height:fill nohit {}
     };
@@ -109,13 +119,14 @@ fn bar_label(window: &UsageWindow) -> String {
 }
 
 /// A resting usage bar: a 4px dithered fill densest at its crisp end, in
-/// ink, amber from 80% or red from 95%, with a thin grey tick for how much
-/// of the window has passed.
+/// the harness colour (ink without one), amber from 80% or red from 95%,
+/// with a thin grey tick for how much of the window has passed.
 #[component]
-pub fn UsageBar(window: UsageWindow) -> Element {
+pub fn UsageBar(window: UsageWindow, #[prop(optional)] harness: Option<Harness>) -> Element {
     let elapsed = window.elapsed_fraction();
     dithered_bar(
         window.used,
+        fill_token(window.used, harness),
         4.0,
         10.0,
         bar_label(&window),
@@ -136,7 +147,7 @@ pub fn UsageBar(window: UsageWindow) -> Element {
 /// value at reset ending in a hollow square when it lands under 100%, or a
 /// red arrow at the end when it overruns, and the elapsed tick.
 #[component]
-pub fn ForecastBar(window: UsageWindow) -> Element {
+pub fn ForecastBar(window: UsageWindow, #[prop(optional)] harness: Option<Harness>) -> Element {
     let forecast = window.forecast();
     let elapsed = window.elapsed_fraction();
     let label = match &forecast {
@@ -146,19 +157,27 @@ pub fn ForecastBar(window: UsageWindow) -> Element {
         ),
         None => bar_label(&window),
     };
-    dithered_bar(window.used, 6.0, 16.0, label, move |scene, r, unit| {
-        if let Some(forecast) = forecast {
-            paint_projection(scene, r, unit, &forecast);
-        }
-        if let Some(elapsed) = elapsed {
-            let x = r.origin.x + r.size.width * elapsed;
-            rect(
-                scene,
-                Rect::from_xywh(x, r.origin.y, unit, r.size.height),
-                color(ground.muted),
-            );
-        }
-    })
+    let tint = fill_token(window.used, harness);
+    dithered_bar(
+        window.used,
+        tint,
+        6.0,
+        16.0,
+        label,
+        move |scene, r, unit| {
+            if let Some(forecast) = forecast {
+                paint_projection(scene, r, unit, &forecast);
+            }
+            if let Some(elapsed) = elapsed {
+                let x = r.origin.x + r.size.width * elapsed;
+                rect(
+                    scene,
+                    Rect::from_xywh(x, r.origin.y, unit, r.size.height),
+                    color(ground.muted),
+                );
+            }
+        },
+    )
 }
 
 /// The dashed line (2 on, 3 off) from just past the value to the
@@ -219,13 +238,13 @@ fn percent(used: f32) -> Element {
     }
 }
 
-fn bar_line(caption: &str, window: &UsageWindow) -> Element {
+fn bar_line(caption: &str, window: &UsageWindow, harness: Harness) -> Element {
     let caption = caption.to_string();
     view! {
         row height:min-content gap:{px(7.0)}px align:center {
             text font-family:monospace font-size:{px(9.5)}px font-color:ground.faint shrink:0
                 (caption)
-            UsageBar window:(window.clone())
+            UsageBar window:(window.clone()) harness:(Some(harness))
             {
                 parent.adopt(&percent(window.used));
             }
@@ -251,10 +270,10 @@ pub fn UsageRow(
         col width:1fr min-width:0px height:min-content gap:{px(3.0)}px {}
     };
     if let Some(session) = &usage.session {
-        bars.adopt(&bar_line("5h", session));
+        bars.adopt(&bar_line("5h", session, usage.harness));
     }
     if let Some(week) = &usage.week {
-        bars.adopt(&bar_line("wk", week));
+        bars.adopt(&bar_line("wk", week, usage.harness));
     }
     if usage.session.is_none() && usage.week.is_none() {
         bars.adopt(&view! {
@@ -305,7 +324,7 @@ fn grow(text: String, tone: ColorToken, weight: u16) -> Element {
     }
 }
 
-fn window_block(title: &str, window: &UsageWindow) -> Element {
+fn window_block(title: &str, window: &UsageWindow, harness: Harness) -> Element {
     let block = view! {
         col height:min-content gap:{px(6.0)}px pad:(top:{px(8.0)}px) {}
     };
@@ -313,7 +332,7 @@ fn window_block(title: &str, window: &UsageWindow) -> Element {
         .then(|| sized_text(window.resets.clone().into(), 12.0, 400, ground.ink));
     block.adopt(&line(grow(title.to_string(), ground.muted, 400), resets));
     block.adopt(&view! {
-        ForecastBar window:(window.clone())
+        ForecastBar window:(window.clone()) harness:(Some(harness))
     });
     if let Some(forecast) = window.forecast() {
         let tone = match forecast.verdict {
@@ -439,10 +458,10 @@ pub fn UsageDetail(usage: HarnessUsage, #[prop(optional)] on_apply: Option<OnApp
         col height:min-content gap:{px(14.0)}px pad:(horizontal:{px(18.0)}px vertical:0px) {}
     };
     if let Some(session) = &usage.session {
-        body.adopt(&window_block("Session · 5h", session));
+        body.adopt(&window_block("Session · 5h", session, usage.harness));
     }
     if let Some(week) = &usage.week {
-        body.adopt(&window_block("Week", week));
+        body.adopt(&window_block("Week", week, usage.harness));
     }
     for part in [
         mix_block(&usage.insight),
