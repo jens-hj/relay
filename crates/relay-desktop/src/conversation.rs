@@ -3062,7 +3062,7 @@ pub(crate) fn BufferText(
     let editor = Rc::new(RefCell::new(EditBuffer::new(buffer_text_style())));
     let source_cursor = Rc::new(Cell::new((0, 0)));
     let markdown = matches!(location, Location::Source { .. }).then(|| {
-        Rc::new(RefCell::new(crate::markdown::Document::new(&current_text(
+        Rc::new(RefCell::new(crate::markdown::document(&current_text(
             model, &location,
         ))))
     });
@@ -3177,9 +3177,7 @@ pub(crate) fn BufferText(
         if let Some(document) = &measure_markdown {
             let size = document
                 .borrow_mut()
-                .shape(&mut fonts, available.width.definite())
-                .metrics()
-                .size;
+                .size(&mut fonts, available.width.definite());
             return Size::new(size.width.max(1.0), size.height.max(px(24.0)));
         }
         let mut buffer = measured.borrow_mut();
@@ -3238,33 +3236,24 @@ pub(crate) fn BufferText(
         let origin = ctx.rect.origin;
         if let Some(document) = &paint_markdown {
             let mut document = document.borrow_mut();
-            let mut backgrounds = document
-                .runs
-                .iter()
-                .filter(|r| r.code)
-                .map(|r| (r.display.clone(), color(ground.hover)))
-                .collect::<Vec<_>>();
+            let width = ctx.rect.size.width;
+            document.paint_under(ctx.scene, &mut fonts, width, origin);
             let query = if model.searching.get_untracked() {
                 model.search.get_untracked()
             } else {
                 String::new()
             };
             if !query.is_empty() {
-                backgrounds.extend(buffer.text().match_indices(&query).map(|(offset, _)| {
-                    (
-                        document.display_offset(offset)
-                            ..document.display_offset(offset + query.len()),
+                for (offset, _) in buffer.text().match_indices(&query) {
+                    let range = document.display_offset(offset)
+                        ..document.display_offset(offset + query.len());
+                    document.fill(
+                        ctx.scene,
+                        &mut fonts,
+                        width,
+                        origin,
+                        range,
                         color(status.needs_you),
-                    )
-                }));
-            }
-            let shaped = document.shape(&mut fonts, Some(ctx.rect.size.width));
-            for (range, fill) in backgrounds {
-                for rect in shaped.selection_rects(range.start, range.end) {
-                    ctx.scene.shape(
-                        Visual::new()
-                            .fill(fill)
-                            .shape(Rect::new(origin + rect.origin, rect.size)),
                     );
                 }
             }
@@ -3298,9 +3287,7 @@ pub(crate) fn BufferText(
                 let (start, end) = buffer.selection_bytes();
                 let start = document.display_offset(start);
                 let end = document.display_offset(end);
-                document
-                    .shape(&mut fonts, Some(ctx.rect.size.width))
-                    .selection_rects(start, end)
+                document.rects(&mut fonts, ctx.rect.size.width, start..end)
             } else {
                 buffer.selection_rects(&mut fonts)
             };
@@ -3313,14 +3300,14 @@ pub(crate) fn BufferText(
             }
         }
         if let Some(document) = &paint_markdown {
-            let mut document = document.borrow_mut();
-            let shaped = document.shape(&mut fonts, Some(ctx.rect.size.width));
-            ctx.scene
-                .glyphs(shaped.place(&mut fonts, ctx.text_color.clone(), origin, ctx.scale));
-            for rect in shaped.decorations(origin, ctx.scale) {
-                ctx.scene
-                    .shape(Visual::new().fill(color(ground.ink)).shape(rect));
-            }
+            document.borrow_mut().paint_text(
+                ctx.scene,
+                &mut fonts,
+                ctx.rect.size.width,
+                origin,
+                ctx.scale,
+                ctx.text_color.clone(),
+            );
         } else {
             ctx.scene
                 .glyphs(buffer.place(&mut fonts, ctx.text_color.clone(), origin, ctx.scale));
@@ -3479,12 +3466,33 @@ pub(crate) fn BufferText(
                     && (event.position.y - origin.y).abs() < px(4.0)
                     && !event.modifiers.shift
                     && ctx.press_count() == 1
+                    && let Some(document) = &pointer_markdown
                 {
-                    crate::markdown::open_url(&url);
+                    document.borrow().open_link(&url);
                 }
                 pressed_link.borrow_mut().take();
                 dragging.set(false);
                 editor.finish_selection();
+            }
+            // Horizontal (or Shift+vertical) wheel input scrolls wide tables;
+            // other wheel input reaches the transcript.
+            PointerEventKind::Wheel { delta } => {
+                if let Some(document) = &pointer_markdown {
+                    let rect = pointer_field.layout_rect();
+                    let delta = if event.modifiers.shift && delta.x == 0.0 {
+                        Vector2::new(delta.y, 0.0)
+                    } else {
+                        delta
+                    };
+                    if document.borrow_mut().scroll(
+                        &mut fonts,
+                        rect.size.width,
+                        event.position - rect.origin,
+                        delta,
+                    ) {
+                        ctx.stop_propagation();
+                    }
+                }
             }
             _ => {}
         }
@@ -3878,13 +3886,10 @@ pub(crate) fn BufferText(
                     editor.caret_offset()
                 };
                 let at_boundary = if let Some(document) = &key_markdown {
-                    let mut document = document.borrow_mut();
+                    let document = document.borrow();
                     let before = document.display_offset(before);
                     let after = document.display_offset(after);
-                    let end = document
-                        .shape(&mut fonts, Some(key_field.layout_rect().size.width))
-                        .text()
-                        .len();
+                    let end = document.display_len();
                     before.min(end) == after.min(end)
                 } else {
                     after == before
@@ -4801,10 +4806,8 @@ mod layout_regression {
                         continue;
                     }
                     let rect = field.layout_rect();
-                    let metrics = crate::markdown::Document::new(&buffer.borrow().text())
-                        .shape(&mut ui.fonts().borrow_mut(), Some(rect.size.width))
-                        .metrics()
-                        .size;
+                    let metrics = crate::markdown::document(&buffer.borrow().text())
+                        .size(&mut ui.fonts().borrow_mut(), Some(rect.size.width));
                     assert!(
                         metrics.height <= rect.size.height + 0.5,
                         "{id} at {width}: painted height {} exceeds measured {}",

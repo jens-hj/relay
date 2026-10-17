@@ -238,7 +238,7 @@ fn shell_screenshots() {
         *receipt.borrow_mut() = Some(request.request_id.clone());
         request.request_id
     };
-    let shots: [(&str, &dyn Fn()); 22] = [
+    let shots: [(&str, &dyn Fn()); 23] = [
         ("notice-command-feedback", &|| {
             model.open_session("session-plan".into());
             model.command_feedback.set("Configure this feature on the server; the harness does not expose its interactive editor here".into());
@@ -387,6 +387,63 @@ fn shell_screenshots() {
                         session_id: "session-plan".into(),
                         author: "Relay".into(),
                         kind: kind.into(),
+                        body,
+                        parts: vec![],
+                        tool: None,
+                    });
+                }
+            });
+            model.open_session("session-plan".into());
+        }),
+        ("transcript-markdown", &|| {
+            model.snapshot.update(|snapshot| {
+                snapshot.messages.retain(|m| m.session_id != "session-plan");
+                for (id, body) in [
+                    (
+                        "markdown-table",
+                        concat!(
+                            "## Worktrees\n\n",
+                            "| Worktree | Size | Status |\n",
+                            "|---|---:|:---:|\n",
+                            "| relay-1 | 1.2 GB | clean |\n",
+                            "| relay-2 | 300 MB | **dirty** |\n\n",
+                            "- [x] Removed `relay-3`\n",
+                            "- [ ] Prune ~~stale~~ branches\n",
+                            "  1. Fetch\n",
+                            "  2. Delete merged\n\n",
+                            "> [!NOTE]\n> Sizes include build output.\n\n",
+                            "```sh\ngit worktree list\n```\n\n",
+                            "---\n\n",
+                            "See https://git-scm.com/docs/git-worktree.[^1]\n\n",
+                            "[^1]: Upstream documentation.",
+                        )
+                        .to_owned(),
+                    ),
+                    (
+                        "markdown-wide",
+                        format!(
+                            "| {} |\n|{}|\n| {} |",
+                            (0..10)
+                                .map(|i| format!("column_{i}"))
+                                .collect::<Vec<_>>()
+                                .join(" | "),
+                            ["---"; 10].join("|"),
+                            (0..10)
+                                .map(|i| format!("/nix/store/value-{i}"))
+                                .collect::<Vec<_>>()
+                                .join(" | ")
+                        ),
+                    ),
+                ]
+                .into_iter()
+                // End on the main table, which the transcript scrolls to.
+                .rev()
+                {
+                    snapshot.messages.push(Message {
+                        id: id.into(),
+                        session_id: "session-plan".into(),
+                        author: "Relay".into(),
+                        kind: "assistant".into(),
                         body,
                         parts: vec![],
                         tool: None,

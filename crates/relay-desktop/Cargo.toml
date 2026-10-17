@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 relay-core.workspace = true
 relay-ui.workspace = true
+md2mosaic.workspace = true
 mosaic.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -17,8 +18,6 @@ futures-util = { workspace = true, features = ["sink"] }
 uuid.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 percent-encoding = "2.3"
-pulldown-cmark = { version = "0.13", default-features = false }
-unicode-segmentation = "1"
 
 [package.metadata.mosaic]
 name = "Relay"

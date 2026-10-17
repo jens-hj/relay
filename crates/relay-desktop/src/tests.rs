@@ -11245,7 +11245,7 @@ fn markdown_transcript_copies_source_and_anchors_replies_across_inline_attachmen
     // Reverse-drag within the rendered fence: the quote must index the original
     // body after the preceding Markdown and file, without either fence marker.
     let field = mounted.rects("Message m1")[1];
-    let mut document = crate::markdown::Document::new(&after);
+    let mut document = crate::markdown::document(&after);
     let answer = after.find("answer").unwrap();
     let start = document
         .caret(
@@ -11304,6 +11304,63 @@ fn markdown_transcript_copies_source_and_anchors_replies_across_inline_attachmen
             .body,
         original
     );
+}
+
+#[test]
+fn markdown_transcript_tables_fit_the_message_and_copy_their_source() {
+    let mounted = mount(false, 1380.0);
+    let columns = (0..12)
+        .map(|i| format!("/nix/store/column-{i}"))
+        .collect::<Vec<_>>();
+    let body = format!(
+        "| Worktree | Size | Status |\n|---|---:|:---:|\n| relay-1 | 1.2 GB | clean |\n\n| {} |\n|{}|\n| {} |",
+        columns.join(" | "),
+        ["---"; 12].join("|"),
+        columns.join(" | ")
+    );
+    mounted.model.snapshot.update(|s| {
+        let message = s.messages.iter_mut().find(|m| m.id == "m1").unwrap();
+        message.body = body.clone();
+        message.parts = vec![];
+    });
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    let field = mounted.rects("Message m1")[0];
+    let mut document = crate::markdown::document(&body);
+    assert!(!document.display_text().contains('|'));
+    let size = document.size(&mut mounted.ui.fonts().borrow_mut(), Some(field.size.width));
+    assert!(size.width <= field.size.width + 0.5);
+    assert!(size.height <= field.size.height + 0.5);
+    // Horizontal wheel input over the wide table scrolls it in place.
+    let wide = body.find("/nix/store/column-0").unwrap();
+    let caret = document.caret(&mut mounted.ui.fonts().borrow_mut(), field.size.width, wide);
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Wheel {
+            delta: Vector2::new(-60.0, 0.0),
+        },
+        position: field.origin + caret.center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: Duration::ZERO,
+    });
+    mounted.settle();
+    let position = field.origin + Vector2::new(2.0, 2.0);
+    for kind in [
+        PointerEventKind::Down(PointerButton::Primary),
+        PointerEventKind::Up(PointerButton::Primary),
+    ] {
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind,
+            position,
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::from_secs(1),
+        });
+    }
+    mounted.settle();
+    mounted.key(Key::Character("a".into()), true);
+    mounted.key(Key::Character("c".into()), true);
+    assert_eq!(mounted.ui.clipboard_text().as_deref(), Some(body.as_str()));
 }
 
 #[test]
