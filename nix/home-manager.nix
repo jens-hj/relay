@@ -54,6 +54,10 @@ in
         RestartSec = 5;
         KillMode = "control-group";
         TimeoutStopSec = 60;
+        # A worker build killed by the OOM killer must not stop the server and
+        # every other worker; keep the server the least preferred victim.
+        OOMPolicy = "continue";
+        OOMScoreAdjust = 100; # Lowest value a user manager may assign.
       };
       Install.WantedBy = [ "default.target" ];
     };

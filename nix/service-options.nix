@@ -58,6 +58,26 @@ with lib;
     default = [ ];
     description = "Additional tools available to server-owned harness processes.";
   };
+  workerMemory = {
+    scope = mkOption {
+      type = types.enum [
+        "auto"
+        "off"
+      ];
+      default = "auto";
+      description = "Run each agent harness in a memory-limited systemd user scope when a user manager is reachable; off launches harnesses directly.";
+    };
+    high = mkOption {
+      type = types.str;
+      default = "30%";
+      description = "Per-worker MemoryHigh throttling threshold: bytes with K/M/G/T suffix, a percentage of RAM, or infinity.";
+    };
+    max = mkOption {
+      type = types.str;
+      default = "40%";
+      description = "Per-worker MemoryMax hard limit; the kernel OOM-kills inside that worker's scope when it is exceeded.";
+    };
+  };
   environment = mkOption {
     type = types.attrsOf types.str;
     default = { };

@@ -1154,7 +1154,13 @@ async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worke
         WorkerStatus::Running
     );
     drop(socket);
-    let stop = env(latest.revision, Command::StopWorker { session_id: id });
+    let stop = env(
+        latest.revision,
+        Command::StopWorker {
+            session_id: id,
+            include_descendants: false,
+        },
+    );
     assert!(send(&stop).await.unwrap().status().is_success());
     assert!(send(&stop).await.unwrap().status().is_success());
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -1255,7 +1261,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            18
+            19
         );
         drop(store);
         let mut reopened = Store::open(&db, AgentProfile::default()).unwrap();
@@ -1349,7 +1355,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 19)
+        .pragma_update(None, "user_version", 20)
         .unwrap();
     drop(store);
     let error = Store::open(&db, AgentProfile::default()).err().unwrap();
@@ -1359,7 +1365,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        19
+        20
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -3613,7 +3619,7 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 18);
+    assert_eq!(schema, 19);
 }
 
 #[test]

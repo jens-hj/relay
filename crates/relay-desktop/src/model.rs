@@ -1598,11 +1598,31 @@ impl Model {
             self.notice.set("Select an active worker to stop.".into());
             return;
         }
+        // Only this session's turn stops; its descendants keep running.
         self.submit(
             Command::StopWorker {
                 session_id: self.session.get_untracked(),
+                include_descendants: false,
             },
             self.snapshot.get_untracked().revision,
+            Saved::Action,
+        );
+    }
+    /// Stops the selected session and every descendant, pausing their queues.
+    pub fn stop_all(&self) {
+        let snapshot = self.snapshot.get_untracked();
+        let session_id = self.session.get_untracked();
+        if snapshot.subtree_status(&session_id).active() == 0 {
+            self.notice
+                .set("Select an agent with active work to stop.".into());
+            return;
+        }
+        self.submit(
+            Command::StopWorker {
+                session_id,
+                include_descendants: true,
+            },
+            snapshot.revision,
             Saved::Action,
         );
     }

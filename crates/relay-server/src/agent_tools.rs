@@ -2038,7 +2038,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 18);
+        assert_eq!(schema, 19);
         f.finish().await;
     }
     #[tokio::test]
@@ -2547,11 +2547,19 @@ mod tests {
                 .iter()
                 .any(|p| p.session_id == grandchild)
         );
+        let queued = f
+            .call("message_agent", json!({"agent":child,"text":"Next turn"}))
+            .await
+            .unwrap()["submission"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         let snapshot = f.workspace.snapshots.borrow().clone();
         let envelope = crate::tests::env(
             snapshot.revision,
             Command::StopWorker {
                 session_id: f.caller.clone(),
+                include_descendants: true,
             },
         );
         let _ = command(
@@ -2571,6 +2579,14 @@ mod tests {
             assert!(store.controls.get(&child).is_none_or(|c| *c.borrow()));
             assert!(store.controls.get(&grandchild).is_none_or(|c| *c.borrow()));
         }
+        assert!(
+            f.workspace
+                .snapshots
+                .borrow()
+                .submissions
+                .iter()
+                .any(|s| s.id == queued && s.state == SubmissionState::Paused)
+        );
         f.finish().await;
         assert!(
             f.workspace
@@ -2580,5 +2596,131 @@ mod tests {
                 .iter()
                 .all(|s| s.worker.as_ref().unwrap().status == WorkerStatus::Stopped)
         );
+    }
+    #[tokio::test]
+    async fn stopping_a_parent_turn_leaves_children_running_and_queued() {
+        let f = Fixture::new(Permission::Allow);
+        let child = f
+            .call("spawn_agent", json!({"title":"Child","task":"Test"}))
+            .await
+            .unwrap()["agent"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let queued = f
+            .call("message_agent", json!({"agent":child,"text":"Next turn"}))
+            .await
+            .unwrap()["submission"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let envelope = crate::tests::env(
+            snapshot.revision,
+            Command::StopWorker {
+                session_id: f.caller.clone(),
+                include_descendants: false,
+            },
+        );
+        let _ = command(
+            State(f.workspace.clone()),
+            {
+                let mut h = HeaderMap::new();
+                h.insert("authorization", "Bearer test-token".parse().unwrap());
+                h
+            },
+            Ok(Json(envelope)),
+        )
+        .await
+        .unwrap();
+        {
+            let store = f.workspace.store.lock().unwrap();
+            assert!(*store.controls[&f.caller].borrow());
+            assert!(!*store.controls[&child].borrow());
+        }
+        // The child's run task keeps going after the parent's turn stops.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            f.workspace
+                .store
+                .lock()
+                .unwrap()
+                .controls
+                .get(&child)
+                .is_some_and(|c| !*c.borrow())
+        );
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        assert!(crate::runtime::active(
+            &snapshot
+                .sessions
+                .iter()
+                .find(|s| s.id == child)
+                .unwrap()
+                .worker
+                .as_ref()
+                .unwrap()
+                .status
+        ));
+        assert!(
+            snapshot
+                .submissions
+                .iter()
+                .any(|s| s.id == queued && s.state == SubmissionState::Queued)
+        );
+        // An idle parent has no turn to stop; only an explicit stop-all
+        // reaches its running children.
+        f.change(|s| {
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .worker
+                .as_mut()
+                .unwrap()
+                .status = WorkerStatus::Completed
+        });
+        let stop = |include_descendants| {
+            let snapshot = f.workspace.snapshots.borrow().clone();
+            command(
+                State(f.workspace.clone()),
+                {
+                    let mut h = HeaderMap::new();
+                    h.insert("authorization", "Bearer test-token".parse().unwrap());
+                    h
+                },
+                Ok(Json(crate::tests::env(
+                    snapshot.revision,
+                    Command::StopWorker {
+                        session_id: f.caller.clone(),
+                        include_descendants,
+                    },
+                ))),
+            )
+        };
+        assert!(stop(false).await.is_err());
+        assert!(stop(true).await.is_ok());
+        assert!(
+            f.workspace
+                .store
+                .lock()
+                .unwrap()
+                .controls
+                .get(&child)
+                .is_none_or(|c| *c.borrow())
+        );
+        assert!(
+            f.workspace
+                .snapshots
+                .borrow()
+                .submissions
+                .iter()
+                .any(|s| s.id == queued && s.state == SubmissionState::Paused)
+        );
+        Shutdown {
+            workspace: f.workspace.clone(),
+        }
+        .shutdown()
+        .await
+        .unwrap();
     }
 }

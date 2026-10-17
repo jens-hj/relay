@@ -117,6 +117,7 @@ pub(super) async fn execute(
     child: &mut tokio::process::Child,
     stop: &mut watch::Receiver<bool>,
 ) -> Result<(), Error> {
+    let background_limit = workspace.config.background_task_limit;
     let mut content = vec![];
     for part in input {
         if part["type"] == "localImage" {
@@ -146,25 +147,87 @@ pub(super) async fn execute(
     let mut thread = previous.map(str::to_owned);
     let mut current_messages = std::collections::HashMap::new();
     let mut completed = false;
+    let mut initialized = false;
     let mut state: Option<String> = None;
-    let mut tasks = std::collections::HashSet::new();
+    // Pending native tasks by ID: description, and whether the latest
+    // `background_tasks_changed` list reported it.
+    let mut tasks = std::collections::HashMap::<String, (String, bool)>::new();
+    // Bounds the idle waits for background work after the first result.
+    let mut background_deadline: Option<tokio::time::Instant> = None;
+    // A finished task's notification starts a follow-up turn just after it;
+    // stdin stays open until that turn starts or this settle time passes.
+    let mut settle: Option<tokio::time::Instant> = None;
+    let mut exiting = false;
     let mut compactions = 0usize;
     // Full tool inputs by tool_use_id; persisted inputs are truncated.
     let mut tool_inputs = std::collections::HashMap::<String, (String, Value)>::new();
     let mut deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(30));
     loop {
+        // A result ends a turn, but native tasks may still notify and start a
+        // follow-up turn that needs the control channel. Close input only
+        // once nothing is pending and the session is idle.
+        if completed
+            && tasks.is_empty()
+            && settle.is_none()
+            && state.as_deref().is_none_or(|s| s == "idle")
+            && stdin.is_some()
+        {
+            drop(stdin.take());
+            exiting = true;
+            deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
+        }
+        // After a result with pending tasks, wait for their notifications
+        // up to the overall ceiling.
+        let waiting = completed && !tasks.is_empty();
+        let settling = completed && settle.is_some();
+        let limit = if waiting {
+            background_deadline
+        } else if settling {
+            settle.min(background_deadline)
+        } else {
+            deadline
+        };
         let bytes = tokio::select! { biased; _ = stop.changed() => {
-            let _ = send(stdin.as_mut().ok_or_else(|| Error::invalid("Claude input already closed"))?, json!({"type":"control_request","request_id":"relay-interrupt","request":{"subtype":"interrupt"}})).await;
+            let Some(input) = stdin.as_mut() else { return Ok(()) };
+            let _ = send(input, json!({"type":"control_request","request_id":"relay-interrupt","request":{"subtype":"interrupt"}})).await;
             let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
                 while let Some(bytes) = runtime::line(&mut stdout).await? { let value: Value = serde_json::from_slice(&bytes).map_err(Error::internal)?; if value["type"] == "result" { break; } }
                 Ok::<_,Error>(())
             }).await;
             return Ok(());
         }, line = async {
-            if let Some(deadline) = deadline {
-                tokio::time::timeout_at(deadline, runtime::line(&mut stdout)).await.map_err(|_| Error::invalid(if completed {"Claude Code did not finish after its result"} else {"Claude Code initialization timed out"}))?
-            } else {runtime::line(&mut stdout).await}
-        } => line? };
+            if let Some(limit) = limit {
+                tokio::time::timeout_at(limit, runtime::line(&mut stdout)).await.map_err(|_| ())
+            } else {Ok(runtime::line(&mut stdout).await)}
+        } => match line {
+            Ok(line) => line?,
+            Err(()) if waiting => {
+                let (description, _) = tasks.values().min().cloned().unwrap_or_default();
+                let minutes = background_limit.as_secs().div_ceil(60);
+                return Err(Error::invalid(format!(
+                    "Claude Code background task \"{description}\" was still running {minutes} min after the turn's result; Relay stopped the session"
+                )));
+            }
+            Err(()) if settling && settle < background_deadline => {
+                settle = None;
+                continue;
+            }
+            Err(()) if settling => {
+                return Err(Error::invalid(
+                    "Claude Code did not start its follow-up turn before the background task limit; Relay stopped the session",
+                ));
+            }
+            Err(()) if exiting => {
+                // The successful result with no pending tasks is the turn's
+                // outcome; the runtime ends the lingering process group.
+                workspace.update_run(session, run, |s| {
+                    message(s, session, run, "exit", "harness_command", "Claude Code did not exit after its final result; Relay ended the process", false);
+                    Ok(())
+                })?;
+                break;
+            }
+            Err(()) => return Err(Error::invalid("Claude Code initialization timed out")),
+        } };
         let Some(bytes) = bytes else {
             if completed && tasks.is_empty() && state.as_deref().is_none_or(|s| s == "idle") {
                 break;
@@ -220,6 +283,13 @@ pub(super) async fn execute(
                 send(stdin.as_mut().ok_or_else(|| Error::invalid("Claude input already closed"))?, json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":response}})).await?;
             }
             "system" if value["subtype"] == "init" => {
+                // Follow-up turns triggered by task notifications repeat init.
+                completed = false;
+                settle = None;
+                if initialized {
+                    continue;
+                }
+                initialized = true;
                 let id = value["session_id"]
                     .as_str()
                     .filter(|id| uuid::Uuid::parse_str(id).is_ok())
@@ -289,16 +359,37 @@ pub(super) async fn execute(
                 }
                 if subtype == "session_state_changed" {
                     state = value["state"].as_str().map(str::to_owned);
+                    if state.as_deref() == Some("running") {
+                        completed = false;
+                        settle = None;
+                    }
+                }
+                let pending = tasks.len();
+                if subtype == "background_tasks_changed"
+                    && let Some(listed) = value["tasks"].as_array()
+                {
+                    // Authoritative for the tasks it lists; others are kept
+                    // until their own notification.
+                    tasks.retain(|id, (_, was_listed)| {
+                        !*was_listed || listed.iter().any(|t| t["task_id"] == id.as_str())
+                    });
+                    for task in listed {
+                        if let Some(id) = task["task_id"].as_str() {
+                            let description = task["description"].as_str().unwrap_or(id);
+                            tasks.insert(id.to_owned(), (description.to_owned(), true));
+                        }
+                    }
                 }
                 if let Some(id) = value["task_id"].as_str() {
                     match subtype {
-                        "task_started"
-                            if matches!(
-                                value["task_type"].as_str(),
-                                Some("local_agent" | "local_workflow")
-                            ) =>
-                        {
-                            tasks.insert(id.to_owned());
+                        // Every native task type (local_bash, monitor,
+                        // local_agent, ...) ends with a notification that can
+                        // start a follow-up turn on the control channel.
+                        "task_started" => {
+                            let description = value["description"].as_str().unwrap_or(id);
+                            tasks
+                                .entry(id.to_owned())
+                                .or_insert_with(|| (description.to_owned(), false));
                         }
                         "task_notification" => {
                             tasks.remove(id);
@@ -313,6 +404,9 @@ pub(super) async fn execute(
                         }
                         _ => {}
                     }
+                }
+                if completed && tasks.len() < pending {
+                    settle = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
                 }
             }
             "user" => {
@@ -567,18 +661,11 @@ pub(super) async fn execute(
                     )));
                 }
                 completed = true;
+                settle = None;
+                background_deadline
+                    .get_or_insert_with(|| tokio::time::Instant::now() + background_limit);
             }
             _ => {}
-        }
-        // A result ends a turn, but delegated work may still need the control
-        // channel. Follow the native SDK's task/state markers before EOF.
-        if completed
-            && tasks.is_empty()
-            && state.as_deref().is_none_or(|s| s == "idle")
-            && stdin.is_some()
-        {
-            drop(stdin.take());
-            deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(10));
         }
     }
     // The native success result is the turn's outcome. Leave the child

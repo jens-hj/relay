@@ -150,7 +150,7 @@ Adapters:
 - Approvals need no duplication: each `ToolPermission` stays on its session. Ancestors, "Needs you" and manager transcripts are client-side projections of pending permissions in the subtree. One `RespondPermission` resolves the request everywhere.
 
 **Lifecycle.**
-- Stopping a session stops its descendants.
+- Stopping a session stops only its own turn; "Stop all" also stops its descendants.
 - Restart repair marks descendants Interrupted, as today.
 - The worker prompt at `runtime.rs:1099` changes from "do not start other workers" to describing the Relay tools when `Delegate` ≠ Deny.
 

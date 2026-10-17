@@ -2548,7 +2548,9 @@ fn worker_running_stop_completed_review_and_continue_use_recorded_session() {
     mounted.focus("Stop");
     mounted.click("Stop");
     let stop = mounted.commands.try_recv().unwrap();
-    assert!(matches!(stop.command, Command::StopWorker { session_id: id } if id == session_id));
+    assert!(
+        matches!(stop.command, Command::StopWorker { session_id: id, include_descendants: false } if id == session_id)
+    );
     let mut snapshot = mounted.model.snapshot.get_untracked();
     snapshot.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed;
     mounted.model.receive(NetworkState {
@@ -8490,6 +8492,56 @@ fn tool_calls_open_in_three_steps_and_the_fingerprint_counts_them() {
 }
 
 #[test]
+fn stop_all_is_a_separate_session_action_that_stops_descendants() {
+    let mut mounted = mount_orchestration(1380.0);
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    for session in &mut snapshot.sessions {
+        session.fixture = false;
+    }
+    snapshot.projects[0].fixture = false;
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    // The header stop only stops this session's turn.
+    mounted.click("Stop");
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::StopWorker { ref session_id, include_descendants: false } if session_id == "session-plan"
+    ));
+    assert!(mounted.commands.try_recv().is_err());
+    mounted.model.busy.set(false);
+    mounted.click("Session actions");
+    mounted.settle();
+    assert!(has_label(&mounted, "Stop this agent and all its subagents"));
+    mounted.click("Stop this agent and all its subagents");
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::StopWorker { ref session_id, include_descendants: true } if session_id == "session-plan"
+    ));
+    // Without active descendants the action is not offered.
+    mounted.model.busy.set(false);
+    mounted.model.snapshot.update(|s| {
+        let below = s
+            .descendants("session-plan")
+            .iter()
+            .map(|d| d.id.clone())
+            .collect::<Vec<_>>();
+        for session in &mut s.sessions {
+            if below.contains(&session.id)
+                && let Some(worker) = session.worker.as_mut()
+            {
+                worker.status = WorkerStatus::Completed;
+            }
+        }
+    });
+    mounted.settle();
+    assert!(!has_label(
+        &mounted,
+        "Stop this agent and all its subagents"
+    ));
+}
+
+#[test]
 fn session_header_shows_context_controls_and_agents_below() {
     let mut mounted = mount_orchestration(1380.0);
     let mut snapshot = mounted.model.snapshot.get_untracked();
@@ -8514,7 +8566,7 @@ fn session_header_shows_context_controls_and_agents_below() {
     mounted.click("Stop");
     assert!(matches!(
         mounted.commands.try_recv().unwrap().command,
-        Command::StopWorker { ref session_id } if session_id == "session-plan"
+        Command::StopWorker { ref session_id, include_descendants: false } if session_id == "session-plan"
     ));
     // A session without measured context shows no gauge.
     mounted.model.open_session("session-worker".into());

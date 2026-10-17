@@ -40,6 +40,10 @@ in
     RELAY_DATABASE = cfg.databasePath;
     SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
     NODE_EXTRA_CA_CERTS = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+    RELAY_WORKER_SCOPE = cfg.workerMemory.scope;
+    # systemd expands % specifiers in Environment=; keep percentages literal.
+    RELAY_WORKER_MEMORY_HIGH = pkgs.lib.replaceStrings [ "%" ] [ "%%" ] cfg.workerMemory.high;
+    RELAY_WORKER_MEMORY_MAX = pkgs.lib.replaceStrings [ "%" ] [ "%%" ] cfg.workerMemory.max;
   }
   // pkgs.lib.optionalAttrs (cfg.publicOrigin != null) { RELAY_PUBLIC_ORIGIN = cfg.publicOrigin; }
   // pkgs.lib.optionalAttrs (cfg.webPackage != null) { RELAY_WEB_ROOT = toString cfg.webPackage; }

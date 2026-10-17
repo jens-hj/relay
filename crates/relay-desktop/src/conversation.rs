@@ -1955,6 +1955,9 @@ pub fn Conversation(model: Model) -> Element {
                         if compact.get() && session.get().and_then(|s|s.worker).is_some_and(|w|matches!(w.status,WorkerStatus::Running|WorkerStatus::Queued)) {
                             { parent.adopt(&action_cell("Stop worker", "Stop worker", move || !model.connected.get() || model.busy.get(), move || model.stop_worker())); }
                         }
+                        if session.get().is_some_and(|s| model.snapshot.get().descendants(&s.id).iter().any(|d| d.worker.as_ref().is_some_and(|w| matches!(w.status, WorkerStatus::Running | WorkerStatus::Queued)))) {
+                            { parent.adopt(&action_cell("Stop this agent and all its subagents", "Stop all", move || !model.connected.get() || model.busy.get(), move || model.stop_all())); }
+                        }
                         grid height:min-content gap:0px
                             stroke:(width:{px(1.0)} color:ground.hairline edges:top offset:{px(-1.0)})
                             cols:{GridTracks::new(vec![GridTrack::fr(1.0); if compact.get() { 3 } else if cfg!(target_arch = "wasm32") { 6 } else { 5 }])} {

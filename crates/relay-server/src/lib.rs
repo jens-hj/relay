@@ -111,19 +111,18 @@ struct Store {
 }
 
 impl Store {
+    /// Stops one session's turn and revokes its run capability.
+    fn stop_control(&mut self, session_id: &str) {
+        self.agent_capabilities.remove(session_id);
+        if let Some(control) = self.controls.get(session_id) {
+            control.send_replace(true);
+        }
+    }
+    /// Stops a session and every descendant.
     fn stop_controls(&mut self, snapshot: &Snapshot, session_id: &str) {
-        let mut ids = vec![session_id.to_owned()];
-        ids.extend(
-            snapshot
-                .descendants(session_id)
-                .iter()
-                .map(|s| s.id.clone()),
-        );
-        for id in ids {
-            self.agent_capabilities.remove(&id);
-            if let Some(control) = self.controls.get(&id) {
-                control.send_replace(true);
-            }
+        self.stop_control(session_id);
+        for session in snapshot.descendants(session_id) {
+            self.stop_control(&session.id);
         }
     }
     fn open(path: &Path, defaults: AgentProfile) -> Result<Self, Error> {
@@ -138,7 +137,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 18 {
+        if version > 19 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -158,7 +157,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 18;"
+             PRAGMA user_version = 19;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -228,9 +227,10 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
-        if version < 18 {
+        if version < 19 {
             // Normalize legacy snapshots with defaults for naming and waiting state.
-            // Schema 18 protects explicit profile models from older servers.
+            // Schema 18 protects explicit profile models from older servers;
+            // schema 19 keeps older servers from cascading a single-turn stop.
             let json: String = connection
                 .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
                     r.get(0)
@@ -821,41 +821,52 @@ impl Store {
                     .push(prompt_message(&session_id, &envelope.request_id, &prompt));
                 action = Some(Action::Run { session_id, prompt });
             }
-            Command::StopWorker { session_id } => {
+            Command::StopWorker {
+                session_id,
+                include_descendants,
+            } => {
                 let worker = snapshot
                     .sessions
                     .iter()
                     .find(|s| s.id == session_id)
                     .and_then(|s| s.worker.as_ref())
                     .ok_or_else(|| Error::invalid("Worker session not found"))?;
-                if !runtime::active(&worker.status)
-                    && snapshot.subtree_status(&session_id).active() == 0
-                {
+                let own = runtime::active(&worker.status);
+                let subtree =
+                    include_descendants && snapshot.subtree_status(&session_id).active() > 0;
+                if !own && !subtree {
                     return Err(Error::invalid("Worker has no active turn"));
                 }
-                if runtime::active(&worker.status) && !self.controls.contains_key(&session_id) {
+                if own && !self.controls.contains_key(&session_id) {
                     return Err(Error::invalid(
                         "Worker process is unavailable; restart to classify interrupted runs",
                     ));
                 }
+                // Hold the stopped session's own queue so a manual stop does
+                // not immediately launch the next queued turn.
                 conversation::pause(
                     &mut snapshot,
                     &session_id,
                     "Queue paused after stopping the agent",
                 );
-                let descendants = snapshot
-                    .descendants(&session_id)
-                    .iter()
-                    .map(|s| s.id.clone())
-                    .collect::<Vec<_>>();
-                for id in descendants {
-                    conversation::pause(
-                        &mut snapshot,
-                        &id,
-                        "Queue paused after stopping an ancestor",
-                    );
+                if include_descendants {
+                    let descendants = snapshot
+                        .descendants(&session_id)
+                        .iter()
+                        .map(|s| s.id.clone())
+                        .collect::<Vec<_>>();
+                    for id in descendants {
+                        conversation::pause(
+                            &mut snapshot,
+                            &id,
+                            "Queue paused after stopping an ancestor",
+                        );
+                    }
                 }
-                action = Some(Action::Stop(session_id));
+                action = Some(Action::Stop {
+                    session_id,
+                    include_descendants,
+                });
             }
             command => {
                 snapshot
@@ -941,8 +952,14 @@ impl Drop for ProjectJob {
 enum Action {
     Sync(String),
     Operations(Vec<String>),
-    Run { session_id: String, prompt: String },
-    Stop(String),
+    Run {
+        session_id: String,
+        prompt: String,
+    },
+    Stop {
+        session_id: String,
+        include_descendants: bool,
+    },
     Promote(String),
 }
 fn now() -> u64 {
@@ -1934,10 +1951,14 @@ async fn command(
                     receiver,
                 ));
             }
-            Some(Action::Stop(session_id)) => {
+            Some(Action::Stop {
+                session_id,
+                include_descendants: true,
+            }) => {
                 let snapshot = store.snapshot()?;
                 store.stop_controls(&snapshot, &session_id);
             }
+            Some(Action::Stop { session_id, .. }) => store.stop_control(&session_id),
             Some(Action::Promote(session_id)) => {
                 if let Some(control) = store.controls.get(&session_id) {
                     control.send_replace(true);

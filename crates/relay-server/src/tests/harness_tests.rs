@@ -40,10 +40,12 @@ done
 "#;
 
 fn claude_workspace(dir: &Path, source: &str) -> Workspace {
+    claude_workspace_with(dir, source, config())
+}
+fn claude_workspace_with(dir: &Path, source: &str, mut c: RuntimeConfig) -> Workspace {
     let repo = review_repo(dir);
     let bin = dir.join("fake-claude");
     script(&bin, source);
-    let mut c = config();
     c.repository = Some(repo);
     c.claude = bin;
     let mut s = live();
@@ -342,7 +344,7 @@ fn apply(w: &Workspace, command: Command) -> Snapshot {
     let (snapshot, action) = store
         .apply(env(snapshot.revision, command), &w.config)
         .unwrap();
-    if let Some(Action::Stop(id)) = action {
+    if let Some(Action::Stop { session_id: id, .. }) = action {
         store.controls.get(&id).unwrap().send_replace(true);
     }
     w.snapshots.send_replace(snapshot.clone());
@@ -360,6 +362,20 @@ async fn launch(w: &Workspace) -> (String, Snapshot) {
         worker(&snapshot, &id).error
     );
     (id, snapshot)
+}
+
+#[tokio::test]
+async fn harness_killed_by_sigkill_reports_out_of_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    // The kernel OOM killer ends a harness with SIGKILL mid-turn.
+    let w = claude_workspace(dir.path(), "read line\nkill -9 $$");
+    let s = w.snapshots.borrow().clone();
+    let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
+    runtime::run(w.clone(), id.clone(), run, prompt, rx).await;
+    let snapshot = finished(&w, &id).await;
+    let work = worker(&snapshot, &id);
+    assert_eq!(work.status, WorkerStatus::Failed);
+    assert_eq!(work.error.as_deref(), Some(crate::process::OUT_OF_MEMORY));
 }
 
 #[tokio::test]
@@ -616,6 +632,7 @@ async fn claude_permission_allow_deny_exact_receipt_and_stop() {
                 &w,
                 Command::StopWorker {
                     session_id: id.clone(),
+                    include_descendants: false,
                 },
             );
         }
@@ -703,6 +720,7 @@ async fn claude_interrupt_and_error_are_truthful() {
                 &w,
                 Command::StopWorker {
                     session_id: id.clone(),
+                    include_descendants: false,
                 },
             );
         }
@@ -1098,6 +1116,212 @@ async fn claude_keeps_control_input_open_until_native_background_work_is_idle() 
     );
 }
 
+/// A turn that ends while a background shell task runs. Unless `never`
+/// exists, the task notifies after `BG_DELAY` seconds and starts a follow-up
+/// turn whose control request needs the input channel still open.
+const CLAUDE_BACKGROUND_FAKE: &str = r#"
+session='"session_id":"11111111-2222-4333-8444-555555555555"'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> claude-input.jsonl
+  type=$(printf '%s' "$line" | jq -r '.type')
+  case "$type" in
+    control_request)
+      if [ "$(printf '%s' "$line" | jq -r '.request.subtype')" = interrupt ]; then
+        echo "{\"type\":\"result\",\"subtype\":\"success\",$session}"
+        continue
+      fi
+      request=$(printf '%s' "$line" | jq -r '.request_id')
+      printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{}}}\n' "$request" ;;
+    user)
+      echo "{\"type\":\"system\",\"subtype\":\"session_state_changed\",\"state\":\"running\",$session}"
+      echo "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"m\",$session}"
+      echo "{\"type\":\"assistant\",\"message\":{\"id\":\"first\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_bg\",\"name\":\"Bash\",\"input\":{\"command\":\"sleep 20; echo done\",\"run_in_background\":true}}]},$session}"
+      echo "{\"type\":\"system\",\"subtype\":\"background_tasks_changed\",\"tasks\":[{\"task_id\":\"bg-1\",\"task_type\":\"local_bash\",\"description\":\"Run tests\"}],$session}"
+      echo "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"bg-1\",\"task_type\":\"local_bash\",\"description\":\"Run tests\",\"is_backgrounded\":true,$session}"
+      echo "{\"type\":\"assistant\",\"message\":{\"id\":\"first-text\",\"content\":[{\"type\":\"text\",\"text\":\"I'll report when the tests finish.\"}]},$session}"
+      echo "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"I'll report when the tests finish.\",$session}"
+      echo "{\"type\":\"system\",\"subtype\":\"session_state_changed\",\"state\":\"idle\",$session}"
+      (
+        sleep "${BG_DELAY:-1}"
+        if [ -f never ]; then sleep 600; fi
+        echo "{\"type\":\"system\",\"subtype\":\"task_updated\",\"task_id\":\"bg-1\",\"patch\":{\"status\":\"completed\"},$session}"
+        echo "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"bg-1\",\"status\":\"completed\",$session}"
+        echo "{\"type\":\"system\",\"subtype\":\"background_tasks_changed\",\"tasks\":[],$session}"
+        echo "{\"type\":\"system\",\"subtype\":\"session_state_changed\",\"state\":\"running\",$session}"
+        echo "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"m\",$session}"
+        echo '{"type":"control_request","request_id":"follow-up","request":{"subtype":"mcp_message"}}'
+      ) & ;;
+    control_response)
+      echo "{\"type\":\"assistant\",\"message\":{\"id\":\"follow-up\",\"content\":[{\"type\":\"text\",\"text\":\"Tests passed: 12\"}]},$session}"
+      echo "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"Tests passed: 12\",$session}"
+      echo "{\"type\":\"system\",\"subtype\":\"session_state_changed\",\"state\":\"idle\",$session}" ;;
+  esac
+done
+wait
+"#;
+
+async fn background_run(
+    source: &str,
+    config: RuntimeConfig,
+) -> (
+    tempfile::TempDir,
+    Workspace,
+    String,
+    tokio::task::JoinHandle<()>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let w = claude_workspace_with(dir.path(), source, config);
+    let s = w.snapshots.borrow().clone();
+    let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
+    let task = tokio::spawn(runtime::run(w.clone(), id.clone(), run, prompt, rx));
+    (dir, w, id, task)
+}
+fn transcript(s: &Snapshot, id: &str) -> Vec<String> {
+    s.messages
+        .iter()
+        .filter(|m| m.session_id == id)
+        .map(|m| m.body.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn claude_waits_for_background_shell_task_and_captures_follow_up_turn() {
+    let (_dir, w, id, task) = background_run(CLAUDE_BACKGROUND_FAKE, config()).await;
+    task.await.unwrap();
+    let s = finished(&w, &id).await;
+    let worker = worker(&s, &id);
+    assert_eq!(worker.status, WorkerStatus::Completed, "{:?}", worker.error);
+    let input = std::fs::read_to_string(
+        Path::new(worker.worktree.as_ref().unwrap()).join("claude-input.jsonl"),
+    )
+    .unwrap();
+    // The follow-up turn's control request was answered on the open channel.
+    assert!(input.contains("\"request_id\":\"follow-up\""), "{input}");
+    let transcript = transcript(&s, &id);
+    assert!(
+        transcript
+            .iter()
+            .any(|m| m == "I'll report when the tests finish.")
+    );
+    assert!(
+        transcript.iter().any(|m| m == "Tests passed: 12"),
+        "{transcript:?}"
+    );
+}
+
+#[tokio::test]
+async fn claude_background_task_past_limit_fails_with_task_name() {
+    let source = format!("touch never\n{CLAUDE_BACKGROUND_FAKE}");
+    let config = RuntimeConfig {
+        background_task_limit: Duration::from_secs(1),
+        ..config()
+    };
+    let (_dir, w, id, task) = background_run(&source, config).await;
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let s = finished(&w, &id).await;
+    let worker = worker(&s, &id);
+    assert_eq!(worker.status, WorkerStatus::Failed);
+    let error = worker.error.as_deref().unwrap_or("");
+    assert!(
+        error.contains("background task \"Run tests\" was still running"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("did not finish after its result"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn claude_stop_interrupts_while_waiting_for_background_task() {
+    let source = format!("touch never\n{CLAUDE_BACKGROUND_FAKE}");
+    let (_dir, w, id, task) = background_run(&source, config()).await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if transcript(&w.snapshots.borrow(), &id)
+                .iter()
+                .any(|m| m == "I'll report when the tests finish.")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Let Relay consume the result and begin waiting on the pending task.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    apply(
+        &w,
+        Command::StopWorker {
+            session_id: id.clone(),
+            include_descendants: false,
+        },
+    );
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let s = finished(&w, &id).await;
+    let worker = worker(&s, &id);
+    assert_eq!(worker.status, WorkerStatus::Stopped, "{:?}", worker.error);
+    assert!(
+        std::fs::read_to_string(
+            Path::new(worker.worktree.as_ref().unwrap()).join("claude-input.jsonl")
+        )
+        .unwrap()
+        .contains("relay-interrupt")
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires installed authenticated Claude Code"]
+async fn installed_claude_background_command_smoke() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = claude_workspace(dir.path(), "");
+    let mut config = (*w.config).clone();
+    config.claude = RuntimeConfig::default().claude;
+    w.config = std::sync::Arc::new(config);
+    let mut s = w.snapshots.borrow().clone();
+    s.projects[0].defaults.execution.approval = ApprovalMode::Unrestricted;
+    w.store.lock().unwrap().save(&s).unwrap();
+    w.snapshots.send_replace(s.clone());
+    let Command::StartWorker {
+        issue_id,
+        agent_config_id,
+        ..
+    } = start(&s)
+    else {
+        unreachable!()
+    };
+    let command = Command::StartWorker {
+        issue_id,
+        agent_config_id,
+        prompt: "Use the Bash tool with run_in_background set to true to run exactly: sleep 20; echo relay-background-done. Then end your turn immediately, saying you will wait for the notification. When notified, reply with the command's output line only.".into(),
+        approve_implementation: true,
+    };
+    let (id, run, rx, prompt) = reserve(&w, env(s.revision, command));
+    tokio::time::timeout(
+        Duration::from_secs(180),
+        runtime::run(w.clone(), id.clone(), run, prompt, rx),
+    )
+    .await
+    .unwrap();
+    let s = finished(&w, &id).await;
+    let worker = worker(&s, &id);
+    assert_eq!(worker.status, WorkerStatus::Completed, "{:?}", worker.error);
+    let transcript = transcript(&s, &id);
+    assert!(
+        transcript
+            .iter()
+            .any(|m| m.trim_matches('`').trim() == "relay-background-done"),
+        "{transcript:?}"
+    );
+}
+
 #[test]
 fn fresh_workspace_and_project_respect_explicit_template_without_migrating_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -1305,7 +1529,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        18
+        19
     );
     let worker = snapshot.sessions[0].worker.as_mut().unwrap();
     worker.model = Some("reported-model".into());

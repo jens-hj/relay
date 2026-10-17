@@ -154,8 +154,11 @@ pub struct RuntimeConfig {
     pub(crate) glab: PathBuf,
     pub(crate) codex: PathBuf,
     pub(crate) claude: PathBuf,
+    /// Overall wait for a harness's background tasks after its turn result.
+    pub(crate) background_task_limit: std::time::Duration,
+    pub(crate) worker: crate::process::WorkerLimits,
 }
-fn installed_binary(name: &str, variable: &str) -> PathBuf {
+pub(crate) fn installed_binary(name: &str, variable: &str) -> PathBuf {
     if let Some(path) = std::env::var_os(variable) {
         return path.into();
     }
@@ -203,6 +206,14 @@ impl Default for RuntimeConfig {
             glab: "glab".into(),
             codex: installed_binary("codex", "RELAY_CODEX_BIN"),
             claude: installed_binary("claude", "RELAY_CLAUDE_BIN"),
+            background_task_limit: std::time::Duration::from_secs(
+                std::env::var("RELAY_BACKGROUND_TASK_LIMIT_SECS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .filter(|s| *s > 0)
+                    .unwrap_or(60 * 60),
+            ),
+            worker: Default::default(),
         }
     }
 }
@@ -258,6 +269,7 @@ impl RuntimeConfig {
         Ok(Self {
             remote,
             repository,
+            worker: crate::process::WorkerLimits::from_env()?,
             ..Self::default()
         })
     }
@@ -1363,7 +1375,7 @@ async fn execute(
     }
     let mode = crate::harness::mode(&snapshot, session_id)?;
     let binary = crate::harness::selected_binary(&snapshot, worker.harness, &workspace.config);
-    let mut cmd = tokio::process::Command::new(binary);
+    let mut cmd = crate::process::worker_command(&binary, &workspace.config.worker);
     let project_root = snapshot
         .projects
         .iter()
@@ -1544,6 +1556,10 @@ async fn execute(
             .id()
             .and_then(|pid| process_identity(pid).map(|identity| (pid, identity))),
     };
+    let cgroup = match child.id() {
+        Some(pid) => crate::process::worker_cgroup(pid, &workspace.config.worker).await,
+        None => None,
+    };
     let publication = workspace.update_run(session_id, run_id, |s| {
         s.sessions
             .iter_mut()
@@ -1597,8 +1613,33 @@ async fn execute(
             .await
         }
     };
+    let result = match result {
+        Err(error) => Err(exit_failure(&mut child, cgroup.as_deref())
+            .await
+            .unwrap_or(error)),
+        ok => ok,
+    };
     terminate(&mut child).await;
     result
+}
+/// Explain a harness that disconnected because it was killed, typically by the
+/// OOM killer, instead of reporting a generic disconnect.
+async fn exit_failure(child: &mut tokio::process::Child, cgroup: Option<&Path>) -> Option<Error> {
+    let oom_kills = cgroup.and_then(crate::process::oom_kills);
+    let group = child.id();
+    // A disconnected harness is exiting; one that is still running keeps its error.
+    let status = tokio::time::timeout(std::time::Duration::from_secs(1), child.wait())
+        .await
+        .ok()
+        .and_then(Result::ok);
+    // Reaping the leader hides its PID from terminate; still end its group.
+    #[cfg(unix)]
+    if let Some(id) = group.filter(|_| status.is_some()) {
+        unsafe {
+            libc::kill(-(id as i32), libc::SIGKILL);
+        }
+    }
+    crate::process::exit_failure(status, oom_kills)
 }
 
 pub(super) async fn terminate(child: &mut tokio::process::Child) {

@@ -88,6 +88,10 @@ The default server address is `127.0.0.1:7331`. Both processes require the token
 | `RELAY_REPO_PATH` | Server | Legacy bootstrap checkout on the server; New Project manages named roots and connections |
 | `RELAY_CODEX_BIN` / `RELAY_CLAUDE_BIN` | Server | Optional executable overrides; saved Harnesses configuration takes precedence |
 | `RELAY_SHARED_BUILD_CACHE` | Server | Agents share `ROOT/.relay/cache/cargo-target` as `CARGO_TARGET_DIR`; `0` gives each worktree its own `target/`. An existing `CARGO_TARGET_DIR` takes precedence |
+| `RELAY_BACKGROUND_TASK_LIMIT_SECS` | Server | Longest wait, in seconds, for Claude Code background tasks after a turn's result; default 3600 |
+| `RELAY_WORKER_SCOPE` | Server | `auto` runs each harness in a memory-limited systemd user scope when one can be created; `off` launches harnesses directly |
+| `RELAY_WORKER_MEMORY_HIGH` / `RELAY_WORKER_MEMORY_MAX` | Server | Per-worker scope `MemoryHigh` (throttle) and `MemoryMax` (OOM kill) limits; bytes with `K`/`M`/`G`/`T`, a percentage of RAM, or `infinity`. Defaults `30%` and `40%` |
+| `RELAY_SYSTEMD_RUN_BIN` | Server | Optional `systemd-run` executable override |
 | `RELAY_ENDPOINT` | Client | `http://127.0.0.1:7331/` |
 | `RELAY_THEME` | Client | Optional startup override: `dark`, `light`, or `system`; defaults to saved settings, initially dark |
 | `RELAY_SETTINGS_PATH` | Client | Optional settings file; otherwise the platform's local configuration directory, `relay/settings.toml` |
@@ -129,6 +133,14 @@ ssh -N -L 7331:127.0.0.1:7331 your-server
 ```
 
 Use the server token and the default client endpoint locally. Alternatively, place the server behind an existing TLS reverse proxy and set `RELAY_ENDPOINT=https://relay.example.com/`. Forward HTTP and WebSocket traffic for `/v1/*`, including the Authorization header. HTTPS endpoints use WSS for events. Relay does not terminate TLS itself. Use SSH or TLS to protect the bearer token in transit.
+
+## Worker memory
+
+Agent builds can use more memory than the machine has; a single Rust link or test binary can take 1.5–2 GB. On Linux, when `systemd-run --user --scope` works at startup, the server launches each harness through it in its own transient scope with `OOMPolicy=continue`, `MemoryHigh` and `MemoryMax`. The kernel throttles a worker above `MemoryHigh` and, above `MemoryMax`, OOM-kills a process inside that worker's scope only; usually the build, leaving the harness to report the failed command. When the server runs as a user service, each scope is bound to that service (`BindsTo=`), so stopping or restarting the server still stops every worker. `systemd-run` execs the harness in place, so process-group termination, the parent-death signal and lowered CPU priority are unchanged. Startup falls back to direct launch, without limits, when there is no reachable user manager or `systemd-run` predates `--expand-environment` (systemd 254): development shells without a session, containers, macOS, and the NixOS system service.
+
+Harnesses raise their `oom_score_adj` to 500 so the kernel prefers them and their builds over the server. The Nix services set `OOMPolicy=continue`, so an OOM kill inside the service no longer stops the server and every worker, and lower the server's own score (`OOMScoreAdjust=100` for the user service, the lowest a user manager may assign; `-100` for the system service). A harness killed with SIGKILL during a turn fails that turn with "Worker build ran out of memory"; when its scope reports no OOM kills, the turn reports a plain SIGKILL instead.
+
+The percentage limits are per worker, not a total, and Relay does not cap concurrent builds. On a 15 GB machine without swap, keep `MemoryMax` at or below about 6 GB and ask workers to build with `CARGO_BUILD_JOBS=2` and test only the crates they touch. Nix deployments set the limits with `services.relay.workerMemory.{scope,high,max}`; other deployments use the environment variables above.
 
 ## Foundation walkthrough
 

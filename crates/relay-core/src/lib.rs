@@ -465,8 +465,12 @@ pub enum Command {
         prompt: String,
         approve_implementation: bool,
     },
+    /// Stops a session's active turn. Descendants keep running unless
+    /// `include_descendants` asks to stop the whole subtree.
     StopWorker {
         session_id: String,
+        #[serde(default)]
+        include_descendants: bool,
     },
     UpdateProjectDefaults {
         project_id: String,
