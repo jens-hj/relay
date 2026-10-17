@@ -87,6 +87,7 @@ The default server address is `127.0.0.1:7331`. Both processes require the token
 | `RELAY_GITHUB_PROJECT_NUMBER` | Server | Projects v2 number from the board URL |
 | `RELAY_REPO_PATH` | Server | Legacy bootstrap checkout on the server; New Project manages named roots and connections |
 | `RELAY_CODEX_BIN` / `RELAY_CLAUDE_BIN` | Server | Optional executable overrides; saved Harnesses configuration takes precedence |
+| `RELAY_SHARED_BUILD_CACHE` | Server | Agents share `ROOT/.relay/cache/cargo-target` as `CARGO_TARGET_DIR`; `0` gives each worktree its own `target/`. An existing `CARGO_TARGET_DIR` takes precedence |
 | `RELAY_ENDPOINT` | Client | `http://127.0.0.1:7331/` |
 | `RELAY_THEME` | Client | Optional startup override: `dark`, `light`, or `system`; defaults to saved settings, initially dark |
 | `RELAY_SETTINGS_PATH` | Client | Optional settings file; otherwise the platform's local configuration directory, `relay/settings.toml` |

@@ -770,7 +770,9 @@ async fn subprocess_exact_resume_sandbox_stdin_usage_and_untracked_diff() {
     ));
     assert!(prompt.contains("Completion lists the evidence and outcomes"));
     assert!(prompt.contains("standing instruction"));
-    assert!(prompt.contains("prefer delegating substantial implementation"));
+    assert!(prompt.contains("delegate every change to repository files"));
+    assert!(prompt.contains("do not call wait_for_agents or otherwise block your turn"));
+    assert!(prompt.contains("accept it as done, archive that worker with archive_agent"));
     assert!(prompt.contains(
         "Do not merge, push, deploy, change remote board statuses, or bypass sandbox permissions"
     ));

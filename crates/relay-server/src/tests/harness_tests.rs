@@ -62,6 +62,7 @@ fn worker<'a>(s: &'a Snapshot, id: &str) -> &'a WorkerRun {
 }
 
 const MULTI_CODEX: &str = r#"
+printf '%s' "${CARGO_TARGET_DIR-}" > cargo-target-dir
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | jq -c '.id')
   method=$(printf '%s' "$line" | jq -r '.method')
@@ -173,6 +174,7 @@ async fn multi_workspace(harness: Harness) {
             &bin,
             &format!(
                 r#"
+printf '%s' "${{CARGO_TARGET_DIR-}}" > cargo-target-dir
 previous=''
 for arg; do
   if [ "$previous" = --settings ]; then
@@ -252,7 +254,25 @@ done
         Path::new(worker(&completed, &id).worktree.as_ref().unwrap()).join("roots"),
     )
     .unwrap();
-    assert_eq!(roots.lines().count(), 4);
+    let worktree = Path::new(worker(&completed, &id).worktree.as_ref().unwrap());
+    let target_dir = std::fs::read_to_string(worktree.join("cargo-target-dir")).unwrap();
+    if std::env::var_os("CARGO_TARGET_DIR").is_none()
+        && std::env::var_os(crate::build_output::SHARED_CACHE_ENV).is_none()
+    {
+        // The shared build cache reaches the harness environment and its sandbox.
+        let cache = dir
+            .path()
+            .join("project")
+            .canonicalize()
+            .unwrap()
+            .join(".relay/cache/cargo-target");
+        assert_eq!(target_dir, cache.display().to_string());
+        assert!(cache.is_dir());
+        assert_eq!(roots.lines().count(), 5);
+        assert!(roots.lines().any(|root| root == target_dir));
+    } else {
+        assert_eq!(roots.lines().count(), 4);
+    }
     // Adding a connection cannot silently widen a resumed thread's roots.
     let extra = dir.path().join("later");
     std::fs::create_dir(&extra).unwrap();
@@ -374,6 +394,11 @@ async fn claude_first_turn_resume_modes_and_bound_harness() {
     assert!(argv.contains("\nauto\n"));
     assert!(argv.contains("\n--settings\n"));
     assert!(!argv.contains("--resume"));
+    // Relay supplies director guidance as Claude's appended system prompt.
+    let system = argv.split("--append-system-prompt\n").nth(1).unwrap();
+    assert!(system.contains("delegate every change to repository files"));
+    assert!(system.contains("do not call wait_for_agents or otherwise block your turn"));
+    assert!(system.contains("accept it as done, archive that worker with archive_agent"));
     // Director harness changes apply to new workers only. Its execution policy
     // still flows through unless the worker has an explicit override.
     s.projects[0].defaults.harness = Harness::Codex;
@@ -414,6 +439,11 @@ async fn claude_first_turn_resume_modes_and_bound_harness() {
     assert!(argv.contains(&format!("--resume\n{CLAUDE_THREAD}\n")));
     assert!(argv.contains("\nbypassPermissions\n"));
     assert_eq!(argv.matches("--settings").count(), 1);
+    assert_eq!(
+        argv.matches("do not call wait_for_agents or otherwise block your turn")
+            .count(),
+        2
+    );
     let s = apply(
         &w,
         Command::SetWorkerExecution {
@@ -1782,3 +1812,193 @@ const CLAUDE_DETAIL_EVENTS: &str = r#"{"type":"assistant","message":{"id":"m1","
 {"type":"assistant","message":{"id":"m6","content":[{"type":"text","text":"Done"}],"usage":{"input_tokens":1000,"cache_read_input_tokens":200,"cache_creation_input_tokens":30,"output_tokens":5}}}
 {"type":"assistant","parent_tool_use_id":"task","message":{"id":"m7","content":[{"type":"text","text":"sub"}],"usage":{"input_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":5}}}
 "#;
+
+#[test]
+fn harness_environment_uses_shared_build_cache_unless_overridden() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let root_text = root.display().to_string();
+    let target_env = |cmd: &tokio::process::Command| {
+        cmd.as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "CARGO_TARGET_DIR")
+            .and_then(|(_, value)| value.map(|v| v.to_owned()))
+    };
+    let mut cmd = tokio::process::Command::new("true");
+    let cache = crate::build_output::configure(&mut cmd, Some(&root_text), None, None).unwrap();
+    let expected = root
+        .canonicalize()
+        .unwrap()
+        .join(".relay/cache/cargo-target");
+    assert_eq!(cache, expected.display().to_string());
+    assert_eq!(target_env(&cmd), Some(expected.clone().into_os_string()));
+    assert!(expected.is_dir());
+    // An inherited override and the opt-out both leave the environment untouched.
+    for (existing, setting) in [
+        (Some(std::ffi::OsStr::new("/custom/target")), None),
+        (None, Some(std::ffi::OsStr::new("0"))),
+        (None, Some(std::ffi::OsStr::new("off"))),
+    ] {
+        let mut cmd = tokio::process::Command::new("true");
+        assert!(
+            crate::build_output::configure(&mut cmd, Some(&root_text), existing, setting).is_none()
+        );
+        assert_eq!(target_env(&cmd), None);
+    }
+    // An empty inherited value does not count as a choice.
+    let mut cmd = tokio::process::Command::new("true");
+    assert!(
+        crate::build_output::configure(
+            &mut cmd,
+            Some(&root_text),
+            Some(std::ffi::OsStr::new("")),
+            Some(std::ffi::OsStr::new("1"))
+        )
+        .is_some()
+    );
+    let mut cmd = tokio::process::Command::new("true");
+    assert!(crate::build_output::configure(&mut cmd, None, None, None).is_none());
+    assert_eq!(target_env(&cmd), None);
+}
+
+#[tokio::test]
+async fn archive_reclaims_ignored_build_output_and_keeps_changes_and_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let repo = review_repo(&source);
+    std::fs::write(repo.join(".gitignore"), "target/\n").unwrap();
+    std::fs::write(repo.join("tracked"), "base\n").unwrap();
+    git(&repo, &["add", ".gitignore", "tracked"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-qm",
+            "tracked",
+        ],
+    );
+    let root = dir.path().join("project");
+    let worktree = root.join(".relay/sessions/session-reclaim/repo-0");
+    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "relay/session-reclaim",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    for output in ["target/debug", "crates/app/target/debug"] {
+        std::fs::create_dir_all(worktree.join(output)).unwrap();
+        std::fs::write(worktree.join(output).join("artifact"), "build").unwrap();
+    }
+    std::fs::write(worktree.join("tracked"), "changed\n").unwrap();
+    std::fs::write(worktree.join("crates/app/new.rs"), "untracked").unwrap();
+    git(
+        &worktree,
+        &[
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@e",
+            "commit",
+            "-qam",
+            "unmerged",
+        ],
+    );
+    std::fs::write(worktree.join("tracked"), "uncommitted\n").unwrap();
+    // Connected directories are edited in place and are never cleaned.
+    let connected = dir.path().join("connected");
+    std::fs::create_dir_all(connected.join("target")).unwrap();
+
+    let mut snapshot = live();
+    snapshot.projects[0].root = Some(root.display().to_string());
+    let mut session = snapshot.sessions[0].clone();
+    session.id = "session-reclaim".into();
+    session.fixture = false;
+    session.archived = false;
+    session.parent_session_id = None;
+    session.worker = None;
+    session.workspaces = vec![
+        SessionWorkspace {
+            connection_id: "repo-0".into(),
+            path: worktree.display().to_string(),
+            repository: true,
+            branch: Some("relay/session-reclaim".into()),
+            base_commit: None,
+            changes: None,
+        },
+        SessionWorkspace {
+            connection_id: "connected".into(),
+            path: connected.display().to_string(),
+            repository: false,
+            branch: None,
+            base_commit: None,
+            changes: None,
+        },
+    ];
+    snapshot.sessions.push(session);
+    let w = workspace(&dir.path().join("db"), &snapshot, config());
+    let archived = apply(
+        &w,
+        Command::SetSessionArchived {
+            session_id: "session-reclaim".into(),
+            archived: true,
+        },
+    );
+    assert!(
+        archived
+            .sessions
+            .iter()
+            .any(|s| s.id == "session-reclaim" && s.archived)
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while worktree.join("target").exists() || worktree.join("crates/app/target").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("tracked")).unwrap(),
+        "uncommitted\n"
+    );
+    assert!(worktree.join("crates/app/new.rs").is_file());
+    assert!(worktree.join(".git").is_file());
+    assert!(connected.join("target").is_dir());
+    let log = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["log", "-1", "--format=%s", "relay/session-reclaim"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(log.stdout).unwrap().trim(), "unmerged");
+    // Repeated and missing paths are no-ops.
+    assert!(
+        crate::build_output::reclaim(&root, &worktree)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        crate::build_output::reclaim(&root, &root.join(".relay/sessions/missing"))
+            .unwrap()
+            .is_empty()
+    );
+    // A connected checkout outside the session directories is never reclaimed.
+    std::fs::create_dir_all(repo.join("target")).unwrap();
+    assert!(
+        crate::build_output::reclaim(&root, &repo)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(repo.join("target").is_dir());
+}

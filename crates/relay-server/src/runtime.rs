@@ -20,13 +20,14 @@ fn workflow_guidance(profile: &AgentProfile) -> String {
         Permission::Allow => {
             guidance.push_str("Use Relay MCP delegation when useful within the user's task and effective permissions. This is a standing instruction; the user does not need to say 'delegate' on each turn. ");
             if profile.responsibilities.contains(&Task::Delegate) {
-                guidance.push_str("Delegate is a responsibility: act as a director by planning and coordinating the work, prefer delegating substantial implementation to suitable workers, and verify their results. ");
+                guidance.push_str("Delegate is a responsibility: act as a director by planning and coordinating the work, delegate every change to repository files to a suitable worker, and verify their results. Work directly only for read-only investigation, answering questions, planning, verifying or reviewing worker results, and trivial edits of a few lines you have already located. Do not implement a change yourself because it looks small; if you are unsure of its size, delegate it. Stay available to the user: do not call wait_for_agents or otherwise block your turn to await workers. After spawning or messaging workers, report their status and end your turn; review worker results when they report back or when the user asks. After you review a worker's result and accept it as done, archive that worker with archive_agent; archiving keeps its history and workspaces. Do not archive workers whose results you rejected, that still need follow-up, or that are still active.");
+            } else {
+                guidance.push_str("Delegation is optional for trivial work or when doing the work directly is more sensible.");
             }
-            guidance.push_str("Delegation is optional for trivial work or when doing the work directly is more sensible.");
         }
     }
     if profile.permissions[&Task::Delegate] != Permission::Deny {
-        guidance.push_str(" Use Relay MCP spawn_agent to start child sessions, stop_agent to stop your own descendants, archive_agent to archive inactive descendants and their subtrees while retaining history and workspaces, message_agent to queue turns within your tree, wait_for_agents to await terminal statuses, list_agents to inspect your subtree and parent, and report_result to report to your parent with your worktree path. Relay enforces delegation approval and explicit human approval for wider child permissions. Do not start workers outside Relay. Child repository edits use their assigned isolated worktrees; connected directories remain shared. Do not bypass workspace isolation or worker limits.");
+        guidance.push_str(" Use Relay MCP spawn_agent to start child sessions, stop_agent to stop your own descendants, archive_agent to archive inactive descendants and their subtrees while retaining history and workspaces, message_agent to queue turns within your tree, wait_for_agents to block until agents are terminal when you are not acting as a director, list_agents to inspect your subtree and parent, and report_result to report to your parent with your worktree path. Relay enforces delegation approval and explicit human approval for wider child permissions. Do not start workers outside Relay. Child repository edits use their assigned isolated worktrees; connected directories remain shared. Do not bypass workspace isolation or worker limits.");
     }
     guidance
 }
@@ -44,9 +45,19 @@ mod workflow_context_tests {
         profile.responsibilities = vec![Task::Plan, Task::Delegate, Task::Verify];
         let guidance = workflow_guidance(&profile);
         assert!(guidance.contains("standing instruction"));
-        assert!(guidance.contains("prefer delegating substantial implementation"));
+        assert!(guidance.contains("delegate every change to repository files"));
+        assert!(guidance.contains("Work directly only for read-only investigation"));
+        assert!(guidance.contains("trivial edits of a few lines you have already located"));
+        assert!(guidance.contains("if you are unsure of its size, delegate it"));
+        assert!(guidance.contains("do not call wait_for_agents or otherwise block your turn"));
+        assert!(guidance.contains("report their status and end your turn"));
+        assert!(guidance.contains("review worker results when they report back"));
+        assert!(guidance.contains("accept it as done, archive that worker with archive_agent"));
+        assert!(guidance.contains(
+            "Do not archive workers whose results you rejected, that still need follow-up, or that are still active"
+        ));
         assert!(guidance.contains("verify their results"));
-        assert!(guidance.contains("optional for trivial work"));
+        assert!(!guidance.contains("optional for trivial work"));
         assert!(
             guidance
                 .contains("absence of an Implement responsibility does not forbid implementation")
@@ -55,6 +66,10 @@ mod workflow_context_tests {
         let guidance = workflow_guidance(&profile);
         assert!(guidance.contains("standing instruction"));
         assert!(!guidance.contains("act as a director"));
+        assert!(guidance.contains("optional for trivial work"));
+        assert!(!guidance.contains("do not call wait_for_agents"));
+        assert!(!guidance.contains("accept it as done"));
+        assert!(guidance.contains("wait_for_agents to block until agents are terminal"));
     }
 
     #[test]
@@ -78,7 +93,7 @@ mod workflow_context_tests {
                     profile.permissions.insert(Task::Delegate, permission);
                     let guidance = workflow_guidance(&profile);
                     assert!(!guidance.contains("standing instruction"));
-                    assert!(!guidance.contains("prefer delegating substantial implementation"));
+                    assert!(!guidance.contains("delegate every change to repository files"));
                     if permission == Permission::Ask {
                         assert!(guidance.contains("Relay MCP to request it"));
                         assert!(guidance.contains("human approval before starting the child"));
@@ -1349,6 +1364,18 @@ async fn execute(
     let mode = crate::harness::mode(&snapshot, session_id)?;
     let binary = crate::harness::selected_binary(&snapshot, worker.harness, &workspace.config);
     let mut cmd = tokio::process::Command::new(binary);
+    let project_root = snapshot
+        .projects
+        .iter()
+        .find(|p| p.id == session.project_id)
+        .and_then(|p| p.root.as_deref());
+    let build_cache = crate::build_output::configure(
+        &mut cmd,
+        project_root,
+        std::env::var_os("CARGO_TARGET_DIR").as_deref(),
+        std::env::var_os(crate::build_output::SHARED_CACHE_ENV).as_deref(),
+    );
+    let writable: Vec<String> = roots.iter().cloned().chain(build_cache).collect();
     match worker.harness {
         Harness::Codex => {
             cmd.args(["app-server", "--stdio"]);
@@ -1360,6 +1387,7 @@ async fn execute(
             &path,
             &_directory.path().display().to_string(),
             &roots,
+            &writable,
             &effective_selection,
         ),
     }
@@ -1543,7 +1571,7 @@ async fn execute(
                 fork.as_ref(),
                 worker.thread_id.as_deref(),
                 &path,
-                &roots,
+                &writable,
                 mode,
                 &mut child,
                 stop,

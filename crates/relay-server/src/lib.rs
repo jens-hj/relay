@@ -13,6 +13,7 @@ use axum::{
 use relay_core::*;
 mod app_server;
 mod browser;
+mod build_output;
 mod tool_activity;
 mod transport;
 pub use browser::{BrowserConfig, initialize_setup_code};
@@ -355,6 +356,13 @@ impl Store {
         {
             return Err(Error::invalid("Unarchive this chat before continuing"));
         }
+        let archived = match &envelope.command {
+            Command::SetSessionArchived {
+                session_id,
+                archived: true,
+            } => Some(session_id.clone()),
+            _ => None,
+        };
         let mut action = None;
         match envelope.command {
             Command::DeleteSessionBranch { session_id } => {
@@ -886,6 +894,10 @@ impl Store {
             )
             .map_err(Error::internal)?;
         transaction.commit().map_err(Error::internal)?;
+        if let Some(session_id) = archived {
+            // Archives keep worktrees for unarchiving; only regenerable build output goes.
+            build_output::reclaim_archived(&snapshot, &session_id);
+        }
         Ok((snapshot, action))
     }
 }

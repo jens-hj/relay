@@ -1136,7 +1136,7 @@ fn tools() -> Value {
         ),
         (
             "archive_agent",
-            "Archive an inactive descendant and its subtree. Requires delegation permission; retains history and workspaces and pauses queued turns.",
+            "Archive an inactive descendant and its subtree. Requires delegation permission; retains history and workspaces and pauses queued turns. Directors archive workers whose results they have reviewed and accepted.",
             json!({"agent":string}),
             vec!["agent"],
         ),
@@ -1148,7 +1148,7 @@ fn tools() -> Value {
         ),
         (
             "wait_for_agents",
-            "Wait until agents are terminal or the timeout expires.",
+            "Block until agents are terminal or the timeout expires. Directors should not use this; report status and end the turn instead.",
             json!({"agents":{"type":"array","items":string,"minItems":1,"maxItems":64},"timeout_s":{"type":"integer","minimum":0,"maximum":600}}),
             vec!["agents", "timeout_s"],
         ),

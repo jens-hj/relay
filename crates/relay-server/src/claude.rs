@@ -3,6 +3,7 @@ use super::*;
 use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn arguments(
     cmd: &mut tokio::process::Command,
     mode: ApprovalMode,
@@ -10,6 +11,7 @@ pub(super) fn arguments(
     path: &str,
     inputs: &str,
     roots: &[String],
+    writable: &[String],
     selection: &HarnessSelection,
 ) {
     cmd.args([
@@ -43,7 +45,7 @@ pub(super) fn arguments(
         }
     }
     if mode != ApprovalMode::Unrestricted {
-        let mut settings = json!({"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"autoAllowBashIfSandboxed":true,"filesystem":{"allowWrite":roots},"network":{"allowAllUnixSockets":false}}});
+        let mut settings = json!({"sandbox":{"enabled":true,"failIfUnavailable":true,"allowUnsandboxedCommands":false,"autoAllowBashIfSandboxed":true,"filesystem":{"allowWrite":writable},"network":{"allowAllUnixSockets":false}}});
         if selection.model.is_some() {
             settings["fastMode"] = json!(selection.fast);
         }
