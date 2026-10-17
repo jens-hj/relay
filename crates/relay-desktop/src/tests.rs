@@ -11641,3 +11641,159 @@ fn progress_peek_updates_preserve_windowed_history_and_draft_focus() {
         |part| matches!(&part.kind, PartKind::Text {text} if text.contains("Keep this draft"))
     ));
 }
+
+fn scroll_history(session: &str, count: usize) -> Vec<Message> {
+    (0..count)
+        .map(|index| Message {
+            id: format!("{session}-{index}"),
+            session_id: session.into(),
+            author: "Codex".into(),
+            kind: "assistant".into(),
+            body: format!(
+                "Entry {index}.\n\n{}",
+                "A variable height paragraph.\n\n".repeat(index % 5 + 1)
+            ),
+            parts: vec![],
+            tool: None,
+        })
+        .collect()
+}
+
+fn wheel(mounted: &Mounted, delta: f32) {
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Wheel {
+            delta: Vector2::new(0.0, delta),
+        },
+        position: mounted.rect("Transcript viewport").center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: Duration::ZERO,
+    });
+    for _ in 0..3 {
+        mounted.settle();
+    }
+}
+
+fn first_visible_message(mounted: &Mounted) -> (String, f32) {
+    let viewport = mounted.rect("Transcript viewport");
+    mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .filter(|node| {
+            node.label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("Message session-"))
+                && node.rect.origin.y >= viewport.origin.y
+                && node.rect.origin.y < viewport.max_y()
+        })
+        .min_by(|a, b| a.rect.origin.y.total_cmp(&b.rect.origin.y))
+        .map(|node| (node.label.unwrap(), node.rect.origin.y))
+        .expect("a visible message")
+}
+
+#[test]
+fn transcript_at_bottom_stays_pinned_after_scrolling_back_while_content_grows() {
+    let mounted = mount(false, 1380.0);
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.messages.extend(scroll_history("session-plan", 120)));
+    mounted.model.open_session("session-plan".into());
+    for _ in 0..3 {
+        mounted.settle();
+    }
+    let boundary = mounted.rect("Draft boundary");
+    let viewport = mounted.rect("Transcript viewport");
+    assert!(boundary.max_y() <= viewport.max_y() + 1.0);
+    // Reading earlier history and returning to the end must resume following.
+    wheel(&mounted, 1500.0);
+    assert!(mounted.rect("Draft boundary").origin.y > viewport.max_y());
+    wheel(&mounted, -100_000.0);
+    assert!((mounted.rect("Draft boundary").origin.y - boundary.origin.y).abs() < 2.0);
+    for index in 120..124 {
+        mounted.model.snapshot.update(|s| {
+            s.messages.extend(
+                scroll_history("session-plan", index + 1)
+                    .into_iter()
+                    .skip(index),
+            )
+        });
+        mounted.settle();
+        assert!(
+            (mounted.rect("Draft boundary").origin.y - boundary.origin.y).abs() < 2.0,
+            "appending message {index} moved the composer"
+        );
+    }
+    mounted.model.snapshot.update(|s| {
+        s.messages
+            .last_mut()
+            .unwrap()
+            .body
+            .push_str(&"Streamed line.\n\n".repeat(30))
+    });
+    mounted.settle();
+    assert!(
+        (mounted.rect("Draft boundary").origin.y - boundary.origin.y).abs() < 2.0,
+        "streaming growth moved the composer"
+    );
+    assert!(has_label(&mounted, "Message session-plan-123"));
+}
+
+#[test]
+fn transcript_scrolled_up_keeps_its_reading_position_while_content_grows() {
+    let mounted = mount(false, 1380.0);
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.messages.extend(scroll_history("session-plan", 120)));
+    mounted.model.open_session("session-plan".into());
+    for _ in 0..3 {
+        mounted.settle();
+    }
+    wheel(&mounted, 2000.0);
+    let (label, y) = first_visible_message(&mounted);
+    mounted.model.snapshot.update(|s| {
+        s.messages
+            .extend(scroll_history("session-plan", 123).into_iter().skip(120));
+        s.messages
+            .last_mut()
+            .unwrap()
+            .body
+            .push_str(&"Streamed line.\n\n".repeat(30));
+    });
+    mounted.settle();
+    assert!(
+        (mounted.rect(&label).origin.y - y).abs() < 2.0,
+        "appending moved the reading position"
+    );
+}
+
+#[test]
+fn opening_a_session_lands_at_its_latest_messages() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.snapshot.update(|s| {
+        s.messages.extend(scroll_history("session-plan", 120));
+        s.messages.extend(scroll_history("session-worker", 120));
+    });
+    mounted.model.open_session("session-plan".into());
+    for _ in 0..3 {
+        mounted.settle();
+    }
+    let viewport = mounted.rect("Transcript viewport");
+    assert!(mounted.rect("Draft boundary").max_y() <= viewport.max_y() + 1.0);
+    // Reading earlier history in one session must not carry into the next.
+    wheel(&mounted, 3000.0);
+    mounted.model.open_session("session-worker".into());
+    for _ in 0..3 {
+        mounted.settle();
+    }
+    let viewport = mounted.rect("Transcript viewport");
+    let boundary = mounted.rect("Draft boundary");
+    assert!(
+        boundary.origin.y >= viewport.origin.y && boundary.max_y() <= viewport.max_y() + 1.0,
+        "opened session is not at its end: boundary {boundary:?} viewport {viewport:?}"
+    );
+    assert!(has_label(&mounted, "Message session-worker-119"));
+}

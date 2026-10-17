@@ -76,6 +76,12 @@ pub struct Controller {
     history_anchor: Option<(String, f32)>,
     history_scroll_seen: bool,
     manual_reading: bool,
+    /// Set when a session opens: its first layout lands at the end even if
+    /// the previous session was left scrolled elsewhere.
+    open_at_end: bool,
+    /// Set by a disclosure toggle: the growth it causes keeps the toggled
+    /// control in place instead of following the end.
+    hold_reading: bool,
     index: Option<Derived<Rc<TranscriptIndex>>>,
     window: Option<HistoryWindow>,
     expanded_rows: BTreeMap<String, bool>,
@@ -1602,6 +1608,9 @@ pub fn Conversation(model: Model) -> Element {
             documents.selection = None;
             documents.history_anchor = None;
             documents.history_scroll_seen = false;
+            // A newly opened session starts at its latest messages.
+            documents.manual_reading = false;
+            documents.open_at_end = true;
         }
     });
     let completion_controller = controller.get_untracked();
@@ -2245,8 +2254,12 @@ pub fn Conversation(model: Model) -> Element {
                                         run-key:(relay_ui::Live::from(thinking_run))
                                         on-toggle:(Rc::new(move || {
                                             // A disclosure is a reading action; pointer-down may
-                                            // otherwise resume automatic caret/bottom following.
-                                            controller.get_untracked().borrow_mut().manual_reading = true;
+                                            // otherwise resume automatic caret/bottom following, and
+                                            // the toggled control stays put while it grows.
+                                            let shared = controller.get_untracked();
+                                            let mut state = shared.borrow_mut();
+                                            state.manual_reading = true;
+                                            state.hold_reading = true;
                                         }) as relay_ui::prelude::OnPress)
                                         hue:(relay_ui::Live::from(thinking_hue))
                                 }
@@ -2332,8 +2345,13 @@ pub fn Conversation(model: Model) -> Element {
                     // Revealing only the caret can leave the rest of the input
                     // below the viewport, so draft focus must preserve bottom-follow.
                     let focused_draft = focused.as_ref().is_some_and(|(draft, _)| *draft);
-                    let was_at_bottom = previous.get().is_none_or(|(content, viewport)|
-                        follow_scroll.offset().y >= (content - viewport).max(0.0) - px(4.0));
+                    // Pinning follows where the offset rests, not the gesture
+                    // that moved it: a reader who scrolls back to the end
+                    // follows again. A newly opened session starts there.
+                    let opened = std::mem::take(&mut layout_controller.borrow_mut().open_at_end);
+                    let held = extent_changed && std::mem::take(&mut layout_controller.borrow_mut().hold_reading);
+                    let was_at_bottom = opened || (!held && previous.get().is_none_or(|(content, viewport)|
+                        follow_scroll.offset().y >= (content - viewport).max(0.0) - px(4.0)));
                     let revealing = model.source_anchor.get_untracked().is_some();
                     let follow_caret = !layout_controller.borrow().manual_reading && !revealing
                         && ((focused_draft && (was_at_bottom || !model.command_flow.get_untracked().is_empty() || model.completion.get_untracked().is_some())) || (!focused_draft && focused.as_ref().is_some_and(|(_, field)| {
@@ -2351,7 +2369,7 @@ pub fn Conversation(model: Model) -> Element {
                         if let Some(field)=layout_controller.borrow().messages.get(&key) && let Some(rect)=model.ui.get_untracked().inspection_rect(field.id()) {
                             follow_scroll.scroll_to(Vector2::new(0.0,follow_scroll.offset().y+rect.origin.y-y));
                         }
-                    } else if was_at_bottom && !layout_controller.borrow().manual_reading && (focused.is_none() || focused_draft) && !model.history.get_untracked().has_newer {
+                    } else if was_at_bottom && (focused.is_none() || focused_draft) && !model.history.get_untracked().has_newer {
                         follow_scroll.scroll_to(Vector2::new(0.0, (rect.size.height - height).max(0.0)));
                     }
                     if let Some(anchor)=model.source_anchor.get_untracked()
