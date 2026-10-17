@@ -336,6 +336,13 @@ impl Document {
         let offset = self.display_offset(source);
         let shaped = self.shape(fonts, Some(width));
         let text = shaped.text();
+        // Shaping can normalize paragraph separators (and refresh the
+        // document after a scale change). A model-based reveal may put the
+        // caret at the raw source end, beyond that normalized display end.
+        let mut offset = offset.min(text.len());
+        while !text.is_char_boundary(offset) {
+            offset -= 1;
+        }
         let mut target = match motion {
             CaretMotion::Left => text[..offset]
                 .grapheme_indices(true)

@@ -137,6 +137,75 @@ fn framed_ledger_preserves_effort_label_height_for_both_harnesses() {
 }
 
 #[test]
+fn collapsed_ledger_expand_row_spans_model_and_effort() {
+    for scale in [0.75, 1.0, 1.5, 2.0] {
+        let state = State::new(gallery::d2::settings(true));
+        let mounted = mount(Size::new(848.0, 360.0), || {
+            install_theme(&crate::tokens::theme(
+                crate::tokens::ThemeVariant::Dark,
+                scale,
+            ));
+            view! {
+                Composer settings:(state) ledger-actions:(actions(state)) on-send:(noop())
+                    on-attach:(noop())
+            }
+        });
+        let ledger = mounted.rect("Agent ledger");
+        let model_label = mounted
+            .labels()
+            .into_iter()
+            .find(|s| s.starts_with("Agent settings:"))
+            .unwrap();
+        let model = mounted.rect(&model_label);
+        let effort = state.get_untracked().effort;
+        let track = mounted.rect(&crate::effort::effort_label(
+            effort.levels,
+            effort.selected(),
+            effort.tiers,
+        ));
+        let expand = mounted.rect("Expand agent settings");
+        assert_eq!(expand.origin.x, ledger.origin.x);
+        assert_eq!(expand.size.width, ledger.size.width);
+        assert!((expand.size.height - 22.0 * scale).abs() < 0.01);
+        assert!(expand.origin.y >= model.max_y() - 0.01);
+        assert!(expand.origin.y >= track.max_y() - 0.01);
+        assert!((expand.max_y() - ledger.max_y()).abs() < 0.01);
+        let icon = mounted.rect("›");
+        assert!((icon.center().x - expand.center().x).abs() < 0.01);
+        assert!((icon.center().y - expand.center().y).abs() < 0.01);
+        // Both the model and effort sides of the row activate the control.
+        for fraction in [0.1, 0.9] {
+            mounted.click(Vector2::new(
+                expand.origin.x + expand.size.width * fraction,
+                expand.center().y,
+            ));
+            assert!(!state.get_untracked().collapsed);
+            state.update(|s| s.collapsed = true);
+            mounted.settle();
+        }
+        for _ in 0..20 {
+            mounted.key(Key::Tab);
+            let snapshot = mounted.ui.inspection_snapshot();
+            if mounted.ui.focused().is_some_and(|focused| {
+                snapshot.nodes.iter().any(|n| {
+                    n.id == focused.id() && n.label.as_deref() == Some("Expand agent settings")
+                })
+            }) {
+                break;
+            }
+        }
+        let focused = mounted.ui.focused().expect("expand button is focusable");
+        assert!(
+            mounted.ui.inspection_snapshot().nodes.iter().any(
+                |n| n.id == focused.id() && n.label.as_deref() == Some("Expand agent settings")
+            )
+        );
+        mounted.key(Key::Enter);
+        assert!(!state.get_untracked().collapsed);
+    }
+}
+
+#[test]
 fn ledger_geometry_actions_and_editor_survive_collapse() {
     let state = State::new(gallery::d2::settings(false));
     let value = State::new("hello".to_owned());
@@ -868,4 +937,268 @@ fn inline_composer_puts_send_on_the_right_and_grows_with_the_draft() {
     mounted.settle();
     assert!(mounted.rect("Message").size.height > 500.0);
     assert_eq!(mounted.rect("Composer actions border").size, actions.size);
+}
+
+#[test]
+fn inline_composer_expand_row_geometry_and_painted_chevron() {
+    for scale in [0.75, 1.0, 1.5, 2.0] {
+        for initial_stacked in [false, true] {
+            for height in [40.0, 240.0, 600.0] {
+                let settings = State::new(gallery::d2::settings(true));
+                let stacked = State::new(initial_stacked);
+                let mounted = mount(Size::new(1200.0, 1600.0), || {
+                    install_theme(&crate::tokens::theme(
+                        crate::tokens::ThemeVariant::Dark,
+                        scale,
+                    ));
+                    let editor = view! {
+                        col height:{px(height)}px label:"Injected draft" {
+                            Label text:"Draft content"
+                        }
+                    };
+                    view! {
+                        col height:min-content {
+                            Composer inline:true stacked:(stacked) gutter-width:(Live::fixed(212.0))
+                                settings:(settings) ledger-actions:(actions(settings))
+                                editor:(Some(editor)) on-send:(noop()) on-attach:(noop())
+                        }
+                    }
+                });
+                for is_stacked in [initial_stacked, !initial_stacked] {
+                    stacked.set(is_stacked);
+                    mounted.settle();
+                    let ledger = mounted.rect("Agent ledger");
+                    let expand = mounted.rect("Expand agent settings");
+                    let model_label = mounted
+                        .labels()
+                        .into_iter()
+                        .find(|s| s.starts_with("Agent settings:"))
+                        .unwrap();
+                    let model = mounted.rect(&model_label);
+                    let effort = settings.get_untracked().effort;
+                    let track = mounted.rect(&crate::effort::effort_label(
+                        effort.levels,
+                        effort.selected(),
+                        effort.tiers,
+                    ));
+                    eprintln!(
+                        "INLINE scale={scale} stacked={is_stacked} editor={height} ledger={ledger:?} expand={expand:?} model={model:?} track={track:?}"
+                    );
+                    assert!((expand.origin.x - ledger.origin.x).abs() < 0.01);
+                    assert!((expand.size.width - ledger.size.width).abs() < 0.01);
+                    assert!((expand.size.height - 22.0 * scale).abs() < 0.01);
+                    assert!(
+                        expand.origin.y >= model.max_y() - 0.01
+                            && expand.origin.y >= track.max_y() - 0.01
+                    );
+                    assert!((expand.max_y() - ledger.max_y()).abs() < 0.01);
+                    let scene = mounted.ui.scene();
+                    let (shape, points) = scene
+                        .cmds
+                        .iter()
+                        .find_map(|cmd| {
+                            if let mosaic::render::PaintCmd::Shape(shape) = cmd
+                                && expand.contains(shape.rect.center())
+                                && let mosaic::render::Geometry::Path {
+                                    points,
+                                    closed: false,
+                                } = &shape.geometry
+                                && points.len() == 3
+                            {
+                                Some((shape, points))
+                            } else {
+                                None
+                            }
+                        })
+                        .expect("painted chevron path inside expand row");
+                    let stroke = &shape.strokes[0];
+                    assert_eq!(stroke.cap, LineCap::Round);
+                    assert_eq!(stroke.join, LineJoin::Round);
+                    assert_eq!(stroke.offset, 0.0);
+                    assert_eq!(shape.rotation, 0.0);
+                    let min_x = points.iter().map(|p| p.x).fold(f32::INFINITY, f32::min)
+                        - stroke.width / 2.0;
+                    let max_x = points.iter().map(|p| p.x).fold(f32::NEG_INFINITY, f32::max)
+                        + stroke.width / 2.0;
+                    let min_y = points.iter().map(|p| p.y).fold(f32::INFINITY, f32::min)
+                        - stroke.width / 2.0;
+                    let max_y = points.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max)
+                        + stroke.width / 2.0;
+                    let painted_center = shape.rect.center()
+                        + Vector2::new((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+                    eprintln!(
+                        "PAINTED center={painted_center:?} control={:?}",
+                        expand.center()
+                    );
+                    assert!(
+                        (painted_center.x - expand.center().x).abs() < 0.01
+                            && (painted_center.y - expand.center().y).abs() < 0.01,
+                        "painted chevron is off center"
+                    );
+                    assert!(
+                        shape.rect.center().x + min_x >= expand.origin.x
+                            && shape.rect.center().x + max_x <= expand.max_x()
+                    );
+                    assert!(
+                        shape.rect.center().y + min_y >= expand.origin.y
+                            && shape.rect.center().y + max_y <= expand.max_y()
+                    );
+                    drop(scene);
+                    let editor_id = mounted
+                        .ui
+                        .inspection_snapshot()
+                        .nodes
+                        .iter()
+                        .find(|n| n.label.as_deref() == Some("Injected draft"))
+                        .unwrap()
+                        .id;
+                    for x in [expand.origin.x + scale, expand.max_x() - scale] {
+                        mounted.click(Vector2::new(x, expand.center().y));
+                        assert!(!settings.get_untracked().collapsed);
+                        assert!(
+                            (mounted.rect("Agent ledger").size.width - 212.0 * scale).abs() < 0.01
+                        );
+                        settings.update(|s| s.collapsed = true);
+                        mounted.settle();
+                    }
+                    for _ in 0..20 {
+                        mounted.key(Key::Tab);
+                        if mounted.ui.focused().is_some_and(|f| {
+                            mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+                                n.id == f.id()
+                                    && n.label.as_deref() == Some("Expand agent settings")
+                            })
+                        }) {
+                            break;
+                        }
+                    }
+                    assert!(mounted.ui.focused().is_some_and(|f| {
+                        mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+                            n.id == f.id() && n.label.as_deref() == Some("Expand agent settings")
+                        })
+                    }));
+                    mounted.key(Key::Enter);
+                    assert!(!settings.get_untracked().collapsed);
+                    assert!(
+                        mounted.ui.inspection_snapshot().node(editor_id).is_some(),
+                        "editor survives the ledger toggle"
+                    );
+                    settings.update(|s| s.collapsed = true);
+                    mounted.settle();
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn working_peek_streams_and_discloses_public_summary() {
+    let summary = State::new(String::new());
+    let run_key = State::new("session/run-one".to_owned());
+    let mounted = mount(Size::new(720.0, 300.0), || {
+        view! {
+            ThinkingLine summary:(summary) run-key:(run_key)
+        }
+    });
+    assert!(mounted.labels().iter().any(|s| s == "No update yet"));
+    assert!(!mounted.labels().iter().any(|s| s == "Peek"));
+    summary.set("Checking the provider adapter".into());
+    mounted.settle();
+    let peek = mounted.rect("Peek");
+    assert!(peek.size.width > 0.0);
+    mounted.click(peek.center());
+    assert!(mounted.labels().iter().any(|s| s == "Latest Update"));
+    summary.set("Checking the provider adapter and stream λ".into());
+    run_key.set("session/run-one".into());
+    mounted.settle();
+    assert!(mounted.labels().iter().any(|s| s.contains("stream λ")));
+    assert!(mounted.labels().iter().any(|s| s == "Latest Update"));
+    mounted.click(mounted.rect("Hide").center());
+    assert!(!mounted.labels().iter().any(|s| s == "Latest Update"));
+    mounted.click(mounted.rect("Peek").center());
+    run_key.set("session/run-two".into());
+    mounted.settle();
+    assert!(!mounted.labels().iter().any(|s| s == "Latest Update"));
+    summary.set(String::new());
+    mounted.settle();
+    assert!(mounted.labels().iter().any(|s| s == "No update yet"));
+}
+
+#[test]
+fn working_peek_bounds_long_unicode_and_keeps_keyboard_controls_inside_narrow_scaled_views() {
+    for (text, expected) in [
+        ("λ".repeat(65536), 240),
+        ("🐱".repeat(20000), 240),
+        (" \n\t".into(), 0),
+    ] {
+        let (excerpt, truncated) = crate::transcript::update_excerpt(&text, 240);
+        assert_eq!(excerpt.chars().count(), expected);
+        assert_eq!(truncated, expected > 0);
+    }
+    assert_eq!(
+        crate::transcript::update_excerpt("  α  \n β ", 240),
+        ("α β".into(), false)
+    );
+    for (width, scale) in [(360.0, 1.0), (360.0, 2.0), (720.0, 2.0)] {
+        let summary = State::new("🐱".repeat(20000));
+        let identity = State::new("first/run".to_owned());
+        let mounted = mount(Size::new(width, 500.0), || {
+            install_theme(&crate::tokens::theme(
+                crate::tokens::ThemeVariant::Dark,
+                scale,
+            ));
+            view! {
+                ThinkingLine summary:(summary) run-key:(identity)
+            }
+        });
+        let button = mounted.rect("Peek");
+        assert!(
+            button.origin.x >= 0.0 && button.max_x() <= width + 1.0,
+            "{button:?}"
+        );
+        assert!(
+            mounted
+                .labels()
+                .iter()
+                .all(|label| label.chars().count() <= 241)
+        );
+        mounted.key(Key::Tab);
+        mounted.key(Key::Enter);
+        assert!(
+            mounted
+                .labels()
+                .iter()
+                .any(|label| label == "Latest Update")
+        );
+        mounted.key(Key::Space);
+        assert!(
+            !mounted
+                .labels()
+                .iter()
+                .any(|label| label == "Latest Update")
+        );
+        mounted.key(Key::Enter);
+        identity.set("second/run".into()); // Both sessions remain Working.
+        mounted.settle();
+        assert!(
+            !mounted
+                .labels()
+                .iter()
+                .any(|label| label == "Latest Update")
+        );
+        summary.set(String::new()); // Remove the focused disclosure control safely.
+        mounted.settle();
+        assert!(
+            !mounted
+                .labels()
+                .iter()
+                .any(|label| label == "Peek" || label == "Hide")
+        );
+        assert!(
+            mounted
+                .labels()
+                .iter()
+                .any(|label| label == "No update yet")
+        );
+    }
 }

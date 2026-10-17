@@ -112,7 +112,22 @@ fn belongs_to_thread(value: &Value, thread: &str) -> bool {
         .is_none_or(|id| id == thread)
 }
 
-fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Result<bool, Error> {
+pub(super) const SUMMARY_PARTS: u64 = 32;
+
+#[derive(Default)]
+struct SummaryStream {
+    // Keep completed identities until this execution ends so late events stay
+    // sealed without imposing a lifetime limit on future public updates.
+    completed: std::collections::BTreeSet<String>,
+}
+
+fn publish(
+    workspace: &Workspace,
+    session: &str,
+    run: &str,
+    value: &Value,
+    summaries: &mut SummaryStream,
+) -> Result<bool, Error> {
     let method = value["method"].as_str().unwrap_or("");
     if method == "skills/changed" {
         workspace.catalogs.lock().map_err(Error::internal)?.clear();
@@ -393,6 +408,32 @@ fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Re
                 }
             }
         }
+        // Only public summaries, never reasoning/textDelta or item.content.
+        if method == "item/reasoning/summaryTextDelta"
+            && let (Some(item), Some(index), Some(delta)) = (
+                params["itemId"].as_str(),
+                params["summaryIndex"].as_u64(),
+                params["delta"].as_str(),
+            )
+            && !summaries.completed.contains(item)
+        {
+            public_summary(snapshot, session, run, item, index, delta, true);
+        }
+        if method == "item/completed"
+            && params["item"]["type"] == "reasoning"
+            && let (Some(item), Some(summary)) = (
+                params["item"]["id"].as_str(),
+                params["item"]["summary"].as_array(),
+            )
+            && item.len() <= 256
+            && summaries.completed.insert(item.into())
+        {
+            for (index, text) in summary.iter().take(SUMMARY_PARTS as usize).enumerate() {
+                if let Some(text) = text.as_str() {
+                    public_summary(snapshot, session, run, item, index as u64, text, false);
+                }
+            }
+        }
         if method == "item/agentMessage/delta"
             || (method == "item/completed" && params["item"]["type"] == "agentMessage")
         {
@@ -425,6 +466,41 @@ fn publish(workspace: &Workspace, session: &str, run: &str, value: &Value) -> Re
         Ok(())
     })?;
     Ok(false)
+}
+
+/// Stable bounded rows: deltas update a paragraph instead of flooding history.
+#[allow(clippy::too_many_arguments)]
+fn public_summary(
+    snapshot: &mut Snapshot,
+    session: &str,
+    run: &str,
+    item: &str,
+    index: u64,
+    text: &str,
+    append: bool,
+) {
+    if text.is_empty() || index >= SUMMARY_PARTS || item.len() > 256 {
+        return;
+    }
+    let id = format!("codex-summary-{run}-{item}-{index}");
+    if let Some(message) = snapshot.messages.iter_mut().find(|m| m.id == id) {
+        // Completed text may extend an already published prefix. A shorter or
+        // rewritten final cannot retract text that clients may have anchored.
+        tool_activity::output(message, text, append);
+    } else {
+        if text.trim().is_empty() {
+            return;
+        }
+        snapshot.messages.push(Message {
+            id,
+            session_id: session.into(),
+            author: "Codex".into(),
+            kind: "reasoning".into(),
+            body: bounded(text.into()),
+            parts: vec![],
+            tool: None,
+        });
+    }
 }
 
 /// Merge a sparse `account/rateLimits/updated` snapshot. Missing windows keep their
@@ -638,6 +714,9 @@ pub(super) async fn execute(
             ),
         };
         if method == "turn/start" {
+            // Explicitly request public summaries instead of inheriting `none`.
+            // Models/providers may still supply no public summary.
+            params["summary"] = json!("auto");
             if let Some(model) = &selection.model {
                 params["model"] = json!(model);
             }
@@ -666,6 +745,7 @@ pub(super) async fn execute(
         return Ok(());
     }
     let mut turn: Option<String> = None;
+    let mut summaries = SummaryStream::default();
     loop {
         tokio::select! {
             biased;
@@ -678,12 +758,17 @@ pub(super) async fn execute(
                             if !belongs_to_thread(&value, &thread) {
                                 continue;
                             }
+                            if value["params"]["turnId"].as_str()
+                                .or_else(|| value["params"]["turn"]["id"].as_str())
+                                .is_some_and(|id| id != turn.as_str()) {
+                                continue;
+                            }
                             if value["method"] == "turn/completed"
                                 && value["params"]["turn"]["id"].as_str() == Some(turn.as_str())
                             {
                                 break Ok::<_, Error>(());
                             }
-                            let _ = publish(workspace, session, run, &value);
+                            let _ = publish(workspace, session, run, &value, &mut summaries);
                         }
                     }).await;
                 }
@@ -714,7 +799,7 @@ pub(super) async fn execute(
                     if !belongs_to_thread(&value, &thread) { continue; }
                     if value["method"]=="turn/started" && let Some(id)=value["params"]["turn"]["id"].as_str() && turn.is_none(){turn=Some(id.to_owned()); workspace.update_run(session, run, |s| { crate::agent_tools::mark_read(s, run); Ok(()) })?;}
                     if let Some(id)=value["params"]["turnId"].as_str().or_else(||value["params"]["turn"]["id"].as_str()) && turn.as_deref().is_some_and(|expected|expected!=id) { return Err(Error::invalid("Codex event belongs to a different turn")); }
-                    if publish(workspace,session,run,&value)? { return Ok(()); }
+                    if publish(workspace,session,run,&value,&mut summaries)? { return Ok(()); }
                 }
             }
         }
@@ -744,4 +829,87 @@ pub(super) async fn prepare(
     })
     .await
     .map_err(Error::internal)?
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    #[test]
+    fn public_summary_bounds_each_item_without_limiting_later_items_or_retracting_prefixes() {
+        let mut snapshot = Snapshot::default();
+        public_summary(
+            &mut snapshot,
+            "session",
+            "run",
+            "item",
+            u64::MAX,
+            "Ignored",
+            true,
+        );
+        public_summary(&mut snapshot, "session", "run", "item", 0, "  ", true);
+        assert!(snapshot.messages.is_empty());
+        for index in 0..100 {
+            public_summary(&mut snapshot, "session", "run", "item", index, "λ", true);
+        }
+        assert_eq!(snapshot.messages.len(), SUMMARY_PARTS as usize);
+        for item in 0..200 {
+            public_summary(
+                &mut snapshot,
+                "session",
+                "run",
+                &format!("item-{item}"),
+                0,
+                "λ",
+                true,
+            );
+        }
+        assert_eq!(snapshot.messages.len(), SUMMARY_PARTS as usize + 200);
+        assert_eq!(
+            snapshot.messages.last().unwrap().id,
+            "codex-summary-run-item-199-0"
+        );
+        public_summary(
+            &mut snapshot,
+            "session",
+            "run",
+            &"x".repeat(257),
+            0,
+            "Ignored",
+            true,
+        );
+        assert_eq!(snapshot.messages.len(), SUMMARY_PARTS as usize + 200);
+        public_summary(&mut snapshot, "session", "run", "item", 0, "🐱", true);
+        assert_eq!(snapshot.messages[0].body, "λ🐱");
+        public_summary(&mut snapshot, "session", "run", "item", 0, "λ", false);
+        assert_eq!(
+            snapshot.messages[0].body, "λ🐱",
+            "shorter finals cannot retract anchored text"
+        );
+        public_summary(
+            &mut snapshot,
+            "session",
+            "run",
+            "item",
+            0,
+            "λ🐱 final",
+            false,
+        );
+        assert_eq!(snapshot.messages[0].body, "λ🐱 final");
+        public_summary(
+            &mut snapshot,
+            "session",
+            "run",
+            "item",
+            0,
+            &"🐱".repeat(TEXT_LIMIT),
+            true,
+        );
+        assert!(snapshot.messages[0].body.len() <= TEXT_LIMIT);
+        assert!(
+            snapshot.messages[0]
+                .body
+                .is_char_boundary(snapshot.messages[0].body.len())
+        );
+    }
 }

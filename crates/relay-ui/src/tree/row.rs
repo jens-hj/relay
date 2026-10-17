@@ -374,6 +374,27 @@ pub fn AgentTreeRow(
             actions.hit_testable(visible);
         });
     }
+    // Hidden overflow descendants still participate in the row's hover path.
+    // Arm only inside the visible row, then retain the full strip until exit.
+    let pointer_revealed = State::new(false);
+    let interaction = row.interaction();
+    Effect::new(move || {
+        if !interaction.hovered() {
+            pointer_revealed.set(false);
+        }
+    });
+    let pointer_row = row.clone();
+    row.on_pointer(move |event, _| {
+        if matches!(
+            event.kind,
+            PointerEventKind::Move | PointerEventKind::Down(_)
+        ) && pointer_row.layout_rect().contains(event.position)
+            && action_viewport
+                .is_none_or(|viewport| viewport.get_untracked().contains(event.position))
+        {
+            pointer_revealed.set(true);
+        }
+    });
     if let Some(spawn) = on_spawn.filter(|_| !line.archived) {
         let id = line.id.clone();
         let action = view! {
@@ -385,7 +406,7 @@ pub fn AgentTreeRow(
                 { parent.adopt(&crate::marks::mark(crate::marks::Mark::Plus, 12.0, ground.ink)); }
             }
         };
-        let visible = reveal_row_action(&row, &action, Live::fixed(false));
+        let visible = reveal_row_action(pointer_revealed.into(), &action, Live::fixed(false));
         let host = view! {
             Tooltip
                 text:(if line.can_spawn { "New Worker" } else { "New Worker · start this agent first" }) {
@@ -406,10 +427,10 @@ pub fn AgentTreeRow(
                 shrink:0 align:center justify:center pad:0px radius:0px fill:(under)
                 label:(format!("Edit {}", line.name)) hover { fill:ground.panel-raised }
                 focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
-                { parent.adopt(&crate::icons::icon_mark(crate::icons::mark.edit, 12.0)); }
+                { parent.adopt(&crate::icons::icon_mark(crate::icons::mark.edit, 16.0)); }
             }
         };
-        let visible = reveal_row_action(&row, &action, Live::fixed(false));
+        let visible = reveal_row_action(pointer_revealed.into(), &action, Live::fixed(false));
         let host = view! {
             Tooltip text:"Edit Profile" {
                 { parent.adopt(&action); }
@@ -425,7 +446,6 @@ pub fn AgentTreeRow(
     if let Some(archive) = on_archive.filter(|_| !line.archived) {
         let id = line.id.clone();
         let name = line.name.clone();
-        let row = row.clone();
         let host = view! {
             row width:max-content height:min-content shrink:0 {}
         };
@@ -444,7 +464,7 @@ pub fn AgentTreeRow(
             };
             // Reconcile the hover bindings with this conditional button.
             let scope = Scope::new(|| {});
-            let visible = scope.run(|| reveal_row_action(&row, &action, Live::fixed(false)));
+            let visible = scope.run(|| reveal_row_action(pointer_revealed.into(), &action, Live::fixed(false)));
             action.on_exit(move |_, done| { scope.dispose(); done.finish(); });
             let tooltip = view! {
                 Tooltip text:"Archive Branch" {
@@ -477,7 +497,7 @@ pub fn AgentTreeRow(
                 }
             }
         };
-        let visible = reveal_row_action(&row, &action, confirm.into());
+        let visible = reveal_row_action(pointer_revealed.into(), &action, confirm.into());
         let host = view! {
             Tooltip text:"Delete Branch Permanently (Two Clicks)" {
                 { parent.adopt(&action); }
@@ -661,11 +681,14 @@ pub fn FoldedBranch(
 
 // Row focus follows pointer selection; only the action's own focus reveals it.
 // Preserve a press or pending confirmation after the pointer leaves.
-fn reveal_row_action(row: &Element, action: &Element, confirming: Live<bool>) -> Derived<bool> {
-    let interaction = row.interaction();
+fn reveal_row_action(
+    pointer_revealed: Live<bool>,
+    action: &Element,
+    confirming: Live<bool>,
+) -> Derived<bool> {
     let button_interaction = action.interaction();
     let visible = Derived::new(move || {
-        interaction.hovered()
+        pointer_revealed.get()
             || button_interaction.focused()
             || button_interaction.pressed()
             || confirming.get()

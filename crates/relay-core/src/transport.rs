@@ -25,6 +25,15 @@ pub struct HistoryState {
     pub generation: u64,
     /// Workspace control metadata remains available when prompts are outside loaded history.
     pub active_run_ids: BTreeMap<String, String>,
+    /// Bounded provider summary for the selected session's active run, independent of paging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_summary: Option<Box<ProgressSummary>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressSummary {
+    pub run_id: String,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

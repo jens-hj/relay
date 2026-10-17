@@ -61,6 +61,13 @@ fn selected_row_actions_require_hover_or_button_focus() {
     for label in labels {
         assert_action_visible(&mounted, label, false);
     }
+    // Hidden overflow cannot initiate reveal, even across the entire strip.
+    for label in labels {
+        mounted.hover(mounted.rect(label).center());
+        for other in labels {
+            assert_action_visible(&mounted, other, false);
+        }
+    }
     mounted.click_label("selected");
     mounted.hover(Vector2::new(379.0, 299.0));
     assert_eq!(mounted.focused_label().as_deref(), Some("selected"));
@@ -83,6 +90,15 @@ fn selected_row_actions_require_hover_or_button_focus() {
         }
         edge = action.max_x();
     }
+    // Exit resets reveal; returning through outside buttons cannot rearm it.
+    mounted.hover(Vector2::new(510.0, 299.0));
+    for label in labels {
+        mounted.hover(mounted.rect(label).center());
+        for other in labels {
+            assert_action_visible(&mounted, other, false);
+        }
+    }
+    mounted.hover(row.center());
     mounted.ui.dispatch_pointer(PointerEvent {
         kind: PointerEventKind::Down(PointerButton::Primary),
         position: mounted.rect(labels[0]).center(),
@@ -132,6 +148,41 @@ fn selected_row_actions_require_hover_or_button_focus() {
     assert_action_visible(&mounted, "Confirm deletion of selected", true);
     mounted.click_label("Confirm deletion of selected");
     assert!(deleted.get_untracked());
+}
+
+#[test]
+fn clipped_row_and_outside_strip_cannot_initiate_reveal() {
+    let mounted = mount(Size::new(520.0, 300.0), || {
+        view! {
+            AgentSidebar
+                roots:(Live::fixed((0..20).map(|i| node(&format!("clip-{i}"), AgentStatus::Idle)).collect()))
+                on-edit:(Some(Rc::new(|_| {}) as OnAgent)) {
+                el height:24px shrink:0 label:"Clipping footer" {}
+            }
+        }
+    });
+    let row = mounted.rect("clip-0");
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Wheel {
+            delta: Vector2::new(0.0, -10.0),
+        },
+        position: row.center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: std::time::Duration::ZERO,
+    });
+    mounted.settle();
+    let clipped = mounted.rect("clip-0");
+    assert!(clipped.origin.y < row.origin.y);
+    // The clipped portion is beneath the header and cannot arm reveal.
+    mounted.hover(Vector2::new(clipped.center().x, clipped.origin.y + 1.0));
+    assert_action_visible(&mounted, "Edit clip-0", false);
+    mounted.hover(mounted.rect("Edit clip-0").center());
+    assert_action_visible(&mounted, "Edit clip-0", false);
+    assert_action_visible(&mounted, "Actions for clip-0", false);
+    // Even hovering the visible remainder cannot let controls cover the header.
+    mounted.hover(Vector2::new(clipped.center().x, clipped.max_y() - 1.0));
+    assert_action_visible(&mounted, "Actions for clip-0", false);
 }
 
 #[test]
@@ -757,7 +808,7 @@ fn spawn_overlay_reserves_no_space_and_archived_rows_remain_readable() {
     let before = mounted.rects("Effort 3 of 5");
     assert_eq!(before.len(), 3);
     for (index, rect) in before.iter().enumerate() {
-        assert_eq!(rect.size, Size::new(3.0, 33.0));
+        assert_eq!(rect.size, Size::new(3.0, 21.0));
         let row_top = index as f32 * 34.0;
         assert!(rect.origin.y >= row_top);
         assert!(rect.origin.y + rect.size.height <= row_top + 34.0);

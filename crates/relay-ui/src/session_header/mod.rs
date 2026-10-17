@@ -98,7 +98,7 @@ pub(crate) fn column(children: Vec<Element>) -> Element {
 }
 
 /// The header's control block: full-height ruled cells flush right. The
-/// status cell shows the session's state with one square per agent below
+/// status cell shows the session's state with one counted mark per state below
 /// and "n below" (pressing it shows them in the tree); Pause (P); Stop (⇧S)
 /// with a red square and a red hover tint. A cell without a handler is not
 /// shown.
@@ -122,9 +122,38 @@ pub fn ControlBlock(
     let squares = view! {
         row width:max-content height:min-content gap:{px(3.0)}px align:center {}
     };
+    let mut tally = StatusTally::default();
     for each in &below {
+        tally.add(*each);
+    }
+    for state in AgentStatus::ALL {
+        let count = tally.get(state);
+        if count == 0 {
+            continue;
+        }
+        let label = format!(
+            "{}: {count} {} below",
+            state.label(),
+            if count == 1 { "agent" } else { "agents" }
+        );
+        let group = view! {
+            row width:max-content height:min-content gap:{px(3.0)}px align:center
+                label:(label.clone()) {
+                StatusSquare status:(state)
+            }
+        };
+        if count >= 2 {
+            group.adopt(&sized_text(
+                count.to_string().into(),
+                11.0,
+                400,
+                ground.muted,
+            ));
+        }
         squares.adopt(&view! {
-            StatusSquare status:(*each)
+            Tooltip text:(label) {
+                { parent.adopt(&group); }
+            }
         });
     }
     let head = view! {

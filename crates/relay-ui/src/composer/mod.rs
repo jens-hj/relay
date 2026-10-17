@@ -4,6 +4,7 @@ use crate::prelude::*;
 use crate::tokens::{ground, px};
 pub use model::*;
 use mosaic::prelude::*;
+use mosaic::render::{Shape, Stroke};
 use std::rc::Rc;
 
 #[derive(Clone)]
@@ -46,9 +47,9 @@ pub fn Ledger(
     host.switch(
         move || data.get(),
         move |parent, vm| {
-            let content = ledger(vm.clone(), actions.clone(), animation_clock.clone());
+            let content = ledger(vm.clone(), actions.clone(), animation_clock.clone(), framed);
             if framed {
-                content.style_dyn(|| Style::default().size(Dimension::Fill, Dimension::MinContent));
+                content.restyle_dyn(|style| style.size(Dimension::Fill, Dimension::MinContent));
             }
             parent.adopt(&content);
             parent.adopt(&view! {
@@ -63,6 +64,7 @@ fn ledger(
     vm: LedgerView,
     actions: LedgerActions,
     animation_clock: Rc<std::cell::Cell<f64>>,
+    framed: bool,
 ) -> Element {
     let colour = vm.model.hue.token();
     let harness_label = if vm.harness == Harness::ClaudeCode {
@@ -107,7 +109,8 @@ fn ledger(
         );
         return view! {
             col {
-                row height:1fr {
+                row height:{if framed { Dimension::MinContent } else { Dimension::Fr(1.0) }}
+                    min-height:0px shrink:0 {
                     stack width:{px(44.0)}px clip {
                         Dither colour:(colour) gradient:(Gradient::Corner)
                             reach:(MODEL_GLOW_COLLAPSED_REACH) opacity:(MODEL_GLOW_OPACITY) seed:3
@@ -127,9 +130,10 @@ fn ledger(
                         { if e.levels > 0 || e.has_max() { let track = view! { EffortTrack levels:(e.levels) current:(e.selected()) tiers:(e.tiers) colour:(effort_colour) orientation:(Orientation::Vertical) names:(e.step_names()) on-select:(Some(actions.set_effort)) }; track.style_dyn(|| Style::default().size(px(12.0), px(78.0)).shrink(0.0)); parent.adopt(&track); } }
                     }
                 }
-                col height:{px(22.0)}px {
-                    CellButton label:"Expand agent settings" on-press:(toggle) {
-                        Label text:"›" role:(TextRole::BodyLarge)
+                row height:{px(22.0)}px shrink:0 {
+                    CellButton label:"Expand agent settings" on-press:(toggle) horizontal-inset:0.0
+                        rule:(Rule::Top) {
+                        { parent.adopt(&expand_chevron()); }
                     }
                 }
             }
@@ -213,6 +217,31 @@ fn ledger(
             }
         }
     }
+}
+// A path centers the visible mark independently of a font's glyph bearings.
+fn expand_chevron() -> Element {
+    let mark = view! {
+        el width:{px(12.0)}px height:{px(12.0)}px shrink:0 nohit label:"›" {}
+    };
+    mark.paint(|ctx| {
+        ctx.scene.shape(
+            Shape::new(ctx.rect)
+                .path(
+                    vec![
+                        Vector2::new(-px(2.0), -px(4.0)),
+                        Vector2::new(px(2.0), 0.0),
+                        Vector2::new(-px(2.0), px(4.0)),
+                    ],
+                    false,
+                )
+                .stroke(
+                    Stroke::new(px(1.3), mosaic::core::theme::color(ground.ink))
+                        .cap(LineCap::Round)
+                        .join(LineJoin::Round),
+                ),
+        );
+    });
+    mark
 }
 /// A quoted source and remove action embedded in one strongly ruled strip.
 #[component]
@@ -347,7 +376,7 @@ pub fn Composer(
                 }
                 row height:min-content align:start {
                     { parent.adopt(&area); }
-                    stack width:{px(62.0)}px shrink:0 height:min-content {
+                    stack width:{px(40.0)}px shrink:0 height:min-content {
                         col height:min-content {
                             button
                                 @click:{if content.get_untracked() && !pending.get_untracked() && !disabled.get_untracked() { send(); }}

@@ -75,10 +75,320 @@ pub struct Controller {
     resize_follow: bool,
     history_anchor: Option<(String, f32)>,
     history_scroll_seen: bool,
+    manual_reading: bool,
+    index: Option<Derived<Rc<TranscriptIndex>>>,
+    window: Option<HistoryWindow>,
+    expanded_rows: BTreeMap<String, bool>,
+    pub(crate) tool_openings: BTreeMap<String, relay_ui::prelude::Opening>,
+    source_request: Option<(String, u64)>,
+    source_search: bool,
+    asset_previews: BTreeMap<(String, Option<String>, bool), bool>,
+    retained_session: Option<String>,
+    native_selection_rows: Option<Vec<String>>,
+}
+
+/// Only history participates in windowing. The surrounding document, including
+/// the live composer, keeps its original element and reactive scope.
+#[derive(Clone)]
+struct HistoryWindow {
+    revision: State<u64>,
+    geometry: State<(f32, f32, f32)>, // offset, viewport height, history origin
+    requested: State<Option<String>>,
+    heights: Rc<RefCell<BTreeMap<String, HistoryHeight>>>,
+    projection: Rc<RefCell<Option<Rc<TranscriptIndex>>>>,
+}
+
+#[derive(Clone, Copy)]
+struct HistoryHeight {
+    pixels: f32,
+    stale: bool,
+}
+
+#[derive(Clone, PartialEq)]
+struct HistorySlot {
+    key: (bool, String), // true for a message; false for a spacer
+    height: f32,
+}
+
+impl HistoryWindow {
+    fn new() -> Self {
+        Self {
+            revision: State::new(0),
+            geometry: State::new((0.0, 900.0, 0.0)),
+            requested: State::new(None),
+            heights: Rc::default(),
+            projection: Rc::default(),
+        }
+    }
+
+    fn height(&self, id: &str) -> f32 {
+        self.heights
+            .borrow()
+            .get(id)
+            .map_or(px(120.0), |height| height.pixels)
+    }
+
+    /// A disposed/dirty row's last height is only an estimate. Preserve it
+    /// until layout supplies a correction: replacing it with an arbitrary
+    /// default would move the reader before any new geometry was available.
+    fn invalidate(&self, id: &str) {
+        if let Some(height) = self.heights.borrow_mut().get_mut(id) {
+            height.stale = true;
+        }
+    }
+
+    fn invalidate_all(&self) {
+        for height in self.heights.borrow_mut().values_mut() {
+            height.stale = true;
+        }
+    }
+
+    fn reconcile(&self, next: Rc<TranscriptIndex>) {
+        let mut previous = self.projection.borrow_mut();
+        self.heights.borrow_mut().retain(|id, height| {
+            let Some(entry) = next.rows.get(id) else {
+                return false;
+            };
+            if previous.as_ref().and_then(|index| index.rows.get(id)) != Some(entry) {
+                height.stale = true;
+            }
+            true
+        });
+        *previous = Some(next);
+    }
+
+    fn report_height(&self, id: &str, pixels: f32) -> (f32, bool) {
+        let delta = pixels - self.height(id);
+        let revalidated = self
+            .heights
+            .borrow()
+            .get(id)
+            .is_none_or(|height| height.stale);
+        // Also revalidate equal-height reports. A new element always reports
+        // its first layout, even if new content happens to occupy the same height.
+        self.heights.borrow_mut().insert(
+            id.to_owned(),
+            HistoryHeight {
+                pixels,
+                stale: false,
+            },
+        );
+        (delta, revalidated)
+    }
+
+    fn slots(&self, order: &[String], pinned: &[String]) -> Vec<HistorySlot> {
+        self.revision.get();
+        let (offset, viewport, origin) = self.geometry.get();
+        let requested = self.requested.get();
+        let mut y = origin;
+        let mut gap = 0.0;
+        let mut slots = Vec::new();
+        // A viewport of overscan on each side keeps wheel/touch scrolling
+        // smooth without mounting the rest of the document.
+        let overscan = viewport.max(px(600.0));
+        for id in order {
+            let height = self.height(id);
+            let visible = order.len() <= 40
+                || (y + height >= offset - overscan && y <= offset + viewport + overscan)
+                || requested.as_ref() == Some(id)
+                || pinned.contains(id);
+            if visible {
+                if gap > 0.0 {
+                    slots.push(HistorySlot {
+                        key: (false, id.clone()),
+                        height: gap,
+                    });
+                    gap = 0.0;
+                }
+                slots.push(HistorySlot {
+                    key: (true, id.clone()),
+                    height,
+                });
+            } else {
+                gap += height;
+            }
+            y += height;
+        }
+        if gap > 0.0 {
+            slots.push(HistorySlot {
+                key: (false, String::new()),
+                height: gap,
+            });
+        }
+        slots
+    }
+
+    fn changed(&self) {
+        self.revision
+            .set(self.revision.get_untracked().wrapping_add(1));
+    }
+}
+
+fn pinned_history(controller: &Shared, ui: &Ui) -> Vec<String> {
+    let mut state = controller.borrow_mut();
+    // Capture once per selection, never absorb rows mounted by later scrolling.
+    let mounted = state.messages.keys().cloned().collect();
+    state.capture_native_selection(ui.selected_text().is_some(), mounted);
+    let mut pinned = state
+        .source_locations
+        .iter()
+        .filter_map(|(key, location)| {
+            let (field, buffer) = state.surfaces.get(key)?;
+            let (a, b) = buffer.borrow().selection_bytes();
+            if (field.interaction().focused() || a != b)
+                && let Location::Source { message, .. } = location
+            {
+                Some(message.clone())
+            } else {
+                None
+            }
+        })
+        .chain(state.history_anchor.as_ref().map(|(id, _)| id.clone()))
+        .collect::<Vec<_>>();
+    pinned.extend(state.native_selection_rows.iter().flatten().cloned());
+    for (id, row) in &state.messages {
+        if row.interaction().focus_within() {
+            pinned.push(id.clone());
+        }
+    }
+    for (key, (field, buffer)) in &state.surfaces {
+        if !key.starts_with("inline-") {
+            continue;
+        }
+        let (a, b) = buffer.borrow().selection_bytes();
+        if field.interaction().focused() || a != b {
+            for (id, row) in &state.messages {
+                if row.layout_rect().contains(field.layout_rect().center()) {
+                    pinned.push(id.clone());
+                }
+            }
+        }
+    }
+    pinned
 }
 
 pub(crate) type Shared = Rc<RefCell<Controller>>;
 pub(crate) type ControllerState = State<Shared>;
+
+impl Controller {
+    fn capture_native_selection(&mut self, selected: bool, mounted: Vec<String>) {
+        if !selected {
+            self.native_selection_rows = None;
+        } else if self.native_selection_rows.is_none() {
+            self.native_selection_rows = Some(mounted);
+        }
+    }
+
+    fn prune_history_state(
+        &mut self,
+        session: &str,
+        index: &TranscriptIndex,
+        assets: &[(String, Option<String>)],
+    ) {
+        if self.retained_session.as_deref() != Some(session) {
+            self.expanded_rows.clear();
+            self.tool_openings.clear();
+            self.asset_previews.clear();
+            self.native_selection_rows = None;
+            self.retained_session = Some(session.to_owned());
+            if let Some(window) = &self.window {
+                window.heights.borrow_mut().clear();
+            }
+        }
+        self.expanded_rows
+            .retain(|id, _| index.rows.contains_key(id));
+        self.tool_openings
+            .retain(|id, _| index.rows.contains_key(id));
+        self.asset_previews.retain(|(id, part, _), _| {
+            assets
+                .iter()
+                .any(|(asset, current)| asset == id && current == part)
+        });
+        if let Some(rows) = &mut self.native_selection_rows {
+            rows.retain(|id| index.rows.contains_key(id));
+        }
+    }
+
+    pub(crate) fn invalidate_history_height(&self, id: &str) {
+        if let Some(window) = &self.window {
+            window.invalidate(id);
+        }
+    }
+}
+
+fn preview_assets(parts: &[Part], draft: bool) -> Vec<(String, Option<String>)> {
+    parts
+        .iter()
+        .flat_map(|part| match &part.kind {
+            PartKind::Asset { asset } => vec![(asset.id.clone(), draft.then(|| part.id.clone()))],
+            PartKind::Reply { parts, .. } => preview_assets(parts, draft),
+            _ => vec![],
+        })
+        .collect()
+}
+
+/// One indexed projection per conversation. Row consumers read a single entry;
+/// changes to message bodies do not invalidate the list's stable key sequence.
+#[derive(Clone, Default, PartialEq)]
+struct TranscriptIndex {
+    order: Vec<String>,
+    rows: BTreeMap<String, TranscriptEntry>,
+}
+
+#[derive(Clone, PartialEq)]
+struct TranscriptEntry {
+    message: Message,
+    comments: Vec<Comment>,
+    speaker: String,
+    continues: bool,
+    spacing: f32,
+}
+
+fn transcript_index(model: Model) -> Derived<Rc<TranscriptIndex>> {
+    Derived::new(move || {
+        let session = model.session.get();
+        model.snapshot.with(|snapshot| {
+            let mut result = TranscriptIndex::default();
+            let mut comments: BTreeMap<&str, Vec<Comment>> = BTreeMap::new();
+            for comment in &snapshot.comments {
+                comments
+                    .entry(&comment.message_id)
+                    .or_default()
+                    .push(comment.clone());
+            }
+            let mut previous: Option<(String, bool)> = None;
+            for message in crate::adapt::transcript_messages(&snapshot.messages, &session) {
+                let speaker = if message.kind == "prompt" {
+                    "You"
+                } else {
+                    &message.author
+                };
+                let tool = message.tool.is_some()
+                    || matches!(message.kind.as_str(), "command_execution" | "file_change");
+                let continues = previous.as_ref().is_some_and(|(name, _)| name == speaker);
+                let entry = TranscriptEntry {
+                    message: crate::tool_activity::with_legacy_tool(message.clone()),
+                    comments: comments.remove(message.id.as_str()).unwrap_or_default(),
+                    speaker: if continues {
+                        String::new()
+                    } else {
+                        speaker.to_owned()
+                    },
+                    continues,
+                    spacing: match previous.as_ref() {
+                        None => 0.0,
+                        Some((_, true)) if tool => 6.0,
+                        Some(_) => 28.0,
+                    },
+                };
+                previous = Some((speaker.to_owned(), tool));
+                result.order.push(message.id.clone());
+                result.rows.insert(message.id.clone(), entry);
+            }
+            Rc::new(result)
+        })
+    })
+}
 
 fn text_part(parts: &[Part], id: &str) -> Option<String> {
     for part in parts {
@@ -116,17 +426,36 @@ fn current_text(model: Model, location: &Location) -> String {
         Location::Draft(id) => {
             text_part(&buffer::parts(model, &model.session.get()), id).unwrap_or_default()
         }
-        Location::Source { message, .. } => model
-            .snapshot
-            .get()
-            .messages
-            .iter()
-            .find(|m| &m.id == message)
-            .and_then(|m| {
-                let (start, end) = source_range(m, location)?;
-                m.body.get(start..end).map(str::to_owned)
-            })
-            .unwrap_or_default(),
+        Location::Source { message, .. } => {
+            let index = model
+                .conversation_controller
+                .get_untracked()
+                .and_then(|controller| controller.borrow().index);
+            let read = |m: &Message| {
+                source_range(m, location)
+                    .and_then(|(start, end)| m.body.get(start..end).map(str::to_owned))
+            };
+            if let Some(index) = index {
+                return index
+                    .with(|index| {
+                        index
+                            .rows
+                            .get(message)
+                            .and_then(|entry| read(&entry.message))
+                    })
+                    .unwrap_or_default();
+            }
+            model
+                .snapshot
+                .with(|snapshot| {
+                    snapshot
+                        .messages
+                        .iter()
+                        .find(|m| &m.id == message)
+                        .and_then(read)
+                })
+                .unwrap_or_default()
+        }
     }
 }
 
@@ -451,7 +780,81 @@ impl AttachmentTarget {
     }
 }
 
-fn document_edge(controller: &Shared, fonts: &mut mosaic::text::FontContext, end: bool) {
+fn source_targets(index: &TranscriptIndex) -> Vec<(String, relay_core::Anchor)> {
+    fn parts(
+        id: &str,
+        values: &[Part],
+        offset: usize,
+        out: &mut Vec<(String, relay_core::Anchor)>,
+    ) {
+        for (_, (part, start)) in located_parts(values, offset) {
+            match part.kind {
+                PartKind::Text { text } => out.push((
+                    format!("source-{id}-{}", part.id),
+                    relay_core::Anchor {
+                        message_id: id.into(),
+                        start,
+                        end: start + text.len(),
+                        quote: text,
+                    },
+                )),
+                PartKind::Reply {
+                    anchor,
+                    parts: nested,
+                } => parts(
+                    id,
+                    &nested,
+                    start + format!("Reply to “{}”:\n", anchor.quote).len(),
+                    out,
+                ),
+                _ => {}
+            }
+        }
+    }
+    let mut result = Vec::new();
+    for id in &index.order {
+        let message = &index.rows[id].message;
+        if message.tool.is_some() {
+            continue;
+        }
+        if message.parts.is_empty() {
+            result.push((
+                format!("source-{id}-0"),
+                relay_core::Anchor {
+                    message_id: id.clone(),
+                    start: 0,
+                    end: message.body.len(),
+                    quote: message.body.clone(),
+                },
+            ));
+        } else {
+            parts(id, &message.parts, 0, &mut result);
+        }
+    }
+    result
+}
+
+fn document_edge(
+    model: Model,
+    controller: &Shared,
+    fonts: &mut mosaic::text::FontContext,
+    end: bool,
+) {
+    if !end {
+        let index = controller.borrow().index;
+        if let Some(index) = index
+            && let Some((_, mut anchor)) = index
+                .with_untracked(|index| source_targets(index))
+                .into_iter()
+                .next()
+        {
+            anchor.end = anchor.start;
+            anchor.quote.clear();
+            controller.borrow_mut().source_search = false;
+            model.source_anchor.set(Some(anchor));
+            return;
+        }
+    }
     let state = controller.borrow();
     let mut surfaces = state.surfaces.values().collect::<Vec<_>>();
     surfaces.sort_by(|a, b| {
@@ -476,11 +879,127 @@ fn document_edge(controller: &Shared, fonts: &mut mosaic::text::FontContext, end
 }
 
 fn neighboring(
+    model: Model,
     controller: &Shared,
     key: &str,
     direction: i32,
     fonts: &mut mosaic::text::FontContext,
 ) {
+    // Preserve navigation among recorded parts and editable reply mirrors in
+    // the same row before crossing a window boundary through the model.
+    let local = {
+        let state = controller.borrow();
+        let mut entries = state.surfaces.iter().collect::<Vec<_>>();
+        entries.sort_by(|a, b| {
+            a.1.0
+                .layout_rect()
+                .origin
+                .y
+                .total_cmp(&b.1.0.layout_rect().origin.y)
+        });
+        entries
+            .iter()
+            .position(|(id, _)| id.as_str() == key)
+            .and_then(|position| {
+                let next = position as i32 + direction;
+                let (_, (field, buffer)) =
+                    (next >= 0).then(|| entries.get(next as usize)).flatten()?;
+                let current = &state.surfaces[key].0;
+                state
+                    .messages
+                    .values()
+                    .any(|row| {
+                        let rect = row.layout_rect();
+                        rect.contains(current.layout_rect().center())
+                            && rect.contains(field.layout_rect().center())
+                    })
+                    .then(|| (field.clone(), buffer.clone()))
+            })
+    };
+    if let Some((field, buffer)) = local {
+        let offset = if direction < 0 {
+            buffer.borrow().text().len()
+        } else {
+            0
+        };
+        buffer
+            .borrow_mut()
+            .set_selection_bytes(fonts, offset, offset);
+        field.focus();
+        field.reveal();
+        field.paint_dirty();
+        return;
+    }
+    let index = controller.borrow().index;
+    if let Some(index) = index {
+        let sources = index.with_untracked(|index| source_targets(index));
+        let position = sources.iter().position(|(id, _)| id == key);
+        let target = if let Some(position) = position {
+            let next = position as i32 + direction;
+            (next >= 0).then(|| sources.get(next as usize)).flatten()
+        } else if key.starts_with("draft-") && direction < 0 {
+            let state = controller.borrow();
+            let first = state
+                .surfaces
+                .iter()
+                .filter(|(key, _)| key.starts_with("draft-"))
+                .min_by(|a, b| {
+                    a.1.0
+                        .layout_rect()
+                        .origin
+                        .y
+                        .total_cmp(&b.1.0.layout_rect().origin.y)
+                });
+            if first.is_some_and(|(id, _)| id == key) {
+                sources.last()
+            } else {
+                None
+            }
+        } else if key.starts_with("inline-") {
+            let state = controller.borrow();
+            let row = state
+                .messages
+                .iter()
+                .find(|(_, row)| row.interaction().focus_within())
+                .map(|(id, _)| id.clone());
+            row.and_then(|row| {
+                index.with_untracked(|index| {
+                    let position = index.order.iter().position(|id| id == &row)?;
+                    if direction < 0 {
+                        sources.iter().rev().find(|(_, anchor)| {
+                            index
+                                .order
+                                .iter()
+                                .position(|id| id == &anchor.message_id)
+                                .is_some_and(|i| i < position)
+                        })
+                    } else {
+                        sources.iter().find(|(_, anchor)| {
+                            index
+                                .order
+                                .iter()
+                                .position(|id| id == &anchor.message_id)
+                                .is_some_and(|i| i > position)
+                        })
+                    }
+                })
+            })
+        } else {
+            None
+        };
+        if let Some((_, anchor)) = target {
+            let mut anchor = anchor.clone();
+            if direction < 0 {
+                anchor.start = anchor.end;
+            } else {
+                anchor.end = anchor.start;
+            }
+            anchor.quote.clear();
+            controller.borrow_mut().source_search = false;
+            model.source_anchor.set(Some(anchor));
+            return;
+        }
+    }
     let controller = controller.borrow();
     let mut entries = controller.surfaces.iter().collect::<Vec<_>>();
     entries.sort_by(|a, b| {
@@ -656,6 +1175,46 @@ fn find_next(model: Model, controller: &Shared, direction: i32) {
         model.search_history(direction < 0);
         return;
     }
+    let indexed = controller.borrow().index;
+    if let Some(index) = indexed {
+        let matches = index.with(|index| {
+            index
+                .order
+                .iter()
+                .flat_map(|id| {
+                    index.rows[id]
+                        .message
+                        .body
+                        .match_indices(&query)
+                        .map(|(start, _)| (id.clone(), start))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        });
+        if matches.is_empty() {
+            return;
+        }
+        let previous = controller.borrow().search_hit.clone();
+        let position = matches
+            .iter()
+            .position(|hit| Some(hit) == previous.as_ref())
+            .map(|i| (i as i32 + direction).rem_euclid(matches.len() as i32) as usize)
+            .unwrap_or(if direction < 0 { matches.len() - 1 } else { 0 });
+        let (id, start) = matches[position].clone();
+        controller.borrow_mut().search_hit = Some((id.clone(), start));
+        go_to_source(
+            model,
+            controller,
+            &relay_core::Anchor {
+                message_id: id,
+                start,
+                end: start,
+                quote: String::new(),
+            },
+            false,
+        );
+        return;
+    }
     let mut entries = controller
         .borrow()
         .surfaces
@@ -695,8 +1254,11 @@ fn find_next(model: Model, controller: &Shared, direction: i32) {
     field.paint_dirty();
 }
 
-fn go_to_source(model: Model, controller: &Shared, anchor: &relay_core::Anchor) {
+fn go_to_source(model: Model, controller: &Shared, anchor: &relay_core::Anchor, focus: bool) {
+    controller.borrow_mut().source_search = !focus;
     controller.borrow_mut().history_anchor = None;
+    controller.borrow_mut().manual_reading = false;
+    controller.borrow_mut().resize_follow = false;
     if model.transport_requests.get_untracked().is_some()
         && (model
             .history
@@ -710,14 +1272,27 @@ fn go_to_source(model: Model, controller: &Shared, anchor: &relay_core::Anchor) 
                 .iter()
                 .any(|m| m.id == anchor.message_id))
     {
-        model.source_anchor.set(Some(anchor.clone()));
-        model.request_history(relay_core::StreamRequest::Around {
-            session_id: model.session.get_untracked(),
-            generation: model.history_generation.get_untracked(),
-            message_id: anchor.message_id.clone(),
-        });
+        if model.source_anchor.get_untracked().as_ref() != Some(anchor) {
+            model.source_anchor.set(Some(anchor.clone()));
+        }
+        let request = (
+            anchor.message_id.clone(),
+            model.history_generation.get_untracked(),
+        );
+        let send = controller.borrow().source_request.as_ref() != Some(&request)
+            || !model.history_error.get_untracked().is_empty();
+        if send
+            && model.request_history(relay_core::StreamRequest::Around {
+                session_id: model.session.get_untracked(),
+                generation: model.history_generation.get_untracked(),
+                message_id: anchor.message_id.clone(),
+            })
+        {
+            controller.borrow_mut().source_request = Some(request);
+        }
         return;
     }
+    controller.borrow_mut().source_request = None;
     let prefix = format!("source-{}-", anchor.message_id);
     let snapshot = model.snapshot.get_untracked();
     let Some(message) = snapshot.messages.iter().find(|m| m.id == anchor.message_id) else {
@@ -737,16 +1312,91 @@ fn go_to_source(model: Model, controller: &Shared, anchor: &relay_core::Anchor) 
         })
         .max_by_key(|(offset, _, _)| *offset);
     drop(state);
+    // Tool rows own selectable presentation rather than BufferText surfaces.
+    // Reveal their measured row once it exists, instead of leaving an anchor
+    // pending forever while looking for a text editor they never create.
+    if selected.is_none() && message.tool.is_some() {
+        let row = controller
+            .borrow()
+            .messages
+            .get(&anchor.message_id)
+            .cloned();
+        if let Some(row) = row
+            && model
+                .ui
+                .get_untracked()
+                .inspection_rect(row.id())
+                .is_some_and(|rect| rect.size.height > 0.0)
+        {
+            row.reveal();
+            model.source_anchor.set(None);
+            controller.borrow_mut().source_search = false;
+            if let Some(window) = controller.borrow().window.clone() {
+                window.requested.set(None);
+            }
+            return;
+        }
+    }
     if let Some((offset, field, editor)) = selected {
-        let fonts = model.ui.get_untracked().fonts();
-        editor.borrow_mut().set_selection_bytes(
-            &mut fonts.borrow_mut(),
-            anchor.start - offset,
-            anchor.end - offset,
-        );
-        field.focus();
+        if !model
+            .ui
+            .get_untracked()
+            .inspection_rect(field.id())
+            .is_some_and(|rect| rect.size.height > 0.0)
+        {
+            if model.source_anchor.get_untracked().as_ref() != Some(anchor) {
+                model.source_anchor.set(Some(anchor.clone()));
+            }
+            mount_history_message(controller, &anchor.message_id);
+            return;
+        }
+        if focus {
+            let fonts = model.ui.get_untracked().fonts();
+            editor.borrow_mut().set_selection_bytes(
+                &mut fonts.borrow_mut(),
+                anchor.start - offset,
+                anchor.end - offset,
+            );
+            field.focus();
+        }
         field.reveal();
         field.paint_dirty();
+        model.source_anchor.set(None);
+        controller.borrow_mut().source_search = false;
+        if let Some(window) = controller.borrow().window.clone() {
+            window.requested.set(None);
+        }
+    } else {
+        if model.source_anchor.get_untracked().as_ref() != Some(anchor) {
+            model.source_anchor.set(Some(anchor.clone()));
+        }
+        mount_history_message(controller, &anchor.message_id);
+    }
+}
+
+fn mount_history_message(controller: &Shared, id: &str) {
+    let state = controller.borrow();
+    let (Some(index), Some(window), Some(viewport)) =
+        (state.index, state.window.clone(), state.viewport.clone())
+    else {
+        return;
+    };
+    let top = index.with_untracked(|index| {
+        let position = index.order.iter().position(|key| key == id)?;
+        Some(
+            index.order[..position]
+                .iter()
+                .map(|key| window.height(key))
+                .sum::<f32>(),
+        )
+    });
+    drop(state);
+    if let Some(top) = top {
+        if window.requested.get_untracked().as_deref() != Some(id) {
+            window.requested.set(Some(id.to_owned()));
+        }
+        let (_, _, origin) = window.geometry.get_untracked();
+        viewport.scroll_to(Vector2::new(0.0, top + origin));
     }
 }
 
@@ -792,6 +1442,107 @@ fn delete_boundary(parts: &mut Vec<Part>, id: &str, backward: bool) -> Option<(S
 #[component]
 pub fn Conversation(model: Model) -> Element {
     let controller = State::new(Rc::new(RefCell::new(Controller::default())));
+    let index = transcript_index(model);
+    controller.get_untracked().borrow_mut().index = Some(index);
+    let message_keys = Derived::new(move || index.with(|index| index.order.clone()));
+    let history_window = HistoryWindow::new();
+    controller.get_untracked().borrow_mut().window = Some(history_window.clone());
+    let projection_window = history_window.clone();
+    let history_assets = Derived::new(move || {
+        index.with(|index| {
+            index
+                .rows
+                .values()
+                .flat_map(|entry| preview_assets(&entry.message.parts, false))
+                .collect::<Vec<_>>()
+        })
+    });
+    Effect::new(move || {
+        let next = index.get();
+        let session = model.session.get();
+        mosaic::core::reactive::untracked(|| {
+            let draft = buffer::parts(model, &session);
+            let assets = history_assets
+                .get_untracked()
+                .into_iter()
+                .chain(preview_assets(&draft, true))
+                .collect::<Vec<_>>();
+            controller
+                .get_untracked()
+                .borrow_mut()
+                .prune_history_state(&session, &next, &assets);
+            projection_window.reconcile(next);
+        });
+    });
+    Effect::new(move || {
+        let assets = history_assets
+            .get()
+            .into_iter()
+            .chain(preview_assets(
+                &buffer::parts(model, &model.session.get()),
+                true,
+            ))
+            .collect::<Vec<_>>();
+        controller
+            .get_untracked()
+            .borrow_mut()
+            .asset_previews
+            .retain(|(id, part, _), _| {
+                assets
+                    .iter()
+                    .any(|(asset, current)| asset == id && current == part)
+            });
+    });
+    let window_slots = {
+        let window = controller
+            .get_untracked()
+            .borrow()
+            .window
+            .clone()
+            .expect("history window");
+        Derived::new(move || {
+            window.slots(
+                &message_keys.get(),
+                &pinned_history(&controller.get_untracked(), &model.ui.get_untracked()),
+            )
+        })
+    };
+    let reveal_controller = controller.get_untracked();
+    let reveal_window = history_window.clone();
+    Effect::new(move || {
+        let anchor = model.source_anchor.get();
+        let remote = model.remote_search.get();
+        let focused = model.focused_message.get();
+        message_keys.get();
+        reveal_window.revision.get();
+        mosaic::core::reactive::untracked(|| {
+            if let Some(anchor) = anchor {
+                let focus = !reveal_controller.borrow().source_search;
+                go_to_source(model, &reveal_controller, &anchor, focus);
+            } else if remote.as_ref() == Some(&focused) && !focused.is_empty() {
+                let target = reveal_controller
+                    .borrow()
+                    .messages
+                    .get(&focused)
+                    .cloned()
+                    .filter(|field| {
+                        model
+                            .ui
+                            .get_untracked()
+                            .inspection_rect(field.id())
+                            .is_some_and(|rect| rect.size.height > 0.0)
+                    });
+                if let Some(field) = target {
+                    reveal_controller.borrow_mut().history_anchor = None;
+                    field.reveal();
+                    reveal_window.requested.set(None);
+                    model.focused_message.set(String::new());
+                } else {
+                    mount_history_message(&reveal_controller, &focused);
+                }
+            }
+        });
+    });
     let mounted_controller = controller.get_untracked();
     model
         .conversation_controller
@@ -890,6 +1641,9 @@ pub fn Conversation(model: Model) -> Element {
         let _size = viewport_size.get();
         mosaic::core::reactive::untracked(|| {
             let mut state = resize_controller.borrow_mut();
+            if state.manual_reading {
+                return;
+            }
             let Some(field) = state
                 .surfaces
                 .values()
@@ -1051,6 +1805,26 @@ pub fn Conversation(model: Model) -> Element {
         });
         working && !calling
     });
+    let thinking_summary = Derived::new(move || {
+        let session = model.session.get();
+        crate::transcript::progress_summary(
+            &model.snapshot.get(),
+            &model.history.get(),
+            &session,
+            model.active_run_ids.get().get(&session).map(String::as_str),
+        )
+    });
+    let thinking_run = Derived::new(move || {
+        let session = model.session.get();
+        format!(
+            "{session}/{}",
+            model
+                .active_run_ids
+                .get()
+                .get(&session)
+                .map_or("", String::as_str)
+        )
+    });
     let thinking_hue = Derived::new(move || ledger.get().model.hue);
     let thinking_level = Derived::new(move || {
         model
@@ -1066,7 +1840,8 @@ pub fn Conversation(model: Model) -> Element {
             row height:min-content shrink:0
                 pad:(left:{px(if compact.get() {12.0} else {28.0})}px right:{px(if compact.get() {12.0} else {36.0})}px bottom:{px(20.0)}px)
                 justify:center {
-                col width:1fr max-width:{px(if compact.get() {848.0} else {994.0})}px height:min-content gap:0px label:"Inline composer" {
+                col width:1fr max-width:{px(if compact.get() {848.0} else {994.0})}px height:min-content
+                    pad:(right:{px(6.0)}px) gap:0px label:"Inline composer" {
             if model.buffer.get().approval_needed {
                 BoundedPanel limit:(auxiliary_limit) {
                     grid height:min-content gap:0px align:center
@@ -1397,13 +2172,57 @@ pub fn Conversation(model: Model) -> Element {
                                 }
                                 if model.snapshot.get().messages.iter().any(|m|m.session_id==model.session.get()) {
                                     col height:min-content min-width:0px gap:0px {
-                                        for (_, message) in {crate::adapt::transcript_messages(&model.snapshot.get().messages, &model.session.get()).into_iter().map(|m|(m.id.clone(),m.clone())).collect::<Vec<_>>()} {
-                                            col height:min-content {
-                                                TranscriptMessage model:(model)
-                                                    message-id:(message.id.clone())
-                                                    controller:(controller)
-                                            }
+                                        {
+                                            parent.keyed(
+                                                move || window_slots.get().into_iter().map(|slot| (slot.key, ())),
+                                                move |parent, key, ()| {
+                                                    if key.0 {
+                                                        parent.adopt(&view! {
+                                                            TranscriptMessage model:(model) message-id:(key.1.clone()) controller:(controller)
+                                                        });
+                                                    } else {
+                                                        let gap_key = State::new(key.clone());
+                                                        parent.adopt(&view! {
+                                                            el height:{window_slots.with(|slots| slots.iter().find(|s| s.key == gap_key.get()).map_or(0.0, |s| s.height))}px
+                                                                shrink:0 nohit {}
+                                                        });
+                                                    }
+                                                },
+                                            );
                                         }
+                                    } as history_content
+                                    {
+                                        let window = controller.get_untracked().borrow().window.clone().expect("history window");
+                                        let content = history_content.clone();
+                                        let previous_width = Rc::new(Cell::new(0.0f32));
+                                        history_content.on_layout(move |rect| {
+                                            let old_width = previous_width.replace(rect.size.width);
+                                            if (old_width - rect.size.width).abs() > 0.5 {
+                                                // Retain a reading anchor while all the old wrap
+                                                // measurements are replaced with estimates.
+                                                let shared = controller.get_untracked();
+                                                let mut state = shared.borrow_mut();
+                                                if old_width > 0.0 && state.history_anchor.is_none()
+                                                    && let Some(viewport) = &state.viewport {
+                                                    let root = viewport.root().layout_rect();
+                                                    if viewport.offset().y < viewport.content().layout_rect().size.height - root.size.height - px(4.0) {
+                                                        state.history_anchor = state.messages.iter().map(|(id, row)| (id, row.layout_rect()))
+                                                            .filter(|(_, rect)| rect.size.height > 0.0 && rect.max_y() > root.origin.y && rect.origin.y < root.max_y())
+                                                            .min_by(|a, b| a.1.origin.y.total_cmp(&b.1.origin.y))
+                                                            .map(|(id, rect)| (id.clone(), rect.origin.y));
+                                                    }
+                                                }
+                                                drop(state);
+                                                window.heights.borrow_mut().clear();
+                                                window.changed();
+                                            }
+                                            let viewport = controller.get_untracked().borrow().viewport.clone();
+                                            if let Some(viewport) = viewport {
+                                                let origin = content.layout_rect().origin.y - viewport.content().layout_rect().origin.y;
+                                                let (offset, height, _) = window.geometry.get_untracked();
+                                                window.geometry.set((offset, height, origin));
+                                            }
+                                        });
                                     }
                                 }
                                 if session.get().is_some_and(|s| s.archived) {
@@ -1419,6 +2238,13 @@ pub fn Conversation(model: Model) -> Element {
                                 }
                                 if thinking.get() {
                                     ThinkingLine effort:(relay_ui::Live::from(thinking_level))
+                                        summary:(relay_ui::Live::from(thinking_summary))
+                                        run-key:(relay_ui::Live::from(thinking_run))
+                                        on-toggle:(Rc::new(move || {
+                                            // A disclosure is a reading action; pointer-down may
+                                            // otherwise resume automatic caret/bottom following.
+                                            controller.get_untracked().borrow_mut().manual_reading = true;
+                                        }) as relay_ui::prelude::OnPress)
                                         hue:(relay_ui::Live::from(thinking_hue))
                                 }
                                 for (_, permission) in {approvals.get().into_iter().map(|p|(p.id.clone(),p)).collect::<Vec<_>>()} {
@@ -1453,21 +2279,40 @@ pub fn Conversation(model: Model) -> Element {
                 document_scroll.root().on_layout(move |rect| viewport_size.set(rect.size));
                 controller.get_untracked().borrow_mut().viewport=Some(document_scroll.clone());
                 controller.get_untracked().borrow_mut().draft_viewport = Some(document_scroll.clone());
+                let window = controller.get_untracked().borrow().window.clone().expect("history window");
+                let window_scroll = document_scroll.clone();
+                Effect::new(move || {
+                    let offset = window_scroll.offset();
+                    let size = viewport_size.get();
+                    mosaic::core::reactive::untracked(|| {
+                        let (_, _, origin) = window.geometry.get_untracked();
+                        window.geometry.set((offset.y, size.height, origin));
+                    });
+                });
                 let gesture_controller=controller.get_untracked();
                 document_scroll.root().on_pointer(move |event,_| {
+                    match event.kind {
+                        PointerEventKind::Wheel { .. } => gesture_controller.borrow_mut().manual_reading = true,
+                        PointerEventKind::Down(_) => gesture_controller.borrow_mut().manual_reading = false,
+                        PointerEventKind::Move if event.pointer_type == PointerType::Touch => gesture_controller.borrow_mut().manual_reading = true,
+                        _ => {}
+                    }
                     if matches!(event.kind,PointerEventKind::Wheel{..}|PointerEventKind::Down(_)) || (event.pointer_type==PointerType::Touch && matches!(event.kind,PointerEventKind::Move)) {let mut state=gesture_controller.borrow_mut();state.history_scroll_seen=true;state.history_anchor=None;}
                 });
                 let paging_scroll=document_scroll.clone();
                 let paging_controller=controller.get_untracked();
+                let paging_window=paging_controller.borrow().window.clone().expect("history window");
                 Effect::new(move || {
                     let offset=paging_scroll.offset();
+                    paging_window.revision.get();
                     mosaic::core::reactive::untracked(|| {
                         if !paging_controller.borrow().history_scroll_seen || model.transport_requests.get_untracked().is_none() || model.history_loading.get_untracked() {return;}
                         let root=paging_scroll.root().layout_rect();
                         if offset.y<px(200.0) {
                             if !model.history.get_untracked().has_more {return;}
                             let ui=model.ui.get_untracked();
-                            let anchor=paging_controller.borrow().messages.iter().filter_map(|(key,field)|ui.inspection_rect(field.id()).map(|rect|(key.clone(),rect))).filter(|(_,rect)|rect.origin.y+rect.size.height>=root.origin.y).min_by(|(_,a),(_,b)|a.origin.y.total_cmp(&b.origin.y)).map(|(key,rect)|(key,rect.origin.y));
+                            let anchor=paging_controller.borrow().messages.iter().filter_map(|(key,field)|ui.inspection_rect(field.id()).map(|rect|(key.clone(),rect))).filter(|(_,rect)|rect.size.height>0.0 && rect.max_y()>=root.origin.y && rect.origin.y<root.max_y()).min_by(|(_,a),(_,b)|a.origin.y.total_cmp(&b.origin.y)).map(|(key,rect)|(key,rect.origin.y));
+                            if anchor.is_none() {return;}
                             if model.load_older() {paging_controller.borrow_mut().history_anchor=anchor;}
                         } else if offset.y+root.size.height>=paging_scroll.content().layout_rect().size.height-px(200.0) {
                             model.load_newer();
@@ -1484,11 +2329,17 @@ pub fn Conversation(model: Model) -> Element {
                     // Revealing only the caret can leave the rest of the input
                     // below the viewport, so draft focus must preserve bottom-follow.
                     let focused_draft = focused.as_ref().is_some_and(|(draft, _)| *draft);
-                    if extent_changed && let Some((_, field)) = &focused { layout_controller.borrow_mut().resize_follow = true; field.paint_dirty(); }
                     let was_at_bottom = previous.get().is_none_or(|(content, viewport)|
                         follow_scroll.offset().y >= (content - viewport).max(0.0) - px(4.0));
+                    let revealing = model.source_anchor.get_untracked().is_some();
+                    let follow_caret = !layout_controller.borrow().manual_reading && !revealing
+                        && ((focused_draft && (was_at_bottom || !model.command_flow.get_untracked().is_empty() || model.completion.get_untracked().is_some())) || (!focused_draft && focused.as_ref().is_some_and(|(_, field)| {
+                            let field = field.layout_rect(); let viewport = follow_scroll.root().layout_rect();
+                            field.max_y() > viewport.origin.y && field.origin.y < viewport.max_y()
+                        })));
+                    if extent_changed && follow_caret && let Some((_, field)) = &focused { layout_controller.borrow_mut().resize_follow = true; field.paint_dirty(); }
                     previous.set(Some((rect.size.height, height)));
-                    if extent_changed && focused.is_some()
+                    if extent_changed && focused.is_some() && follow_caret
                         && let Some(caret) = model.ui.get_untracked().ime_cursor_area() {
                         follow_scroll.reveal(caret_with_margin(Vector2::ZERO, caret));
                     }
@@ -1497,18 +2348,21 @@ pub fn Conversation(model: Model) -> Element {
                         if let Some(field)=layout_controller.borrow().messages.get(&key) && let Some(rect)=model.ui.get_untracked().inspection_rect(field.id()) {
                             follow_scroll.scroll_to(Vector2::new(0.0,follow_scroll.offset().y+rect.origin.y-y));
                         }
-                    } else if was_at_bottom && (focused.is_none() || focused_draft) && !model.history.get_untracked().has_newer {
+                    } else if was_at_bottom && !layout_controller.borrow().manual_reading && (focused.is_none() || focused_draft) && !model.history.get_untracked().has_newer {
                         follow_scroll.scroll_to(Vector2::new(0.0, (rect.size.height - height).max(0.0)));
                     }
                     if let Some(anchor)=model.source_anchor.get_untracked()
                         && !model.history.get_untracked().preview_ids.contains(&anchor.message_id)
                         && model.snapshot.get_untracked().messages.iter().any(|m|m.id==anchor.message_id)
                     {
-                        go_to_source(model,&layout_controller,&anchor);
-                        model.source_anchor.set(None);
+                        let focus = !layout_controller.borrow().source_search;
+                        go_to_source(model,&layout_controller,&anchor,focus);
                     } else if let Some(id)=model.remote_search.get_untracked() {
                         let target=layout_controller.borrow().messages.get(&id).filter(|field|model.ui.get_untracked().inspection_rect(field.id()).is_some()).cloned();
-                        if let Some(field)=target && model.focused_message.get_untracked()==id {layout_controller.borrow_mut().history_anchor=None;field.reveal();model.focused_message.set(String::new());}
+                        if model.focused_message.get_untracked()==id {
+                            if let Some(field)=target {layout_controller.borrow_mut().history_anchor=None;field.reveal();model.focused_message.set(String::new());}
+                            else {mount_history_message(&layout_controller, &id);}
+                        }
                     }
                 });
             }
@@ -1653,34 +2507,44 @@ pub fn Conversation(model: Model) -> Element {
 #[component]
 fn TranscriptMessage(model: Model, message_id: String, controller: ControllerState) -> Element {
     let message_id = State::new(message_id);
-    let spacing = Derived::new(move || {
-        let snapshot = model.snapshot.get();
-        let id = message_id.get();
-        let mut previous = None;
-        for message in crate::adapt::transcript_messages(&snapshot.messages, &model.session.get()) {
-            let tool = message.tool.is_some()
-                || matches!(message.kind.as_str(), "command_execution" | "file_change");
-            if message.id == id {
-                return match previous {
-                    None => 0.0,
-                    Some(true) if tool => 6.0,
-                    Some(_) => 28.0,
-                };
-            }
-            previous = Some(tool);
-        }
-        0.0
-    });
-    let message = Derived::new(move || {
-        model
-            .snapshot
+    let index = controller
+        .get_untracked()
+        .borrow()
+        .index
+        .unwrap_or_else(|| transcript_index(model));
+    let entry =
+        Derived::new(move || index.with(|index| index.rows.get(&message_id.get()).cloned()));
+    let spacing =
+        Derived::new(move || entry.with(|entry| entry.as_ref().map_or(0.0, |entry| entry.spacing)));
+    let message =
+        Derived::new(move || entry.with(|entry| entry.as_ref().map(|entry| entry.message.clone())));
+    let expanded = State::new(
+        controller
+            .get_untracked()
+            .borrow()
+            .expanded_rows
+            .get(&message_id.get_untracked())
+            .copied()
+            .unwrap_or(false),
+    );
+    Effect::new(move || {
+        if model
+            .source_anchor
             .get()
-            .messages
-            .into_iter()
-            .find(|m| m.id == message_id.get())
-            .map(crate::tool_activity::with_legacy_tool)
+            .is_some_and(|anchor| anchor.message_id == message_id.get_untracked())
+        {
+            expanded.set(true);
+        }
     });
-    let expanded = State::new(false);
+    Effect::new(move || {
+        let value = expanded.get();
+        let shared = controller.get_untracked();
+        let mut state = shared.borrow_mut();
+        let id = message_id.get_untracked();
+        if state.expanded_rows.insert(id.clone(), value) != Some(value) {
+            state.invalidate_history_height(&id);
+        }
+    });
     let initial = message.get_untracked();
     let detail = initial.as_ref().is_some_and(|m| {
         matches!(
@@ -1690,30 +2554,14 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
     });
     let prompt = initial.as_ref().is_some_and(|m| m.kind == "prompt");
     let tool = initial.as_ref().is_some_and(|m| m.tool.is_some());
-    fn speaker_of(message: &Message) -> String {
-        if message.kind == "prompt" {
-            "You".to_string()
-        } else {
-            message.author.clone()
-        }
-    }
-    // A run of messages from one speaker names it once, at the first.
-    let continues = move || {
-        let snapshot = model.snapshot.get();
-        let id = message_id.get();
-        let messages = crate::adapt::transcript_messages(&snapshot.messages, &model.session.get());
-        let Some(index) = messages.iter().position(|m| m.id == id) else {
-            return false;
-        };
-        index
-            .checked_sub(1)
-            .is_some_and(|previous| speaker_of(messages[previous]) == speaker_of(messages[index]))
-    };
+    let continues = move || entry.with(|entry| entry.as_ref().is_some_and(|entry| entry.continues));
     let speaker = Derived::new(move || {
-        if continues() {
-            return String::new();
-        }
-        message.get().map(|m| speaker_of(&m)).unwrap_or_default()
+        entry.with(|entry| {
+            entry
+                .as_ref()
+                .map(|entry| entry.speaker.clone())
+                .unwrap_or_default()
+        })
     });
     // Relay's own messages (the context it sends with each turn) carry the
     // Relay mark rather than the session's harness glyph.
@@ -1785,7 +2633,7 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
                     DraftPart model:(model) controller:(controller) part:(reply.clone()) mirror:true
                 }
             }
-            for (_, comment) in {model.snapshot.get().comments.into_iter().filter(|c|c.message_id==message_id.get()).map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
+            for (_, comment) in {entry.with(|entry| entry.as_ref().map(|entry| entry.comments.clone()).unwrap_or_default()).into_iter().map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
                 col height:min-content pad:(left:{px(14.0)}px top:{px(8.0)}px) gap:{px(5.0)}px
                     selectable stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
                     Label text:(comment.author.clone()) role:(TextRole::Caption) tone:(Tone::Muted)
@@ -1833,12 +2681,54 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
     };
     let shared = controller.get_untracked();
     let id = message_id.get_untracked();
+    if let Some(window) = shared.borrow().window.clone() {
+        let measure_id = id.clone();
+        let measure_controller = shared.clone();
+        root.on_layout(move |rect| {
+            let delta = rect.size.height - window.height(&measure_id);
+            if delta.abs() > 0.5 {
+                let state = measure_controller.borrow();
+                let viewport = state.viewport.clone();
+                let (_, _, origin) = window.geometry.get_untracked();
+                let old_bottom = state.index.and_then(|index| {
+                    index.with_untracked(|index| {
+                        let position = index.order.iter().position(|id| id == &measure_id)?;
+                        Some(
+                            origin
+                                + index.order[..=position]
+                                    .iter()
+                                    .map(|id| window.height(id))
+                                    .sum::<f32>(),
+                        )
+                    })
+                });
+                let anchored = state.history_anchor.is_some();
+                drop(state);
+                window.report_height(&measure_id, rect.size.height);
+                if !anchored && let Some(viewport) = viewport {
+                    let offset = viewport.offset();
+                    let bottom = (viewport.content().layout_rect().size.height
+                        - viewport.root().layout_rect().size.height)
+                        .max(0.0);
+                    if offset.y < bottom - px(4.0) && old_bottom.is_some_and(|end| end <= offset.y)
+                    {
+                        viewport.scroll_to(Vector2::new(offset.x, (offset.y + delta).max(0.0)));
+                    }
+                }
+                window.changed();
+            } else if window.report_height(&measure_id, rect.size.height).1 {
+                window.changed();
+            }
+        });
+    }
     shared
         .borrow_mut()
         .messages
         .insert(id.clone(), content_anchor);
     mosaic::core::reactive::on_cleanup(move || {
-        shared.borrow_mut().messages.remove(&id);
+        let mut state = shared.borrow_mut();
+        state.messages.remove(&id);
+        state.invalidate_history_height(&id);
     });
     root
 }
@@ -1965,7 +2855,7 @@ fn DraftPart(model: Model, controller: ControllerState, part: Part, mirror: bool
                     stroke:(width:{px(2.0)} color:ground.rule edges:left) {
                     ReplyStrip
                         quote:(Derived::new(move || anchor.get().quote.split_whitespace().collect::<Vec<_>>().join(" ")))
-                        on-source:(press(move || go_to_source(model, &source_controller.get_untracked(), &anchor.get_untracked())))
+                        on-source:(press(move || go_to_source(model, &source_controller.get_untracked(), &anchor.get_untracked(), true)))
                         on-remove:(press(move || remove_draft_part(model, &source_controller.get_untracked(), &remove.get_untracked(), false)))
                     for (_, nested) in {parts.get().into_iter().map(|p|(p.id.clone(),p)).collect::<Vec<_>>()} {
                         col height:min-content {
@@ -2004,7 +2894,31 @@ pub(crate) fn InlineAsset(
     mirror: bool,
 ) -> Element {
     buffer::fetch(model, &asset);
-    let preview = State::new(asset.media_type.starts_with("image/"));
+    let preview_controller = model.conversation_controller.get_untracked();
+    let preview_key = (asset.id.clone(), part_id.clone(), mirror);
+    let preview = State::new(
+        preview_controller
+            .as_ref()
+            .and_then(|controller| {
+                controller
+                    .borrow()
+                    .asset_previews
+                    .get(&preview_key)
+                    .copied()
+            })
+            .unwrap_or_else(|| asset.media_type.starts_with("image/")),
+    );
+    Effect::new(move || {
+        let value = preview.get();
+        if let Some(controller) = &preview_controller {
+            let mut state = controller.borrow_mut();
+            if state.asset_previews.insert(preview_key.clone(), value) != Some(value)
+                && let Some(window) = &state.window
+            {
+                window.invalidate_all();
+            }
+        }
+    });
     let asset = State::new(asset);
     let part_id = State::new(part_id);
     let root = view! {
@@ -2159,8 +3073,16 @@ pub(crate) fn BufferText(
     let follow = Rc::new(Cell::new(false));
     let focus_follow = follow.clone();
     let observe_markdown = markdown.clone();
+    let text_location = observe_location.clone();
+    let source_text = Derived::new(move || current_text(model, &text_location));
+    let previous_content = Rc::new(RefCell::new(None::<(String, String)>));
     field.style_dyn(move || {
-        let text = current_text(model, &observe_location);
+        // Draft transactions also deliver pending focus and IME requests when
+        // the source bytes have not changed (for example, crossing a part).
+        if matches!(observe_location, Location::Draft(_)) {
+            model.buffer.with(|_| ());
+        }
+        let text = source_text.get();
         if let Some(document) = &observe_markdown {
             document.borrow_mut().update(&text);
         }
@@ -2193,11 +3115,13 @@ pub(crate) fn BufferText(
         };
         editor.set_color_spans(&mut observe_fonts.borrow_mut(), spans);
         let staged = focus_controller.borrow().preedit.clone();
+        let mut changed_preedit = false;
         if let Some((key, text, cursor)) = staged
             && key == focus_key
         {
             editor.set_preedit(&mut observe_fonts.borrow_mut(), &text, cursor);
             focus_controller.borrow_mut().preedit = None;
+            changed_preedit = true;
         }
         drop(editor);
         let requested = focus_controller.borrow().requested.clone();
@@ -2214,7 +3138,11 @@ pub(crate) fn BufferText(
             focus_follow.set(true);
             repaint.reveal();
         }
-        repaint.content_dirty();
+        let content = (text, query);
+        if changed_preedit || previous_content.borrow().as_ref() != Some(&content) {
+            *previous_content.borrow_mut() = Some(content);
+            repaint.content_dirty();
+        }
         Style::default()
             .width(Dimension::Fill)
             .height(Dimension::MinContent)
@@ -2549,6 +3477,11 @@ pub(crate) fn BufferText(
     let ime_field = field.clone();
     let ime_follow = follow.clone();
     field.on_ime(move |event, _| {
+        {
+            let mut state = ime_controller.borrow_mut();
+            state.manual_reading = false;
+            state.history_anchor = None;
+        }
         let mut editor = ime_editor.borrow_mut();
         let mut fonts = ime_fonts.borrow_mut();
         if matches!(ime_location, Location::Source { .. }) {
@@ -2616,6 +3549,11 @@ pub(crate) fn BufferText(
             return;
         }
         key_follow.set(true);
+        {
+            let mut state = key_controller.borrow_mut();
+            state.manual_reading = false;
+            state.history_anchor = None;
+        }
         if event.key == Key::Escape {
             model.command_feedback.set(String::new());
             model.notice.set(String::new());
@@ -2668,7 +3606,7 @@ pub(crate) fn BufferText(
         let mut fonts = key_fonts.borrow_mut();
         if command && !event.modifiers.shift && matches!(event.key, Key::Home | Key::End) {
             drop(editor);
-            document_edge(&key_controller, &mut fonts, event.key == Key::End);
+            document_edge(model, &key_controller, &mut fonts, event.key == Key::End);
             ctx.stop_propagation();
             return;
         }
@@ -2913,7 +3851,24 @@ pub(crate) fn BufferText(
                 } else if !event.modifiers.shift {
                     key_controller.borrow_mut().selection = None;
                 }
-                if editor.caret_offset() == before
+                let after = if key_markdown.is_some() {
+                    key_cursor.get().1
+                } else {
+                    editor.caret_offset()
+                };
+                let at_boundary = if let Some(document) = &key_markdown {
+                    let mut document = document.borrow_mut();
+                    let before = document.display_offset(before);
+                    let after = document.display_offset(after);
+                    let end = document
+                        .shape(&mut fonts, Some(key_field.layout_rect().size.width))
+                        .text()
+                        .len();
+                    before.min(end) == after.min(end)
+                } else {
+                    after == before
+                };
+                if at_boundary
                     && !event.modifiers.shift
                     && matches!(
                         motion,
@@ -2925,6 +3880,7 @@ pub(crate) fn BufferText(
                 {
                     drop(editor);
                     neighboring(
+                        model,
                         &key_controller,
                         &key,
                         if matches!(motion, CaretMotion::Left | CaretMotion::Up) {
@@ -3122,6 +4078,534 @@ pub(crate) fn provenance(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_selection_ownership_does_not_absorb_later_windows() {
+        let mut state = Controller::default();
+        state.capture_native_selection(true, vec!["a".into(), "b".into()]);
+        for n in 0..800 {
+            state.capture_native_selection(true, vec![format!("later-{n}")]);
+        }
+        assert_eq!(
+            state.native_selection_rows.as_deref(),
+            Some(["a".into(), "b".into()].as_slice())
+        );
+        state.capture_native_selection(false, vec![]);
+        assert!(state.native_selection_rows.is_none());
+        state.capture_native_selection(true, vec!["c".into()]);
+        assert_eq!(state.native_selection_rows, Some(vec!["c".into()]));
+    }
+
+    #[test]
+    fn history_retained_state_prunes_removals_and_session_changes() {
+        let mut state = Controller::default();
+        let mut index = TranscriptIndex::default();
+        state.prune_history_state("first", &index, &[]);
+        for id in ["keep", "removed"] {
+            state.expanded_rows.insert(id.into(), true);
+            state
+                .tool_openings
+                .insert(id.into(), relay_ui::prelude::Opening::Expanded);
+        }
+        state
+            .asset_previews
+            .insert(("keep-asset".into(), None, false), true);
+        state.asset_previews.insert(
+            ("keep-asset".into(), Some("removed-part".into()), true),
+            true,
+        );
+        state
+            .asset_previews
+            .insert(("removed-asset".into(), None, false), true);
+        state.capture_native_selection(true, vec!["keep".into(), "removed".into()]);
+        index.rows.insert(
+            "keep".into(),
+            TranscriptEntry {
+                message: projected_message("keep", "Agent", "assistant"),
+                comments: vec![],
+                speaker: "Agent".into(),
+                continues: false,
+                spacing: 0.0,
+            },
+        );
+        state.prune_history_state("first", &index, &[("keep-asset".into(), None)]);
+        assert_eq!(state.expanded_rows.len(), 1);
+        assert!(state.expanded_rows.contains_key("keep"));
+        assert_eq!(state.tool_openings.len(), 1);
+        assert!(state.tool_openings.contains_key("keep"));
+        assert_eq!(state.asset_previews.len(), 1);
+        assert_eq!(state.native_selection_rows, Some(vec!["keep".into()]));
+        state.prune_history_state("second", &index, &[("keep-asset".into(), None)]);
+        assert!(state.expanded_rows.is_empty());
+        assert!(state.tool_openings.is_empty());
+        assert!(state.asset_previews.is_empty());
+        assert!(state.native_selection_rows.is_none());
+    }
+
+    #[test]
+    fn history_cache_invalidates_projection_versions_without_moving_estimates() {
+        mosaic::core::builtins::install();
+        install_theme(&relay_ui::tokens::theme(
+            relay_ui::tokens::ThemeVariant::select(false, false),
+            1.0,
+        ));
+        let scope = Scope::new(|| {});
+        scope.run(|| {
+            let ui = Ui::new();
+            let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
+            let model = Model::new(&ui, sender);
+            model.session.set("indexed".into());
+            model.snapshot.update(|snapshot| {
+                snapshot.messages = vec![
+                    projected_message("a", "Agent", "assistant"),
+                    projected_message("b", "Agent", "assistant"),
+                ]
+            });
+            let index = transcript_index(model);
+            let window = HistoryWindow::new();
+            window.reconcile(index.get());
+            window.report_height("a", 480.0);
+            window.report_height("b", 160.0);
+            model.snapshot.update(|snapshot| {
+                snapshot.messages[0].body = "Changed body".into();
+                snapshot.messages[0].parts = vec![Part::text("Changed body")];
+            });
+            window.reconcile(index.get());
+            assert!(window.heights.borrow()["a"].stale);
+            assert!(!window.heights.borrow()["b"].stale);
+            assert_eq!(
+                window.height("a"),
+                480.0,
+                "invalidating unseen content must retain its estimate"
+            );
+            assert_eq!(window.report_height("a", 480.0), (0.0, true));
+            assert!(
+                !window.heights.borrow()["a"].stale,
+                "equal-height layout must revalidate"
+            );
+            model.snapshot.update(|snapshot| {
+                snapshot.comments.push(Comment {
+                    id: "comment".into(),
+                    message_id: "a".into(),
+                    quote: None,
+                    author: "Reader".into(),
+                    body: "New comment".into(),
+                    created_at: 1,
+                })
+            });
+            window.reconcile(index.get());
+            assert!(window.heights.borrow()["a"].stale);
+            assert_eq!(window.report_height("a", 720.0), (240.0, true));
+            let state = Controller {
+                window: Some(window.clone()),
+                ..Default::default()
+            };
+            state.invalidate_history_height("b");
+            assert!(window.heights.borrow()["b"].stale);
+            assert_eq!(window.height("b"), 160.0);
+            model
+                .snapshot
+                .update(|snapshot| snapshot.messages.remove(0));
+            window.reconcile(index.get());
+            assert!(!window.heights.borrow().contains_key("a"));
+            model.session.set("other".into());
+            window.reconcile(index.get());
+            assert!(
+                window.heights.borrow().is_empty(),
+                "session changes must discard old measurements"
+            );
+        });
+        scope.dispose();
+    }
+
+    fn projected_message(id: &str, author: &str, kind: &str) -> Message {
+        Message {
+            id: id.into(),
+            session_id: "indexed".into(),
+            author: author.into(),
+            kind: kind.into(),
+            body: format!("Body {id}"),
+            parts: vec![],
+            tool: None,
+        }
+    }
+
+    fn assert_projection(
+        index: Derived<Rc<TranscriptIndex>>,
+        expected: &[(&str, &str, bool, f32)],
+    ) {
+        let actual = index.get();
+        assert_eq!(
+            actual.order,
+            expected
+                .iter()
+                .map(|row| row.0.to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(actual.rows.len(), expected.len());
+        for &(id, speaker, continues, spacing) in expected {
+            let row = &actual.rows[id];
+            assert_eq!(
+                (&*row.speaker, row.continues, row.spacing),
+                (speaker, continues, spacing),
+                "row {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn transcript_projection_distinguishes_empty_speakers_from_continuations() {
+        let scope = Scope::new(|| {});
+        scope.run(|| {
+            let ui = Ui::new();
+            let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
+            let model = Model::new(&ui, sender);
+            model.session.set("indexed".into());
+            model.snapshot.update(|snapshot| {
+                snapshot.messages = vec![
+                    projected_message("first", "", "assistant"),
+                    projected_message("same", "", "assistant"),
+                    projected_message("named", "Agent", "assistant"),
+                    projected_message("empty-after-named", "", "assistant"),
+                    projected_message("prompt", "", "prompt"),
+                    projected_message("next-prompt", "Different raw author", "prompt"),
+                ]
+            });
+            let index = transcript_index(model);
+            assert_projection(
+                index,
+                &[
+                    ("first", "", false, 0.0),
+                    ("same", "", true, 28.0),
+                    ("named", "Agent", false, 28.0),
+                    ("empty-after-named", "", false, 28.0),
+                    ("prompt", "You", false, 28.0),
+                    ("next-prompt", "", true, 28.0),
+                ],
+            );
+            let empty =
+                Derived::new(move || index.with(|index| index.rows["empty-after-named"].clone()));
+            let changes = Rc::new(Cell::new(0));
+            let observed = changes.clone();
+            Effect::new(move || {
+                empty.get();
+                observed.set(observed.get() + 1);
+            });
+            mosaic::core::reactive::flush();
+            model
+                .snapshot
+                .update(|snapshot| snapshot.messages[2].author.clear());
+            mosaic::core::reactive::flush();
+            assert!(empty.get().continues);
+            assert_eq!(empty.get().speaker, "");
+            assert_eq!(
+                changes.get(),
+                2,
+                "continuation-only change must cross the row equality cutoff"
+            );
+            model
+                .snapshot
+                .update(|snapshot| snapshot.messages[2].author = "Agent".into());
+            mosaic::core::reactive::flush();
+            assert!(!empty.get().continues);
+            assert_eq!(changes.get(), 3);
+        });
+        scope.dispose();
+    }
+
+    #[test]
+    fn transcript_projection_updates_neighbors_after_predecessor_and_structure_changes() {
+        let scope = Scope::new(|| {});
+        scope.run(|| {
+            let ui = Ui::new();
+            let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
+            let model = Model::new(&ui, sender);
+            model.session.set("indexed".into());
+            model.snapshot.update(|snapshot| {
+                snapshot.messages = vec![
+                    projected_message("a", "Agent", "command_execution"),
+                    projected_message("b", "Agent", "file_change"),
+                    projected_message("c", "Other", "assistant"),
+                ]
+            });
+            let index = transcript_index(model);
+            let b = Derived::new(move || index.with(|index| index.rows["b"].clone()));
+            let updates = Rc::new(Cell::new(0));
+            let observed = updates.clone();
+            Effect::new(move || {
+                b.get();
+                observed.set(observed.get() + 1);
+            });
+            mosaic::core::reactive::flush();
+            assert_projection(
+                index,
+                &[
+                    ("a", "Agent", false, 0.0),
+                    ("b", "", true, 6.0),
+                    ("c", "Other", false, 28.0),
+                ],
+            );
+            model
+                .snapshot
+                .update(|snapshot| snapshot.messages[0].author = "Other".into());
+            mosaic::core::reactive::flush();
+            assert_projection(
+                index,
+                &[
+                    ("a", "Other", false, 0.0),
+                    ("b", "Agent", false, 6.0),
+                    ("c", "Other", false, 28.0),
+                ],
+            );
+            assert_eq!(updates.get(), 2);
+            model
+                .snapshot
+                .update(|snapshot| snapshot.messages[0].kind = "assistant".into());
+            mosaic::core::reactive::flush();
+            assert_projection(
+                index,
+                &[
+                    ("a", "Other", false, 0.0),
+                    ("b", "Agent", false, 28.0),
+                    ("c", "Other", false, 28.0),
+                ],
+            );
+            assert_eq!(updates.get(), 3);
+            model.snapshot.update(|snapshot| {
+                snapshot
+                    .messages
+                    .insert(0, projected_message("p", "Agent", "command_execution"))
+            });
+            mosaic::core::reactive::flush();
+            assert_projection(
+                index,
+                &[
+                    ("p", "Agent", false, 0.0),
+                    ("a", "Other", false, 28.0),
+                    ("b", "Agent", false, 28.0),
+                    ("c", "Other", false, 28.0),
+                ],
+            );
+            assert_eq!(
+                updates.get(),
+                3,
+                "unaffected row should keep its equality cutoff"
+            );
+            model.snapshot.update(|snapshot| {
+                snapshot.messages.remove(1);
+            });
+            mosaic::core::reactive::flush();
+            assert_projection(
+                index,
+                &[
+                    ("p", "Agent", false, 0.0),
+                    ("b", "", true, 6.0),
+                    ("c", "Other", false, 28.0),
+                ],
+            );
+            assert_eq!(updates.get(), 4);
+            model
+                .snapshot
+                .update(|snapshot| snapshot.messages.reverse());
+            mosaic::core::reactive::flush();
+            assert_projection(
+                index,
+                &[
+                    ("c", "Other", false, 0.0),
+                    ("b", "Agent", false, 28.0),
+                    ("p", "", true, 6.0),
+                ],
+            );
+            assert_eq!(updates.get(), 5);
+            model.snapshot.update(|snapshot| {
+                snapshot
+                    .messages
+                    .insert(0, projected_message("older", "Agent", "assistant"))
+            });
+            mosaic::core::reactive::flush();
+            assert_projection(
+                index,
+                &[
+                    ("older", "Agent", false, 0.0),
+                    ("c", "Other", false, 28.0),
+                    ("b", "Agent", false, 28.0),
+                    ("p", "", true, 6.0),
+                ],
+            );
+            assert_eq!(updates.get(), 5);
+        });
+        scope.dispose();
+    }
+
+    #[test]
+    fn transcript_projection_reconciles_spawn_receipts_comments_and_session_switches() {
+        let scope = Scope::new(|| {});
+        scope.run(|| {
+            let ui = Ui::new();
+            let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
+            let model = Model::new(&ui, sender);
+            let mut snapshot = demo_snapshot(AgentProfile::default());
+            demo_orchestration(&mut snapshot);
+            let mut native = snapshot
+                .messages
+                .iter()
+                .find(|m| m.id == "t-spawn")
+                .unwrap()
+                .clone();
+            native.id = "native-spawn".into();
+            let mut receipt = native.clone();
+            receipt.id = "agent-tool-receipt".into();
+            receipt.author = "Relay".into();
+            receipt.kind = "tool".into();
+            let mut foreign = projected_message("foreign", "Other", "assistant");
+            foreign.session_id = "other".into();
+            snapshot.messages = vec![receipt.clone(), foreign];
+            snapshot.comments = vec![Comment {
+                id: "receipt-comment".into(),
+                message_id: receipt.id.clone(),
+                quote: None,
+                author: "Reader".into(),
+                body: "Keep fallback".into(),
+                created_at: 1,
+            }];
+            model.snapshot.set(snapshot);
+            model.session.set(native.session_id.clone());
+            let index = transcript_index(model);
+            assert_eq!(index.get().order, [receipt.id.clone()]);
+            assert_eq!(
+                index.get().rows[&receipt.id].comments[0].body,
+                "Keep fallback"
+            );
+            model.snapshot.update(|snapshot| {
+                snapshot.messages.push(native.clone());
+                snapshot.comments.push(Comment {
+                    id: "native-comment".into(),
+                    message_id: native.id.clone(),
+                    quote: Some("quoted".into()),
+                    author: "Reader".into(),
+                    body: "Original".into(),
+                    created_at: 2,
+                });
+            });
+            assert_eq!(index.get().order, [native.id.clone()]);
+            assert_eq!(
+                index.get().rows[&native.id].comments[0].id,
+                "native-comment"
+            );
+            model.snapshot.update(|snapshot| {
+                let comment = &mut snapshot.comments[1];
+                comment.body = "Edited".into();
+                comment.quote = None;
+                comment.author = "Editor".into();
+                snapshot.messages.reverse();
+            });
+            let row = index.get().rows[&native.id].clone();
+            assert_eq!(index.get().order, [native.id.clone()]);
+            assert_eq!(
+                (
+                    &*row.comments[0].body,
+                    &*row.comments[0].author,
+                    &row.comments[0].quote
+                ),
+                ("Edited", "Editor", &None)
+            );
+            model
+                .snapshot
+                .update(|snapshot| snapshot.messages.retain(|m| m.id != native.id));
+            assert_eq!(index.get().order, [receipt.id.clone()]);
+            assert_eq!(
+                index.get().rows[&receipt.id].comments[0].body,
+                "Keep fallback"
+            );
+            model.snapshot.update(|snapshot| {
+                snapshot
+                    .messages
+                    .iter_mut()
+                    .find(|m| m.id == receipt.id)
+                    .unwrap()
+                    .body = "Meaningful receipt text".into();
+                snapshot.messages.push(native.clone());
+            });
+            assert_eq!(index.get().order, [receipt.id.clone(), native.id.clone()]);
+            model.session.set("other".into());
+            assert_projection(index, &[("foreign", "Other", false, 0.0)]);
+            assert!(index.get().rows["foreign"].comments.is_empty());
+            model.session.set(native.session_id.clone());
+            assert_eq!(index.get().order, [receipt.id.clone(), native.id.clone()]);
+            model.snapshot.update(|snapshot| snapshot.comments.clear());
+            assert!(index.get().rows.values().all(|row| row.comments.is_empty()));
+            assert_eq!(model.snapshot.get_untracked().messages.len(), 3);
+        });
+        scope.dispose();
+    }
+
+    #[test]
+    fn transcript_projection_isolates_keys_and_unchanged_rows_from_streaming() {
+        let scope = Scope::new(|| {});
+        scope.run(|| {
+            let ui = Ui::new();
+            let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
+            let model = Model::new(&ui, sender);
+            model.session.set("indexed".into());
+            model.snapshot.update(|snapshot| {
+                snapshot.messages = (0..100)
+                    .map(|index| Message {
+                        id: format!("row-{index}"),
+                        session_id: "indexed".into(),
+                        author: "Agent".into(),
+                        kind: "assistant".into(),
+                        body: "Text".into(),
+                        parts: vec![],
+                        tool: None,
+                    })
+                    .collect();
+            });
+            let index = transcript_index(model);
+            let keys = Derived::new(move || index.with(|index| index.order.clone()));
+            let first = Derived::new(move || index.with(|index| index.rows["row-0"].clone()));
+            let tail = Derived::new(move || index.with(|index| index.rows["row-99"].clone()));
+            let counts = Rc::new(Cell::new([0; 3]));
+            for (position, read) in [
+                Box::new(move || {
+                    keys.get();
+                }) as Box<dyn Fn()>,
+                Box::new(move || {
+                    first.get();
+                }),
+                Box::new(move || {
+                    tail.get();
+                }),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let counts = counts.clone();
+                Effect::new(move || {
+                    read();
+                    let mut next = counts.get();
+                    next[position] += 1;
+                    counts.set(next);
+                });
+            }
+            mosaic::core::reactive::flush();
+            assert_eq!(counts.get(), [1, 1, 1]);
+            model.snapshot.update(|snapshot| {
+                snapshot
+                    .messages
+                    .last_mut()
+                    .unwrap()
+                    .body
+                    .push_str(" streamed")
+            });
+            mosaic::core::reactive::flush();
+            assert_eq!(counts.get(), [1, 1, 2]);
+            model.snapshot.update(|snapshot| snapshot.revision += 1);
+            mosaic::core::reactive::flush();
+            assert_eq!(counts.get(), [1, 1, 2]);
+        });
+        scope.dispose();
+    }
+
     #[test]
     fn draft_selection_replaces_text_and_objects_together_without_breaking_unicode() {
         let left = Part::text("λ before");

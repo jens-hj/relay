@@ -2876,9 +2876,9 @@ async fn app_server_preserves_ordered_multimodal_context_and_exact_existing_thre
         rpc[2]["params"]["threadId"],
         "12345678-1234-4234-8234-123456789abc"
     );
-    let input = rpc.iter().find(|v| v["method"] == "turn/start").unwrap()["params"]["input"]
-        .as_array()
-        .unwrap();
+    let turn = rpc.iter().find(|v| v["method"] == "turn/start").unwrap();
+    assert_eq!(turn["params"]["summary"], "auto");
+    let input = turn["params"]["input"].as_array().unwrap();
     assert_eq!(input[1]["text"], "Before λ");
     assert_eq!(input[3]["type"], "localImage");
     assert_eq!(input[4]["text"], "Between");
@@ -3675,4 +3675,245 @@ fn remove_unused_agent_config_is_persistent_and_preserves_session_history() {
     drop(w);
     let reopened = Store::open(&path, AgentProfile::default()).unwrap();
     assert_eq!(reopened.snapshot().unwrap(), saved);
+}
+
+#[tokio::test]
+async fn app_server_public_summary_streams_before_completion_without_private_reasoning() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = r#"
+      printf '{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"%s","turnId":"turn-1","itemId":"peek","summaryIndex":0,"delta":"Checking "}}\n' "$thread"
+      printf '{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"%s","turnId":"turn-1","itemId":"peek","summaryIndex":0,"delta":"the adapter λ"}}\n' "$thread"
+      printf '{"method":"item/reasoning/textDelta","params":{"threadId":"%s","turnId":"turn-1","itemId":"peek","delta":"PRIVATE_TEST_SENTINEL"}}\n' "$thread"
+      printf '{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"child-thread","turnId":"child-turn","itemId":"child","summaryIndex":0,"delta":"CHILD_TEST_SENTINEL"}}\n'
+      while [ ! -f release-summary ]; do sleep 0.02; done
+      printf '{"method":"item/completed","params":{"threadId":"%s","turnId":"turn-1","item":{"id":"redacted","type":"reasoning","summary":[],"content":["REDACTED_TEST_SENTINEL"],"signature":"SIGNATURE_TEST_SENTINEL"}}}\n' "$thread"
+      printf '{"method":"item/completed","params":{"threadId":"%s","turnId":"turn-1","item":{"id":"peek","type":"reasoning","summary":["Checking the adapter λ"],"content":["PRIVATE_TEST_SENTINEL"]}}}\n' "$thread"
+      printf '{"method":"item/completed","params":{"threadId":"%s","turnId":"turn-1","item":{"id":"peek","type":"reasoning","summary":["Checking the adapter λ DUPLICATE"]}}}\n' "$thread"
+      printf '{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"%s","turnId":"turn-1","itemId":"peek","summaryIndex":0,"delta":" LATE"}}\n' "$thread"
+      printf '{"method":"item/completed","params":{"threadId":"%s","turnId":"turn-1","item":{"id":"before-delta","type":"reasoning","summary":["Final before delta"]}}}\n' "$thread"
+      printf '{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"%s","turnId":"turn-1","itemId":"before-delta","summaryIndex":0,"delta":" LATE"}}\n' "$thread"
+      printf '{"method":"item/completed","params":{"threadId":"%s","turnId":"turn-1","item":{"id":"blank","type":"reasoning","summary":["","  "]}}}\n' "$thread"
+"#;
+    let fake = APP_FAKE.replace(
+        "      printf '{\"method\":\"item/agentMessage/delta\"",
+        &format!("{events}\n      printf '{{\"method\":\"item/agentMessage/delta\""),
+    );
+    assert_ne!(fake, APP_FAKE);
+    let (w, id, repo) = completed_app_workspace(dir.path(), &fake);
+    let request = saved_turn(&w, &id, vec![Part::text("Inspect progress")]).await;
+    let (session, run, rx, prompt) = reserve(&w, request);
+    let mut updates = w.snapshots.subscribe();
+    let task = tokio::spawn(runtime::run(w.clone(), session, run, prompt, rx));
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if updates
+                .borrow()
+                .messages
+                .iter()
+                .any(|m| m.kind == "reasoning" && m.body == "Checking the adapter λ")
+            {
+                break;
+            }
+            updates.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        w.snapshots
+            .borrow()
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .status,
+        WorkerStatus::Running
+    );
+    let mut projection = transport::Projection::default();
+    projection
+        .request(
+            &w.snapshots.borrow(),
+            StreamRequest::Subscribe {
+                session_id: id.clone(),
+                generation: 1,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        projection
+            .view(&w.snapshots.borrow())
+            .1
+            .progress_summary
+            .unwrap()
+            .text,
+        "Checking the adapter λ"
+    );
+    std::fs::write(repo.join("release-summary"), b"").unwrap();
+    task.await.unwrap();
+    let snapshot = finished(&w, &id).await;
+    assert!(projection.view(&snapshot).1.progress_summary.is_none());
+    let summaries: Vec<_> = snapshot
+        .messages
+        .iter()
+        .filter(|m| m.kind == "reasoning")
+        .collect();
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].body, "Checking the adapter λ");
+    assert_eq!(summaries[1].body, "Final before delta");
+    assert!(
+        !snapshot
+            .messages
+            .iter()
+            .any(|m| m.body.contains("TEST_SENTINEL"))
+    );
+}
+
+#[tokio::test]
+async fn app_server_requests_public_summaries_over_inherited_none_and_accepts_no_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    // Simulate a thread configured with summary=none. The fixture emits no
+    // summary events even when asked, as an unsupported model/provider may do.
+    let gate = r#"
+      summary=$(printf '%s' "$line" | jq -r '.params.summary // "none"')
+      if [ "$summary" != auto ]; then
+        printf '{"id":%s,"error":{"code":-32602,"message":"Expected explicit public summary override"}}\n' "$id"
+        continue
+      fi
+"#;
+    let fake = APP_FAKE.replace("    turn/start)\n", &format!("    turn/start)\n{gate}"));
+    assert_ne!(fake, APP_FAKE);
+    let (w, id, repo) = completed_app_workspace(dir.path(), &fake);
+    let request = saved_turn(
+        &w,
+        &id,
+        vec![Part::text("Continue without progress updates")],
+    )
+    .await;
+    let (session, run, rx, prompt) = reserve(&w, request);
+    let prefix = format!("codex-summary-{run}-");
+    runtime::run(w.clone(), session, run, prompt, rx).await;
+    let snapshot = finished(&w, &id).await;
+    assert_eq!(
+        snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .status,
+        WorkerStatus::Completed
+    );
+    assert!(!snapshot.messages.iter().any(|m| m.id.starts_with(&prefix)));
+    assert!(
+        snapshot
+            .messages
+            .iter()
+            .any(|m| m.body == "Ordered response λ")
+    );
+    let rpc = std::fs::read_to_string(repo.join("rpc-input.jsonl")).unwrap();
+    let turns: Vec<serde_json::Value> = rpc
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|v: &serde_json::Value| v["method"] == "turn/start")
+        .collect();
+    assert_eq!(turns.len(), 1, "an accepted turn must not be replayed");
+    assert_eq!(turns[0]["params"]["summary"], "auto");
+}
+
+#[tokio::test]
+async fn app_server_public_summary_stays_fresh_after_many_public_and_redacted_items() {
+    let dir = tempfile::tempdir().unwrap();
+    let events = r#"
+      n=0
+      while [ "$n" -lt 160 ]; do
+        printf '{"method":"item/completed","params":{"threadId":"%s","turnId":"turn-1","item":{"id":"redacted-%s","type":"reasoning","summary":[],"content":["PRIVATE_TEST_SENTINEL"]}}}\n' "$thread" "$n"
+        n=$((n + 1))
+      done
+      n=0
+      while [ "$n" -lt 160 ]; do
+        printf '{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"%s","turnId":"turn-1","itemId":"public-%s","summaryIndex":0,"delta":"Public item %s"}}\n' "$thread" "$n" "$n"
+        printf '{"method":"item/completed","params":{"threadId":"%s","turnId":"turn-1","item":{"id":"public-%s","type":"reasoning","summary":["Public item %s"]}}}\n' "$thread" "$n" "$n"
+        n=$((n + 1))
+      done
+      printf '{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"%s","turnId":"turn-1","itemId":"fresh","summaryIndex":1,"delta":"Latest public update λ"}}\n' "$thread"
+      printf '{"method":"item/completed","params":{"threadId":"%s","turnId":"turn-1","item":{"id":"fresh","type":"reasoning","summary":["Earlier paragraph","Latest public update λ"]}}}\n' "$thread"
+      printf '{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"%s","turnId":"turn-1","itemId":"public-0","summaryIndex":1,"delta":"LATE_TEST_SENTINEL"}}\n' "$thread"
+      printf '{"method":"item/completed","params":{"threadId":"%s","turnId":"turn-1","item":{"id":"public-0","type":"reasoning","summary":["Public item 0 DUPLICATE_TEST_SENTINEL"]}}}\n' "$thread"
+      printf '{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"%s","turnId":"turn-1","itemId":"fresh","summaryIndex":1,"delta":" LATE_TEST_SENTINEL"}}\n' "$thread"
+      printf '{"method":"item/agentMessage/delta","params":{"threadId":"%s","turnId":"turn-1","itemId":"processed","delta":"All summary events processed"}}\n' "$thread"
+      while [ ! -f release-summary ]; do sleep 0.02; done
+"#;
+    let fake = APP_FAKE.replace(
+        "      printf '{\"method\":\"item/agentMessage/delta\"",
+        &format!("{events}\n      printf '{{\"method\":\"item/agentMessage/delta\""),
+    );
+    assert_ne!(fake, APP_FAKE);
+    let (w, id, repo) = completed_app_workspace(dir.path(), &fake);
+    let request = saved_turn(&w, &id, vec![Part::text("Long run progress")]).await;
+    let (session, run, rx, prompt) = reserve(&w, request);
+    let prefix = format!("codex-summary-{run}-");
+    let mut updates = w.snapshots.subscribe();
+    let task = tokio::spawn(runtime::run(w.clone(), session, run, prompt, rx));
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if updates
+                .borrow()
+                .messages
+                .iter()
+                .any(|m| m.body == "All summary events processed")
+            {
+                break;
+            }
+            updates.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    let mut projection = transport::Projection::default();
+    projection
+        .request(
+            &w.snapshots.borrow(),
+            StreamRequest::Subscribe {
+                session_id: id.clone(),
+                generation: 1,
+            },
+        )
+        .unwrap();
+    let snapshot = w.snapshots.borrow().clone();
+    let summary = projection.view(&snapshot).1.progress_summary;
+    // Release the provider before assertions so a failure cannot leave it parked.
+    std::fs::write(repo.join("release-summary"), b"").unwrap();
+    task.await.unwrap();
+    let finished = finished(&w, &id).await;
+    let summary = summary.expect("fresh metadata after hundreds of completed items");
+    assert_eq!(summary.text, "Latest public update λ");
+    let summaries: Vec<_> = snapshot
+        .messages
+        .iter()
+        .filter(|m| m.id.starts_with(&prefix))
+        .collect();
+    assert_eq!(
+        summaries.len(),
+        162,
+        "all public source rows remain anchorable"
+    );
+    assert_eq!(summaries[0].body, "Public item 0");
+    assert_eq!(summaries[0].id, format!("{prefix}public-0-0"));
+    assert!(
+        summaries
+            .iter()
+            .any(|m| m.id == format!("{prefix}public-159-0"))
+    );
+    assert!(
+        !finished
+            .messages
+            .iter()
+            .any(|m| m.body.contains("TEST_SENTINEL"))
+    );
+    assert!(projection.view(&finished).1.progress_summary.is_none());
 }

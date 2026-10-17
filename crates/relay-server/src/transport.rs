@@ -49,6 +49,72 @@ fn active_run_ids(snapshot: &Snapshot) -> std::collections::BTreeMap<String, Str
     ids
 }
 
+fn progress_summary(snapshot: &Snapshot, session: &str) -> Option<Box<ProgressSummary>> {
+    let running = snapshot.sessions.iter().any(|s| {
+        s.id == session
+            && s.worker
+                .as_ref()
+                .is_some_and(|w| w.status == WorkerStatus::Running)
+    });
+    if !running {
+        return None;
+    }
+    let run = active_run_ids(snapshot).remove(session)?;
+    // This namespace is produced only from Codex's explicit public summary fields.
+    // Legacy generic reasoning rows have no public/current-run contract.
+    let prefix = format!("codex-summary-{run}-");
+    // Item order is first public appearance; paragraph order is summaryIndex,
+    // independent of arrival/insertion order. Late paragraphs of an older item
+    // cannot replace the current item, nor can an index-zero delta replace one.
+    let mut seen = BTreeSet::new();
+    let mut current = None;
+    let mut selected = None;
+    let mut selected_index = 0;
+    for message in &snapshot.messages {
+        if message.session_id != session
+            || message.kind != "reasoning"
+            || message.body.trim().is_empty()
+        {
+            continue;
+        }
+        let Some((item, index)) = message
+            .id
+            .strip_prefix(&prefix)
+            .and_then(|id| id.rsplit_once('-'))
+        else {
+            continue;
+        };
+        let Ok(index) = index.parse::<u64>() else {
+            continue;
+        };
+        if index >= app_server::SUMMARY_PARTS {
+            continue;
+        }
+        if seen.insert(item) {
+            current = Some(item);
+            selected_index = index;
+            selected = Some(message);
+        } else if current == Some(item) && index > selected_index {
+            selected_index = index;
+            selected = Some(message);
+        }
+    }
+    let message = selected?;
+    let text = message
+        .body
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut end = text.len().min(4096);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(Box::new(ProgressSummary {
+        run_id: run,
+        text: text[..end].into(),
+    }))
+}
+
 fn historical_submissions(
     snapshot: &Snapshot,
     messages: &[relay_core::Message],
@@ -236,6 +302,7 @@ pub(crate) fn history_page(
             preview_ids: previews,
             generation: 0,
             active_run_ids: active_run_ids(snapshot),
+            progress_summary: progress_summary(snapshot, session),
         },
     };
     // Include cursor, preview references, comments and receipt metadata in the budget.
@@ -282,6 +349,7 @@ impl Projection {
             session_id: self.session.clone(),
             generation: self.generation,
             active_run_ids: active_run_ids(snapshot),
+            progress_summary: progress_summary(snapshot, &self.session),
             ..Default::default()
         };
         let messages = snapshot
@@ -853,6 +921,253 @@ mod tests {
                 .map(String::as_str),
             Some("active-run")
         );
+    }
+
+    fn progress_archive() -> Snapshot {
+        let mut snapshot = archive();
+        snapshot.sessions[0].worker = Some(WorkerRun {
+            model: None,
+            context_tokens: None,
+            context_window: None,
+            last_usage: None,
+            harness: Harness::Codex,
+            execution: None,
+            status: WorkerStatus::Running,
+            thread_id: None,
+            worktree: None,
+            branch: None,
+            base_commit: None,
+            error: None,
+            usage: None,
+            changes: None,
+        });
+        snapshot.messages[0].id = "prompt-active-run".into();
+        snapshot.messages[0].kind = "prompt".into();
+        let mut summary = snapshot.messages.last().unwrap().clone();
+        summary.id = "codex-summary-active-run-item-0".into();
+        summary.kind = "reasoning".into();
+        summary.body = "Checking the adapter λ".into();
+        snapshot.messages.push(summary);
+        snapshot
+    }
+
+    #[test]
+    fn progress_uses_logical_indices_and_latest_first_seen_item() {
+        let mut snapshot = progress_archive();
+        snapshot.messages.last_mut().unwrap().id = "codex-summary-active-run-item-1".into();
+        let mut paragraph = snapshot.messages.last().unwrap().clone();
+        paragraph.id = "codex-summary-active-run-item-0".into();
+        paragraph.body = "Zero arrived later".into();
+        snapshot.messages.push(paragraph.clone());
+        assert_eq!(
+            progress_summary(&snapshot, "session-plan").unwrap().text,
+            "Checking the adapter λ"
+        );
+        snapshot
+            .messages
+            .last_mut()
+            .unwrap()
+            .body
+            .push_str(" with a delta");
+        assert_eq!(
+            progress_summary(&snapshot, "session-plan").unwrap().text,
+            "Checking the adapter λ"
+        );
+        paragraph.id = "codex-summary-active-run-next-item-0".into();
+        paragraph.body = "Current item".into();
+        snapshot.messages.push(paragraph.clone());
+        paragraph.id = "codex-summary-active-run-item-2".into();
+        paragraph.body = "Older item late paragraph".into();
+        snapshot.messages.push(paragraph.clone());
+        assert_eq!(
+            progress_summary(&snapshot, "session-plan").unwrap().text,
+            "Current item"
+        );
+        paragraph.id = "codex-summary-active-run-next-item-31".into();
+        paragraph.body = "Logical final paragraph".into();
+        snapshot.messages.push(paragraph.clone());
+        paragraph.id = "codex-summary-active-run-next-item-18446744073709551615".into();
+        paragraph.body = "Invalid index".into();
+        snapshot.messages.push(paragraph);
+        assert_eq!(
+            progress_summary(&snapshot, "session-plan").unwrap().text,
+            "Logical final paragraph"
+        );
+    }
+
+    #[test]
+    fn progress_metadata_survives_paging_and_rejects_stale_legacy_and_empty_rows() {
+        let mut snapshot = progress_archive();
+        snapshot.submissions.push(Submission {
+            id: "queued-run".into(),
+            session_id: "session-plan".into(),
+            parts: vec![],
+            state: SubmissionState::Queued,
+            approve_implementation: false,
+            error: None,
+            interrupts_run: None,
+            last_edit_request: None,
+        });
+        let mut projection = Projection::default();
+        subscribe(&mut projection, &snapshot, 1);
+        projection
+            .request(
+                &snapshot,
+                StreamRequest::Around {
+                    session_id: "session-plan".into(),
+                    generation: 1,
+                    message_id: "history-30".into(),
+                },
+            )
+            .unwrap();
+        let (view, history) = projection.view(&snapshot);
+        assert!(
+            !view
+                .messages
+                .iter()
+                .any(|m| m.kind == "prompt" || m.kind == "reasoning")
+        );
+        assert_eq!(
+            history.progress_summary.as_ref().unwrap().text,
+            "Checking the adapter λ"
+        );
+        let mut stale = snapshot.messages.last().unwrap().clone();
+        stale.id = "codex-summary-prior-run-item-0".into();
+        stale.body = "Stale completion".into();
+        snapshot.messages.push(stale.clone());
+        stale.id = "legacy-uuid".into();
+        stale.body = "Uncertified reasoning".into();
+        snapshot.messages.push(stale);
+        snapshot
+            .messages
+            .iter_mut()
+            .find(|m| m.id == "codex-summary-active-run-item-0")
+            .unwrap()
+            .body
+            .push_str(" streamed");
+        let (updated, history) = projection.view(&snapshot);
+        assert_eq!(updated.messages, view.messages);
+        assert_eq!(
+            history.progress_summary.as_ref().unwrap().text,
+            "Checking the adapter λ streamed"
+        );
+        snapshot
+            .messages
+            .iter_mut()
+            .find(|m| m.id == "codex-summary-active-run-item-0")
+            .unwrap()
+            .body = "🐱".repeat(10000);
+        assert!(
+            projection
+                .view(&snapshot)
+                .1
+                .progress_summary
+                .unwrap()
+                .text
+                .len()
+                <= 4096
+        );
+        snapshot
+            .messages
+            .iter_mut()
+            .find(|m| m.id == "codex-summary-active-run-item-0")
+            .unwrap()
+            .body
+            .clear();
+        assert!(projection.view(&snapshot).1.progress_summary.is_none());
+        snapshot
+            .messages
+            .iter_mut()
+            .find(|m| m.id == "codex-summary-active-run-item-0")
+            .unwrap()
+            .body = "Current".into();
+        snapshot.messages[0].id = "prompt-next-run".into();
+        assert!(projection.view(&snapshot).1.progress_summary.is_none());
+        snapshot.messages[0].id = "prompt-active-run".into();
+        for status in [
+            WorkerStatus::Completed,
+            WorkerStatus::Failed,
+            WorkerStatus::Interrupted,
+            WorkerStatus::Stopped,
+            WorkerStatus::Queued,
+        ] {
+            snapshot.sessions[0].worker.as_mut().unwrap().status = status;
+            assert!(projection.view(&snapshot).1.progress_summary.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_metadata_crosses_http_and_websocket_with_unloaded_live_tail() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("db");
+        let mut store = Store::open(&path, AgentProfile::default()).unwrap();
+        store.save(&progress_archive()).unwrap();
+        drop(store);
+        let token = uuid::Uuid::new_v4().to_string();
+        let app = router(&path, token.clone(), AgentProfile::default()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let page: HistoryPage = client
+            .get(format!(
+                "http://{address}/v1/sessions/session-plan/history?around=history-30"
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(!page.messages.iter().any(|m| m.kind == "reasoning"));
+        assert_eq!(
+            page.history.progress_summary.unwrap().text,
+            "Checking the adapter λ"
+        );
+        let mut request = format!("ws://{address}/v1/events")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        let mut state = Snapshot::default();
+        let event: StreamEvent =
+            serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap())
+                .unwrap();
+        event.apply(&mut state).unwrap();
+        for request in [
+            StreamRequest::Subscribe {
+                session_id: "session-plan".into(),
+                generation: 1,
+            },
+            StreamRequest::Around {
+                session_id: "session-plan".into(),
+                generation: 1,
+                message_id: "history-30".into(),
+            },
+        ] {
+            socket
+                .send(ClientMessage::Text(
+                    serde_json::to_string(&request).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+            let event: StreamEvent =
+                serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            let history = event.apply(&mut state).unwrap().unwrap();
+            assert_eq!(
+                history.progress_summary.unwrap().text,
+                "Checking the adapter λ"
+            );
+        }
+        assert!(!state.messages.iter().any(|m| m.kind == "reasoning"));
+        server.abort();
     }
 
     #[test]

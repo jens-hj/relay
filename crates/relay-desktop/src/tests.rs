@@ -8,6 +8,793 @@ use relay_core::*;
 use relay_ui::tokens::{ThemeVariant, theme};
 use std::time::Duration;
 
+fn windowed_history(count: usize) -> Mounted {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot.messages = (0..count)
+            .map(|index| Message {
+                id: format!("window-{index}"),
+                session_id: "session-plan".into(),
+                author: "Codex".into(),
+                kind: "assistant".into(),
+                body: format!(
+                    "Entry {index}. **Markdown**.\n\n{}",
+                    "A variable height paragraph.\n\n".repeat(index % 5 + 1)
+                ),
+                parts: vec![],
+                tool: None,
+            })
+            .collect();
+    });
+    for _ in 0..3 {
+        mounted.settle();
+    }
+    mounted
+}
+
+#[test]
+fn history_window_bounds_mounted_rows_and_keeps_the_composer() {
+    for count in [50, 200, 800] {
+        let mounted = windowed_history(count);
+        let tree = mounted.ui.inspection_snapshot();
+        let sources = tree
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.label
+                    .as_deref()
+                    .is_some_and(|label| label.starts_with("Message window-"))
+            })
+            .count();
+        eprintln!(
+            "HISTORY_WINDOW rows={count} mounted={sources} nodes={}",
+            tree.nodes.len()
+        );
+        assert!(sources < 60, "{count} rows mounted {sources}");
+        assert!(
+            tree.nodes.len() < 2500,
+            "{count} rows mounted {} nodes",
+            tree.nodes.len()
+        );
+        let draft = tree
+            .nodes
+            .iter()
+            .find(|node| {
+                node.label
+                    .as_deref()
+                    .is_some_and(|label| label.starts_with("Draft text "))
+            })
+            .unwrap();
+        let draft_id = draft.id;
+        let draft_label = draft.label.clone().unwrap();
+        mounted.click(&draft_label);
+        mounted.key(Key::Character("draft survives".into()), false);
+        mounted.model.snapshot.update(|snapshot| {
+            snapshot
+                .messages
+                .last_mut()
+                .unwrap()
+                .body
+                .push_str(" Streamed tail.")
+        });
+        mounted.settle();
+        mounted.model.source_anchor.set(Some(relay_core::Anchor {
+            message_id: "window-0".into(),
+            start: 0,
+            end: 5,
+            quote: "Entry".into(),
+        }));
+        mounted.settle();
+        assert!(
+            mounted.model.source_anchor.get_untracked().is_none(),
+            "source anchor was not resolved"
+        );
+        let source = mounted.rect("Message window-0");
+        let viewport = mounted.rect("Transcript viewport");
+        assert!(
+            source.origin.y < viewport.origin.y + viewport.size.height
+                && source.origin.y + source.size.height > viewport.origin.y
+        );
+        let after = mounted.ui.inspection_snapshot();
+        assert_eq!(
+            after
+                .nodes
+                .iter()
+                .find(|node| node.label.as_deref() == Some(&draft_label))
+                .unwrap()
+                .id,
+            draft_id
+        );
+        assert!(crate::buffer::parts(mounted.model, "session-plan").iter().any(|part| matches!(&part.kind, PartKind::Text { text } if text.contains("draft survives"))));
+        assert_eq!(mounted.model.snapshot.get_untracked().messages.len(), count);
+    }
+}
+
+#[test]
+fn history_window_search_and_keyboard_reveal_unmounted_rows() {
+    let mounted = windowed_history(800);
+    mounted.model.searching.set(true);
+    mounted.settle();
+    mounted.focus("Find in conversation");
+    mounted.key(Key::Character("Entry 317.".into()), false);
+    assert!(mounted.model.source_anchor.get_untracked().is_none());
+    assert_eq!(
+        focused_label(&mounted).as_deref(),
+        Some("Find in conversation")
+    );
+    assert!(
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|node| node.label.as_deref() == Some("Message window-317"))
+    );
+    mounted.focus("Message window-317");
+    mounted.key(Key::Home, true);
+    mounted.settle();
+    let first = mounted.rect("Message window-0");
+    let viewport = mounted.rect("Transcript viewport");
+    assert!(
+        first.origin.y + first.size.height > viewport.origin.y
+            && first.origin.y < viewport.origin.y + viewport.size.height
+    );
+    mounted.key(Key::End, true);
+    mounted.settle();
+    let tree = mounted.ui.inspection_snapshot();
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|node| node.label.as_deref() == Some("Message window-799"))
+    );
+    assert!(
+        tree.nodes
+            .iter()
+            .filter(|node| node
+                .label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("Message window-")))
+            .count()
+            < 60
+    );
+    let end = mounted
+        .model
+        .snapshot
+        .with_untracked(|snapshot| snapshot.messages[317].body.len());
+    mounted.model.source_anchor.set(Some(relay_core::Anchor {
+        message_id: "window-317".into(),
+        start: end,
+        end,
+        quote: String::new(),
+    }));
+    mounted.settle();
+    let source = mounted.ui.focused().unwrap().id();
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Wheel {
+            delta: Vector2::new(0.0, -1000000.0),
+        },
+        position: mounted.rect("Transcript viewport").center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: Duration::ZERO,
+    });
+    mounted.settle();
+    assert_eq!(mounted.ui.focused().unwrap().id(), source);
+    assert!(!has_label(&mounted, "Message window-318"));
+    mounted.key(Key::ArrowRight, false);
+    mounted.settle();
+    assert_eq!(
+        mounted
+            .ui
+            .inspection_snapshot()
+            .node(mounted.ui.focused().unwrap().id())
+            .unwrap()
+            .label
+            .as_deref(),
+        Some("Message window-318")
+    );
+}
+
+#[test]
+fn history_window_manual_scroll_keeps_draft_focus_and_reading_position() {
+    let mut mounted = windowed_history(800);
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|node| node.label.filter(|label| label.starts_with("Draft text ")))
+        .unwrap();
+    mounted.focus(&draft);
+    let focused = mounted.ui.focused().unwrap().id();
+    crate::browser_text::update(&mounted.ui, focused.raw(), "kept", 4, 4, false);
+    mounted.settle();
+    crate::browser_text::update(&mounted.ui, focused.raw(), "kept你", 5, 5, true);
+    mounted.settle();
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Wheel {
+            delta: Vector2::new(0.0, 2000.0),
+        },
+        position: mounted.rect("Transcript viewport").center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: Duration::ZERO,
+    });
+    for _ in 0..3 {
+        mounted.settle();
+    }
+    assert_eq!(mounted.ui.focused().unwrap().id(), focused);
+    let viewport = mounted.rect("Transcript viewport");
+    assert!(
+        mounted.rect(&draft).origin.y > viewport.max_y(),
+        "manual scrolling returned to the draft"
+    );
+    let visible = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|node| {
+            node.label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("Message window-"))
+                && node.rect.origin.y < viewport.max_y()
+                && node.rect.max_y() > viewport.origin.y
+        })
+        .unwrap();
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot
+            .messages
+            .last_mut()
+            .unwrap()
+            .body
+            .push_str(" New tail.")
+    });
+    mounted.settle();
+    assert!(
+        (mounted.rect(visible.label.as_deref().unwrap()).origin.y - visible.rect.origin.y).abs()
+            < 2.0
+    );
+    assert_eq!(mounted.ui.focused().unwrap().id(), focused);
+    mounted.size.width = 950.0;
+    for _ in 0..3 {
+        mounted.settle();
+    }
+    let resized_viewport = mounted.rect("Transcript viewport");
+    let anchor = mounted.rect(visible.label.as_deref().unwrap());
+    assert!(
+        anchor.max_y() > resized_viewport.origin.y && anchor.origin.y < resized_viewport.max_y(),
+        "resize lost the reading anchor"
+    );
+    assert_eq!(mounted.ui.focused().unwrap().id(), focused);
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "kept"
+    );
+    crate::browser_text::update(&mounted.ui, focused.raw(), "kept你", 5, 5, false);
+    mounted.settle();
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "kept你"
+    );
+    mounted.key(Key::Character("z".into()), true);
+    mounted.settle();
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "kept"
+    );
+}
+
+#[test]
+fn history_window_preserves_disclosure_state_across_disposal() {
+    for tool in [false, true] {
+        let mounted = windowed_history(200);
+        mounted.model.snapshot.update(|snapshot| {
+            snapshot.messages[0].kind = "reasoning".into();
+            if tool {
+                snapshot.messages[0].tool = Some(ToolCall {
+                    run_id: "window-run".into(),
+                    name: "exec_command".into(),
+                    kind: ToolKind::Run,
+                    state: ToolState::Completed,
+                    input: "pwd".into(),
+                    target: "pwd".into(),
+                    directory: None,
+                    exit_code: Some(0),
+                    started_ms: None,
+                    finished_ms: None,
+                    detail: None,
+                });
+            }
+        });
+        mounted.model.source_anchor.set(Some(relay_core::Anchor {
+            message_id: "window-0".into(),
+            start: 0,
+            end: 0,
+            quote: String::new(),
+        }));
+        mounted.settle();
+        let expanded_label = if tool {
+            "Summary. Expand fully"
+        } else {
+            "Message window-0"
+        };
+        if tool {
+            let collapsed = mounted
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .into_iter()
+                .find_map(|node| node.label.filter(|label| label.starts_with("Collapsed.")))
+                .unwrap();
+            mounted.click(&collapsed);
+        }
+        assert!(has_label(&mounted, expanded_label));
+        // Remove focus and selection, then leave the row so it really disposes.
+        let draft = mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .find_map(|node| node.label.filter(|label| label.starts_with("Draft text ")))
+            .unwrap();
+        mounted.focus(&draft);
+        mounted.key(Key::End, true);
+        mounted.settle();
+        assert!(!has_label(&mounted, expanded_label));
+        // A manual scroll mounts the first row without requesting/expanding it.
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Wheel {
+                delta: Vector2::new(0.0, 1000000.0),
+            },
+            position: mounted.rect("Transcript viewport").center(),
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+        for _ in 0..3 {
+            mounted.settle();
+        }
+        assert!(
+            has_label(&mounted, expanded_label),
+            "disclosure was lost on remount (tool={tool})"
+        );
+    }
+}
+
+#[test]
+fn history_window_reply_source_waits_for_layout_and_preserves_selected_source() {
+    let mounted = windowed_history(800);
+    let anchor = relay_core::Anchor {
+        message_id: "window-0".into(),
+        start: 0,
+        end: 5,
+        quote: "Entry".into(),
+    };
+    crate::buffer::edit(
+        mounted.model,
+        "session-plan",
+        vec![
+            Part {
+                id: "window-reply".into(),
+                kind: PartKind::Reply {
+                    anchor: anchor.clone(),
+                    parts: vec![Part::text("Reply stays intact")],
+                },
+            },
+            Part::text("After reply"),
+        ],
+    );
+    mounted.settle();
+    assert!(!has_label(&mounted, "Message window-0"));
+    mounted.focus("Go to reply source");
+    mounted.ui.dispatch_key(KeyEvent {
+        kind: KeyEventKind::Down { repeat: false },
+        key: Key::Enter,
+        modifiers: Modifiers::default(),
+    });
+    flush();
+    assert_eq!(
+        mounted.model.source_anchor.get_untracked(),
+        Some(anchor),
+        "the anchor must remain pending before layout"
+    );
+    mounted.settle();
+    assert!(mounted.model.source_anchor.get_untracked().is_none());
+    assert_eq!(focused_label(&mounted).as_deref(), Some("Message window-0"));
+    let selected = mounted.ui.focused().unwrap().id();
+    mounted.key(Key::Character("c".into()), true);
+    assert_eq!(mounted.ui.clipboard_text().as_deref(), Some("Entry"));
+    mounted.key(Key::End, true);
+    mounted.settle();
+    assert!(has_label(&mounted, "Message window-799"));
+    assert!(
+        mounted.ui.inspection_snapshot().node(selected).is_some(),
+        "selected source must survive leaving its window"
+    );
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot
+            .messages
+            .last_mut()
+            .unwrap()
+            .body
+            .push_str(" More output.")
+    });
+    mounted.settle();
+    mounted.focus("Message window-0");
+    assert_eq!(mounted.ui.focused().unwrap().id(), selected);
+    mounted.key(Key::Character("c".into()), true);
+    assert_eq!(mounted.ui.clipboard_text().as_deref(), Some("Entry"));
+    assert!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan"))
+            .contains("Reply stays intact")
+    );
+}
+
+#[test]
+fn history_window_tall_expanded_tool_preserves_following_and_mount_bounds() {
+    let mounted = windowed_history(200);
+    mounted.model.snapshot.update(|snapshot| {
+        let message = &mut snapshot.messages[100];
+        message.body = (0..100).map(|i| format!("Output line {i}\n")).collect();
+        message.tool = Some(ToolCall {
+            run_id: "tall-run".into(),
+            name: "exec_command".into(),
+            kind: ToolKind::Run,
+            state: ToolState::Completed,
+            input: "long command".into(),
+            target: "long command".into(),
+            directory: None,
+            exit_code: Some(0),
+            started_ms: None,
+            finished_ms: None,
+            detail: None,
+        });
+    });
+    mounted.model.source_anchor.set(Some(relay_core::Anchor {
+        message_id: "window-100".into(),
+        start: 0,
+        end: 0,
+        quote: String::new(),
+    }));
+    mounted.settle();
+    let collapsed = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|node| node.label.filter(|label| label.starts_with("Collapsed.")))
+        .unwrap();
+    mounted.click(&collapsed);
+    mounted.click("Summary. Expand fully");
+    let viewport = mounted.rect("Transcript viewport");
+    assert!(
+        mounted.rect("Tool call window-100").size.height > viewport.size.height,
+        "fixture must exercise a tool taller than the viewport"
+    );
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find_map(|node| node.label.filter(|label| label.starts_with("Draft text ")))
+        .unwrap();
+    mounted.focus(&draft);
+    let editor = mounted.ui.focused().unwrap().id();
+    mounted.key(Key::End, true);
+    assert!(!has_label(&mounted, "Tool call window-100"));
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot
+            .messages
+            .last_mut()
+            .unwrap()
+            .body
+            .push_str("\n\nStreamed at bottom.\n\nMore output.")
+    });
+    mounted.settle();
+    assert_eq!(mounted.ui.focused().unwrap().id(), editor);
+    assert!(mounted.rect(&draft).max_y() <= mounted.rect("Transcript viewport").max_y() + 1.0);
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Wheel {
+            delta: Vector2::new(0.0, 1500.0),
+        },
+        position: viewport.center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: Duration::ZERO,
+    });
+    for _ in 0..3 {
+        mounted.settle();
+    }
+    let viewport = mounted.rect("Transcript viewport");
+    let visible = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|node| {
+            node.label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("Message window-"))
+                && node.rect.origin.y < viewport.max_y()
+                && node.rect.max_y() > viewport.origin.y
+        })
+        .unwrap();
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot
+            .messages
+            .last_mut()
+            .unwrap()
+            .body
+            .push_str("\n\nUnseen streaming tail.")
+    });
+    mounted.settle();
+    assert!(
+        (mounted.rect(visible.label.as_deref().unwrap()).origin.y - visible.rect.origin.y).abs()
+            < 2.0
+    );
+    mounted.model.source_anchor.set(Some(relay_core::Anchor {
+        message_id: "window-100".into(),
+        start: 0,
+        end: 0,
+        quote: String::new(),
+    }));
+    mounted.settle();
+    assert!(has_label(&mounted, "Expanded. Collapse"));
+    assert!(mounted.rect("Tool call window-100").size.height > viewport.size.height);
+    let tree = mounted.ui.inspection_snapshot();
+    assert!(
+        tree.nodes
+            .iter()
+            .filter(|node| node
+                .label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("Message window-")))
+            .count()
+            < 60
+    );
+    assert!(tree.nodes.len() < 2500);
+}
+
+#[test]
+fn history_window_changed_offscreen_height_corrects_growth_and_shrink_without_losing_anchor() {
+    let mounted = windowed_history(200);
+    let reveal = |id: &str, end| {
+        mounted.model.source_anchor.set(Some(relay_core::Anchor {
+            message_id: id.into(),
+            start: 0,
+            end,
+            quote: String::new(),
+        }));
+        mounted.settle();
+    };
+    // Keep this source selected so its live geometry remains available while
+    // neighboring rows really dispose. It is the reader's pixel anchor.
+    reveal("window-101", 5);
+    for tall in [true, false] {
+        reveal("window-190", 0);
+        assert!(!has_label(&mounted, "Message window-100"));
+        let before = mounted.rect("Message window-190");
+        mounted.model.snapshot.update(|snapshot| {
+            let body = if tall {
+                "Changed paragraph.\n\n".repeat(80)
+            } else {
+                "Short again.".into()
+            };
+            snapshot.messages[100].body = body.clone();
+            snapshot.messages[100].parts = vec![Part {
+                id: "changed-part".into(),
+                kind: PartKind::Text { text: body },
+            }];
+            snapshot.comments.clear();
+            if tall {
+                snapshot.comments.push(Comment {
+                    id: "changed-comment".into(),
+                    message_id: "window-100".into(),
+                    quote: None,
+                    author: "Reader".into(),
+                    body: "A wrapped comment. ".repeat(20),
+                    created_at: 1,
+                });
+            }
+        });
+        mounted.settle();
+        assert!(!has_label(&mounted, "Message window-100"));
+        assert!(
+            (mounted.rect("Message window-190").origin.y - before.origin.y).abs() < 1.0,
+            "offscreen invalidation moved the reader before measurement"
+        );
+        let viewport = mounted.rect("Transcript viewport");
+        let expected_y = viewport.origin.y - 8.0;
+        let delta = expected_y - mounted.rect("Message window-101").origin.y;
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind: PointerEventKind::Wheel {
+                delta: Vector2::new(0.0, delta),
+            },
+            position: viewport.center(),
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+        for _ in 0..3 {
+            mounted.settle();
+        }
+        assert!(
+            (mounted.rect("Message window-101").origin.y - expected_y).abs() < 2.0,
+            "remount height correction moved the pixel anchor (tall={tall})"
+        );
+        assert!(has_label(&mounted, "Message window-100"));
+    }
+    reveal("window-190", 0);
+    mounted
+        .model
+        .snapshot
+        .update(|snapshot| snapshot.messages[100].body = "Grown again.\n\n".repeat(80));
+    mounted
+        .model
+        .snapshot
+        .update(|snapshot| snapshot.messages[100].parts.clear());
+    reveal("window-101", 0);
+    let viewport = mounted.rect("Transcript viewport");
+    let target = mounted.rect("Message window-101");
+    assert!(
+        target.max_y() > viewport.origin.y && target.origin.y < viewport.max_y(),
+        "programmatic reveal must not double-apply a height correction"
+    );
+}
+
+#[test]
+fn history_window_repeated_remote_reveal_resolves_without_new_layout() {
+    let mounted = windowed_history(200);
+    mounted.model.remote_search.set(Some("window-100".into()));
+    mounted.model.focused_message.set("window-100".into());
+    mounted.settle();
+    assert!(mounted.model.focused_message.get_untracked().is_empty());
+    assert!(has_label(&mounted, "Message window-100"));
+    mounted.model.focused_message.set("window-100".into());
+    flush();
+    assert!(
+        mounted.model.focused_message.get_untracked().is_empty(),
+        "an already-mounted result must not wait for a content-size change"
+    );
+    let before = mounted.rect("Message window-100");
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Wheel {
+            delta: Vector2::new(0.0, 200.0),
+        },
+        position: mounted.rect("Transcript viewport").center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: Duration::ZERO,
+    });
+    mounted.settle();
+    let after = mounted.rect("Message window-100");
+    assert!(after.origin.y > before.origin.y + 40.0);
+    mounted
+        .model
+        .snapshot
+        .update(|snapshot| snapshot.revision += 1);
+    mounted.settle();
+    assert!(
+        (mounted.rect("Message window-100").origin.y - after.origin.y).abs() < 1.0,
+        "retained remote result moved the reader again"
+    );
+}
+
+#[test]
+#[ignore = "diagnostic history scaling probe"]
+fn diagnose_chat_history_scaling() {
+    for count in [50, 200, 800] {
+        let mounted = mount(false, 1380.0);
+        mounted.model.open_session("session-plan".into());
+        mounted.model.snapshot.update(|snapshot| {
+            snapshot.messages.clear();
+            for index in 0..count {
+                snapshot.messages.push(Message {
+                    id: format!("probe-{index}"), session_id: "session-plan".into(),
+                    author: "Codex".into(), kind: "assistant".into(),
+                    body: format!("Message {index}. **Markdown** with a [link](https://example.com).\n\nA second paragraph."),
+                    parts: vec![], tool: None,
+                });
+            }
+        });
+        mounted.settle();
+        let tree = mounted.ui.inspection_snapshot();
+        let sources = tree
+            .nodes
+            .iter()
+            .filter(|n| {
+                n.label
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("Message probe-"))
+            })
+            .count();
+        for operation in ["snapshot", "tail", "search"] {
+            let start = std::time::Instant::now();
+            match operation {
+                "snapshot" => mounted.model.snapshot.update(|_| {}),
+                "tail" => mounted
+                    .model
+                    .snapshot
+                    .update(|s| s.messages.last_mut().unwrap().body.push_str(" Streamed.")),
+                _ => {
+                    mounted.model.searching.set(true);
+                    mounted.model.search.set("paragraph".into());
+                }
+            }
+            flush();
+            let flush_ms = start.elapsed().as_secs_f64() * 1000.0;
+            mounted.settle();
+            let stats = mounted.ui.frame_stats();
+            eprintln!(
+                "HISTORY_PROBE rows={count} nodes={} sources={sources} op={operation} flush_ms={flush_ms:.3} total_ms={:.3} last_frame_inherit_ms={:.3} last_frame_layout_ms={:.3} last_frame_geometry_ms={:.3} last_frame_paint_ms={:.3} elements={} painted={} culled={}",
+                tree.nodes.len(),
+                start.elapsed().as_secs_f64() * 1000.0,
+                stats.inherit,
+                stats.layout,
+                stats.geometry,
+                stats.paint,
+                stats.elements,
+                stats.painted,
+                stats.culled
+            );
+        }
+    }
+}
+
+#[test]
+fn transcript_keys_and_unchanged_source_survive_global_and_tail_updates() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot.messages = (0..20)
+            .map(|index| Message {
+                id: format!("indexed-{index}"),
+                session_id: "session-plan".into(),
+                author: "Codex".into(),
+                kind: "assistant".into(),
+                body: format!("Source {index}. **Text**."),
+                parts: vec![],
+                tool: None,
+            })
+            .collect();
+    });
+    mounted.settle();
+    let field = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|node| node.label.as_deref() == Some("Message indexed-0"))
+        .unwrap()
+        .id;
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot.revision += 1;
+        snapshot
+            .messages
+            .last_mut()
+            .unwrap()
+            .body
+            .push_str(" Streamed tail.");
+    });
+    mounted.settle();
+    let tree = mounted.ui.inspection_snapshot();
+    assert_eq!(
+        tree.nodes
+            .iter()
+            .find(|node| node.label.as_deref() == Some("Message indexed-0"))
+            .unwrap()
+            .id,
+        field
+    );
+    assert!(
+        tree.nodes
+            .iter()
+            .any(|node| node.label.as_deref() == Some("Message indexed-19"))
+    );
+}
+
 struct Mounted {
     _scope: Scope,
     ui: Ui,
@@ -9710,7 +10497,10 @@ fn queued_gutter_actions_fit_short_messages_and_work_with_keyboard_at_each_scale
         let queued = mounted.rect("Queued message");
         let text = mounted.rect("Short message");
         let number = mounted.rect("01");
-        assert!(queued.size.height <= 88.0 * scale, "{queued:?}");
+        assert!(
+            (queued.size.height - 80.0 * scale).abs() < 0.1,
+            "{queued:?}"
+        );
         let tree = mounted.ui.inspection_snapshot();
         let number_node = tree
             .nodes
@@ -9821,18 +10611,66 @@ fn queued_gutter_actions_fit_short_messages_and_work_with_keyboard_at_each_scale
             );
             assert_control_hit(&mounted, label);
         }
-        // Long content grows the message without stretching the action cells.
+        // Tall content stretches only Send Now to the message bottom.
         mounted.model.snapshot.update(|snapshot| {
             snapshot.submissions.last_mut().unwrap().parts =
-                vec![Part::text("Long queued content. ".repeat(200))];
+                vec![Part::text("Long queued content. ".repeat(30))];
         });
         mounted.settle();
-        assert!(mounted.rect("Queued message").size.height > queued.size.height);
-        for label in labels {
+        let tall = mounted.rect("Queued message");
+        assert!(tall.size.height > queued.size.height);
+        let content = mounted.rect(&"Long queued content. ".repeat(30));
+        assert!(
+            tall.size.height <= content.size.height + 80.0 * scale,
+            "message must hug its content: message={tall:?}, content={content:?}"
+        );
+        for label in &labels[..2] {
             let button = mounted.rect(label);
             assert!((button.size.height - 20.0 * scale).abs() < 0.1);
             assert!((button.size.width - 34.0 * scale).abs() < 0.1);
         }
+        let send = mounted.rect(labels[2]);
+        assert!((send.origin.y - (tall.origin.y + 60.0 * scale)).abs() < 0.1);
+        assert!((send.max_y() - tall.max_y()).abs() < 0.1);
+        assert!(send.size.height >= 20.0 * scale);
+        assert!((send.size.width - 34.0 * scale).abs() < 0.1);
+        let tree = mounted.ui.inspection_snapshot();
+        let button = tree
+            .nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some(labels[2]))
+            .unwrap();
+        let mut descendants = button.children.clone();
+        let mut icons = Vec::new();
+        while let Some(id) = descendants.pop() {
+            let node = tree.node(id).unwrap();
+            descendants.extend(&node.children);
+            if node.role == Role::Image {
+                icons.push(node.rect);
+            }
+        }
+        assert_eq!(icons.len(), 1);
+        assert!((icons[0].center().y - send.center().y).abs() < 0.1);
+        assert!((icons[0].center().x - send.center().x).abs() < 0.1);
+        assert!((icons[0].size.height - 12.0 * scale).abs() < 0.1);
+        // Click the expanded lower region, away from the original 20px cell.
+        let position = Vector2::new(send.max_x() - 2.0 * scale, send.max_y() - 2.0 * scale);
+        for kind in [
+            PointerEventKind::Down(PointerButton::Primary),
+            PointerEventKind::Up(PointerButton::Primary),
+        ] {
+            mounted.ui.dispatch_pointer(PointerEvent {
+                kind,
+                position,
+                pointer_type: PointerType::Mouse,
+                modifiers: Modifiers::default(),
+                timestamp: Duration::ZERO,
+            });
+        }
+        mounted.settle();
+        assert!(matches!(mounted.commands.try_recv().unwrap().command,
+            Command::PromoteTurn { submission_id, .. } if submission_id == "compact-queue"));
+        mounted.model.busy.set(false);
         mounted.model.snapshot.update(|snapshot| {
             snapshot.submissions.last_mut().unwrap().parts = vec![Part::text("Short message")];
         });
@@ -10479,4 +11317,275 @@ fn sidebar_edit_targets_the_clicked_session_or_config_without_selecting_it() {
             Command::UpdateAgentConfig { agent_config_id, name, .. }
                 if agent_config_id == "edit-target" && name == "Updated target"));
     }
+}
+
+#[test]
+fn session_header_groups_nested_descendants_and_updates_live() {
+    let mounted = mount_orchestration(1380.0);
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    let template = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == "session-plan")
+        .unwrap()
+        .clone();
+    snapshot.sessions.clear();
+    snapshot.tool_permissions.clear();
+    snapshot.submissions.clear();
+    for (id, parent, state) in [
+        ("summary-root", None, WorkerStatus::Running),
+        (
+            "summary-child",
+            Some("summary-root"),
+            WorkerStatus::Completed,
+        ),
+        (
+            "summary-grandchild",
+            Some("summary-child"),
+            WorkerStatus::Completed,
+        ),
+        ("summary-queued", Some("summary-root"), WorkerStatus::Queued),
+        ("summary-other", None, WorkerStatus::Failed),
+    ] {
+        let mut session = template.clone();
+        session.id = id.into();
+        session.title = id.into();
+        session.fixture = false;
+        session.awaiting_first_message = false;
+        session.parent_session_id = parent.map(Into::into);
+        session.worker.as_mut().unwrap().status = state;
+        snapshot.sessions.push(session);
+    }
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_session("summary-root".into());
+    mounted.settle();
+    assert!(has_label(
+        &mounted,
+        "Working. 3 agents below: 1 queued, 2 done. Show in tree"
+    ));
+    assert!(has_label(&mounted, "Done: 2 agents below"));
+    assert!(has_label(&mounted, "Queued: 1 agent below"));
+    assert!(!has_label(&mounted, "Failed: 1 agent below"));
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == "summary-grandchild")
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .status = WorkerStatus::Running;
+    });
+    mounted.settle();
+    assert!(has_label(
+        &mounted,
+        "Working. 3 agents below: 1 working, 1 queued, 1 done. Show in tree"
+    ));
+    assert!(has_label(&mounted, "Working: 1 agent below"));
+    assert!(has_label(&mounted, "Done: 1 agent below"));
+    assert!(!has_label(&mounted, "Done: 2 agents below"));
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot.sessions.retain(|s| s.id != "summary-queued");
+    });
+    mounted.settle();
+    assert!(!has_label(&mounted, "Queued: 1 agent below"));
+    mounted.click("Working. 2 agents below: 1 working, 1 done. Show in tree");
+    assert_eq!(
+        mounted.model.agent_focus.get_untracked().as_deref(),
+        Some("summary-root")
+    );
+}
+
+#[test]
+fn progress_peek_uses_only_selected_active_run_metadata_without_loaded_tail() {
+    let mut snapshot = live_snapshot();
+    let session = snapshot.sessions[0].id.clone();
+    snapshot.sessions[0].worker = Some(worker_run(WorkerStatus::Running));
+    snapshot.messages.clear(); // Active prompt and summary are outside the loaded page.
+    let mut history = HistoryState {
+        session_id: session.clone(),
+        progress_summary: Some(Box::new(ProgressSummary {
+            run_id: "active".into(),
+            text: "Checking adapter λ".into(),
+        })),
+        ..Default::default()
+    };
+    let read = |snapshot: &Snapshot, history: &HistoryState, session: &str, run: Option<&str>| {
+        crate::transcript::progress_summary(snapshot, history, session, run)
+    };
+    assert_eq!(
+        read(&snapshot, &history, &session, Some("active")),
+        "Checking adapter λ"
+    );
+    snapshot.messages.push(Message {
+        id: "prompt-queued".into(),
+        session_id: session.clone(),
+        author: "You".into(),
+        kind: "prompt".into(),
+        body: "Next turn".into(),
+        parts: vec![],
+        tool: None,
+    });
+    assert_eq!(
+        read(&snapshot, &history, &session, Some("active")),
+        "Checking adapter λ"
+    );
+    assert!(read(&snapshot, &history, &session, Some("next-run")).is_empty());
+    assert!(read(&snapshot, &history, &session, None).is_empty());
+    assert!(read(&snapshot, &history, "other-session", Some("active")).is_empty());
+    for status in [
+        WorkerStatus::Completed,
+        WorkerStatus::Failed,
+        WorkerStatus::Interrupted,
+        WorkerStatus::Stopped,
+        WorkerStatus::Queued,
+    ] {
+        snapshot.sessions[0].worker.as_mut().unwrap().status = status;
+        assert!(read(&snapshot, &history, &session, Some("active")).is_empty());
+    }
+    snapshot.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Running;
+    history.progress_summary.as_mut().unwrap().text = " \n".into();
+    assert!(read(&snapshot, &history, &session, Some("active")).is_empty());
+}
+
+#[test]
+fn progress_peek_updates_preserve_windowed_history_and_draft_focus() {
+    let mounted = windowed_history(200);
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == "session-plan")
+            .unwrap()
+            .worker = Some(worker_run(WorkerStatus::Running));
+    });
+    mounted
+        .model
+        .active_run_ids
+        .set(std::collections::BTreeMap::from([(
+            "session-plan".into(),
+            "live-run".into(),
+        )]));
+    mounted.model.history.update(|history| {
+        history.session_id = "session-plan".into();
+        history.progress_summary = Some(Box::new(ProgressSummary {
+            run_id: "live-run".into(),
+            text: "Checking stream boundaries".into(),
+        }));
+    });
+    mounted.settle();
+    assert!(has_label(&mounted, "Peek"));
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .find(|node| {
+            node.label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("Draft text "))
+        })
+        .unwrap();
+    let label = draft.label.unwrap();
+    mounted.click(&label);
+    mounted.key(Key::Character("Keep this draft".into()), false);
+    mounted.ui.dispatch_ime(ImeEvent::Preedit {
+        text: "確定".into(),
+        cursor: Some((0, 6)),
+    });
+    for _ in 0..3 {
+        mounted.model.history.update(|history| {
+            history
+                .progress_summary
+                .as_mut()
+                .unwrap()
+                .text
+                .push_str(" λ")
+        });
+        mounted.settle();
+    }
+    assert_eq!(focused_label(&mounted).as_deref(), Some(label.as_str()));
+    mounted.ui.dispatch_ime(ImeEvent::Commit("確定".into()));
+    mounted.settle();
+    assert!(plain_text(&crate::buffer::parts(mounted.model, "session-plan")).contains("確定"));
+    mounted.model.source_anchor.set(Some(relay_core::Anchor {
+        message_id: "window-30".into(),
+        start: 0,
+        end: 0,
+        quote: String::new(),
+    }));
+    mounted.settle();
+    let reading_y = mounted.rect("Message window-30").origin.y;
+    let reading_focus = focused_label(&mounted);
+    mounted.model.history.update(|history| {
+        history
+            .progress_summary
+            .as_mut()
+            .unwrap()
+            .text
+            .push_str(" More progress")
+    });
+    mounted.settle();
+    assert_eq!(focused_label(&mounted), reading_focus);
+    assert!((mounted.rect("Message window-30").origin.y - reading_y).abs() < 1.0);
+    // Keep the older-page reading anchor and the disclosure in the same
+    // viewport. Focusing a control outside the viewport intentionally reveals it.
+    mounted.model.source_anchor.set(Some(relay_core::Anchor {
+        message_id: "window-198".into(),
+        start: 0,
+        end: 0,
+        quote: String::new(),
+    }));
+    mounted.settle();
+    mounted.focus("Peek");
+    mounted.ui.dispatch_pointer(PointerEvent {
+        kind: PointerEventKind::Wheel {
+            delta: Vector2::new(0.0, 1.0),
+        },
+        position: mounted.rect("Transcript viewport").center(),
+        pointer_type: PointerType::Mouse,
+        modifiers: Modifiers::default(),
+        timestamp: Duration::ZERO,
+    });
+    mounted.settle();
+    let peek_reading_y = mounted.rect("Message window-198").origin.y;
+    mounted.key(Key::Enter, false);
+    mounted.settle();
+    assert!(has_label(&mounted, "Latest Update"));
+    assert!((mounted.rect("Message window-198").origin.y - peek_reading_y).abs() < 1.0);
+    mounted.key(Key::Space, false);
+    mounted.settle();
+    assert!(!has_label(&mounted, "Latest Update"));
+    assert!((mounted.rect("Message window-198").origin.y - peek_reading_y).abs() < 1.0);
+    mounted.click("Peek");
+    assert!(has_label(&mounted, "Latest Update"));
+    mounted.model.history.update(|history| {
+        history
+            .progress_summary
+            .as_mut()
+            .unwrap()
+            .text
+            .push_str(" while open")
+    });
+    mounted.settle();
+    assert!((mounted.rect("Message window-198").origin.y - peek_reading_y).abs() < 1.0);
+    mounted.click("Hide");
+    assert!(!has_label(&mounted, "Latest Update"));
+    assert!((mounted.rect("Message window-198").origin.y - peek_reading_y).abs() < 1.0);
+    let tree = mounted.ui.inspection_snapshot();
+    assert!(tree.nodes.iter().any(|node| node.id == draft.id));
+    assert!(
+        tree.nodes
+            .iter()
+            .filter(|node| node
+                .label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("Message window-")))
+            .count()
+            < 60
+    );
+    assert!(crate::buffer::parts(mounted.model, "session-plan").iter().any(
+        |part| matches!(&part.kind, PartKind::Text {text} if text.contains("Keep this draft"))
+    ));
 }

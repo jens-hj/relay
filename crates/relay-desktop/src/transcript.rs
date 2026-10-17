@@ -19,6 +19,33 @@ use relay_ui::prelude::{
 use relay_ui::tokens::{ToolKind as UiKind, ground, px};
 use std::rc::Rc;
 
+/// Use page-independent metadata, scoped to the selected session's active run.
+pub(crate) fn progress_summary(
+    snapshot: &Snapshot,
+    history: &HistoryState,
+    session: &str,
+    active_run: Option<&str>,
+) -> String {
+    if history.session_id != session
+        || !snapshot.sessions.iter().any(|s| {
+            s.id == session
+                && s.worker
+                    .as_ref()
+                    .is_some_and(|w| w.status == WorkerStatus::Running)
+        })
+    {
+        return String::new();
+    }
+    history
+        .progress_summary
+        .as_ref()
+        .filter(|summary| {
+            Some(summary.run_id.as_str()) == active_run && !summary.text.trim().is_empty()
+        })
+        .map(|summary| summary.text.clone())
+        .unwrap_or_default()
+}
+
 /// What the session header shows; rebuilt only when it changes.
 #[derive(Clone, Debug, PartialEq)]
 struct HeaderView {
@@ -152,6 +179,22 @@ pub(crate) fn SessionHead(model: Model, menu: State<bool>, compact: Derived<bool
 #[component]
 pub(crate) fn ToolMessage(model: Model, message: Derived<Option<Message>>) -> Element {
     let chosen = State::new(None::<Opening>);
+    let controller = model.conversation_controller.get_untracked();
+    let id = message.get_untracked().map(|m| m.id).unwrap_or_default();
+    if let Some(controller) = &controller {
+        chosen.set(controller.borrow().tool_openings.get(&id).copied());
+    }
+    Effect::new(move || {
+        let opening = chosen.get();
+        if let Some(controller) = &controller
+            && let Some(opening) = opening
+        {
+            let mut state = controller.borrow_mut();
+            if state.tool_openings.insert(id.clone(), opening) != Some(opening) {
+                state.invalidate_history_height(&id);
+            }
+        }
+    });
     let data = Derived::new(move || {
         let snapshot = model.snapshot.get();
         let message = message.get()?;
@@ -304,14 +347,14 @@ pub(crate) fn QueuedTurn(model: Model, submission: String) -> Element {
         MessageRow speaker:(relay_ui::Live::from(speaker)) {
             row height:min-content min-width:0px label:"Queued message"
                 stroke:(width:{px(1.0)} color:ground.hairline offset:{px(-1.0)}) {
-                col width:{px(34.0)}px height:min-content shrink:0 gap:0px {
+                col width:{px(34.0)}px min-height:{px(80.0)}px shrink:0 gap:0px {
                     row height:{px(20.0)}px shrink:0 align:center justify:center {
                         { parent.adopt(&queued_position(model, position)); }
                     }
                     {
-                        parent.adopt(&queued_action("Cancel queued message", relay_ui::icons::mark.remove, Tone::Signal(relay_ui::tokens::Signal::Failed), move || model.submit(Command::CancelTurn { submission_id: id.get_untracked() }, model.snapshot.get_untracked().revision, crate::model::Saved::Action)));
-                        parent.adopt(&queued_action("Edit queued message", relay_ui::icons::mark.edit, Tone::Signal(relay_ui::tokens::Signal::NeedsYou), move || buffer::edit_queued(model, &id.get_untracked())));
-                        parent.adopt(&queued_action("Send queued message now", relay_ui::icons::mark.send, Tone::Signal(relay_ui::tokens::Signal::FullSteam), move || buffer::promote(model, &id.get_untracked())));
+                        parent.adopt(&queued_action("Cancel queued message", relay_ui::icons::mark.remove, Tone::Signal(relay_ui::tokens::Signal::Failed), false, move || model.submit(Command::CancelTurn { submission_id: id.get_untracked() }, model.snapshot.get_untracked().revision, crate::model::Saved::Action)));
+                        parent.adopt(&queued_action("Edit queued message", relay_ui::icons::mark.edit, Tone::Signal(relay_ui::tokens::Signal::NeedsYou), false, move || buffer::edit_queued(model, &id.get_untracked())));
+                        parent.adopt(&queued_action("Send queued message now", relay_ui::icons::mark.send, Tone::Signal(relay_ui::tokens::Signal::FullSteam), true, move || buffer::promote(model, &id.get_untracked())));
                     }
                 }
                 el width:{px(1.0)}px height:fill shrink:0 nohit fill:ground.hairline {}
@@ -508,11 +551,14 @@ fn queued_action(
     label: &'static str,
     icon: SvgToken,
     tone: Tone,
+    stretch: bool,
     handler: impl Fn() + 'static,
 ) -> Element {
     view! {
-        Tooltip text:(label) {
-            row width:{px(34.0)}px height:{px(20.0)}px shrink:0 {
+        Tooltip text:(label)
+            height:(if stretch { Dimension::Fr(1.0) } else { Dimension::Px(px(20.0)) })
+            min-height:(px(20.0)) {
+            row width:{px(34.0)}px min-height:{px(20.0)}px shrink:0 {
                 CellButton label:(label) rule:(Rule::Top) horizontal-inset:(0.0)
                     on-press:(press(handler)) {
                     row width:max-content height:min-content

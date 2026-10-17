@@ -151,7 +151,8 @@ pub fn EffortTrack(
     let length = Derived::new(move || {
         let count = lv.get() as f32 + max.get() as f32;
         if compact {
-            px((count - 1.0).max(0.0) * 5.0 + 3.0)
+            let pitch = if vertical { 3.0 } else { 5.0 };
+            px((count - 1.0).max(0.0) * pitch + 3.0)
         } else {
             px(158.0)
         }
@@ -342,8 +343,8 @@ fn paint_diamond(
     scene.shape(shape);
 }
 
-/// Paints a compact track: 3-unit squares at a 5-unit pitch, unfilled
-/// steps in the track grey, each top step as a small diamond.
+/// Paints a compact track: 3-unit squares adjoining vertically or at a
+/// 5-unit horizontal pitch, unfilled steps grey, each top step a small diamond.
 pub fn paint_compact(
     scene: &mut Scene,
     rect: Rect,
@@ -362,7 +363,8 @@ pub fn paint_compact(
     let empty = color(ground.track);
     let count = levels as usize + tiers as usize;
     for index in 0..count {
-        let offset = index as f32 * 5.0 * unit;
+        let pitch = if vertical { 3.0 } else { 5.0 };
+        let offset = index as f32 * pitch * unit;
         let (x, y) = if vertical {
             (rect.origin.x, rect.origin.y + offset)
         } else {

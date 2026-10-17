@@ -158,27 +158,107 @@ pub fn ApprovalBlock(
     });
     host
 }
+/// Normalize and stop before handing text to shaping/accessibility. Even a
+/// single enormous word has a bounded cost and a Unicode-safe excerpt.
+pub(crate) fn update_excerpt(text: &str, limit: usize) -> (String, bool) {
+    let mut result = String::new();
+    let mut count = 0;
+    let mut space = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            space = !result.is_empty();
+            continue;
+        }
+        if space && count < limit {
+            result.push(' ');
+            count += 1;
+        }
+        if count == limit {
+            return (result, true);
+        }
+        result.push(ch);
+        count += 1;
+        space = false;
+    }
+    (result, false)
+}
+
 #[component]
 pub fn ThinkingLine(
     #[prop(default = Live::fixed(1u8))] effort: Live<u8>,
     #[prop(default = Live::fixed(ModelHue::Neutral))] hue: Live<ModelHue>,
+    #[prop(default = Live::fixed(String::new()))] summary: Live<String>,
+    #[prop(default = Live::fixed(String::new()))] run_key: Live<String>,
+    #[prop(default = std::rc::Rc::new(|| {}) as OnPress)] on_toggle: OnPress,
 ) -> Element {
+    let expanded = State::new(false);
+    let previous_run = State::new(None::<String>);
+    Effect::new(move || {
+        let key = run_key.get();
+        if previous_run.get_untracked().as_ref() != Some(&key) {
+            previous_run.set(Some(key));
+            expanded.set(false);
+        }
+    });
+    let preview_summary = summary.clone();
+    let preview = Derived::new(move || {
+        let (mut text, truncated) = update_excerpt(&preview_summary.get(), 240);
+        if text.is_empty() {
+            "No update yet".to_owned()
+        } else {
+            if truncated {
+                text.push('…');
+            }
+            text
+        }
+    });
+    let detail_summary = summary.clone();
+    let detail = Derived::new(move || {
+        let (mut excerpt, truncated) = update_excerpt(&detail_summary.get(), 600);
+        if truncated {
+            excerpt.push_str("… (Full update in the transcript.)");
+        }
+        excerpt
+    });
     let host = view! {
-        stack height:{px(40.0)}px clip {}
+        col height:min-content min-width:0px {}
     };
     host.switch(
         move || hue.get(),
         move |parent, hue| {
             let colour = hue.token();
             let effort = effort.clone();
+            let summary = summary.clone();
+            let on_toggle = on_toggle.clone();
+            let toggle: OnPress = std::rc::Rc::new(move || {
+                on_toggle();
+                expanded.set(!expanded.get_untracked());
+            });
+            let has_summary = Derived::new(move || !summary.get().trim().is_empty());
             parent.adopt(&view! {
-                stack height:{px(40.0)}px clip {
-                    Dither colour:(colour) gradient:(crate::dither::Gradient::Horizontal)
-                        reach:(Derived::new(move || live_reach(effort.get()))) opacity:0.3 seed:7
-                        over:(ground.page)
-                    row align:center gap:{px(10.0)}px pad:(horizontal:{px(14.0)}px vertical:0px) {
-                        StatusSquare status:(AgentStatus::Working) working-colour:(colour)
-                        Label text:"Thinking" role:(TextRole::Label) weight:500
+                col height:min-content min-width:0px {
+                    stack height:{px(40.0)}px clip {
+                        Dither colour:(colour) gradient:(crate::dither::Gradient::Horizontal)
+                            reach:(Derived::new(move || live_reach(effort.get()))) opacity:0.3
+                            seed:7 over:(ground.page)
+                        row align:center min-width:0px gap:{px(10.0)}px
+                            pad:(horizontal:{px(14.0)}px vertical:0px) {
+                            StatusSquare status:(AgentStatus::Working) working-colour:(colour)
+                            Label text:"Working" role:(TextRole::Label) weight:500
+                            Ellipsis text:(preview) role:(TextRole::Label) tone:(Tone::Muted)
+                            if has_summary.get() {
+                                LinkButton
+                                    text:(Derived::new(move || if expanded.get() { "Hide".to_owned() } else { "Peek".to_owned() }))
+                                    on-press:(toggle.clone())
+                            }
+                        }
+                    }
+                    if expanded.get() && has_summary.get() {
+                        col height:min-content pad:(horizontal:{px(14.0)}px vertical:{px(8.0)}px)
+                            gap:{px(6.0)}px {
+                            Label text:"Latest Update" role:(TextRole::Caption) tone:(Tone::Muted)
+                            text font-size:{px(12.0)}px line-height:1.5 {detail.get()}
+                        }
                     }
                 }
             });
