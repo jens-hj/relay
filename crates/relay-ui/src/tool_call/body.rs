@@ -252,6 +252,7 @@ pub(super) fn body(vm: &ToolCallView, actions: ToolActions) -> Element {
         ToolDetail::Spawn {
             task,
             context,
+            rationale,
             reports_to,
             permissions,
             ..
@@ -259,6 +260,7 @@ pub(super) fn body(vm: &ToolCallView, actions: ToolActions) -> Element {
             add("task", task);
             if expanded {
                 add("context", context);
+                add("model choice", rationale);
                 add("reports to", reports_to);
                 if let Some(permissions) = permissions {
                     if !kv.is_empty() {

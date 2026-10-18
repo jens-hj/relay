@@ -385,6 +385,14 @@ fn tool_calls_map_measured_details_and_pending_permissions() {
             ..
         })
     ));
+    // The parent's reason for the worker's model shows with its task.
+    snapshot
+        .sessions
+        .iter_mut()
+        .find(|s| s.title == "Schema migration")
+        .and_then(|s| s.spawn.as_mut())
+        .unwrap()
+        .selection_rationale = Some("Mechanical migration; a light model suffices".into());
     let spawn = tool_view(
         &snapshot,
         &message(&snapshot, "t-spawn"),
@@ -395,6 +403,7 @@ fn tool_calls_map_measured_details_and_pending_permissions() {
     let Some(View::Spawn {
         child,
         task,
+        rationale,
         reports_to,
         ..
     }) = spawn.detail
@@ -404,6 +413,10 @@ fn tool_calls_map_measured_details_and_pending_permissions() {
     assert_eq!(child.as_deref(), Some("Schema migration"));
     assert_eq!(reports_to.as_deref(), Some("Profile design"));
     assert!(task.is_some());
+    assert_eq!(
+        rationale.as_deref(),
+        Some("Mechanical migration; a light model suffices")
+    );
     let other = tool_view(
         &snapshot,
         &message(&snapshot, "t-other"),

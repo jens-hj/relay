@@ -1261,7 +1261,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            21
+            22
         );
         drop(store);
         let mut reopened = Store::open(&db, AgentProfile::default()).unwrap();
@@ -1355,7 +1355,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 22)
+        .pragma_update(None, "user_version", 23)
         .unwrap();
     drop(store);
     let error = Store::open(&db, AgentProfile::default()).err().unwrap();
@@ -1365,7 +1365,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        22
+        23
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -3585,7 +3585,7 @@ fn schema_twenty_one_adds_default_worker_model_policies_and_persists_changes() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 21);
+    assert_eq!(schema, 22);
     let stored: String = store
         .connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -3716,7 +3716,7 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 21);
+    assert_eq!(schema, 22);
 }
 
 #[test]
@@ -3767,7 +3767,7 @@ fn schema_nineteen_snapshots_load_prompt_senders_as_the_user() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 21);
+    assert_eq!(schema, 22);
 }
 
 #[test]

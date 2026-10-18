@@ -49,7 +49,14 @@ fn worker_model_guidance(policy: &WorkerModelPolicy, usage: &[UsageRemaining], n
             model_capability,
             available_usage,
         } => {
-            guidance.push_str("Delegator Chooses. Choose the harness, model and effort for each worker in spawn_agent; an omitted model uses your own profile model when the harness matches. ");
+            guidance.push_str("Delegator Chooses. Deliberately choose the harness, model and effort for each worker and pass all three to spawn_agent; Relay rejects omitted values and does not fall back to your own model. Omit effort only for a model that offers no effort setting. Before choosing, consider which allowed alternatives suit the task; pick the best fit, which may be the same model for several workers, rather than varying models for their own sake, and do not assume model rankings you cannot support. Pass a concise rationale explaining why the choice fits the task");
+            match (model_capability, available_usage) {
+                (true, true) => guidance.push_str(", the capability it needs and remaining usage"),
+                (true, false) => guidance.push_str(" and the capability it needs"),
+                (false, true) => guidance.push_str(" and remaining usage"),
+                (false, false) => {}
+            }
+            guidance.push_str("; Relay records it with the worker. ");
             if allowed_models.is_empty() {
                 guidance.push_str("Allowed models: any model of any connected harness. ");
             } else {
@@ -62,7 +69,7 @@ fn worker_model_guidance(policy: &WorkerModelPolicy, usage: &[UsageRemaining], n
             }
             match max_effort {
                 Some(cap) => guidance.push_str(&format!(
-                    "Maximum effort: {cap} (allowed: {}); when you omit effort, the model's default must be within the cap. ",
+                    "Maximum effort: {cap} (allowed: {}). ",
                     policy.efforts().unwrap_or_default().join(", ")
                 )),
                 None => guidance.push_str("Maximum effort: none; any effort the model offers. "),
@@ -110,6 +117,13 @@ mod workflow_context_tests {
     fn worker_model_guidance_states_mode_limits_and_considerations() {
         let guidance = worker_model_guidance(&WorkerModelPolicy::default(), &[], 0);
         assert!(guidance.contains("enforced by Relay in spawn_agent: Delegator Chooses"));
+        assert!(guidance.contains("pass all three to spawn_agent"));
+        assert!(guidance.contains("does not fall back to your own model"));
+        assert!(guidance.contains("offers no effort setting"));
+        assert!(guidance.contains("consider which allowed alternatives suit the task"));
+        assert!(guidance.contains("rather than varying models for their own sake"));
+        assert!(guidance.contains("model rankings you cannot support"));
+        assert!(guidance.contains("why the choice fits the task and the capability it needs;"));
         assert!(guidance.contains("any model of any connected harness"));
         assert!(guidance.contains("Maximum effort: none"));
         assert!(guidance.contains("Model capability is on: match model strength and effort"));
@@ -126,6 +140,7 @@ mod workflow_context_tests {
         );
         assert!(guidance.contains("Relay rejects any other value"));
         assert!(!guidance.contains("Selection considerations"));
+        assert!(!guidance.contains("rationale"));
 
         let listed = WorkerModelPolicy::DelegatorChooses {
             allowed_models: vec![
@@ -161,6 +176,7 @@ mod workflow_context_tests {
             guidance.contains("Allowed models: Codex: gpt-a, gpt-b; Claude Code: claude-opus.")
         );
         assert!(guidance.contains("Maximum effort: medium (allowed: none, minimal, low, medium)"));
+        assert!(guidance.contains("the capability it needs and remaining usage;"));
         assert!(guidance.contains("Model capability is on"));
         assert!(guidance.contains(
             "Available usage is on: prefer harnesses and models with more remaining usage quota"
@@ -182,6 +198,7 @@ mod workflow_context_tests {
         let guidance = worker_model_guidance(&usage_only, &[], 0);
         assert!(!guidance.contains("Model capability is on"));
         assert!(!guidance.contains("too weak"));
+        assert!(guidance.contains("fits the task and remaining usage;"));
         assert!(guidance.contains("Current usage remaining: not reported"));
     }
 

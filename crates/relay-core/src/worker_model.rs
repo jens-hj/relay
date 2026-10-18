@@ -16,6 +16,10 @@ pub fn effort_rank(effort: &str) -> Option<usize> {
 /// A spawn request's optional harness, model and effort.
 pub type SpawnRequest = (Option<Harness>, Option<String>, Option<String>);
 
+/// Longest selection rationale a spawn request may give, in characters as
+/// JSON Schema `maxLength` counts them.
+pub const MAX_RATIONALE_LEN: usize = 1000;
+
 /// One model of one harness.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -300,8 +304,71 @@ impl WorkerModelPolicy {
         ))
     }
 
+    /// What a Delegator Chooses rationale should address, for tools and errors.
+    pub fn rationale_hint(&self) -> String {
+        let mut points = vec!["why the harness, model and effort fit the task"];
+        if let Self::DelegatorChooses {
+            model_capability,
+            available_usage,
+            ..
+        } = self
+        {
+            if *model_capability {
+                points.push("the capability the task needs");
+            }
+            if *available_usage {
+                points.push("remaining usage");
+            }
+        }
+        points.join(", ")
+    }
+
+    /// Under Delegator Chooses, a spawn request must name its harness, model
+    /// and effort and give a rationale; effort is omitted only for a model
+    /// whose discovered catalog offers none (`offers_effort` is `Some(false)`;
+    /// `None` when the catalog is unknown). Fixed requests are already filled.
+    pub fn check_selection(
+        &self,
+        (harness, model, effort): &SpawnRequest,
+        rationale: Option<&str>,
+        offers_effort: Option<bool>,
+    ) -> Result<(), String> {
+        if rationale.is_some_and(|r| r.chars().count() > MAX_RATIONALE_LEN) {
+            return Err(format!(
+                "Keep the selection rationale within {MAX_RATIONALE_LEN} characters"
+            ));
+        }
+        if self.is_fixed() {
+            return Ok(());
+        }
+        let mut missing = vec![];
+        if harness.is_none() {
+            missing.push("harness");
+        }
+        if model.is_none() {
+            missing.push("model");
+        }
+        if effort.is_none() && offers_effort != Some(false) {
+            missing.push("effort");
+        }
+        if rationale.is_none_or(|r| r.trim().is_empty()) {
+            missing.push("rationale");
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "This profile has you choose each worker's model; pass {} explicitly. {} Effort may be omitted only for a model that offers no effort setting. The rationale briefly covers {}.",
+            missing.join(", "),
+            self.allowed_summary(),
+            self.rationale_hint()
+        ))
+    }
+
     /// Check a worker's resolved choice. `default_effort` is the model's
-    /// default when known; it applies when no effort was requested.
+    /// default when known; it applies when no effort was requested. With
+    /// neither, the model has no effort setting ([`Self::check_selection`]
+    /// requires an effort for any other model), so a cap does not restrict it.
     pub fn permits(
         &self,
         harness: Harness,
@@ -335,12 +402,7 @@ impl WorkerModelPolicy {
                 let cap_rank = effort_rank(cap).unwrap_or(0);
                 let allowed = EFFORT_LEVELS[..=cap_rank].join(", ");
                 match effort.or(default_effort) {
-                    None => {
-                        return Err(format!(
-                            "Workers are capped at {cap} effort and this model's default effort is unknown; pass an effort ({allowed}). {}",
-                            self.allowed_summary()
-                        ));
-                    }
+                    None => {}
                     Some(chosen) if effort_rank(chosen).is_none_or(|r| r > cap_rank) => {
                         let source = if effort.is_some() {
                             "requested"
@@ -577,11 +639,11 @@ mod tests {
                 .unwrap_err()
                 .contains("model's default effort xhigh")
         );
+        // A model with no effort setting has nothing for the cap to restrict.
         assert!(
             policy
                 .permits(Harness::ClaudeCode, "claude-opus", None, None)
-                .unwrap_err()
-                .contains("pass an effort")
+                .is_ok()
         );
         assert!(
             policy
@@ -601,6 +663,89 @@ mod tests {
         assert_eq!(
             policy.efforts().unwrap(),
             vec!["none", "minimal", "low", "medium", "high"]
+        );
+    }
+
+    #[test]
+    fn delegator_chooses_requires_an_explicit_explained_selection() {
+        let policy = WorkerModelPolicy::DelegatorChooses {
+            allowed_models: vec![],
+            max_effort: None,
+            model_capability: true,
+            available_usage: true,
+        };
+        let full: SpawnRequest = (
+            Some(Harness::Codex),
+            Some("gpt".into()),
+            Some("high".into()),
+        );
+        let why = Some("Cross-crate change; strong model with ample quota");
+        assert!(policy.check_selection(&full, why, None).is_ok());
+
+        let error = policy
+            .check_selection(&(None, None, None), None, None)
+            .unwrap_err();
+        assert!(
+            error.contains("pass harness, model, effort, rationale explicitly"),
+            "{error}"
+        );
+        assert!(
+            error.contains("any model of a connected harness"),
+            "{error}"
+        );
+        assert!(
+            error.contains("the capability the task needs, remaining usage"),
+            "{error}"
+        );
+        let error = policy.check_selection(&full, Some("  "), None).unwrap_err();
+        assert!(error.contains("pass rationale explicitly"), "{error}");
+        let long = "x".repeat(MAX_RATIONALE_LEN + 1);
+        assert!(
+            policy
+                .check_selection(&full, Some(long.as_str()), None)
+                .unwrap_err()
+                .contains("within 1000 characters")
+        );
+        // The limit counts characters, as the schema's maxLength does.
+        let accented = "é".repeat(MAX_RATIONALE_LEN);
+        assert!(
+            policy
+                .check_selection(&full, Some(accented.as_str()), None)
+                .is_ok()
+        );
+
+        // Effort is required unless the model is known to offer none.
+        let no_effort: SpawnRequest = (Some(Harness::Codex), Some("gpt".into()), None);
+        for offers in [None, Some(true)] {
+            assert!(
+                policy
+                    .check_selection(&no_effort, why, offers)
+                    .unwrap_err()
+                    .contains("pass effort explicitly")
+            );
+        }
+        assert!(policy.check_selection(&no_effort, why, Some(false)).is_ok());
+
+        // Without considerations the rationale need only cover task fit.
+        let plain = WorkerModelPolicy::DelegatorChooses {
+            allowed_models: vec![],
+            max_effort: None,
+            model_capability: false,
+            available_usage: false,
+        };
+        assert_eq!(
+            plain.rationale_hint(),
+            "why the harness, model and effort fit the task"
+        );
+
+        // Fixed policies fill the request and need no rationale.
+        let pinned = fixed(None);
+        let filled = pinned.resolve_request(None, None, None).unwrap();
+        assert!(pinned.check_selection(&filled, None, None).is_ok());
+        assert!(
+            pinned
+                .check_selection(&filled, Some(long.as_str()), None)
+                .is_err()
         );
     }
 

@@ -155,7 +155,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 21 {
+        if version > 22 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -175,7 +175,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 21;"
+             PRAGMA user_version = 22;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -245,13 +245,15 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
-        if version < 21 {
+        if version < 22 {
             // Normalize legacy snapshots with defaults for naming, waiting state,
             // prompt senders and worker model policies. Schema 18 protects explicit
             // profile models, schema 19 keeps older servers from cascading a
-            // single-turn stop, schema 20 protects agent-sent prompt senders and
+            // single-turn stop, schema 20 protects agent-sent prompt senders,
             // schema 21 stores each profile's worker model policy, which older
-            // servers would reject. Missing policies take the default.
+            // servers would reject, and schema 22 keeps older servers from
+            // dropping spawn selection rationales. Missing policies take the
+            // default; older spawns have no rationale.
             let json: String = connection
                 .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
                     r.get(0)
@@ -457,6 +459,7 @@ impl Store {
                     context: None,
                     permissions: Default::default(),
                     requested_by_run: None,
+                    selection_rationale: None,
                 });
                 child.compactions.clear();
                 child.selection = profile.model_selection();

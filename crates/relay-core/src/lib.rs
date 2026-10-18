@@ -161,6 +161,10 @@ pub struct SpawnGrant {
     pub permissions: std::collections::BTreeMap<Task, Permission>,
     #[serde(default)]
     pub requested_by_run: Option<String>,
+    /// Why the parent chose the worker's harness, model and effort; required
+    /// when the parent's worker model policy lets it choose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_rationale: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

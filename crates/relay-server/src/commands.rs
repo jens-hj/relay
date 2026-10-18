@@ -187,10 +187,18 @@ pub(super) async fn profile_catalog(
     State(workspace): State<Workspace>,
     axum::extract::Path((project, harness)): axum::extract::Path<(String, Harness)>,
 ) -> Result<Json<HarnessCatalog>, Error> {
+    Ok(Json(discover_profile(&workspace, &project, harness).await?))
+}
+
+/// A harness's catalog in the project's root, as the profile editor discovers
+/// it; no session or worktree is needed.
+pub(super) async fn discover_profile(
+    workspace: &Workspace,
+    project: &str,
+    harness: Harness,
+) -> Result<HarnessCatalog, Error> {
     let key = format!("profile:{project}:{harness:?}");
-    Ok(Json(
-        discover_context(&workspace, &key, false, Some((&project, harness))).await?,
-    ))
+    discover_context(workspace, &key, false, Some((project, harness))).await
 }
 
 async fn discover_context(

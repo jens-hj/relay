@@ -280,6 +280,7 @@ fn detail(
                 effort,
                 task: grant.map(|g| g.task.clone()),
                 context: grant.and_then(|g| g.context.clone()),
+                rationale: grant.and_then(|g| g.selection_rationale.clone()),
                 reports_to: title(snapshot, &Some(message.session_id.clone())),
                 permissions: grant.filter(|g| !g.permissions.is_empty()).map(|g| {
                     g.permissions

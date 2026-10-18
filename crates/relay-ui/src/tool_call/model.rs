@@ -174,6 +174,8 @@ pub enum ToolDetail {
         effort: Option<Effort>,
         task: Option<String>,
         context: Option<String>,
+        /// Why the parent chose the worker's harness, model and effort.
+        rationale: Option<String>,
         reports_to: Option<String>,
         permissions: Option<Vec<ToolPermission>>,
     },

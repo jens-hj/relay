@@ -328,6 +328,7 @@ fn grant(task: &str) -> SpawnGrant {
         context: None,
         permissions: [(Task::Implement, Permission::Allow)].into(),
         requested_by_run: None,
+        selection_rationale: None,
     }
 }
 

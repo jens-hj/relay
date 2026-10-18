@@ -246,6 +246,7 @@ struct Spawn {
     harness: Option<Harness>,
     model: Option<String>,
     effort: Option<String>,
+    rationale: Option<String>,
     #[serde(default)]
     permissions: BTreeMap<Task, Permission>,
 }
@@ -683,39 +684,65 @@ async fn spawn(
         .child_slot(&parent.id, None)
         .map_err(Error::invalid)?;
     // The worker model policy is checked before approvals or forks: a fixed
-    // policy fills omitted values and rejects differing ones.
+    // policy fills omitted values and rejects differing ones, and a delegator
+    // that chooses must name harness, model and effort and explain the choice.
     let policy = effective.worker_models.clone();
-    let (harness, model, effort) = policy
+    let request = policy
         .resolve_request(args.harness, args.model.clone(), args.effort.clone())
         .map_err(Error::invalid)?;
-    let harness = harness.unwrap_or(effective.harness);
+    let rationale = args
+        .rationale
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
+    // Use any discovered catalog for the requested harness; launch discovers it
+    // again in the child workspace before executing the first turn.
+    let harness = request.0.unwrap_or(effective.harness);
+    let mut catalog = commands::cached(workspace, caller, harness);
+    // A delegator that chooses an allowed model of an undiscovered harness has
+    // the harness discovered first, before approvals or forks, so a model
+    // without an effort setting can be chosen without one and any effort is
+    // checked before the worker exists. Discovery failure rejects the spawn.
+    if catalog.is_none()
+        && !policy.is_fixed()
+        && request.0.is_some()
+        && let Some(model) = request.1.as_deref()
+        && policy.allows_model(harness, model)
+    {
+        let discovered = tokio::select! {
+            result = commands::discover_profile(workspace, &parent.project_id, harness) => result,
+            _ = stop.wait_for(|stopped| *stopped) => return Err(unauthorized()),
+        };
+        catalog = Some(discovered.map_err(|error| {
+            Error::invalid(format!(
+                "Cannot discover {} models to check this worker: {}",
+                harness.label(),
+                error.message
+            ))
+        })?);
+    }
+    let offers_effort = request.1.as_deref().and_then(|model| {
+        let model = catalog.as_ref()?.model(Some(model))?;
+        Some(!model.efforts.is_empty())
+    });
+    policy
+        .check_selection(&request, rationale, offers_effort)
+        .map_err(Error::invalid)?;
+    let (_, model, effort) = request;
+    let Some(selected_model) = model else {
+        return Err(Error::invalid("Choose a model for this worker"));
+    };
     let mut selection = HarnessSelection {
-        model: model.or_else(|| {
-            (harness == effective.harness)
-                .then(|| {
-                    effective
-                        .model_selection()
-                        .model
-                        .or_else(|| parent.selection.model.clone())
-                        .or_else(|| parent.worker.as_ref().and_then(|w| w.model.clone()))
-                })
-                .flatten()
-        }),
+        model: Some(selected_model.clone()),
         effort,
         ..Default::default()
     };
-    let Some(selected_model) = selection.model.clone() else {
-        return Err(Error::invalid(
-            "Choose a model in the agent profile or provide a model for this worker",
-        ));
-    };
-    // Use any discovered catalog for the requested harness; launch discovers it
-    // again in the child workspace before executing the first turn. Without a
-    // requested effort the child runs and shows its model's default from the
-    // start, and the policy checks that resolved effort.
+    // Without a requested effort (a fixed policy without one) the child runs
+    // and shows its model's default from the start, and the policy checks
+    // that resolved effort.
     let requested_effort = selection.effort.clone();
-    if let Some(catalog) = commands::cached(workspace, caller, harness) {
-        commands::validate_selection(&catalog, &selection)?;
+    if let Some(catalog) = &catalog {
+        commands::validate_selection(catalog, &selection)?;
         selection.effort = catalog.effective_effort(&selection, None);
     }
     policy
@@ -797,6 +824,7 @@ async fn spawn(
         context: args.context.clone(),
         permissions: args.permissions,
         requested_by_run: Some(run.into()),
+        selection_rationale: rationale.map(str::to_owned),
     });
     let worker = child.worker.as_mut().unwrap();
     worker.harness = harness;
@@ -1134,8 +1162,9 @@ pub(super) fn mark_read(snapshot: &mut Snapshot, run: &str) {
     }
 }
 
-/// The spawn_agent description and properties allowed by a worker model policy.
-fn spawn_spec(policy: &WorkerModelPolicy) -> (String, Value) {
+/// The spawn_agent description, properties and required properties allowed by
+/// a worker model policy.
+fn spawn_spec(policy: &WorkerModelPolicy) -> (String, Value, Vec<&'static str>) {
     let string = json!({"type":"string"});
     let permissions = json!({"type":"object","propertyNames":{"enum":["plan","delegate","implement","verify","review","merge","deploy"]},"additionalProperties":{"enum":["allow","ask","deny"]}});
     let harnesses = policy.harnesses();
@@ -1158,10 +1187,17 @@ fn spawn_spec(policy: &WorkerModelPolicy) -> (String, Value) {
         Some(efforts) if efforts.is_empty() => {}
         Some(efforts) => properties["effort"] = json!({"type":"string","enum":efforts}),
     }
+    let mut required = vec!["title", "task"];
     let rule = if policy.is_fixed() {
         "Worker model is fixed: omit harness, model and effort; differing values are rejected."
+            .to_string()
     } else {
-        "You choose harness, model and effort per worker; Relay rejects choices outside the policy."
+        properties["rationale"] = json!({"type":"string","maxLength":MAX_RATIONALE_LEN});
+        required.extend(["harness", "model", "rationale"]);
+        format!(
+            "You choose harness, model and effort per worker and must pass all three; omit effort only for a model that offers no effort setting. Give a concise rationale covering {}. Relay rejects omitted values and choices outside the policy.",
+            policy.rationale_hint()
+        )
     };
     (
         format!(
@@ -1169,6 +1205,7 @@ fn spawn_spec(policy: &WorkerModelPolicy) -> (String, Value) {
             policy.allowed_summary()
         ),
         properties,
+        required,
     )
 }
 
@@ -1190,13 +1227,13 @@ fn worker_models(snapshot: &Snapshot, policy: &WorkerModelPolicy) -> Value {
 
 fn tools(policy: &WorkerModelPolicy) -> Value {
     let string = json!({"type":"string"});
-    let (spawn_description, spawn_properties) = spawn_spec(policy);
+    let (spawn_description, spawn_properties, spawn_required) = spawn_spec(policy);
     let specs = [
         (
             "spawn_agent",
             spawn_description.as_str(),
             spawn_properties,
-            vec!["title", "task"],
+            spawn_required,
         ),
         (
             "stop_agent",
@@ -1372,6 +1409,13 @@ mod tests {
             snapshot.messages.clear();
             snapshot.projects[0].defaults.max_workers = 64;
             snapshot.projects[0].defaults.model = "fixture-model".into();
+            // Tests unrelated to model choice spawn without a selection;
+            // worker model policy tests set the policy they exercise.
+            snapshot.projects[0].defaults.worker_models = WorkerModelPolicy::Fixed {
+                harness: Harness::Codex,
+                model: "fixture-model".into(),
+                effort: None,
+            };
             snapshot.projects[0]
                 .defaults
                 .permissions
@@ -2127,11 +2171,12 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 21);
+        assert_eq!(schema, 22);
         f.finish().await;
     }
     #[tokio::test]
-    async fn spawned_children_without_an_effort_take_their_model_default() {
+    async fn fixed_workers_without_an_effort_take_their_model_default() {
+        // The fixture fixes fixture-model without an effort.
         let f = Fixture::new(Permission::Allow);
         let harness = f.workspace.snapshots.borrow().sessions[0]
             .worker
@@ -2155,10 +2200,11 @@ mod tests {
             ),
         );
         let defaulted = spawn_child(&f, "Defaulted").await;
+        f.change(|s| s.projects[0].defaults.worker_models = WorkerModelPolicy::default());
         let chosen = f
             .call(
                 "spawn_agent",
-                json!({"title":"Chosen","task":"Test","effort":"high"}),
+                json!({"title":"Chosen","task":"Test","harness":"codex","model":"fixture-model","effort":"high","rationale":"Needs care"}),
             )
             .await
             .unwrap()["agent"]
@@ -2236,25 +2282,45 @@ mod tests {
             .unwrap()
             .clone()
     }
-    #[tokio::test]
-    async fn effort_caps_check_the_resolved_default_effort() {
+    fn spawn_grant(f: &Fixture, value: &Value) -> SpawnGrant {
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let child = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == value["agent"])
+            .unwrap();
+        child.spawn.clone().unwrap()
+    }
+    /// Make the fixture's Codex answer discovery with `models`, its model/list data.
+    fn discoverable_codex(f: &Fixture, models: Value) {
+        let listed = r#"[{"id":"test-model","displayName":"Test model","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"fast"}]}]"#;
+        let codex = crate::tests::command_tests::CODEX.replace(
+            "@CAPTURE@",
+            f._directory.path().join("capture").to_str().unwrap(),
+        );
+        assert!(codex.contains(listed));
+        let codex = codex.replace(listed, &models.to_string());
+        std::fs::write(&f.workspace.config.codex, format!("#!/bin/sh\n{codex}")).unwrap();
+    }
+    fn profile_discovered(f: &Fixture) -> bool {
+        f.workspace
+            .catalogs
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|key| key.starts_with("profile:"))
+    }
+    /// A capped Delegator Chooses fixture whose Codex catalog is not cached.
+    fn uncached_chooser() -> Fixture {
         let f = Fixture::new(Permission::Allow);
-        let model = |id: &str, default: &str| relay_core::HarnessModel {
-            id: id.into(),
-            efforts: vec!["low".into(), "medium".into(), "xhigh".into()],
-            default_effort: Some(default.into()),
-            ..Default::default()
-        };
-        f.workspace.catalogs.lock().unwrap().insert(
-            "cached".into(),
-            (
-                0,
-                HarnessCatalog {
-                    harness: Harness::Codex,
-                    models: vec![model("gpt-light", "medium"), model("gpt-heavy", "xhigh")],
-                    ..Default::default()
-                },
-            ),
+        discoverable_codex(
+            &f,
+            json!([
+                {"id":"gpt-plain"},
+                {"id":"gpt-light","defaultReasoningEffort":"medium","supportedReasoningEfforts":[
+                    {"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"xhigh"}
+                ]},
+            ]),
         );
         f.change(|s| {
             s.projects[0].defaults.worker_models = WorkerModelPolicy::DelegatorChooses {
@@ -2264,35 +2330,249 @@ mod tests {
                 available_usage: false,
             }
         });
-        // The child stores the default effort the policy was checked against.
+        let cached = commands::cached(&f.workspace, &f.caller, Harness::Codex);
+        assert!(cached.is_none());
+        f
+    }
+    #[tokio::test]
+    async fn uncached_models_without_effort_are_discovered_and_chosen_without_one() {
+        let f = uncached_chooser();
         let value = f
             .call(
                 "spawn_agent",
-                json!({"title":"Light","task":"Test","model":"gpt-light"}),
+                json!({"title":"Plain","task":"Test","harness":"codex","model":"gpt-plain","rationale":"Lookup only"}),
+            )
+            .await
+            .unwrap();
+        assert!(profile_discovered(&f));
+        let (harness, selection) = spawned_selection(&f, &value);
+        assert_eq!(harness, Harness::Codex);
+        assert_eq!(selection.model.as_deref(), Some("gpt-plain"));
+        assert_eq!(selection.effort, None);
+        assert_eq!(
+            spawn_grant(&f, &value).selection_rationale.as_deref(),
+            Some("Lookup only")
+        );
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn uncached_models_with_effort_are_checked_after_discovery() {
+        let f = uncached_chooser();
+        // Discovery runs before any worker exists and still requires an effort.
+        let error = rejected(
+            &f,
+            json!({"title":"Light","task":"Test","harness":"codex","model":"gpt-light","rationale":"Small"}),
+        )
+        .await;
+        assert!(error.contains("pass effort explicitly"), "{error}");
+        assert!(profile_discovered(&f));
+        for (args, expected) in [
+            (
+                json!({"title":"Plain","task":"Test","harness":"codex","model":"gpt-plain","effort":"low","rationale":"Small"}),
+                "Effort is not supported",
+            ),
+            (
+                json!({"title":"Light","task":"Test","harness":"codex","model":"gpt-light","effort":"high","rationale":"Small"}),
+                "Effort is not supported",
+            ),
+            (
+                json!({"title":"Light","task":"Test","harness":"codex","model":"gpt-light","effort":"xhigh","rationale":"Hard"}),
+                "requested effort xhigh exceeds the worker cap of high",
+            ),
+            (
+                json!({"title":"Gone","task":"Test","harness":"codex","model":"gpt-gone","effort":"low","rationale":"Small"}),
+                "no longer available",
+            ),
+        ] {
+            let error = rejected(&f, args).await;
+            assert!(error.contains(expected), "{error}");
+        }
+        let value = f
+            .call(
+                "spawn_agent",
+                json!({"title":"Light","task":"Test","harness":"codex","model":"gpt-light","effort":"medium","rationale":"Small change"}),
             )
             .await
             .unwrap();
         let (_, selection) = spawned_selection(&f, &value);
+        assert_eq!(selection.model.as_deref(), Some("gpt-light"));
         assert_eq!(selection.effort.as_deref(), Some("medium"));
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn failed_or_stopped_discovery_rejects_the_spawn() {
+        let f = uncached_chooser();
+        std::fs::write(&f.workspace.config.codex, "#!/bin/sh\nexit 1\n").unwrap();
         let error = rejected(
             &f,
-            json!({"title":"Heavy","task":"Test","model":"gpt-heavy"}),
+            json!({"title":"Plain","task":"Test","harness":"codex","model":"gpt-plain","rationale":"Lookup only"}),
         )
         .await;
         assert!(
-            error.contains("model's default effort xhigh exceeds the worker cap of high"),
+            error.contains("Cannot discover Codex models to check this worker"),
             "{error}"
         );
+        f.finish().await;
+
+        // A Codex that never lists models holds discovery until the run stops.
+        let f = uncached_chooser();
+        std::fs::write(&f.workspace.config.codex, "#!/bin/sh\nsleep 30\n").unwrap();
+        let stop = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let store = f.workspace.store.lock().unwrap();
+            store.controls[&f.caller].send_replace(true);
+        };
+        let (result, ()) = tokio::join!(
+            f.call(
+                "spawn_agent",
+                json!({"title":"Plain","task":"Test","harness":"codex","model":"gpt-plain","rationale":"Lookup only"}),
+            ),
+            stop
+        );
+        assert!(result.is_err());
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
+        assert!(!profile_discovered(&f));
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn delegator_chooses_requires_an_explicit_explained_selection() {
+        let f = Fixture::new(Permission::Allow);
+        let model = |id: &str, efforts: &[&str]| relay_core::HarnessModel {
+            id: id.into(),
+            efforts: efforts.iter().map(|e| e.to_string()).collect(),
+            default_effort: efforts.first().map(|e| e.to_string()),
+            ..Default::default()
+        };
+        f.workspace.catalogs.lock().unwrap().insert(
+            "cached".into(),
+            (
+                0,
+                HarnessCatalog {
+                    harness: Harness::Codex,
+                    models: vec![
+                        model("gpt-light", &["low", "medium", "xhigh"]),
+                        model("gpt-plain", &[]),
+                    ],
+                    ..Default::default()
+                },
+            ),
+        );
+        f.change(|s| {
+            s.projects[0].defaults.worker_models = WorkerModelPolicy::DelegatorChooses {
+                allowed_models: Vec::new(),
+                max_effort: Some("high".into()),
+                model_capability: true,
+                available_usage: true,
+            }
+        });
+        // Nothing falls back to the delegator's own harness or model.
+        let error = rejected(&f, json!({"title":"Bare","task":"Test"})).await;
+        assert!(
+            error.contains("pass harness, model, effort, rationale explicitly"),
+            "{error}"
+        );
+        assert!(
+            error.contains("the capability the task needs, remaining usage"),
+            "{error}"
+        );
+        let error = rejected(
+            &f,
+            json!({"title":"No model","task":"Test","harness":"codex","effort":"low","rationale":"Small"}),
+        )
+        .await;
+        assert!(error.contains("pass model explicitly"), "{error}");
+        // A model with an effort setting needs an explicit effort.
+        let error = rejected(
+            &f,
+            json!({"title":"No effort","task":"Test","harness":"codex","model":"gpt-light","rationale":"Small"}),
+        )
+        .await;
+        assert!(error.contains("pass effort explicitly"), "{error}");
+        for blank in [json!(null), json!(" \n ")] {
+            let error = rejected(
+                &f,
+                json!({"title":"No reason","task":"Test","harness":"codex","model":"gpt-light","effort":"low","rationale":blank}),
+            )
+            .await;
+            assert!(error.contains("pass rationale explicitly"), "{error}");
+        }
+        let error = rejected(
+            &f,
+            json!({"title":"Long","task":"Test","harness":"codex","model":"gpt-light","effort":"low","rationale":"x".repeat(MAX_RATIONALE_LEN + 1)}),
+        )
+        .await;
+        assert!(error.contains("within 1000 characters"), "{error}");
+        // Explicit choices still meet the catalog and the effort cap.
+        let error = rejected(
+            &f,
+            json!({"title":"Heavy","task":"Test","harness":"codex","model":"gpt-light","effort":"xhigh","rationale":"Hard"}),
+        )
+        .await;
+        assert!(
+            error.contains("requested effort xhigh exceeds the worker cap of high"),
+            "{error}"
+        );
+        let error = rejected(
+            &f,
+            json!({"title":"Plain","task":"Test","harness":"codex","model":"gpt-plain","effort":"low","rationale":"Simple"}),
+        )
+        .await;
+        assert!(error.contains("Effort is not supported"), "{error}");
+        let error = rejected(
+            &f,
+            json!({"title":"Unknown","task":"Test","harness":"codex","model":"gpt-gone","effort":"low","rationale":"Simple"}),
+        )
+        .await;
+        assert!(error.contains("no longer available"), "{error}");
+
+        // A complete choice spawns and keeps its trimmed rationale.
+        let value = f
+            .call(
+                "spawn_agent",
+                json!({"title":"Chosen","task":"Test","harness":"codex","model":"gpt-light","effort":"medium","rationale":"  Mechanical rename; light model, ample quota \n"}),
+            )
+            .await
+            .unwrap();
+        let (harness, selection) = spawned_selection(&f, &value);
+        assert_eq!(harness, Harness::Codex);
+        assert_eq!(selection.model.as_deref(), Some("gpt-light"));
+        assert_eq!(selection.effort.as_deref(), Some("medium"));
+        assert_eq!(
+            spawn_grant(&f, &value).selection_rationale.as_deref(),
+            Some("Mechanical rename; light model, ample quota")
+        );
+        // A model without an effort setting is chosen without one, under the cap.
+        let value = f
+            .call(
+                "spawn_agent",
+                json!({"title":"Plain","task":"Test","harness":"codex","model":"gpt-plain","rationale":"Simple lookup"}),
+            )
+            .await
+            .unwrap();
+        let (_, selection) = spawned_selection(&f, &value);
+        assert_eq!(selection.model.as_deref(), Some("gpt-plain"));
+        assert_eq!(selection.effort, None);
         f.finish().await;
     }
     #[tokio::test]
     async fn worker_model_policy_is_enforced_in_spawn_and_described_in_tools() {
         let f = Fixture::new(Permission::Allow);
+        discoverable_codex(
+            &f,
+            json!([
+                {"id":"other-model","supportedReasoningEfforts":[{"reasoningEffort":"xhigh"}]},
+                {"id":"fixed-model","supportedReasoningEfforts":[{"reasoningEffort":"low"}]},
+                {"id":"gpt-light","supportedReasoningEfforts":[
+                    {"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"max"}
+                ]},
+            ]),
+        );
         // The open default lets the delegator choose any model and effort.
+        f.change(|s| s.projects[0].defaults.worker_models = WorkerModelPolicy::default());
         let value = f
             .call(
                 "spawn_agent",
-                json!({"title":"Open","task":"Test","model":"other-model","effort":"xhigh"}),
+                json!({"title":"Open","task":"Test","harness":"codex","model":"other-model","effort":"xhigh","rationale":"Hard task"}),
             )
             .await
             .unwrap();
@@ -2309,11 +2589,23 @@ mod tests {
             open["inputSchema"]["properties"]["effort"],
             json!({"type":"string"})
         );
+        assert_eq!(
+            open["inputSchema"]["properties"]["rationale"],
+            json!({"type":"string","maxLength":MAX_RATIONALE_LEN})
+        );
+        assert_eq!(
+            open["inputSchema"]["required"],
+            json!(["title", "task", "harness", "model", "rationale"])
+        );
+        let description = open["description"].as_str().unwrap();
         assert!(
-            open["description"]
-                .as_str()
-                .unwrap()
-                .contains("any model of a connected harness; any effort")
+            description.contains("any model of a connected harness; any effort"),
+            "{description}"
+        );
+        assert!(description.contains("must pass all three"), "{description}");
+        assert!(
+            description.contains("rationale covering why the harness, model and effort fit the task, the capability the task needs."),
+            "{description}"
         );
 
         // Fixed: differing values are rejected; omitted values are filled.
@@ -2333,6 +2625,7 @@ mod tests {
             assert!(error.contains("fixes the worker model"), "{error}");
             assert!(error.contains("Codex fixed-model at low effort"), "{error}");
         }
+        // No rationale is needed when there is no choice.
         let value = f
             .call(
                 "spawn_agent",
@@ -2344,6 +2637,7 @@ mod tests {
         assert_eq!(harness, Harness::Codex);
         assert_eq!(selection.model.as_deref(), Some("fixed-model"));
         assert_eq!(selection.effort.as_deref(), Some("low"));
+        assert_eq!(spawn_grant(&f, &value).selection_rationale, None);
         let fixed = spawn_schema(&f.call("tools", json!({})).await.unwrap());
         assert_eq!(
             fixed["inputSchema"]["properties"]["harness"]["enum"],
@@ -2357,6 +2651,8 @@ mod tests {
             fixed["inputSchema"]["properties"]["effort"]["enum"],
             json!(["low"])
         );
+        assert_eq!(fixed["inputSchema"]["properties"].get("rationale"), None);
+        assert_eq!(fixed["inputSchema"]["required"], json!(["title", "task"]));
         assert!(
             fixed["description"]
                 .as_str()
@@ -2382,25 +2678,29 @@ mod tests {
                 available_usage: true,
             }
         });
-        // The inherited profile model is outside the allowlist.
-        let error = rejected(&f, json!({"title":"Listed","task":"Test","effort":"low"})).await;
-        assert!(
-            error.contains("Codex fixture-model is not allowed"),
-            "{error}"
-        );
+        // The profile model is no longer used when the model is omitted.
+        let error = rejected(
+            &f,
+            json!({"title":"Listed","task":"Test","harness":"codex","effort":"low","rationale":"Small"}),
+        )
+        .await;
+        assert!(error.contains("pass model explicitly"), "{error}");
         assert!(
             error.contains("Allowed models: Codex gpt-light, Claude Code claude-heavy"),
             "{error}"
         );
         let error = rejected(
             &f,
-            json!({"title":"Listed","task":"Test","harness":"codex","model":"claude-heavy","effort":"low"}),
+            json!({"title":"Listed","task":"Test","harness":"codex","model":"claude-heavy","effort":"low","rationale":"Small"}),
         )
         .await;
-        assert!(error.contains("not allowed"), "{error}");
+        assert!(
+            error.contains("Codex claude-heavy is not allowed"),
+            "{error}"
+        );
         let error = rejected(
             &f,
-            json!({"title":"Listed","task":"Test","model":"gpt-light","effort":"max"}),
+            json!({"title":"Listed","task":"Test","harness":"codex","model":"gpt-light","effort":"max","rationale":"Hard"}),
         )
         .await;
         assert!(
@@ -2411,21 +2711,22 @@ mod tests {
             error.contains("none, minimal, low, medium, high"),
             "{error}"
         );
-        // Without a discovered catalog the default effort is unknown.
+        // gpt-light offers efforts, so one must be chosen.
         let error = rejected(
             &f,
-            json!({"title":"Listed","task":"Test","model":"gpt-light"}),
+            json!({"title":"Listed","task":"Test","harness":"codex","model":"gpt-light","rationale":"Small"}),
         )
         .await;
-        assert!(error.contains("pass an effort"), "{error}");
+        assert!(error.contains("pass effort explicitly"), "{error}");
         let value = f
             .call(
                 "spawn_agent",
-                json!({"title":"Listed","task":"Test","model":"gpt-light","effort":"medium"}),
+                json!({"title":"Listed","task":"Test","harness":"codex","model":"gpt-light","effort":"medium","rationale":"Clear small change"}),
             )
             .await
             .unwrap();
-        let (_, selection) = spawned_selection(&f, &value);
+        let (harness, selection) = spawned_selection(&f, &value);
+        assert_eq!(harness, Harness::Codex);
         assert_eq!(selection.model.as_deref(), Some("gpt-light"));
         assert_eq!(selection.effort.as_deref(), Some("medium"));
         let listed = spawn_schema(&f.call("tools", json!({})).await.unwrap());
