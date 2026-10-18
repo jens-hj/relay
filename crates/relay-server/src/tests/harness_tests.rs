@@ -1681,6 +1681,36 @@ async fn claude_tool_requests_and_results_share_one_transcript_entry() {
 }
 
 #[tokio::test]
+async fn claude_streamed_text_after_thinking_is_recorded_once() {
+    let dir = tempfile::tempdir().unwrap();
+    // Claude Code sends one `assistant` event per content block, so the text
+    // block streamed at index 1 arrives at position 0 of its own event.
+    let events = r#"
+      echo '{"type":"stream_event","event":{"type":"message_start","message":{"id":"thought"}}}'
+      echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Plan"}}}'
+      echo '{"type":"assistant","message":{"id":"thought","content":[{"type":"thinking","thinking":"Plan"}]}}'
+      echo '{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"First "}}}'
+      echo '{"type":"assistant","message":{"id":"thought","content":[{"type":"text","text":"First answer"}]}}'
+      echo '{"type":"stream_event","event":{"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"Second "}}}'
+      echo '{"type":"assistant","message":{"id":"thought","content":[{"type":"text","text":"Second answer"}]}}'
+"#;
+    let source = CLAUDE_FAKE.replacen(
+        "      echo '{\"type\":\"stream_event\"",
+        &format!("{events}\n      echo '{{\"type\":\"stream_event\""),
+        1,
+    );
+    let w = claude_workspace(dir.path(), &source);
+    let (id, snapshot) = launch(&w).await;
+    let bodies = snapshot
+        .messages
+        .iter()
+        .filter(|m| m.session_id == id && m.kind == "agent_message")
+        .map(|m| m.body.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(bodies, ["First answer", "Second answer", "Complete λ"]);
+}
+
+#[tokio::test]
 async fn restart_interrupts_unfinished_tool_records_without_erasing_output() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("db");

@@ -21,7 +21,7 @@ fn workflow_guidance(profile: &AgentProfile) -> String {
             guidance.push_str("Use Relay MCP delegation when useful within the user's task and effective permissions. This is a standing instruction; the user does not need to say 'delegate' on each turn. ");
             if profile.responsibilities.contains(&Task::Delegate) {
                 guidance.push_str("Delegate is a responsibility: act as a director by planning and coordinating the work, delegate every change to repository files to a suitable worker, and verify their results. Work directly only for read-only investigation, answering questions, planning, verifying or reviewing worker results, and trivial edits of a few lines you have already located. Do not implement a change yourself because it looks small; if you are unsure of its size, delegate it. Stay available to the user: do not call wait_for_agents or otherwise block your turn to await workers. After spawning or messaging workers, report their status and end your turn; review worker results when they report back or when the user asks. After you review a worker's result and accept it as done, archive that worker with archive_agent; archiving keeps its history and workspaces. Do not archive workers whose results you rejected, that still need follow-up, or that are still active.");
-                guidance.push_str(" Relay notifies you when a worker ends without reporting a result; inspect that worker, then resume it, send a follow-up, or accept and archive it.");
+                guidance.push_str(" Relay notifies you with a new turn when a worker reports a result, and when a worker ends without reporting one once that worker's own workers have ended; inspect that worker, then resume it, send a follow-up, or accept and archive it. If you were started by a parent agent, you are also its worker and must still call report_result to that parent: do so once you have reviewed and accepted your workers' results, in the turn where Relay notifies you that they reported back, not by blocking on them. Ending a turn while your workers are still running is not a report; Relay does not tell your parent you ended until your workers have ended.");
             } else {
                 guidance.push_str("Delegation is optional for trivial work or when doing the work directly is more sensible.");
             }
@@ -53,6 +53,13 @@ mod workflow_context_tests {
         assert!(guidance.contains("do not call wait_for_agents or otherwise block your turn"));
         assert!(guidance.contains("report their status and end your turn"));
         assert!(guidance.contains("review worker results when they report back"));
+        assert!(
+            guidance.contains("Relay notifies you with a new turn when a worker reports a result")
+        );
+        assert!(guidance.contains("must still call report_result to that parent"));
+        assert!(guidance.contains(
+            "in the turn where Relay notifies you that they reported back, not by blocking on them"
+        ));
         assert!(guidance.contains("accept it as done, archive that worker with archive_agent"));
         assert!(guidance.contains(
             "Do not archive workers whose results you rejected, that still need follow-up, or that are still active"
@@ -70,6 +77,7 @@ mod workflow_context_tests {
         assert!(guidance.contains("optional for trivial work"));
         assert!(!guidance.contains("do not call wait_for_agents"));
         assert!(!guidance.contains("accept it as done"));
+        assert!(!guidance.contains("must still call report_result"));
         assert!(guidance.contains("wait_for_agents to block until agents are terminal"));
     }
 
@@ -1494,40 +1502,56 @@ async fn execute(
         }
         // Recheck the effective profile at launch, after worktree preparation.
         // The reservation itself occupies a slot, so omit it from the count.
-        let request: String = store
+        let request: Option<String> = store
             .connection
             .query_row(
                 "SELECT request FROM receipts WHERE request_id=?1",
                 [run_id],
                 |r| r.get(0),
             )
+            .optional()
             .map_err(Error::internal)?;
-        let envelope: CommandEnvelope = serde_json::from_str(&request).map_err(Error::internal)?;
-        let approved = match envelope.command {
-            Command::StartWorker {
-                approve_implementation,
-                ..
+        let current = store.snapshot()?;
+        let command = request
+            .map(|request| serde_json::from_str::<CommandEnvelope>(&request))
+            .transpose()
+            .map_err(Error::internal)?
+            .map(|envelope| envelope.command);
+        let approved = match command {
+            Some(
+                Command::StartWorker {
+                    approve_implementation,
+                    ..
+                }
+                | Command::SendWorker {
+                    approve_implementation,
+                    ..
+                }
+                | Command::StartRootAgent {
+                    approve_implementation,
+                    ..
+                }
+                | Command::StartSession {
+                    approve_implementation,
+                    ..
+                }
+                | Command::SubmitTurn {
+                    approve_implementation,
+                    ..
+                },
+            ) => approve_implementation,
+            Some(Command::ConversationCommand { ref name, .. }) if name == "fork" => true,
+            // Relay notices have no client receipt; their durable submission
+            // establishes the turn and never carries implementation approval.
+            None if run_id.starts_with(crate::notices::PREFIX)
+                && current.submissions.iter().any(|submission| {
+                    submission.id == run_id && submission.session_id == session_id
+                }) =>
+            {
+                false
             }
-            | Command::SendWorker {
-                approve_implementation,
-                ..
-            } => approve_implementation,
-            Command::StartRootAgent {
-                approve_implementation,
-                ..
-            }
-            | Command::StartSession {
-                approve_implementation,
-                ..
-            }
-            | Command::SubmitTurn {
-                approve_implementation,
-                ..
-            } => approve_implementation,
-            Command::ConversationCommand { ref name, .. } if name == "fork" => true,
             _ => return Err(Error::invalid("Run receipt does not authorize a turn")),
         };
-        let current = store.snapshot()?;
         // Queue edits may carry a fresh approval after the original submission.
         // The receipt establishes the turn's identity; its current durable
         // submission supplies the reviewed approval used for this launch.

@@ -487,6 +487,7 @@ async fn call(
                 .ok_or_else(|| Error::invalid("Revision exhausted"))?;
             store.save(&current)?;
             store.mark_ancestor_stop(&args.agent);
+            store.held.remove(&args.agent);
             store.stop_controls(&current, &args.agent);
             workspace.snapshots.send_replace(current);
             Ok(json!({"agent":args.agent,"stop_requested":true}))
@@ -2879,19 +2880,29 @@ mod tests {
             .to_owned()
     }
     async fn stop_worker(f: &Fixture, session: &str, include_descendants: bool) {
-        let snapshot = f.workspace.snapshots.borrow().clone();
-        let envelope = crate::tests::env(
-            snapshot.revision,
-            Command::StopWorker {
-                session_id: session.into(),
-                include_descendants,
-            },
-        );
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", "Bearer test-token".parse().unwrap());
-        let _ = command(State(f.workspace.clone()), headers, Ok(Json(envelope)))
-            .await
-            .unwrap();
+        // Children publish their own launch progress, so retry a stale revision.
+        for _ in 0..20 {
+            let snapshot = f.workspace.snapshots.borrow().clone();
+            let envelope = crate::tests::env(
+                snapshot.revision,
+                Command::StopWorker {
+                    session_id: session.into(),
+                    include_descendants,
+                },
+            );
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", "Bearer test-token".parse().unwrap());
+            match command(State(f.workspace.clone()), headers, Ok(Json(envelope))).await {
+                Err(error) if error.status == StatusCode::CONFLICT => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                result => {
+                    let _ = result.unwrap();
+                    return;
+                }
+            }
+        }
+        panic!("Workspace kept changing");
     }
     #[tokio::test]
     async fn failed_and_completed_children_without_results_notify_the_parent() {
@@ -2928,6 +2939,10 @@ mod tests {
     #[tokio::test]
     async fn stopped_children_notify_once_per_batch_unless_they_reported() {
         let f = Fixture::new(Permission::Allow);
+        // Only directors are notified of reported results.
+        f.change(|s| {
+            s.projects[0].defaults.responsibilities = vec![Task::Implement, Task::Verify];
+        });
         let first = spawn_child(&f, "First").await;
         let second = spawn_child(&f, "Second").await;
         let reporter = spawn_child(&f, "Reporter").await;
@@ -3009,14 +3024,17 @@ mod tests {
         let f = Fixture::new(Permission::Allow);
         let child = spawn_child(&f, "Child").await;
         f.change(|s| {
-            s.sessions
+            let worker = s
+                .sessions
                 .iter_mut()
                 .find(|s| s.id == f.caller)
                 .unwrap()
                 .worker
                 .as_mut()
-                .unwrap()
-                .status = WorkerStatus::Completed
+                .unwrap();
+            worker.status = WorkerStatus::Completed;
+            // The fixture harness resumes this thread.
+            worker.thread_id = Some("thread".into());
         });
         stop_worker(&f, &child, false).await;
         await_ended(&f, &[&child]).await;
@@ -3033,11 +3051,189 @@ mod tests {
             (prompt.author.as_str(), prompt.kind.as_str()),
             ("Relay", "prompt")
         );
+        // The notice has no client receipt; its turn must still launch the
+        // harness rather than fail on a missing receipt.
+        let parent = settled(&f, &f.caller).await;
+        assert_eq!((parent.status, parent.error), (WorkerStatus::Running, None));
         Shutdown {
             workspace: f.workspace.clone(),
         }
         .shutdown()
         .await
         .unwrap();
+    }
+    /// Waits until a session's turn has launched its harness or ended.
+    async fn settled(f: &Fixture, session: &str) -> WorkerRun {
+        let mut events = f.workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let worker = events
+                    .borrow()
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == session)
+                    .and_then(|s| s.worker.clone())
+                    .unwrap();
+                if worker.status != WorkerStatus::Queued {
+                    return worker;
+                }
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap()
+    }
+    fn director(f: &Fixture) {
+        f.change(|s| {
+            s.projects[0].defaults.responsibilities = vec![Task::Delegate, Task::Verify];
+        });
+    }
+    async fn spawn_grandchild(f: &Fixture, child: &str) -> String {
+        let run = f
+            .workspace
+            .store
+            .lock()
+            .unwrap()
+            .run_id(child)
+            .unwrap()
+            .unwrap();
+        call(
+            &f.workspace,
+            child,
+            &run,
+            "spawn_agent",
+            json!({"title":"Grandchild","task":"Test"}),
+            &mut f.stop.clone(),
+        )
+        .await
+        .unwrap()["agent"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+    #[tokio::test]
+    async fn worker_with_active_workers_holds_its_notice_until_they_end() {
+        let f = Fixture::new(Permission::Allow);
+        let middle = spawn_child(&f, "Middle").await;
+        let grandchild = spawn_grandchild(&f, &middle).await;
+        stop_worker(&f, &middle, false).await;
+        await_ended(&f, &[&middle]).await;
+        // Its worker is still running, so it is not reported as ended.
+        assert!(notices(&f).is_empty());
+        // The director's own stop sends no notice for the grandchild, which
+        // releases the held notice for its idle parent.
+        f.call("stop_agent", json!({"agent":grandchild}))
+            .await
+            .unwrap();
+        await_ended(&f, &[&grandchild]).await;
+        let notices = notices(&f);
+        assert_eq!(notices.len(), 1);
+        let text = plain_text(&notices[0].parts);
+        assert!(
+            text.starts_with("Relay: a worker ended without reporting a result."),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "Middle ({middle}): stopped, no result reported; its workers have since ended"
+            )),
+            "{text}"
+        );
+        assert!(!text.contains("Grandchild"), "{text}");
+        // The top-level director is not asked to report to a parent.
+        assert!(!text.contains("call report_result"), "{text}");
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn stop_all_drops_held_notices() {
+        let f = Fixture::new(Permission::Allow);
+        let middle = spawn_child(&f, "Middle").await;
+        let grandchild = spawn_grandchild(&f, &middle).await;
+        stop_worker(&f, &middle, false).await;
+        await_ended(&f, &[&middle]).await;
+        stop_worker(&f, &f.caller, true).await;
+        await_ended(&f, &[&grandchild]).await;
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        assert!(
+            !snapshot
+                .submissions
+                .iter()
+                .any(|s| s.id.starts_with(crate::notices::PREFIX))
+        );
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn worker_woken_by_its_own_workers_keeps_its_held_notice() {
+        let f = Fixture::new(Permission::Allow);
+        let middle = spawn_child(&f, "Middle").await;
+        let grandchild = spawn_grandchild(&f, &middle).await;
+        stop_worker(&f, &middle, false).await;
+        await_ended(&f, &[&middle]).await;
+        // A plain stop notifies the grandchild's parent, which is woken
+        // instead of being reported to the director as ended.
+        stop_worker(&f, &grandchild, false).await;
+        await_ended(&f, &[&grandchild]).await;
+        assert!(notices(&f).is_empty());
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let woken = snapshot
+            .submissions
+            .iter()
+            .find(|s| s.session_id == middle && s.id.starts_with(crate::notices::PREFIX))
+            .unwrap();
+        let text = plain_text(&woken.parts);
+        assert!(text.contains("Grandchild"), "{text}");
+        // An intermediate worker is reminded to report to its own parent.
+        assert!(
+            text.ends_with(
+                "When your delegated work is accepted, call report_result to report it to your parent."
+            ),
+            "{text}"
+        );
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn directors_are_notified_when_a_worker_reports() {
+        let f = Fixture::new(Permission::Allow);
+        director(&f);
+        let child = spawn_child(&f, "Reporter").await;
+        let run = f
+            .workspace
+            .store
+            .lock()
+            .unwrap()
+            .run_id(&child)
+            .unwrap()
+            .unwrap();
+        call(
+            &f.workspace,
+            &child,
+            &run,
+            "report_result",
+            json!({"summary":"Implemented and tested"}),
+            &mut f.stop.clone(),
+        )
+        .await
+        .unwrap();
+        let quiet = spawn_child(&f, "Quiet").await;
+        stop_worker(&f, &child, false).await;
+        stop_worker(&f, &quiet, false).await;
+        await_ended(&f, &[&child, &quiet]).await;
+        let notices = notices(&f);
+        assert_eq!(notices.len(), 1);
+        let text = plain_text(&notices[0].parts);
+        assert!(
+            text.starts_with("Relay: 2 workers ended their turns."),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "Reporter ({child}): stopped, reported a result\n  Summary: Implemented and tested"
+            )),
+            "{text}"
+        );
+        assert!(text.contains("Quiet"), "{text}");
+        assert!(text.contains("stopped, no result reported"), "{text}");
+        assert!(text.contains("Review each reported result"), "{text}");
+        f.finish().await;
     }
 }

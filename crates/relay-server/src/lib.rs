@@ -113,6 +113,8 @@ struct Store {
     ancestor_stops: HashMap<String, String>,
     /// Pending end-of-turn notices, keyed by parent session.
     notices: HashMap<String, Vec<notices::Notice>>,
+    /// Ended runs whose notice waits for their own workers, keyed by session.
+    held: HashMap<String, String>,
 }
 
 impl Store {
@@ -129,6 +131,7 @@ impl Store {
         for session in snapshot.descendants(session_id) {
             // The cascade's origin already knows, so its descendants send no notice.
             self.mark_ancestor_stop(&session.id);
+            self.held.remove(&session.id);
             self.stop_control(&session.id);
         }
     }
@@ -272,6 +275,7 @@ impl Store {
             closing: false,
             ancestor_stops: HashMap::new(),
             notices: HashMap::new(),
+            held: HashMap::new(),
         })
     }
     fn snapshot(&self) -> Result<Snapshot, Error> {

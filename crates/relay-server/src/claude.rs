@@ -147,6 +147,12 @@ pub(super) async fn execute(
     let mut sent = false;
     let mut thread = previous.map(str::to_owned);
     let mut current_messages = std::collections::HashMap::new();
+    // Claude Code emits one `assistant` event per content block, so a block's
+    // position in that event is not its API index. Text blocks map, in order, to
+    // the indices their streamed deltas used.
+    let mut streamed_text: std::collections::HashMap<String, Vec<u64>> =
+        std::collections::HashMap::new();
+    let mut final_text: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut completed = false;
     let mut initialized = false;
     let mut state: Option<String> = None;
@@ -514,14 +520,16 @@ pub(super) async fn execute(
                 if event["type"] == "content_block_delta"
                     && let Some(text) = event["delta"]["text"].as_str()
                 {
-                    let id = format!(
-                        "{}-{}",
-                        current_messages
-                            .get(stream)
-                            .map(String::as_str)
-                            .unwrap_or("response"),
-                        event["index"].as_u64().unwrap_or(0)
-                    );
+                    let message_id = current_messages
+                        .get(stream)
+                        .map(String::as_str)
+                        .unwrap_or("response");
+                    let index = event["index"].as_u64().unwrap_or(0);
+                    let indices = streamed_text.entry(message_id.to_owned()).or_default();
+                    if !indices.contains(&index) {
+                        indices.push(index);
+                    }
+                    let id = format!("{message_id}-{index}");
                     workspace.update_run(session, run, |s| {
                         message(s, session, run, &id, "agent_message", text, true);
                         Ok(())
@@ -551,8 +559,22 @@ pub(super) async fn execute(
                         }
                     }
 
+                    let text_keys = blocks
+                        .iter()
+                        .filter(|block| block["type"] == "text")
+                        .map(|_| {
+                            let order = final_text.entry(id.to_owned()).or_default();
+                            let key = match streamed_text.get(id).and_then(|i| i.get(*order)) {
+                                Some(index) => format!("{id}-{index}"),
+                                None => format!("{id}-text-{order}"),
+                            };
+                            *order += 1;
+                            key
+                        })
+                        .collect::<Vec<_>>();
                     workspace.update_run(session, run, |s| {
                         context(s, session, &value);
+                        let mut text_keys = text_keys.iter();
                         for (index, block) in blocks.iter().enumerate() {
                             let key = format!("{id}-{index}");
                             match block["type"].as_str() {
@@ -560,7 +582,7 @@ pub(super) async fn execute(
                                     s,
                                     session,
                                     run,
-                                    &key,
+                                    text_keys.next().unwrap(),
                                     "agent_message",
                                     block["text"].as_str().unwrap_or(""),
                                     false,
