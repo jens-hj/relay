@@ -1,6 +1,6 @@
 //! The agent tree of a project, built from `Session::parent_session_id`.
 
-use super::identity::{harness, session_model};
+use super::identity::{harness, session_model, stored_effort};
 use relay_core::{
     HarnessCatalog, Session, Snapshot, SubmissionState, ToolPermission, WorkerStatus,
 };
@@ -105,7 +105,9 @@ pub fn agent_forest(
             let (model, effort) = session_model(session, catalogs);
             built.archived = session.archived;
             built.model = model;
-            built.effort = effort;
+            // Rows show effort only as a track, so a stored effort keeps one
+            // before any catalog describes the model.
+            built.effort = effort.or_else(|| stored_effort(&session.selection));
             built.expanded = !collapsed.contains(&session.id);
             built.can_spawn = !session.archived
                 && session.worker.is_some()
@@ -163,7 +165,7 @@ pub fn agent_forest(
                 catalogs,
             );
             node.model = identity;
-            node.effort = effort;
+            node.effort = effort.or_else(|| stored_effort(&config.draft_selection));
             node.can_spawn = false;
             node.can_delete = !snapshot
                 .sessions

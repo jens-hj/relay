@@ -212,11 +212,8 @@ pub fn selection_model(
     catalogs: &BTreeMap<String, Result<HarnessCatalog, String>>,
 ) -> (Option<ModelIdentity>, Option<Effort>) {
     let effective = selection.model.as_deref().or(reported);
-    let find = |catalog: &HarnessCatalog| {
-        effective
-            .and_then(|id| catalog.models.iter().find(|m| m.id == id))
-            .cloned()
-    };
+    // Without a selected or reported model, the harness runs its default.
+    let find = |catalog: &HarnessCatalog| catalog.model(effective).cloned();
     // The session's own catalog, else any loaded catalog of the same harness
     // that lists the model: a model's effort steps do not depend on the
     // session.
@@ -231,29 +228,54 @@ pub fn selection_model(
                 .filter(|catalog| harness.is_none_or(|h| catalog.harness == h))
                 .find_map(find)
         });
-    let identity = effective.map(|id| {
-        let mut identity = model_identity(id);
-        // Moving Claude aliases (e.g. "opus") omit the version from their ID,
-        // but their catalogue display names carry it. An explicit version wins.
-        if identity.version.is_empty() {
-            let candidates = catalog_model
-                .as_ref()
-                .map(|model| model.name.as_str())
-                .into_iter()
-                .chain(reported);
-            for candidate in candidates {
-                let resolved = model_identity(candidate);
-                if resolved.family == identity.family
-                    && resolved.vendor == identity.vendor
-                    && !resolved.version.is_empty()
-                {
-                    identity.version = resolved.version;
-                    break;
+    let identity = effective
+        .or(catalog_model.as_ref().map(|model| model.id.as_str()))
+        .map(|id| {
+            let mut identity = model_identity(id);
+            // Moving Claude aliases (e.g. "opus") omit the version from their ID,
+            // but their catalogue display names carry it. An explicit version wins.
+            if identity.version.is_empty() {
+                let candidates = catalog_model
+                    .as_ref()
+                    .map(|model| model.name.as_str())
+                    .into_iter()
+                    .chain(reported);
+                for candidate in candidates {
+                    let resolved = model_identity(candidate);
+                    if resolved.family == identity.family
+                        && resolved.vendor == identity.vendor
+                        && !resolved.version.is_empty()
+                    {
+                        identity.version = resolved.version;
+                        break;
+                    }
                 }
             }
-        }
-        identity
-    });
+            identity
+        });
     let effort = catalog_model.and_then(|model| effort(selection, &model));
     (identity, effort)
+}
+
+/// The track of a stored effort whose model no loaded catalog describes,
+/// for surfaces that show effort only as a track (tree rows, spawn cards):
+/// the low…xhigh and max scale both harnesses share, reaching down to
+/// minimal or up to ultra when the effort names them.
+pub fn stored_effort(selection: &HarnessSelection) -> Option<Effort> {
+    let name = selection.effort.as_deref()?;
+    let mut efforts: Vec<String> = ["low", "medium", "high", "xhigh", "max"]
+        .map(String::from)
+        .to_vec();
+    match name {
+        "minimal" => efforts.insert(0, name.into()),
+        "ultra" => efforts.push(name.into()),
+        _ => {}
+    }
+    effort(
+        selection,
+        &HarnessModel {
+            efforts,
+            ..Default::default()
+        },
+    )
 }

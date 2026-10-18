@@ -36,13 +36,20 @@ pub struct HarnessCommand {
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessModel {
     pub id: String,
     pub name: String,
     pub efforts: Vec<String>,
     pub default_effort: Option<String>,
     pub fast: bool,
+    /// The model the harness runs when no model is selected.
+    #[serde(default)]
+    pub default: bool,
+    /// The concrete model a moving alias (e.g. Claude's "opus") runs, as the
+    /// harness reports it on its turns.
+    #[serde(default)]
+    pub resolved: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +62,39 @@ pub struct HarnessCatalog {
     pub warnings: Vec<String>,
     #[serde(default)]
     pub mcp: Vec<String>,
+}
+
+impl HarnessCatalog {
+    /// The model `id` names, by catalog ID or by the concrete model an alias
+    /// resolves to; without an ID, the harness's default model.
+    pub fn model(&self, id: Option<&str>) -> Option<&HarnessModel> {
+        match id {
+            Some(id) => self.models.iter().find(|m| m.id == id).or_else(|| {
+                self.models
+                    .iter()
+                    .find(|m| m.resolved.as_deref() == Some(id))
+            }),
+            None => self.models.iter().find(|m| m.default),
+        }
+    }
+
+    /// The effort a turn runs with: the selected one, else the default of
+    /// the selected model, the reported model or the harness's default model.
+    pub fn effective_effort(
+        &self,
+        selection: &HarnessSelection,
+        reported: Option<&str>,
+    ) -> Option<String> {
+        selection.effort.clone().or_else(|| {
+            let model = match selection.model.as_deref() {
+                Some(id) => self.model(Some(id)),
+                None => reported
+                    .and_then(|id| self.model(Some(id)))
+                    .or_else(|| self.model(None)),
+            };
+            model.and_then(|m| m.default_effort.clone())
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,5 +337,50 @@ mod tests {
                 .contains("Choose which")
         );
         assert_eq!(resolve_skills(&parts, &catalog).unwrap(), parts);
+    }
+    #[test]
+    fn models_resolve_by_alias_concrete_id_or_harness_default() {
+        let catalog = HarnessCatalog {
+            models: vec![
+                HarnessModel {
+                    id: "opus".into(),
+                    efforts: vec!["low".into(), "medium".into(), "high".into()],
+                    default_effort: Some("medium".into()),
+                    default: true,
+                    resolved: Some("claude-opus-5-5".into()),
+                    ..Default::default()
+                },
+                HarnessModel {
+                    id: "haiku".into(),
+                    default_effort: Some("low".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(catalog.model(Some("claude-opus-5-5")).unwrap().id, "opus");
+        assert_eq!(catalog.model(None).unwrap().id, "opus");
+        assert!(catalog.model(Some("unknown")).is_none());
+        let selection = |model: Option<&str>, effort: Option<&str>| HarnessSelection {
+            model: model.map(str::to_owned),
+            effort: effort.map(str::to_owned),
+            ..Default::default()
+        };
+        assert_eq!(
+            catalog.effective_effort(&selection(Some("haiku"), None), None),
+            Some("low".into())
+        );
+        assert_eq!(
+            catalog.effective_effort(&selection(None, None), None),
+            Some("medium".into())
+        );
+        assert_eq!(
+            catalog.effective_effort(&selection(None, None), Some("haiku")),
+            Some("low".into())
+        );
+        assert_eq!(
+            catalog.effective_effort(&selection(Some("haiku"), Some("high")), None),
+            Some("high".into())
+        );
     }
 }

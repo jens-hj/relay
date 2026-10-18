@@ -1137,6 +1137,7 @@ fn harness_completion_inserts_durable_skills_and_opens_native_model_flow() {
                     efforts: vec!["high".into()],
                     default_effort: None,
                     fast: false,
+                    ..Default::default()
                 }],
                 ..Default::default()
             }),
@@ -1220,6 +1221,7 @@ fn harness_command_panel_is_attached_bounded_and_escape_restores_draft_focus() {
                 efforts: vec!["low".into(), "high".into()],
                 default_effort: Some("low".into()),
                 fast: false,
+                ..Default::default()
             })
             .collect();
         mounted
@@ -8453,6 +8455,7 @@ fn ledger_effort_steps_send_the_session_harness_selection() {
                     efforts: vec!["low".into(), "medium".into(), "high".into(), "max".into()],
                     default_effort: Some("medium".into()),
                     fast: false,
+                    ..Default::default()
                 }],
                 ..Default::default()
             }),
@@ -9643,6 +9646,7 @@ fn agent_configuration_requires_and_persists_an_explicit_harness_model() {
         efforts: vec!["medium".into()],
         default_effort: Some("medium".into()),
         fast: false,
+        ..Default::default()
     };
     mounted.model.catalogs.update(|catalogs| {
         catalogs.insert(
@@ -10002,6 +10006,7 @@ fn effort_selection_feedback_tracks_the_command_response_and_chat() {
                         efforts: vec!["low".into(), "medium".into(), "high".into()],
                         default_effort: Some("medium".into()),
                         fast: false,
+                        ..Default::default()
                     }],
                     ..Default::default()
                 }),
@@ -10330,6 +10335,7 @@ fn prelaunch_model_and_effort_render_before_any_message_is_sent() {
                     efforts: vec!["low".into(), "medium".into(), "high".into()],
                     default_effort: Some("low".into()),
                     fast: false,
+                    ..Default::default()
                 }],
                 ..Default::default()
             }),

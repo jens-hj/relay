@@ -572,6 +572,8 @@ fn add_models(catalog: &mut HarnessCatalog, data: &Value, harness: Harness) {
     } else {
         "models"
     };
+    // Claude lists its default as a "default" entry naming the model it runs.
+    let mut default_model = None;
     for model in data[field].as_array().into_iter().flatten() {
         let Some(id) = model[if harness == Harness::Codex {
             "id"
@@ -583,9 +585,10 @@ fn add_models(catalog: &mut HarnessCatalog, data: &Value, harness: Harness) {
         };
         let explicit_id = model["model"].as_str().unwrap_or(id);
         if explicit_id.eq_ignore_ascii_case("default") {
+            default_model = model["resolvedModel"].as_str();
             continue;
         }
-        let efforts = if harness == Harness::Codex {
+        let efforts: Vec<String> = if harness == Harness::Codex {
             model["supportedReasoningEfforts"]
                 .as_array()
                 .into_iter()
@@ -602,17 +605,51 @@ fn add_models(catalog: &mut HarnessCatalog, data: &Value, harness: Harness) {
                 .map(str::to_owned)
                 .collect()
         };
+        let default_effort = model["defaultReasoningEffort"]
+            .as_str()
+            .or_else(|| model["defaultEffortLevel"].as_str())
+            .map(str::to_owned)
+            .or_else(|| claude_default_effort(harness, &efforts));
         catalog.models.push(HarnessModel {
             id: explicit_id.into(),
             name: model["displayName"].as_str().unwrap_or(id).into(),
             efforts,
-            default_effort: model["defaultReasoningEffort"].as_str().map(str::to_owned),
+            default_effort,
             fast: model["supportsFastMode"].as_bool().unwrap_or(false)
                 || model["serviceTiers"]
                     .as_array()
                     .is_some_and(|tiers| tiers.iter().any(|t| t["id"] == "fast")),
+            default: model["isDefault"].as_bool().unwrap_or(false),
+            resolved: model["resolvedModel"]
+                .as_str()
+                .filter(|resolved| *resolved != explicit_id)
+                .map(str::to_owned),
         });
     }
+    if let Some(resolved) = default_model
+        && !catalog.models.iter().any(|m| m.default)
+        && let Some(model) = catalog
+            .models
+            .iter_mut()
+            .find(|m| m.resolved.as_deref() == Some(resolved) || m.id == resolved)
+    {
+        model.default = true;
+    }
+}
+
+/// Claude Code reports which efforts a model accepts but not the one it
+/// defaults to, which varies by account. Relay applies this level explicitly
+/// when none is selected, so the stored effort is the one the turn runs with.
+fn claude_default_effort(harness: Harness, efforts: &[String]) -> Option<String> {
+    (harness == Harness::ClaudeCode)
+        .then(|| {
+            efforts
+                .iter()
+                .find(|e| *e == "medium")
+                .or_else(|| efforts.first())
+                .cloned()
+        })
+        .flatten()
 }
 
 fn is_control(name: &str) -> bool {
@@ -800,28 +837,46 @@ pub(super) fn validate_selection(
     catalog: &HarnessCatalog,
     selection: &HarnessSelection,
 ) -> Result<(), Error> {
-    if let Some(id) = &selection.model {
-        let model = catalog
-            .models
-            .iter()
-            .find(|m| &m.id == id)
-            .ok_or_else(|| Error::invalid("Model is no longer available"))?;
-        if selection
-            .effort
-            .as_ref()
-            .is_some_and(|e| !model.efforts.contains(e))
-        {
-            return Err(Error::invalid("Effort is not supported by this model"));
+    let Some(id) = &selection.model else {
+        // An effort without a model applies to whichever model the harness
+        // runs, which may differ from the catalog default.
+        if selection.fast {
+            return Err(Error::invalid(
+                "Choose a model before setting effort or fast mode",
+            ));
         }
-        if selection.fast && !model.fast {
-            return Err(Error::invalid("Fast mode is not supported by this model"));
-        }
-    } else if selection.effort.is_some() || selection.fast {
-        return Err(Error::invalid(
-            "Choose a model before setting effort or fast mode",
-        ));
+        return Ok(());
+    };
+    let model = catalog
+        .model(Some(id))
+        .ok_or_else(|| Error::invalid("Model is no longer available"))?;
+    if selection
+        .effort
+        .as_ref()
+        .is_some_and(|e| !model.efforts.contains(e))
+    {
+        return Err(Error::invalid("Effort is not supported by this model"));
+    }
+    if selection.fast && !model.fast {
+        return Err(Error::invalid("Fast mode is not supported by this model"));
     }
     Ok(())
+}
+
+/// A catalog already discovered for `session`, else for any session of the
+/// same harness: a model's efforts and defaults do not depend on the session.
+pub(super) fn cached(
+    workspace: &Workspace,
+    session: &str,
+    harness: Harness,
+) -> Option<HarnessCatalog> {
+    let catalogs = workspace.catalogs.lock().ok()?;
+    let mut matching: Vec<_> = catalogs
+        .values()
+        .filter(|(_, c)| c.harness == harness)
+        .collect();
+    matching.sort_by_key(|(saved_at, c)| (c.session_id == session, *saved_at));
+    matching.last().map(|(_, c)| c.clone())
 }
 
 pub(super) fn reserve_fork(snapshot: &mut Snapshot, id: &str) -> Result<(), Error> {
@@ -1304,5 +1359,83 @@ mod model_tests {
                 .collect::<Vec<_>>(),
             vec!["claude-opus-test", "claude-haiku-test"]
         );
+    }
+
+    #[test]
+    fn claude_catalog_marks_its_default_model_and_names_a_default_effort() {
+        let mut catalog = HarnessCatalog::default();
+        add_models(
+            &mut catalog,
+            &json!({"models": [
+                {"value": "default", "resolvedModel": "claude-opus-5-5", "displayName": "Default (recommended)",
+                 "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+                {"value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5",
+                 "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+                {"value": "claude-haiku-4-5", "resolvedModel": "claude-haiku-4-5", "displayName": "Haiku 4.5"},
+                {"value": "custom", "displayName": "Custom", "supportedEffortLevels": ["high", "max"]}
+            ]}),
+            Harness::ClaudeCode,
+        );
+        let opus = catalog.model(None).unwrap();
+        assert_eq!(opus.id, "opus");
+        assert_eq!(opus.resolved.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(opus.default_effort.as_deref(), Some("medium"));
+        assert_eq!(catalog.model(Some("claude-opus-5-5")).unwrap().id, "opus");
+        // A model without efforts has no default, and the resolved ID equal
+        // to its own is not recorded.
+        let haiku = catalog.model(Some("claude-haiku-4-5")).unwrap();
+        assert_eq!(
+            (haiku.default_effort.as_deref(), haiku.resolved.as_deref()),
+            (None, None)
+        );
+        assert_eq!(
+            catalog
+                .model(Some("custom"))
+                .unwrap()
+                .default_effort
+                .as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn codex_catalog_keeps_its_default_model_and_reported_default_effort() {
+        let mut catalog = HarnessCatalog::default();
+        add_models(
+            &mut catalog,
+            &json!({"data": [
+                {"id": "gpt-a", "model": "gpt-a", "isDefault": false, "defaultReasoningEffort": "medium",
+                 "supportedReasoningEfforts": [{"reasoningEffort": "low"}, {"reasoningEffort": "medium"}]},
+                {"id": "gpt-b", "model": "gpt-b", "isDefault": true, "defaultReasoningEffort": "low",
+                 "supportedReasoningEfforts": [{"reasoningEffort": "low"}, {"reasoningEffort": "high"}]}
+            ]}),
+            Harness::Codex,
+        );
+        let default = catalog.model(None).unwrap();
+        assert_eq!(default.id, "gpt-b");
+        assert_eq!(default.default_effort.as_deref(), Some("low"));
+        assert_eq!(
+            catalog
+                .model(Some("gpt-a"))
+                .unwrap()
+                .default_effort
+                .as_deref(),
+            Some("medium")
+        );
+    }
+
+    #[test]
+    fn effort_without_a_model_is_left_to_the_harness_but_fast_mode_needs_one() {
+        let catalog = HarnessCatalog::default();
+        let effort = HarnessSelection {
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        assert!(validate_selection(&catalog, &effort).is_ok());
+        let fast = HarnessSelection {
+            fast: true,
+            ..Default::default()
+        };
+        assert!(validate_selection(&catalog, &fast).is_err());
     }
 }

@@ -1,4 +1,4 @@
-use super::identity::{effort, model_identity};
+use super::identity::{effort, model_identity, stored_effort};
 use super::tools::ui_kind;
 use super::*;
 use relay_core::*;
@@ -298,6 +298,7 @@ fn catalog_model(efforts: &[&str]) -> HarnessModel {
         efforts: efforts.iter().map(|e| e.to_string()).collect(),
         default_effort: Some("medium".into()),
         fast: false,
+        ..Default::default()
     }
 }
 
@@ -574,6 +575,7 @@ fn session_model_reads_reported_model_and_catalog_effort() {
                 efforts: vec!["low".into(), "medium".into(), "high".into(), "max".into()],
                 default_effort: None,
                 fast: false,
+                ..Default::default()
             }],
             ..Default::default()
         }),
@@ -654,6 +656,7 @@ fn selected_model_and_effort_override_the_last_reported_model_together() {
         ],
         default_effort: Some("low".into()),
         fast: false,
+        ..Default::default()
     };
     let opus = HarnessModel {
         id: "claude-opus-5-5".into(),
@@ -661,6 +664,7 @@ fn selected_model_and_effort_override_the_last_reported_model_together() {
         efforts: vec!["medium".into(), "high".into()],
         default_effort: Some("medium".into()),
         fast: false,
+        ..Default::default()
     };
     let catalogs = BTreeMap::from([(
         session.id.clone(),
@@ -688,6 +692,64 @@ fn selected_model_and_effort_override_the_last_reported_model_together() {
         effort.is_none(),
         "never borrow steps from the previously reported model"
     );
+    // Track-only surfaces place the stored effort on the common scale instead.
+    let stored = stored_effort(&session.selection).unwrap();
+    assert_eq!((stored.levels, stored.tiers), (4, 1));
+    assert_eq!(stored.step_name(stored.current), "low");
+}
+
+#[test]
+fn sessions_without_a_selected_effort_show_their_model_default() {
+    let opus = HarnessModel {
+        id: "opus".into(),
+        name: "Opus 5.5".into(),
+        efforts: ["low", "medium", "high", "xhigh", "max"]
+            .map(String::from)
+            .to_vec(),
+        default_effort: Some("medium".into()),
+        default: true,
+        resolved: Some("claude-opus-5-5".into()),
+        ..Default::default()
+    };
+    let catalogs = BTreeMap::from([(
+        "other-session".to_string(),
+        Ok(HarnessCatalog {
+            harness: relay_core::Harness::ClaudeCode,
+            models: vec![opus],
+            ..Default::default()
+        }),
+    )]);
+    let claude = Some(relay_core::Harness::ClaudeCode);
+    // A spawned child inherits the concrete model its parent reported.
+    let inherited = HarnessSelection {
+        model: Some("claude-opus-5-5".into()),
+        ..Default::default()
+    };
+    // A root session follows the harness default model.
+    let unselected = HarnessSelection::default();
+    for selection in [&inherited, &unselected] {
+        let (identity, effort) = selection_model(selection, None, "child", claude, &catalogs);
+        assert_eq!(identity.unwrap().short_name(), "Opus 5.5");
+        let effort = effort.expect("the default effort is shown");
+        assert_eq!(effort.step_name(effort.current), "medium");
+    }
+    // Without any loaded catalog, tree rows still show a stored effort.
+    let stored = HarnessSelection {
+        model: Some("claude-opus-5-5".into()),
+        effort: Some("xhigh".into()),
+        ..Default::default()
+    };
+    let effort = stored_effort(&stored).unwrap();
+    assert_eq!(effort.step_name(effort.current), "xhigh");
+    let ultra = HarnessSelection {
+        effort: Some("ultra".into()),
+        ..stored
+    };
+    let effort = stored_effort(&ultra).unwrap();
+    assert_eq!(
+        (effort.tiers, effort.step_name(effort.current)),
+        (2, "ultra")
+    );
 }
 
 #[test]
@@ -707,6 +769,7 @@ fn claude_alias_versions_come_from_catalog_names_without_overriding_explicit_ver
                     efforts: vec![],
                     default_effort: None,
                     fast: false,
+                    ..Default::default()
                 }],
                 ..Default::default()
             }),
@@ -767,4 +830,25 @@ fn claude_alias_versions_come_from_catalog_names_without_overriding_explicit_ver
         .version,
         "5.5"
     );
+}
+
+#[test]
+fn tree_rows_show_a_stored_effort_before_any_catalog_loads() {
+    let mut snapshot = demo();
+    for session in &mut snapshot.sessions {
+        session.selection.effort = Some("high".into());
+    }
+    fn all(nodes: &[AgentNode]) -> Vec<&AgentNode> {
+        nodes
+            .iter()
+            .flat_map(|n| std::iter::once(n).chain(all(&n.children)))
+            .collect()
+    }
+    let roots = forest(&snapshot);
+    let rows = all(&roots);
+    assert!(!rows.is_empty());
+    for row in rows.into_iter().filter(|r| !r.id.starts_with("config:")) {
+        let effort = row.effort.expect("every session row shows its effort");
+        assert_eq!(effort.step_name(effort.current), "high", "{}", row.name);
+    }
 }

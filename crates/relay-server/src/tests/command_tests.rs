@@ -197,6 +197,60 @@ async fn codex_discovery_skills_settings_and_compaction_use_native_protocol() {
 }
 
 #[tokio::test]
+async fn turns_store_and_run_the_default_effort_when_none_is_selected() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, id, capture) = setup(dir.path()).await;
+    let efforts = || -> Vec<Value> {
+        std::fs::read_to_string(&capture)
+            .unwrap()
+            .lines()
+            .map(|s| serde_json::from_str::<Value>(s).unwrap())
+            .filter(|v| v["method"] == "turn/start")
+            .map(|v| v["params"]["effort"].clone())
+            .collect()
+    };
+    // Before any catalog is known, the turn runs at the harness default.
+    assert_eq!(efforts(), vec![Value::Null]);
+    // Any discovered catalog of the harness names the reported model's default.
+    commands::discover(&w, &id, true).await.unwrap();
+    turn(&w, &id, "Continue").await;
+    assert_eq!(efforts().last().unwrap(), "medium");
+    let reopen = || {
+        Store::open(&dir.path().join("db"), AgentProfile::default())
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .selection
+    };
+    assert_eq!(
+        reopen(),
+        HarnessSelection {
+            model: None,
+            effort: Some("medium".into()),
+            ..Default::default()
+        }
+    );
+    // A selected model without an effort runs and stores that model's default.
+    apply(
+        &w,
+        Command::SetHarnessSelection {
+            session_id: id.clone(),
+            selection: HarnessSelection {
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+        },
+    );
+    turn(&w, &id, "Continue again").await;
+    assert_eq!(efforts().last().unwrap(), "medium");
+    assert_eq!(reopen().effort.as_deref(), Some("medium"));
+    assert_eq!(reopen().model.as_deref(), Some("test-model"));
+}
+#[tokio::test]
 async fn clear_resume_and_fork_keep_exact_history_and_independent_files() {
     let dir = tempfile::tempdir().unwrap();
     let (w, id, _) = setup(dir.path()).await;

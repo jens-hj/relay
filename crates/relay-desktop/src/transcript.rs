@@ -489,7 +489,7 @@ pub(crate) fn choose_effort(model: Model, step: u8) {
     let chosen = catalogs
         .get(&id)
         .and_then(|c| c.as_ref().ok())
-        .and_then(|c| c.models.iter().find(|m| Some(&m.id) == model_id.as_ref()));
+        .and_then(|c| c.model(model_id.as_deref()));
     let Some(chosen) = chosen else {
         model.notice.set("Choose a session model first".into());
         return;

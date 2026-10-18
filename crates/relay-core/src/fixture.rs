@@ -773,8 +773,9 @@ pub fn demo_catalog(session_id: &str, harness: Harness) -> HarnessCatalog {
         efforts: efforts.iter().map(|e| e.to_string()).collect(),
         default_effort: Some(default.into()),
         fast: false,
+        ..Default::default()
     };
-    let models = match harness {
+    let mut models = match harness {
         Harness::ClaudeCode => vec![
             model(
                 "claude-opus-4-5",
@@ -810,6 +811,8 @@ pub fn demo_catalog(session_id: &str, harness: Harness) -> HarnessCatalog {
             ),
         ],
     };
+    // The first listed model is the harness default.
+    models[0].default = true;
     HarnessCatalog {
         session_id: session_id.into(),
         harness,

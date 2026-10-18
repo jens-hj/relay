@@ -766,16 +766,12 @@ async fn spawn(
     };
     validate_prompt(&prompt)?;
     // Use any discovered catalog for the requested harness; launch discovers it
-    // again in the child workspace before executing the first turn.
-    if child.selection.model.is_some() || child.selection.effort.is_some() {
-        let catalogs = workspace.catalogs.lock().map_err(Error::internal)?;
-        let catalog = catalogs
-            .values()
-            .map(|(_, c)| c)
-            .find(|c| c.harness == child.worker.as_ref().unwrap().harness);
-        if let Some(catalog) = catalog {
-            commands::validate_selection(catalog, &child.selection)?;
-        }
+    // again in the child workspace before executing the first turn. Without a
+    // requested effort the child shows its model's default from the start.
+    let harness = child.worker.as_ref().unwrap().harness;
+    if let Some(catalog) = commands::cached(workspace, caller, harness) {
+        commands::validate_selection(&catalog, &child.selection)?;
+        child.selection.effort = catalog.effective_effort(&child.selection, None);
     }
     let child_run = uuid::Uuid::new_v4().to_string();
     let parts = vec![Part::text(&prompt)];
@@ -2020,6 +2016,59 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(schema, 20);
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn spawned_children_without_an_effort_take_their_model_default() {
+        let f = Fixture::new(Permission::Allow);
+        let harness = f.workspace.snapshots.borrow().sessions[0]
+            .worker
+            .as_ref()
+            .unwrap()
+            .harness;
+        f.workspace.catalogs.lock().unwrap().insert(
+            "cached".into(),
+            (
+                0,
+                HarnessCatalog {
+                    harness,
+                    models: vec![relay_core::HarnessModel {
+                        id: "fixture-model".into(),
+                        efforts: vec!["low".into(), "medium".into(), "high".into()],
+                        default_effort: Some("medium".into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ),
+        );
+        let defaulted = spawn_child(&f, "Defaulted").await;
+        let chosen = f
+            .call(
+                "spawn_agent",
+                json!({"title":"Chosen","task":"Test","effort":"high"}),
+            )
+            .await
+            .unwrap()["agent"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let selection = |id: &str| {
+            snapshot
+                .sessions
+                .iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .selection
+                .clone()
+        };
+        assert_eq!(selection(&defaulted).effort.as_deref(), Some("medium"));
+        assert_eq!(
+            selection(&defaulted).model.as_deref(),
+            Some("fixture-model")
+        );
+        assert_eq!(selection(&chosen).effort.as_deref(), Some("high"));
         f.finish().await;
     }
     #[tokio::test]

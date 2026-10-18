@@ -1334,14 +1334,24 @@ async fn execute(
     if let Some(catalog) = &catalog {
         crate::commands::validate_selection(catalog, &effective_selection)?;
     }
-    if effective_selection.effort.is_none()
-        && let Some(catalog) = &catalog
-        && let Some(model) = catalog
-            .models
-            .iter()
-            .find(|m| Some(&m.id) == effective_selection.model.as_ref())
-    {
-        effective_selection.effort = model.default_effort.clone();
+    // Run every turn at an explicit effort and store it, so the session
+    // shows the level the harness runs rather than an unnamed default.
+    if fork.is_none() && effective_selection.effort.is_none() {
+        let resolved = catalog
+            .clone()
+            .or_else(|| crate::commands::cached(workspace, session_id, worker.harness))
+            .and_then(|c| c.effective_effort(&effective_selection, worker.model.as_deref()));
+        if let Some(effort) = resolved {
+            effective_selection.effort = Some(effort);
+            let stored = effective_selection.clone();
+            workspace.update_run(session_id, run_id, |s| {
+                let session = s.sessions.iter_mut().find(|s| s.id == session_id).unwrap();
+                if session.selection.effort.is_none() && session.selection.model == stored.model {
+                    session.selection.effort = stored.effort.clone();
+                }
+                Ok(())
+            })?;
+        }
     }
     let (_directory, mut input) =
         crate::app_server::prepare(workspace, &execution_prompt, &parts).await?;

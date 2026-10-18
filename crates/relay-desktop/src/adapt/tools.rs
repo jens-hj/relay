@@ -1,6 +1,6 @@
 //! Tool calls, fingerprints and approval blocks.
 
-use super::identity::{harness, session_model};
+use super::identity::{harness, session_model, stored_effort};
 use super::tree::{ancestor_path, session_status};
 use relay_core::{
     HarnessCatalog, HistoryState, Message, Snapshot, ToolCall, ToolDetail as Measured,
@@ -265,7 +265,10 @@ fn detail(
                 .as_ref()
                 .and_then(|id| snapshot.sessions.iter().find(|s| &s.id == id));
             let (model, effort) = child
-                .map(|child| session_model(child, catalogs))
+                .map(|child| {
+                    let (model, effort) = session_model(child, catalogs);
+                    (model, effort.or_else(|| stored_effort(&child.selection)))
+                })
                 .unwrap_or_default();
             let grant = child.and_then(|child| child.spawn.as_ref());
             ToolDetail::Spawn {
