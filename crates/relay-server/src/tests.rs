@@ -1261,7 +1261,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            20
+            21
         );
         drop(store);
         let mut reopened = Store::open(&db, AgentProfile::default()).unwrap();
@@ -1355,7 +1355,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 21)
+        .pragma_update(None, "user_version", 22)
         .unwrap();
     drop(store);
     let error = Store::open(&db, AgentProfile::default()).err().unwrap();
@@ -1365,7 +1365,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        21
+        22
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -3553,6 +3553,103 @@ fn revision(w: &Workspace) -> u64 {
 }
 
 #[test]
+fn schema_twenty_one_adds_default_worker_model_policies_and_persists_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("worker-models.sqlite");
+    let defaults = AgentProfile::default();
+    let store = Store::open(&path, defaults.clone()).unwrap();
+    let original = store.snapshot().unwrap();
+    // A schema 20 snapshot has no worker_models in any profile.
+    let mut json = serde_json::to_value(&original).unwrap();
+    for project in json["projects"].as_array_mut().unwrap() {
+        project["defaults"]
+            .as_object_mut()
+            .unwrap()
+            .remove("worker_models");
+    }
+    assert!(!json.to_string().contains("worker_models"));
+    store
+        .connection
+        .execute(
+            "UPDATE workspace SET snapshot=?1 WHERE id=1",
+            [serde_json::to_string(&json).unwrap()],
+        )
+        .unwrap();
+    store
+        .connection
+        .pragma_update(None, "user_version", 20)
+        .unwrap();
+    drop(store);
+    let mut store = Store::open(&path, defaults.clone()).unwrap();
+    let schema: u32 = store
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema, 21);
+    let stored: String = store
+        .connection
+        .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(stored.contains("\"worker_models\""));
+    let upgraded = store.snapshot().unwrap();
+    assert_eq!(upgraded, original);
+    assert!(
+        upgraded
+            .projects
+            .iter()
+            .all(|p| p.defaults.worker_models == WorkerModelPolicy::default())
+    );
+    let mut profile = upgraded.projects[0].defaults.clone();
+    profile.worker_models = WorkerModelPolicy::DelegatorChooses {
+        allowed_models: vec![ModelChoice {
+            harness: Harness::ClaudeCode,
+            model: "claude-sonnet".into(),
+        }],
+        max_effort: Some("high".into()),
+        model_capability: true,
+        available_usage: true,
+    };
+    store
+        .apply(
+            env(
+                upgraded.revision,
+                Command::UpdateProjectDefaults {
+                    project_id: upgraded.projects[0].id.clone(),
+                    profile: profile.clone(),
+                },
+            ),
+            &config(),
+        )
+        .unwrap();
+    let mut invalid = profile.clone();
+    invalid.worker_models = WorkerModelPolicy::Fixed {
+        harness: Harness::Codex,
+        model: String::new(),
+        effort: None,
+    };
+    let revision = store.snapshot().unwrap().revision;
+    assert!(
+        store
+            .apply(
+                env(
+                    revision,
+                    Command::UpdateProjectDefaults {
+                        project_id: upgraded.projects[0].id.clone(),
+                        profile: invalid,
+                    },
+                ),
+                &config(),
+            )
+            .is_err()
+    );
+    drop(store);
+    let reopened = Store::open(&path, defaults).unwrap().snapshot().unwrap();
+    assert_eq!(reopened.projects[0].defaults, profile);
+}
+
+#[test]
 fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("archive.sqlite");
@@ -3619,7 +3716,7 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 20);
+    assert_eq!(schema, 21);
 }
 
 #[test]
@@ -3670,7 +3767,7 @@ fn schema_nineteen_snapshots_load_prompt_senders_as_the_user() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 20);
+    assert_eq!(schema, 21);
 }
 
 #[test]

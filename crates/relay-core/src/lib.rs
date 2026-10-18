@@ -18,8 +18,10 @@ mod profile;
 mod tree;
 pub use tree::*;
 mod usage;
+mod worker_model;
 pub use conversation::*;
 pub use usage::*;
+pub use worker_model::*;
 
 pub use fixture::{demo_catalog, demo_orchestration, demo_snapshot, demo_usage};
 pub use profile::*;
@@ -605,6 +607,19 @@ impl Snapshot {
             }
         }
         Ok(())
+    }
+
+    /// A child's explicit profile inherits its parent's worker model policy
+    /// and may only narrow it.
+    pub fn validate_child_profile(
+        &self,
+        parent: &Session,
+        profile: &AgentProfile,
+    ) -> Result<(), String> {
+        self.validate_profile(&parent.project_id, profile)?;
+        profile
+            .worker_models
+            .narrows(&self.session_profile(parent)?.worker_models)
     }
 
     pub fn session_branch_ids(&self, session_id: &str) -> std::collections::HashSet<String> {

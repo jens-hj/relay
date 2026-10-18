@@ -131,9 +131,191 @@ impl Snapshot {
     }
 }
 
+/// One harness's remaining quota as of a moment, for delegators weighing
+/// available usage. Built from the same windows and ledger as the usage panel.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UsageRemaining {
+    pub harness: Harness,
+    /// Percent left in each reported window that has not reset since.
+    pub five_hour_left_percent: Option<u8>,
+    pub weekly_left_percent: Option<u8>,
+    /// Unix seconds.
+    pub five_hour_resets_at: Option<u64>,
+    pub weekly_resets_at: Option<u64>,
+    /// Tokens per model in the last week, heaviest first.
+    pub models_this_week: Vec<ModelTokens>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ModelTokens {
+    pub model: String,
+    pub tokens: u64,
+}
+
+const WEEK_SECS: u64 = 7 * 24 * 60 * 60;
+
+impl UsageRemaining {
+    /// "Codex: 62% of the 5-hour window left (resets in 2h 05m), …".
+    pub fn describe(&self, now: u64) -> String {
+        let window = |name: &str, left: Option<u8>, resets: Option<u64>| match left {
+            None => format!("{name} window not reported"),
+            Some(left) => match resets {
+                Some(at) => format!(
+                    "{left}% of the {name} window left (resets in {})",
+                    duration(at.saturating_sub(now))
+                ),
+                None => format!("{left}% of the {name} window left"),
+            },
+        };
+        let mut text = format!(
+            "{}: {}, {}",
+            self.harness.label(),
+            window(
+                "5-hour",
+                self.five_hour_left_percent,
+                self.five_hour_resets_at
+            ),
+            window("weekly", self.weekly_left_percent, self.weekly_resets_at),
+        );
+        if !self.models_this_week.is_empty() {
+            text.push_str("; tokens this week: ");
+            text.push_str(
+                &self
+                    .models_this_week
+                    .iter()
+                    .map(|m| format!("{} {}", m.model, m.tokens))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        text
+    }
+}
+
+/// "2d 4h", "3h 05m" or "12m".
+fn duration(seconds: u64) -> String {
+    let (days, hours, minutes) = (seconds / 86_400, seconds / 3600 % 24, seconds / 60 % 60);
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes:02}m")
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+impl Snapshot {
+    /// Remaining usage of each harness in `harnesses`, as of `now` (Unix seconds).
+    pub fn usage_remaining(&self, harnesses: &[Harness], now: u64) -> Vec<UsageRemaining> {
+        harnesses
+            .iter()
+            .map(|&harness| {
+                let current = |window: UsageWindow| {
+                    self.usage_limits
+                        .iter()
+                        .find(|l| l.harness == harness && l.window == window)
+                        .filter(|l| l.resets_at.is_none_or(|at| at > now))
+                };
+                let left = |limit: Option<&UsageLimit>| {
+                    limit.map(|l| (100.0 - l.used_percent).round().clamp(0.0, 100.0) as u8)
+                };
+                let (five, week) = (current(UsageWindow::FiveHour), current(UsageWindow::Weekly));
+                let mut models: Vec<ModelTokens> = vec![];
+                for entry in self
+                    .usage_ledger
+                    .iter()
+                    .filter(|e| e.harness == harness && e.completed_at + WEEK_SECS >= now)
+                {
+                    let Some(model) = &entry.model else { continue };
+                    let tokens = entry.input_tokens + entry.output_tokens;
+                    match models.iter_mut().find(|m| &m.model == model) {
+                        Some(existing) => existing.tokens += tokens,
+                        None => models.push(ModelTokens {
+                            model: model.clone(),
+                            tokens,
+                        }),
+                    }
+                }
+                models.sort_by(|a, b| b.tokens.cmp(&a.tokens).then(a.model.cmp(&b.model)));
+                UsageRemaining {
+                    harness,
+                    five_hour_left_percent: left(five),
+                    weekly_left_percent: left(week),
+                    five_hour_resets_at: five.and_then(|l| l.resets_at),
+                    weekly_resets_at: week.and_then(|l| l.resets_at),
+                    models_this_week: models,
+                }
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remaining_usage_reports_current_windows_and_weekly_model_tokens() {
+        let mut snapshot = Snapshot::default();
+        let now = 1_000_000;
+        snapshot.record_usage_limit(UsageLimit::new(
+            Harness::Codex,
+            UsageWindow::FiveHour,
+            38.0,
+            300,
+            Some(now + 2 * 3600 + 5 * 60),
+            now - 10,
+        ));
+        // A window that reset since it was observed no longer describes usage.
+        snapshot.record_usage_limit(UsageLimit::new(
+            Harness::Codex,
+            UsageWindow::Weekly,
+            90.0,
+            10080,
+            Some(now - 1),
+            now - 100,
+        ));
+        for (id, model, tokens, at) in [
+            ("a", "gpt-big", 700, now - 5),
+            ("b", "gpt-small", 100, now - 5),
+            ("c", "gpt-big", 300, now - 6),
+            ("d", "gpt-small", 9_000, now - WEEK_SECS - 1),
+        ] {
+            snapshot.record_usage(
+                UsageEntry {
+                    model: Some(model.into()),
+                    output_tokens: tokens,
+                    input_tokens: 0,
+                    ..entry(id, at)
+                },
+                now,
+            );
+        }
+        let remaining = snapshot.usage_remaining(&[Harness::Codex, Harness::ClaudeCode], now);
+        assert_eq!(remaining[0].five_hour_left_percent, Some(62));
+        assert_eq!(remaining[0].weekly_left_percent, None);
+        assert_eq!(
+            remaining[0].models_this_week,
+            vec![
+                ModelTokens {
+                    model: "gpt-big".into(),
+                    tokens: 1000
+                },
+                ModelTokens {
+                    model: "gpt-small".into(),
+                    tokens: 100
+                },
+            ]
+        );
+        assert_eq!(
+            remaining[0].describe(now),
+            "Codex: 62% of the 5-hour window left (resets in 2h 05m), weekly window not reported; tokens this week: gpt-big 1000, gpt-small 100"
+        );
+        assert_eq!(
+            remaining[1].describe(now),
+            "Claude Code: 5-hour window not reported, weekly window not reported"
+        );
+    }
 
     fn entry(id: &str, completed_at: u64) -> UsageEntry {
         UsageEntry {

@@ -1753,6 +1753,7 @@ impl Model {
                 "completion" => overrides.completion = Some(profile.completion.clone()),
                 "max_workers" => overrides.max_workers = Some(profile.max_workers),
                 "permissions" => overrides.permissions = Some(profile.permissions.clone()),
+                "worker_models" => overrides.worker_models = Some(profile.worker_models.clone()),
                 _ => unreachable!(),
             });
         }
@@ -1771,6 +1772,7 @@ impl Model {
             "completion" => o.completion = None,
             "max_workers" => o.max_workers = None,
             "permissions" => o.permissions = None,
+            "worker_models" => o.worker_models = None,
             _ => unreachable!(),
         });
         self.editor_profile.set(
@@ -1793,6 +1795,7 @@ impl Model {
             "completion" => overrides.completion.is_some(),
             "max_workers" => overrides.max_workers.is_some(),
             "permissions" => overrides.permissions.is_some(),
+            "worker_models" => overrides.worker_models.is_some(),
             _ => false,
         };
         if overridden {

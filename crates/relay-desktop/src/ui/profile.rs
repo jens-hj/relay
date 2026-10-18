@@ -14,7 +14,7 @@ use relay_ui::surfaces::{
 use relay_ui::tokens::Signal;
 
 /// Profile fields an agent can override, each as a whole.
-const OVERRIDE_FIELDS: usize = 8;
+const OVERRIDE_FIELDS: usize = 9;
 
 #[component]
 fn AgentProfileSelector(model: Model) -> Element {
@@ -156,6 +156,7 @@ pub(crate) fn overridden_fields(overrides: &ProfileOverrides) -> Vec<&'static st
         ("Responsibilities", overrides.responsibilities.is_some()),
         ("Completion", overrides.completion.is_some()),
         ("Workers", overrides.max_workers.is_some()),
+        ("Worker Model", overrides.worker_models.is_some()),
         ("Permissions", overrides.permissions.is_some()),
     ]
     .into_iter()
@@ -501,7 +502,7 @@ fn field_module(
     let end = field_origin(model, title, field, extra);
     let module = view! {
         Module title:(title.to_string())
-            icon:(Some(match field { "harness" => relay_ui::icons::harness.codex, "execution" => relay_ui::icons::call.approval, "scope" => relay_ui::icons::section.scope, "max_workers" => relay_ui::icons::call.spawn, _ => relay_ui::icons::section.permissions }))
+            icon:(Some(match field { "harness" => relay_ui::icons::harness.codex, "execution" => relay_ui::icons::call.approval, "scope" => relay_ui::icons::section.scope, "max_workers" | "worker_models" => relay_ui::icons::call.spawn, _ => relay_ui::icons::section.permissions }))
             head-end:(Some(end)) head-label:(Some(format!("{title} field header")))
     };
     module.adopt(&body);
@@ -849,11 +850,536 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
             }
         },
     );
+    let worker_model = field_module(
+        model,
+        "Worker Model",
+        "worker_models",
+        None,
+        view! {
+            WorkerModelControls model:(model)
+        },
+    );
     view! {
         col height:min-content gap:0px {
-            { for module in [&harness, &model_selection, &approval, &scope, &workers] { parent.adopt(module); } }
+            { for module in [&harness, &model_selection, &approval, &scope, &workers, &worker_model] { parent.adopt(module); } }
         }
     }
+}
+
+const WORKER_MODES: [&str; 2] = ["Delegator Chooses", "Fixed"];
+
+/// Effort caps offered when no other cap is set, lowest first.
+const EFFORT_CAPS: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+fn effort_title(effort: &str) -> String {
+    match effort {
+        "xhigh" => "XHigh".into(),
+        _ => {
+            let mut chars = effort.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// The profile catalog of one harness: loading (none), failed, or loaded.
+fn profile_catalog(model: Model, harness: Harness) -> Option<Result<HarnessCatalog, String>> {
+    let key = format!("profile:{}:{harness:?}", model.project.get());
+    model.catalogs.get().get(&key).cloned()
+}
+
+fn catalog_note(result: &Option<Result<HarnessCatalog, String>>) -> String {
+    match result {
+        None => "Loading models…".into(),
+        Some(Err(error)) => error.clone(),
+        Some(Ok(_)) => "No models available".into(),
+    }
+}
+
+/// A checkbox cell, selected while `on`.
+fn checkbox_cell(
+    label: String,
+    title: &'static str,
+    on: Derived<bool>,
+    toggle: impl Fn() + 'static,
+) -> Element {
+    let cell = view! {
+        CellButton label:(label) selected:(on) on-press:(press(toggle)) start:true {
+            Label text:(title) role:(TextRole::Label) weight:500
+        }
+    };
+    cell.role(mosaic::widgets::Role::Checkbox);
+    let semantic = cell.clone();
+    let effect = Effect::new(move || {
+        semantic.toggled(on.get());
+    });
+    cell.__hot_on_remove(move || effect.dispose());
+    cell
+}
+
+/// The Worker Model module: the mode, then either the fixed harness, model
+/// and effort, or the allowed models, effort cap and selection considerations.
+#[component]
+fn WorkerModelControls(model: Model) -> Element {
+    // Model choices span every harness, so both catalogs are requested.
+    let requested = State::new(std::collections::BTreeSet::<String>::new());
+    Effect::new(move || {
+        let project = model.project.get();
+        for harness in Harness::ALL {
+            let key = format!("profile:{project}:{harness:?}");
+            if model.connected.get()
+                && !model.catalogs.get().contains_key(&key)
+                && !requested.get().contains(&key)
+                && let Some(sender) = model.buffer_requests.get()
+                && sender
+                    .send(crate::buffer_network::Request::ProfileCatalog {
+                        project: project.clone(),
+                        harness,
+                    })
+                    .is_ok()
+            {
+                requested.update(|keys| {
+                    keys.insert(key);
+                });
+            }
+        }
+    });
+    let fixed = Derived::new(move || model.editor_profile.get().worker_models.is_fixed());
+    let mode_index = Derived::new(move || usize::from(fixed.get()));
+    let choose_mode: relay_ui::surfaces::OnIndex = std::rc::Rc::new(move |slot| {
+        model.modify_profile("worker_models", |p| {
+            if (slot == 1) != p.worker_models.is_fixed() {
+                p.worker_models = if slot == 1 {
+                    WorkerModelPolicy::Fixed {
+                        harness: p.harness,
+                        model: p.model.clone(),
+                        effort: None,
+                    }
+                } else {
+                    WorkerModelPolicy::default()
+                };
+            }
+        });
+    });
+    view! {
+        col height:min-content gap:0px {
+            row height:{px(48.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                Segments name:("Worker Model Mode".to_string())
+                    options:(WORKER_MODES.iter().map(|m| m.to_string()).collect::<Vec<_>>())
+                    selected:(relay_ui::Live::from(mode_index)) on-select:(choose_mode)
+            }
+            if fixed.get() {
+                FixedWorkerModel model:(model)
+            } else {
+                ChosenWorkerModels model:(model)
+            }
+        }
+    }
+}
+
+/// Fixed mode: the one harness, model and effort every worker uses.
+#[component]
+fn FixedWorkerModel(model: Model) -> Element {
+    let fixed = Derived::new(move || match model.editor_profile.get().worker_models {
+        WorkerModelPolicy::Fixed {
+            harness,
+            model,
+            effort,
+        } => Some((harness, model, effort)),
+        _ => None,
+    });
+    let harness_index =
+        Derived::new(move || usize::from(fixed.get().is_some_and(|f| f.0 == Harness::ClaudeCode)));
+    let choose_harness: relay_ui::surfaces::OnIndex = std::rc::Rc::new(move |slot| {
+        let chosen = Harness::ALL[slot];
+        model.modify_profile("worker_models", |p| {
+            if let WorkerModelPolicy::Fixed {
+                harness,
+                model,
+                effort,
+            } = &mut p.worker_models
+                && *harness != chosen
+            {
+                *harness = chosen;
+                model.clear();
+                *effort = None;
+            }
+        });
+    });
+    let open = State::new(false);
+    let content: PopoverContent = std::rc::Rc::new(move || {
+        let host = view! {
+            col width:{px(320.0)}px height:min-content {}
+        };
+        host.switch(
+            move || fixed.get().and_then(|f| profile_catalog(model, f.0)),
+            move |parent, result| {
+                let models = result
+                    .as_ref()
+                    .and_then(|r| r.as_ref().ok())
+                    .map(|c| c.models.clone())
+                    .unwrap_or_default();
+                if models.is_empty() {
+                    let text = catalog_note(result);
+                    parent.adopt(&view! {
+                        row height:min-content pad:{px(14.0)}px {
+                            Label text:(text.clone()) role:(TextRole::Caption) tone:(Tone::Muted)
+                        }
+                    });
+                }
+                for choice in models {
+                    let id = choice.id.clone();
+                    let selected_id = id.clone();
+                    let label = format!("Use worker model {id}");
+                    let selected: relay_ui::Live<bool> = Derived::new(move || {
+                        fixed.get().is_some_and(|f| f.1 == selected_id)
+                    })
+                    .into();
+                    parent.adopt(&view! {
+                        row height:{px(40.0)}px {
+                            CellButton label:(label.clone()) start:true selected:(selected)
+                                on-press:(press(move || {
+                                    model.modify_profile("worker_models", |p| {
+                                        if let WorkerModelPolicy::Fixed { model, effort, .. } = &mut p.worker_models {
+                                            *model = id.clone();
+                                            *effort = None;
+                                        }
+                                    });
+                                    open.set(false);
+                                })) {
+                                Ellipsis text:(choice.name.clone()) role:(TextRole::Label)
+                            }
+                        }
+                    });
+                }
+            },
+        );
+        host
+    });
+    let name = Derived::new(move || {
+        let Some((harness, id, _)) = fixed.get() else {
+            return String::new();
+        };
+        profile_catalog(model, harness)
+            .and_then(Result::ok)
+            .and_then(|c| c.models.into_iter().find(|m| m.id == id))
+            .map(|m| m.name)
+            .unwrap_or_else(|| {
+                if id.is_empty() {
+                    "Choose Worker Model".into()
+                } else {
+                    id
+                }
+            })
+    });
+    let effort = view! {
+        row height:{px(48.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:top) {}
+    };
+    effort.switch(
+        move || {
+            let Some((harness, id, effort)) = fixed.get() else {
+                return vec![];
+            };
+            let mut efforts = profile_catalog(model, harness)
+                .and_then(Result::ok)
+                .and_then(|c| c.models.into_iter().find(|m| m.id == id))
+                .map(|m| m.efforts)
+                .unwrap_or_default();
+            if let Some(effort) = effort
+                && !efforts.contains(&effort)
+            {
+                efforts.push(effort);
+            }
+            efforts
+        },
+        move |parent, efforts| {
+            let options = std::iter::once("Model Default".to_string())
+                .chain(efforts.iter().map(|e| effort_title(e)))
+                .collect::<Vec<_>>();
+            let listed = efforts.clone();
+            let selected = Derived::new(move || match model.editor_profile.get().worker_models {
+                WorkerModelPolicy::Fixed {
+                    effort: Some(effort),
+                    ..
+                } => listed
+                    .iter()
+                    .position(|e| *e == effort)
+                    .map_or(0, |i| i + 1),
+                _ => 0,
+            });
+            let choices = efforts.clone();
+            let choose: relay_ui::surfaces::OnIndex = std::rc::Rc::new(move |slot| {
+                let chosen = slot.checked_sub(1).map(|i| choices[i].clone());
+                model.modify_profile("worker_models", |p| {
+                    if let WorkerModelPolicy::Fixed { effort, .. } = &mut p.worker_models {
+                        *effort = chosen;
+                    }
+                });
+            });
+            parent.adopt(&view! {
+                Segments name:("Fixed Worker Effort".to_string()) options:(options)
+                    selected:(relay_ui::Live::from(selected)) on-select:(choose)
+            });
+        },
+    );
+    view! {
+        col height:min-content gap:0px {
+            row height:{px(48.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                Segments name:("Fixed Worker Harness".to_string())
+                    options:(Harness::ALL.iter().map(|h| h.label().to_string()).collect::<Vec<_>>())
+                    selected:(relay_ui::Live::from(harness_index)) on-select:(choose_harness)
+            }
+            stack height:{px(44.0)}px {
+                CellButton label:"Select fixed worker model" start:true
+                    on-press:(press(move || open.set(!open.get_untracked()))) {
+                    Label text:(name) role:(TextRole::Label)
+                    icon size:{px(12.0)}px tree-chevron-down
+                }
+                Popover open:(open) label:"Worker Models" content:(content)
+            }
+            { parent.adopt(&effort); }
+            row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px)
+                stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
+                Label
+                    text:"Every worker uses this harness, model and effort. Relay rejects spawn requests for anything else."
+                    role:(TextRole::Caption) tone:(Tone::Muted)
+            }
+        }
+    }
+}
+
+/// Delegator Chooses mode: the allowed models across harnesses, the effort
+/// cap and the selection considerations.
+#[component]
+fn ChosenWorkerModels(model: Model) -> Element {
+    let policy = Derived::new(move || model.editor_profile.get().worker_models);
+    let allowed = Derived::new(move || match policy.get() {
+        WorkerModelPolicy::DelegatorChooses { allowed_models, .. } => allowed_models,
+        _ => vec![],
+    });
+    // Every catalog model, then allowed models no loaded catalog lists.
+    let choices = Derived::new(move || {
+        let mut choices: Vec<(ModelChoice, String)> = vec![];
+        for harness in Harness::ALL {
+            if let Some(Ok(catalog)) = profile_catalog(model, harness) {
+                for entry in catalog.models {
+                    choices.push((
+                        ModelChoice {
+                            harness,
+                            model: entry.id,
+                        },
+                        entry.name,
+                    ));
+                }
+            }
+        }
+        for choice in allowed.get() {
+            if !choices.iter().any(|(c, _)| *c == choice) {
+                let name = choice.model.clone();
+                choices.push((choice, name));
+            }
+        }
+        choices
+    });
+    let summary = Derived::new(move || {
+        let count = allowed.get().len();
+        if count == 0 {
+            "No models selected: any model of a connected harness is allowed".to_string()
+        } else {
+            format!("{count} allowed model{}", if count == 1 { "" } else { "s" })
+        }
+    });
+    let loading = Derived::new(move || {
+        let missing = Harness::ALL
+            .iter()
+            .filter(|h| !matches!(profile_catalog(model, **h), Some(Ok(_))))
+            .map(|h| {
+                format!(
+                    "{}: {}",
+                    h.label(),
+                    catalog_note(&profile_catalog(model, *h))
+                )
+            })
+            .collect::<Vec<_>>();
+        missing.join(" · ")
+    });
+    let cap = view! {
+        row height:{px(48.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:(top bottom)) {}
+    };
+    cap.switch(
+        move || match policy.get() {
+            WorkerModelPolicy::DelegatorChooses {
+                max_effort: Some(cap),
+                ..
+            } if !EFFORT_CAPS.contains(&cap.as_str()) => Some(cap),
+            _ => None,
+        },
+        move |parent, extra| {
+            let mut levels: Vec<String> = EFFORT_CAPS.iter().map(|e| e.to_string()).collect();
+            if let Some(extra) = extra {
+                levels.push(extra.clone());
+                levels.sort_by_key(|e| effort_rank(e));
+            }
+            let options = std::iter::once("No Cap".to_string())
+                .chain(levels.iter().map(|e| effort_title(e)))
+                .collect::<Vec<_>>();
+            let listed = levels.clone();
+            let selected = Derived::new(move || match policy.get() {
+                WorkerModelPolicy::DelegatorChooses {
+                    max_effort: Some(cap),
+                    ..
+                } => listed.iter().position(|e| *e == cap).map_or(0, |i| i + 1),
+                _ => 0,
+            });
+            let choose: relay_ui::surfaces::OnIndex = std::rc::Rc::new(move |slot| {
+                let chosen = slot.checked_sub(1).map(|i| levels[i].clone());
+                model.modify_profile("worker_models", |p| {
+                    if let WorkerModelPolicy::DelegatorChooses { max_effort, .. } =
+                        &mut p.worker_models
+                    {
+                        *max_effort = chosen;
+                    }
+                });
+            });
+            parent.adopt(&view! {
+                Segments name:("Maximum Worker Effort".to_string()) options:(options)
+                    selected:(relay_ui::Live::from(selected)) on-select:(choose)
+            });
+        },
+    );
+    let consideration = move |usage: bool| {
+        Derived::new(move || match policy.get() {
+            WorkerModelPolicy::DelegatorChooses {
+                model_capability,
+                available_usage,
+                ..
+            } => {
+                if usage {
+                    available_usage
+                } else {
+                    model_capability
+                }
+            }
+            _ => false,
+        })
+    };
+    let toggle = move |usage: bool| {
+        move || {
+            model.modify_profile("worker_models", |p| {
+                if let WorkerModelPolicy::DelegatorChooses {
+                    model_capability,
+                    available_usage,
+                    ..
+                } = &mut p.worker_models
+                {
+                    let flag = if usage {
+                        available_usage
+                    } else {
+                        model_capability
+                    };
+                    *flag = !*flag;
+                }
+            });
+        }
+    };
+    let capability = checkbox_cell(
+        "Consider model capability".into(),
+        "Model Capability",
+        consideration(false),
+        toggle(false),
+    );
+    let usage = checkbox_cell(
+        "Consider available usage".into(),
+        "Available Usage",
+        consideration(true),
+        toggle(true),
+    );
+    let usage_cell = view! {
+        row height:{px(40.0)}px min-width:0px
+            stroke:(width:{px(1.0)} color:ground.hairline edges:left) {}
+    };
+    usage_cell.adopt(&usage);
+    view! {
+        col height:min-content gap:0px {
+            row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px)
+                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                Ellipsis text:(summary) role:(TextRole::Caption) tone:(Tone::Muted)
+            }
+            grid height:min-content gap:0px
+                cols:{GridTracks::auto_fit(GridTrack::minmax(px(200.0).into(), GridTrack::fr(1.0)))} {
+                for (_, entry) in { choices.get().into_iter().map(|(c, name)| (format!("{:?}:{}", c.harness, c.model), (c, name))).collect::<Vec<_>>() } {
+                    AllowedModelChip model:(model) choice:(entry.0.clone()) name:(entry.1.clone())
+                }
+            }
+            if !loading.get().is_empty() {
+                row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px) {
+                    Ellipsis text:(loading) role:(TextRole::Caption) tone:(Tone::Muted)
+                }
+            }
+            { parent.adopt(&cap); }
+            grid height:min-content gap:0px
+                cols:{GridTracks::new([GridTrack::fr(1.0), GridTrack::fr(1.0)])} {
+                row height:{px(40.0)}px min-width:0px {
+                    { parent.adopt(&capability); }
+                }
+                { parent.adopt(&usage_cell); }
+            }
+            row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px)
+                stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
+                Label
+                    text:"Model Capability matches model strength and effort to task difficulty. Available Usage prefers harnesses and models with more remaining usage. Relay rejects models outside the list and efforts above the cap."
+                    role:(TextRole::Caption) tone:(Tone::Muted)
+            }
+        }
+    }
+}
+
+/// One harness model the delegator may choose: a checkbox cell with the
+/// harness and model name, selected while the model is allowed.
+#[component]
+fn AllowedModelChip(model: Model, choice: ModelChoice, name: String) -> Element {
+    let allowed_choice = choice.clone();
+    let on = Derived::new(move || {
+        matches!(
+            model.editor_profile.get().worker_models,
+            WorkerModelPolicy::DelegatorChooses { ref allowed_models, .. } if allowed_models.contains(&allowed_choice)
+        )
+    });
+    let toggled = choice.clone();
+    let chip = view! {
+        CellButton label:(format!("Allow worker model {}", choice.label())) selected:(on) start:true
+            on-press:(press(move || {
+                model.modify_profile("worker_models", |p| {
+                    if let WorkerModelPolicy::DelegatorChooses { allowed_models, .. } = &mut p.worker_models {
+                        match allowed_models.iter().position(|c| *c == toggled) {
+                            Some(index) => {
+                                allowed_models.remove(index);
+                            }
+                            None => allowed_models.push(toggled.clone()),
+                        }
+                    }
+                });
+            })) {
+            Label text:(choice.harness.label()) role:(TextRole::Caption) weight:600
+            row width:1fr min-width:0px height:min-content {
+                Ellipsis text:(name.clone()) role:(TextRole::Label)
+            }
+        }
+    };
+    chip.role(mosaic::widgets::Role::Checkbox);
+    let semantic = chip.clone();
+    let effect = Effect::new(move || {
+        semantic.toggled(on.get());
+    });
+    chip.__hot_on_remove(move || effect.dispose());
+    let cell = view! {
+        row height:{px(34.0)}px min-width:0px
+            stroke:(width:{px(1.0)} color:ground.hairline edges:(right bottom)) {}
+    };
+    cell.adopt(&chip);
+    cell
 }
 
 #[component]

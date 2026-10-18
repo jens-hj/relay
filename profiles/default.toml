@@ -17,3 +17,8 @@ deploy = "deny"
 
 [execution]
 approval = "automatic"
+
+[worker_models]
+mode = "delegator_chooses"
+model_capability = true
+available_usage = false

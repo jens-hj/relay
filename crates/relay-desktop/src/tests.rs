@@ -9705,6 +9705,141 @@ fn agent_configuration_requires_and_persists_an_explicit_harness_model() {
 }
 
 #[test]
+fn worker_model_editor_covers_both_modes_as_one_override() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.size = Size::new(1380.0, 2600.0);
+    let project = mounted.model.project.get_untracked();
+    let model = |id: &str, efforts: &[&str]| HarnessModel {
+        id: id.into(),
+        name: id.into(),
+        efforts: efforts.iter().map(|e| e.to_string()).collect(),
+        default_effort: efforts.first().map(|e| e.to_string()),
+        fast: false,
+        ..Default::default()
+    };
+    mounted.model.catalogs.update(|catalogs| {
+        catalogs.insert(
+            format!("profile:{project}:{:?}", Harness::Codex),
+            Ok(HarnessCatalog {
+                harness: Harness::Codex,
+                models: vec![model("gpt-light", &["low", "medium"])],
+                ..Default::default()
+            }),
+        );
+        catalogs.insert(
+            format!("profile:{project}:{:?}", Harness::ClaudeCode),
+            Ok(HarnessCatalog {
+                harness: Harness::ClaudeCode,
+                models: vec![model("claude-heavy", &["low", "high", "max"])],
+                ..Default::default()
+            }),
+        );
+    });
+    mounted
+        .model
+        .open_profile(EditTarget::Config("director-main".into()));
+    mounted.settle();
+    let policy = |m: &Mounted| m.model.editor_profile.get_untracked().worker_models;
+    assert_eq!(policy(&mounted), WorkerModelPolicy::default());
+    assert!(has_label(&mounted, "Worker Model field header"));
+    assert!(has_label(&mounted, "Worker Model Mode: Delegator Chooses"));
+    assert!(has_label(&mounted, "Allow worker model Codex gpt-light"));
+
+    // Delegator Chooses: allowlist across harnesses, cap and considerations.
+    mounted.click("Allow worker model Claude Code claude-heavy");
+    mounted.click("Maximum Worker Effort: High");
+    mounted.click("Consider available usage");
+    mounted.click("Consider model capability");
+    assert_eq!(
+        policy(&mounted),
+        WorkerModelPolicy::DelegatorChooses {
+            allowed_models: vec![ModelChoice {
+                harness: Harness::ClaudeCode,
+                model: "claude-heavy".into(),
+            }],
+            max_effort: Some("high".into()),
+            model_capability: false,
+            available_usage: true,
+        }
+    );
+    mounted.click("Consider model capability");
+    mounted.click("Allow worker model Claude Code claude-heavy");
+    mounted.click("Maximum Worker Effort: No Cap");
+    assert!(matches!(
+        policy(&mounted),
+        WorkerModelPolicy::DelegatorChooses { allowed_models, max_effort: None, model_capability: true, available_usage: true } if allowed_models.is_empty()
+    ));
+    assert_eq!(
+        mounted.model.editor_overrides.get_untracked().worker_models,
+        Some(policy(&mounted))
+    );
+    assert!(
+        crate::ui::overridden_fields(&mounted.model.editor_overrides.get_untracked())
+            .contains(&"Worker Model")
+    );
+
+    // Fixed: one harness, model and effort; a harness change clears the model.
+    mounted.click("Worker Model Mode: Fixed");
+    let profile = mounted.model.editor_profile.get_untracked();
+    assert_eq!(
+        policy(&mounted),
+        WorkerModelPolicy::Fixed {
+            harness: profile.harness,
+            model: profile.model.clone(),
+            effort: None,
+        }
+    );
+    mounted.click("Fixed Worker Harness: Claude Code");
+    assert!(matches!(
+        policy(&mounted),
+        WorkerModelPolicy::Fixed { harness: Harness::ClaudeCode, ref model, effort: None } if model.is_empty()
+    ));
+    assert!(
+        mounted
+            .model
+            .editor_profile
+            .get_untracked()
+            .validate()
+            .is_err()
+    );
+    mounted.click("Select fixed worker model");
+    mounted.click("Use worker model claude-heavy");
+    mounted.click("Fixed Worker Effort: Max");
+    let fixed = WorkerModelPolicy::Fixed {
+        harness: Harness::ClaudeCode,
+        model: "claude-heavy".into(),
+        effort: Some("max".into()),
+    };
+    assert_eq!(policy(&mounted), fixed);
+    assert!(
+        mounted
+            .model
+            .editor_profile
+            .get_untracked()
+            .validate()
+            .is_ok()
+    );
+    mounted.model.save_profile();
+    let envelope = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(&envelope.command, Command::UpdateAgentConfig { overrides, .. } if overrides.worker_models.as_ref() == Some(&fixed))
+    );
+
+    // Inherit restores the project default.
+    mounted.click("Inherit worker_models");
+    assert_eq!(policy(&mounted), WorkerModelPolicy::default());
+    assert!(
+        mounted
+            .model
+            .editor_overrides
+            .get_untracked()
+            .worker_models
+            .is_none()
+    );
+    assert!(has_label(&mounted, "Worker Model Mode: Delegator Chooses"));
+}
+
+#[test]
 fn agent_creation_uses_director_and_worker_profiles_and_preserves_parent_links() {
     let mut mounted = mount_orchestration(1380.0);
     mounted.click("New agent");

@@ -9,6 +9,16 @@ pub enum Harness {
     ClaudeCode,
 }
 
+impl Harness {
+    pub const ALL: [Self; 2] = [Self::Codex, Self::ClaudeCode];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::ClaudeCode => "Claude Code",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AgentScope {
@@ -94,6 +104,9 @@ pub struct AgentProfile {
     /// Zero pauses delegation. The upper bound prevents accidental unbounded fan-out.
     pub max_workers: u16,
     pub permissions: BTreeMap<Task, Permission>,
+    /// The harness, model and effort this agent's workers may use.
+    #[serde(default)]
+    pub worker_models: crate::WorkerModelPolicy,
 }
 
 impl Default for AgentProfile {
@@ -132,6 +145,7 @@ impl AgentProfile {
         if self.max_workers > 64 {
             return Err("Worker limit must be between 0 and 64".into());
         }
+        self.worker_models.validate()?;
         if self.responsibilities.is_empty() {
             return Err("Select at least one responsibility".into());
         }
@@ -201,6 +215,8 @@ pub struct ProfileOverrides {
     pub max_workers: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permissions: Option<BTreeMap<Task, Permission>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_models: Option<crate::WorkerModelPolicy>,
 }
 
 impl ProfileOverrides {
@@ -218,6 +234,8 @@ impl ProfileOverrides {
             max_workers: (base.max_workers != profile.max_workers).then_some(profile.max_workers),
             permissions: (base.permissions != profile.permissions)
                 .then(|| profile.permissions.clone()),
+            worker_models: (base.worker_models != profile.worker_models)
+                .then(|| profile.worker_models.clone()),
         }
     }
     pub fn resolve(&self, base: &AgentProfile) -> AgentProfile {
@@ -248,6 +266,10 @@ impl ProfileOverrides {
                 .permissions
                 .clone()
                 .unwrap_or_else(|| base.permissions.clone()),
+            worker_models: self
+                .worker_models
+                .clone()
+                .unwrap_or_else(|| base.worker_models.clone()),
         }
     }
     pub fn from_toml(source: &str) -> Result<Self, String> {
@@ -339,6 +361,40 @@ mod tests {
     }
 
     #[test]
+    fn explicit_child_profiles_may_only_narrow_the_worker_model_policy() {
+        let mut snapshot = crate::demo_snapshot(AgentProfile::default());
+        let parent_profile = AgentProfile {
+            worker_models: crate::WorkerModelPolicy::DelegatorChooses {
+                allowed_models: vec![crate::ModelChoice {
+                    harness: Harness::Codex,
+                    model: "gpt-light".into(),
+                }],
+                max_effort: Some("high".into()),
+                model_capability: true,
+                available_usage: false,
+            },
+            ..AgentProfile::default()
+        };
+        snapshot.sessions[0].profile = Some(parent_profile.clone());
+        let parent = snapshot.sessions[0].clone();
+        let mut child = AgentProfile::worker(&parent_profile);
+        assert!(snapshot.validate_child_profile(&parent, &child).is_ok());
+        child.worker_models = crate::WorkerModelPolicy::Fixed {
+            harness: Harness::Codex,
+            model: "gpt-light".into(),
+            effort: Some("low".into()),
+        };
+        assert!(snapshot.validate_child_profile(&parent, &child).is_ok());
+        child.worker_models = crate::WorkerModelPolicy::default();
+        assert!(
+            snapshot
+                .validate_child_profile(&parent, &child)
+                .unwrap_err()
+                .contains("cannot widen")
+        );
+    }
+
+    #[test]
     fn named_profiles_persist_and_reject_duplicate_or_reserved_names() {
         let mut snapshot = crate::demo_snapshot(AgentProfile::default());
         let command = crate::Command::SaveAgentTemplate {
@@ -405,6 +461,56 @@ mod tests {
         assert_eq!(resolved.harness, Harness::ClaudeCode);
         assert_eq!(ProfileOverrides::default().resolve(&defaults), defaults);
     }
+    #[test]
+    fn worker_model_policy_is_an_inheritable_validated_profile_field() {
+        let base = AgentProfile::default();
+        assert_eq!(base.worker_models, crate::WorkerModelPolicy::default());
+        let mut profile = base.clone();
+        profile.worker_models = crate::WorkerModelPolicy::Fixed {
+            harness: Harness::ClaudeCode,
+            model: "claude-sonnet".into(),
+            effort: Some("high".into()),
+        };
+        let overrides = ProfileOverrides::between(&base, &profile);
+        assert_eq!(overrides.worker_models, Some(profile.worker_models.clone()));
+        assert_eq!(overrides.resolve(&base), profile);
+        assert_eq!(
+            ProfileOverrides::from_toml(&overrides.to_toml()).unwrap(),
+            overrides
+        );
+        assert_eq!(
+            AgentProfile::from_toml(&profile.to_toml()).unwrap(),
+            profile
+        );
+        assert!(ProfileOverrides::default().worker_models.is_none());
+        assert!(
+            !ProfileOverrides::default()
+                .to_toml()
+                .contains("worker_models")
+        );
+        // Workers keep their delegator's policy.
+        assert_eq!(
+            AgentProfile::worker(&profile).worker_models,
+            profile.worker_models
+        );
+        profile.worker_models = crate::WorkerModelPolicy::DelegatorChooses {
+            allowed_models: vec![],
+            max_effort: Some("enormous".into()),
+            model_capability: true,
+            available_usage: true,
+        };
+        assert!(profile.validate().is_err());
+        // Profiles stored before the policy existed load with the default.
+        let mut legacy = serde_json::to_value(&base).unwrap();
+        legacy.as_object_mut().unwrap().remove("worker_models");
+        assert_eq!(
+            serde_json::from_value::<AgentProfile>(legacy)
+                .unwrap()
+                .worker_models,
+            crate::WorkerModelPolicy::default()
+        );
+    }
+
     #[test]
     fn toml_roundtrips_and_rejects_typos_or_invalid_limits() {
         let profile = AgentProfile::default();

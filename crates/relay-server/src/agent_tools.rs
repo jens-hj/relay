@@ -408,7 +408,26 @@ async fn call(
             {
                 agents.push(state(&snapshot, parent));
             }
-            Ok(json!({"agents":agents}))
+            let caller = snapshot
+                .sessions
+                .iter()
+                .find(|s| s.id == caller)
+                .ok_or_else(|| Error::invalid("Agent missing"))?;
+            let policy = profile(&snapshot, caller)?.worker_models;
+            Ok(json!({"agents":agents,"worker_models":worker_models(&snapshot, &policy)}))
+        }
+        // Tool specifications for this run, read by the stdio bridge.
+        "tools" => {
+            if !input.is_object() || !input.as_object().unwrap().is_empty() {
+                return Err(Error::invalid("tools takes no arguments"));
+            }
+            let snapshot = workspace.snapshots.borrow().clone();
+            let caller = snapshot
+                .sessions
+                .iter()
+                .find(|s| s.id == caller)
+                .ok_or_else(|| Error::invalid("Agent missing"))?;
+            Ok(tools(&profile(&snapshot, caller)?.worker_models))
         }
         "spawn_agent" => spawn(workspace, caller, run, parse(input)?, stop).await,
         "stop_agent" => {
@@ -663,6 +682,50 @@ async fn spawn(
     snapshot
         .child_slot(&parent.id, None)
         .map_err(Error::invalid)?;
+    // The worker model policy is checked before approvals or forks: a fixed
+    // policy fills omitted values and rejects differing ones.
+    let policy = effective.worker_models.clone();
+    let (harness, model, effort) = policy
+        .resolve_request(args.harness, args.model.clone(), args.effort.clone())
+        .map_err(Error::invalid)?;
+    let harness = harness.unwrap_or(effective.harness);
+    let mut selection = HarnessSelection {
+        model: model.or_else(|| {
+            (harness == effective.harness)
+                .then(|| {
+                    effective
+                        .model_selection()
+                        .model
+                        .or_else(|| parent.selection.model.clone())
+                        .or_else(|| parent.worker.as_ref().and_then(|w| w.model.clone()))
+                })
+                .flatten()
+        }),
+        effort,
+        ..Default::default()
+    };
+    let Some(selected_model) = selection.model.clone() else {
+        return Err(Error::invalid(
+            "Choose a model in the agent profile or provide a model for this worker",
+        ));
+    };
+    // Use any discovered catalog for the requested harness; launch discovers it
+    // again in the child workspace before executing the first turn. Without a
+    // requested effort the child runs and shows its model's default from the
+    // start, and the policy checks that resolved effort.
+    let requested_effort = selection.effort.clone();
+    if let Some(catalog) = commands::cached(workspace, caller, harness) {
+        commands::validate_selection(&catalog, &selection)?;
+        selection.effort = catalog.effective_effort(&selection, None);
+    }
+    policy
+        .permits(
+            harness,
+            &selected_model,
+            requested_effort.as_deref(),
+            selection.effort.as_deref(),
+        )
+        .map_err(Error::invalid)?;
     let mut permissions = effective.permissions.clone();
     let widened = args
         .permissions
@@ -728,26 +791,7 @@ async fn spawn(
     child.role = SessionRole::Worker;
     child.parent_session_id = Some(caller.into());
     child.compactions.clear();
-    child.selection = HarnessSelection {
-        model: args.model.or_else(|| {
-            (args.harness.is_none_or(|h| h == effective.harness))
-                .then(|| {
-                    effective
-                        .model_selection()
-                        .model
-                        .or_else(|| parent.selection.model.clone())
-                        .or_else(|| parent.worker.as_ref().and_then(|w| w.model.clone()))
-                })
-                .flatten()
-        }),
-        effort: args.effort,
-        ..Default::default()
-    };
-    if child.selection.model.is_none() {
-        return Err(Error::invalid(
-            "Choose a model in the agent profile or provide a model for this worker",
-        ));
-    }
+    child.selection = selection;
     child.spawn = Some(SpawnGrant {
         task: args.task.clone(),
         context: args.context.clone(),
@@ -755,7 +799,7 @@ async fn spawn(
         requested_by_run: Some(run.into()),
     });
     let worker = child.worker.as_mut().unwrap();
-    worker.harness = args.harness.unwrap_or(worker.harness);
+    worker.harness = harness;
     worker.model = None;
     worker.context_tokens = None;
     worker.context_window = None;
@@ -765,14 +809,6 @@ async fn spawn(
         None => args.task,
     };
     validate_prompt(&prompt)?;
-    // Use any discovered catalog for the requested harness; launch discovers it
-    // again in the child workspace before executing the first turn. Without a
-    // requested effort the child shows its model's default from the start.
-    let harness = child.worker.as_ref().unwrap().harness;
-    if let Some(catalog) = commands::cached(workspace, caller, harness) {
-        commands::validate_selection(&catalog, &child.selection)?;
-        child.selection.effort = catalog.effective_effort(&child.selection, None);
-    }
     let child_run = uuid::Uuid::new_v4().to_string();
     let parts = vec![Part::text(&prompt)];
     // An Ask implementation grant needs approval for this first turn as normal launches do.
@@ -800,8 +836,12 @@ async fn spawn(
         let mut current = store.snapshot()?;
         active_caller(&store, &current, caller, run)?;
         let latest_parent = current.sessions.iter().find(|s| s.id == caller).unwrap();
-        if profile(&current, latest_parent)?.permissions != effective.permissions {
+        let latest = profile(&current, latest_parent)?;
+        if latest.permissions != effective.permissions {
             return Err(Error::invalid("Parent permissions changed; retry spawn"));
+        }
+        if latest.worker_models != policy {
+            return Err(Error::invalid("Worker model policy changed; retry spawn"));
         }
         authorize_session(&current, &child, true, &workspace.config)?;
         // Enrich the harness's calling tool when it has already been observed.
@@ -1094,14 +1134,68 @@ pub(super) fn mark_read(snapshot: &mut Snapshot, run: &str) {
     }
 }
 
-fn tools() -> Value {
+/// The spawn_agent description and properties allowed by a worker model policy.
+fn spawn_spec(policy: &WorkerModelPolicy) -> (String, Value) {
     let string = json!({"type":"string"});
     let permissions = json!({"type":"object","propertyNames":{"enum":["plan","delegate","implement","verify","review","merge","deploy"]},"additionalProperties":{"enum":["allow","ask","deny"]}});
+    let harnesses = policy.harnesses();
+    let mut models: Vec<&str> = vec![];
+    for model in harnesses.iter().flat_map(|h| policy.models_for(*h)) {
+        if !models.contains(&model) {
+            models.push(model);
+        }
+    }
+    let mut properties = json!({
+        "title": string,
+        "task": string,
+        "context": string,
+        "harness": {"enum": harnesses},
+        "model": if models.is_empty() { string.clone() } else { json!({"type":"string","enum":models}) },
+        "permissions": permissions,
+    });
+    match policy.efforts() {
+        None => properties["effort"] = string,
+        Some(efforts) if efforts.is_empty() => {}
+        Some(efforts) => properties["effort"] = json!({"type":"string","enum":efforts}),
+    }
+    let rule = if policy.is_fixed() {
+        "Worker model is fixed: omit harness, model and effort; differing values are rejected."
+    } else {
+        "You choose harness, model and effort per worker; Relay rejects choices outside the policy."
+    };
+    (
+        format!(
+            "Start a child Relay session. Relay enforces delegation and human approval for wider permissions. {rule} {}",
+            policy.allowed_summary()
+        ),
+        properties,
+    )
+}
+
+/// The worker model policy, and remaining usage when the policy weighs it.
+fn worker_models(snapshot: &Snapshot, policy: &WorkerModelPolicy) -> Value {
+    let mut value = json!({"policy": policy, "summary": policy.allowed_summary()});
+    if policy.considers_usage() {
+        let now = now();
+        value["usage"] = json!(
+            snapshot
+                .usage_remaining(&policy.harnesses(), now)
+                .iter()
+                .map(|u| u.describe(now))
+                .collect::<Vec<_>>()
+        );
+    }
+    value
+}
+
+fn tools(policy: &WorkerModelPolicy) -> Value {
+    let string = json!({"type":"string"});
+    let (spawn_description, spawn_properties) = spawn_spec(policy);
     let specs = [
         (
             "spawn_agent",
-            "Start a child Relay session. Relay enforces delegation and human approval for wider permissions.",
-            json!({"title":string,"task":string,"context":string,"harness":{"enum":["codex","claude_code"]},"model":string,"effort":string,"permissions":permissions}),
+            spawn_description.as_str(),
+            spawn_properties,
             vec!["title", "task"],
         ),
         (
@@ -1136,7 +1230,7 @@ fn tools() -> Value {
         ),
         (
             "list_agents",
-            "List your subtree and parent with current statuses.",
+            "List your subtree and parent with current statuses, and your worker model policy with remaining usage when it applies.",
             json!({}),
             vec![],
         ),
@@ -1176,7 +1270,25 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
                     json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"relay","version":env!("CARGO_PKG_VERSION")}}),
                 ),
                 Some("ping") => Ok(json!({})),
-                Some("tools/list") => Ok(tools()),
+                // The server describes spawn_agent with this run's worker model
+                // policy; the generic list remains if it cannot be reached.
+                Some("tools/list") => Ok(
+                    match client
+                        .post(format!("{endpoint}/v1/agent-tools/tools"))
+                        .bearer_auth(&secret)
+                        .json(&json!({}))
+                        .send()
+                        .await
+                    {
+                        Ok(response) if response.status().is_success() => response
+                            .json::<Value>()
+                            .await
+                            .ok()
+                            .filter(|v| v["tools"].is_array())
+                            .unwrap_or_else(|| tools(&WorkerModelPolicy::default())),
+                        _ => tools(&WorkerModelPolicy::default()),
+                    },
+                ),
                 Some("tools/call") => {
                     let name = request["params"]["name"].as_str().unwrap_or("");
                     if ![
@@ -1660,7 +1772,7 @@ mod tests {
 
     #[test]
     fn archive_tool_schema_is_discoverable() {
-        let tools = tools();
+        let tools = tools(&WorkerModelPolicy::default());
         let tool = tools["tools"]
             .as_array()
             .unwrap()
@@ -2015,7 +2127,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 20);
+        assert_eq!(schema, 21);
         f.finish().await;
     }
     #[tokio::test]
@@ -2096,6 +2208,276 @@ mod tests {
             assert_eq!(result.is_ok(), allow);
             f.finish().await;
         }
+    }
+    fn spawned_selection(f: &Fixture, value: &Value) -> (Harness, HarnessSelection) {
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let child = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == value["agent"])
+            .unwrap();
+        (
+            child.worker.as_ref().unwrap().harness,
+            child.selection.clone(),
+        )
+    }
+    async fn rejected(f: &Fixture, args: Value) -> String {
+        let before = f.workspace.snapshots.borrow().sessions.len();
+        let error = f.call("spawn_agent", args).await.unwrap_err();
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), before);
+        error.message
+    }
+    fn spawn_schema(tools: &Value) -> Value {
+        tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "spawn_agent")
+            .unwrap()
+            .clone()
+    }
+    #[tokio::test]
+    async fn effort_caps_check_the_resolved_default_effort() {
+        let f = Fixture::new(Permission::Allow);
+        let model = |id: &str, default: &str| relay_core::HarnessModel {
+            id: id.into(),
+            efforts: vec!["low".into(), "medium".into(), "xhigh".into()],
+            default_effort: Some(default.into()),
+            ..Default::default()
+        };
+        f.workspace.catalogs.lock().unwrap().insert(
+            "cached".into(),
+            (
+                0,
+                HarnessCatalog {
+                    harness: Harness::Codex,
+                    models: vec![model("gpt-light", "medium"), model("gpt-heavy", "xhigh")],
+                    ..Default::default()
+                },
+            ),
+        );
+        f.change(|s| {
+            s.projects[0].defaults.worker_models = WorkerModelPolicy::DelegatorChooses {
+                allowed_models: Vec::new(),
+                max_effort: Some("high".into()),
+                model_capability: true,
+                available_usage: false,
+            }
+        });
+        // The child stores the default effort the policy was checked against.
+        let value = f
+            .call(
+                "spawn_agent",
+                json!({"title":"Light","task":"Test","model":"gpt-light"}),
+            )
+            .await
+            .unwrap();
+        let (_, selection) = spawned_selection(&f, &value);
+        assert_eq!(selection.effort.as_deref(), Some("medium"));
+        let error = rejected(
+            &f,
+            json!({"title":"Heavy","task":"Test","model":"gpt-heavy"}),
+        )
+        .await;
+        assert!(
+            error.contains("model's default effort xhigh exceeds the worker cap of high"),
+            "{error}"
+        );
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn worker_model_policy_is_enforced_in_spawn_and_described_in_tools() {
+        let f = Fixture::new(Permission::Allow);
+        // The open default lets the delegator choose any model and effort.
+        let value = f
+            .call(
+                "spawn_agent",
+                json!({"title":"Open","task":"Test","model":"other-model","effort":"xhigh"}),
+            )
+            .await
+            .unwrap();
+        let (harness, selection) = spawned_selection(&f, &value);
+        assert_eq!(harness, Harness::Codex);
+        assert_eq!(selection.model.as_deref(), Some("other-model"));
+        assert_eq!(selection.effort.as_deref(), Some("xhigh"));
+        let open = spawn_schema(&f.call("tools", json!({})).await.unwrap());
+        assert_eq!(
+            open["inputSchema"]["properties"]["harness"]["enum"],
+            json!(["codex", "claude_code"])
+        );
+        assert_eq!(
+            open["inputSchema"]["properties"]["effort"],
+            json!({"type":"string"})
+        );
+        assert!(
+            open["description"]
+                .as_str()
+                .unwrap()
+                .contains("any model of a connected harness; any effort")
+        );
+
+        // Fixed: differing values are rejected; omitted values are filled.
+        f.change(|s| {
+            s.projects[0].defaults.worker_models = WorkerModelPolicy::Fixed {
+                harness: Harness::Codex,
+                model: "fixed-model".into(),
+                effort: Some("low".into()),
+            }
+        });
+        for args in [
+            json!({"title":"Fixed","task":"Test","model":"other-model"}),
+            json!({"title":"Fixed","task":"Test","harness":"claude_code"}),
+            json!({"title":"Fixed","task":"Test","effort":"high"}),
+        ] {
+            let error = rejected(&f, args).await;
+            assert!(error.contains("fixes the worker model"), "{error}");
+            assert!(error.contains("Codex fixed-model at low effort"), "{error}");
+        }
+        let value = f
+            .call(
+                "spawn_agent",
+                json!({"title":"Fixed","task":"Test","model":"fixed-model"}),
+            )
+            .await
+            .unwrap();
+        let (harness, selection) = spawned_selection(&f, &value);
+        assert_eq!(harness, Harness::Codex);
+        assert_eq!(selection.model.as_deref(), Some("fixed-model"));
+        assert_eq!(selection.effort.as_deref(), Some("low"));
+        let fixed = spawn_schema(&f.call("tools", json!({})).await.unwrap());
+        assert_eq!(
+            fixed["inputSchema"]["properties"]["harness"]["enum"],
+            json!(["codex"])
+        );
+        assert_eq!(
+            fixed["inputSchema"]["properties"]["model"]["enum"],
+            json!(["fixed-model"])
+        );
+        assert_eq!(
+            fixed["inputSchema"]["properties"]["effort"]["enum"],
+            json!(["low"])
+        );
+        assert!(
+            fixed["description"]
+                .as_str()
+                .unwrap()
+                .contains("Worker model is fixed")
+        );
+
+        // Delegator chooses within an allowlist and an effort cap.
+        f.change(|s| {
+            s.projects[0].defaults.worker_models = WorkerModelPolicy::DelegatorChooses {
+                allowed_models: vec![
+                    ModelChoice {
+                        harness: Harness::Codex,
+                        model: "gpt-light".into(),
+                    },
+                    ModelChoice {
+                        harness: Harness::ClaudeCode,
+                        model: "claude-heavy".into(),
+                    },
+                ],
+                max_effort: Some("high".into()),
+                model_capability: true,
+                available_usage: true,
+            }
+        });
+        // The inherited profile model is outside the allowlist.
+        let error = rejected(&f, json!({"title":"Listed","task":"Test","effort":"low"})).await;
+        assert!(
+            error.contains("Codex fixture-model is not allowed"),
+            "{error}"
+        );
+        assert!(
+            error.contains("Allowed models: Codex gpt-light, Claude Code claude-heavy"),
+            "{error}"
+        );
+        let error = rejected(
+            &f,
+            json!({"title":"Listed","task":"Test","harness":"codex","model":"claude-heavy","effort":"low"}),
+        )
+        .await;
+        assert!(error.contains("not allowed"), "{error}");
+        let error = rejected(
+            &f,
+            json!({"title":"Listed","task":"Test","model":"gpt-light","effort":"max"}),
+        )
+        .await;
+        assert!(
+            error.contains("requested effort max exceeds the worker cap of high"),
+            "{error}"
+        );
+        assert!(
+            error.contains("none, minimal, low, medium, high"),
+            "{error}"
+        );
+        // Without a discovered catalog the default effort is unknown.
+        let error = rejected(
+            &f,
+            json!({"title":"Listed","task":"Test","model":"gpt-light"}),
+        )
+        .await;
+        assert!(error.contains("pass an effort"), "{error}");
+        let value = f
+            .call(
+                "spawn_agent",
+                json!({"title":"Listed","task":"Test","model":"gpt-light","effort":"medium"}),
+            )
+            .await
+            .unwrap();
+        let (_, selection) = spawned_selection(&f, &value);
+        assert_eq!(selection.model.as_deref(), Some("gpt-light"));
+        assert_eq!(selection.effort.as_deref(), Some("medium"));
+        let listed = spawn_schema(&f.call("tools", json!({})).await.unwrap());
+        assert_eq!(
+            listed["inputSchema"]["properties"]["model"]["enum"],
+            json!(["gpt-light", "claude-heavy"])
+        );
+        assert_eq!(
+            listed["inputSchema"]["properties"]["effort"]["enum"],
+            json!(["none", "minimal", "low", "medium", "high"])
+        );
+
+        // list_agents reports the policy and, with available usage on, usage.
+        let now = crate::now();
+        f.change(|s| {
+            s.record_usage_limit(UsageLimit::new(
+                Harness::Codex,
+                UsageWindow::FiveHour,
+                38.0,
+                300,
+                Some(now + 3600),
+                now,
+            ));
+        });
+        let listed = f.call("list_agents", json!({})).await.unwrap();
+        let models = &listed["worker_models"];
+        assert_eq!(models["policy"]["mode"], "delegator_chooses");
+        assert_eq!(models["policy"]["max_effort"], "high");
+        assert!(
+            models["summary"]
+                .as_str()
+                .unwrap()
+                .contains("effort at most high")
+        );
+        assert!(
+            models["usage"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("Codex: 62% of the 5-hour window left"),
+            "{models}"
+        );
+        assert!(
+            models["usage"][1]
+                .as_str()
+                .unwrap()
+                .starts_with("Claude Code: 5-hour window not reported")
+        );
+        f.change(|s| s.projects[0].defaults.worker_models = WorkerModelPolicy::default());
+        let listed = f.call("list_agents", json!({})).await.unwrap();
+        assert!(listed["worker_models"].get("usage").is_none());
+        assert!(f.call("tools", json!({"x":1})).await.is_err());
+        f.finish().await;
     }
     #[tokio::test]
     async fn widening_requires_human_and_child_map_is_enforced() {
