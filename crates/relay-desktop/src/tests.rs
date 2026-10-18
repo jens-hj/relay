@@ -12052,3 +12052,124 @@ fn opening_a_session_lands_at_its_latest_messages() {
     );
     assert!(has_label(&mounted, "Message session-worker-119"));
 }
+
+#[test]
+fn composer_keeps_keyboard_focus_after_sending() {
+    use crate::buffer_network::{Outcome, Request, Update};
+    let draft_label = |mounted: &Mounted| {
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .find_map(|n| n.label.filter(|l| l.starts_with("Draft text")))
+            .unwrap()
+    };
+    let focused_label = |mounted: &Mounted| {
+        let id = mounted.ui.focused()?.id();
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .find(|n| n.id == id)?
+            .label
+    };
+    // A restored draft keeps its own part id, so sending remounts its field.
+    for case in 0..8 {
+        let (running, button, restored) = (case & 1 == 1, case & 2 == 2, case & 4 == 4);
+        let case = format!("running {running}, send button {button}, restored {restored}");
+        let mut mounted = mount(false, 1380.0);
+        buffer_worker(&mounted);
+        if !running {
+            mounted.model.snapshot.update(|s| {
+                s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed;
+            });
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        mounted.model.buffer_requests.set(Some(tx));
+        mounted.settle();
+        if restored {
+            crate::buffer::edit(
+                mounted.model,
+                "session-plan",
+                vec![Part::text("First message")],
+            );
+            mounted.settle();
+            mounted.focus(&draft_label(&mounted));
+        } else {
+            type_in(&mounted, &draft_label(&mounted), "First message");
+        }
+        if button {
+            mounted.click("Send message");
+        } else {
+            mounted.key(Key::Enter, true);
+        }
+        assert!(
+            mounted.model.buffer.get_untracked().documents["session-plan"]
+                .finalize
+                .is_some(),
+            "{case}: the message is submitted"
+        );
+        assert!(
+            focused_label(&mounted).is_some_and(|l| l.starts_with("Draft text")),
+            "{case}: focus returns to the composer, found {:?}",
+            focused_label(&mounted)
+        );
+        mounted
+            .ui
+            .dispatch_ime(ImeEvent::Commit("Next message".into()));
+        mounted.settle();
+        assert_eq!(
+            plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+            "Next message",
+            "{case}: typing continues in the composer"
+        );
+        // Focus the user moves elsewhere is kept when the send completes.
+        mounted.focus("Session actions");
+        let Request::Save { session, request } = rx.try_recv().unwrap() else {
+            panic!("{case}: expected draft save")
+        };
+        let saved = Draft {
+            session_id: session.clone(),
+            revision: 1,
+            parts: request.parts.clone(),
+        };
+        crate::buffer::receive(
+            mounted.model,
+            Update {
+                serial: 1,
+                initialized: true,
+                connected: true,
+                drafts: vec![saved.clone()],
+                outcomes: std::collections::BTreeMap::from([(
+                    request.request_id.clone(),
+                    Outcome::Saved {
+                        session,
+                        request,
+                        result: Ok(saved),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        mounted.settle();
+        if let Ok(submitted) = mounted.commands.try_recv() {
+            let snapshot = mounted.model.snapshot.get_untracked();
+            mounted.model.receive(NetworkState {
+                snapshot: snapshot.clone(),
+                connected: true,
+                acknowledged_revision: snapshot.revision + 1,
+                outcome_serial: 1,
+                outcome: Some((submitted.request_id, Ok(()))),
+                ..Default::default()
+            });
+            mounted.settle();
+        }
+        assert_eq!(
+            focused_label(&mounted).as_deref(),
+            Some("Session actions"),
+            "{case}: completion must not steal focus"
+        );
+    }
+}

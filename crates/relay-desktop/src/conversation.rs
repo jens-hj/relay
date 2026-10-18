@@ -91,6 +91,8 @@ pub struct Controller {
     asset_previews: BTreeMap<(String, Option<String>, bool), bool>,
     retained_session: Option<String>,
     native_selection_rows: Option<Vec<String>>,
+    /// Part id of the composer's trailing empty text when the draft has none.
+    empty_draft: String,
 }
 
 /// Only history participates in windowing. The surrounding document, including
@@ -1602,6 +1604,7 @@ pub fn Conversation(model: Model) -> Element {
         }
     });
     let empty = State::new(uuid::Uuid::new_v4().to_string());
+    controller.get_untracked().borrow_mut().empty_draft = empty.get_untracked();
     let menu = State::new(false);
     let discovery_feedback = Derived::new(move || crate::command_ui::discovery_feedback(model));
     let details = State::new(String::new());
@@ -1759,13 +1762,7 @@ pub fn Conversation(model: Model) -> Element {
             }
             col height:min-content min-width:0px gap:{px(6.0)}px {
                 for (_, part) in {
-                    let parts=buffer::parts(model,&model.session.get());
-                    let mut parts=parts;
-                    if !parts.last().is_some_and(|p| matches!(p.kind, PartKind::Text { .. })) {
-                        let id = parts.last().map(|part| format!("{}-after-{}", empty.get(), part.id)).unwrap_or_else(|| empty.get());
-                        parts.push(Part{id,kind:PartKind::Text{text:String::new()}});
-                    }
-                    parts.into_iter().map(|p|(p.id.clone(),p)).collect::<Vec<_>>()
+                    composer_parts(buffer::parts(model,&model.session.get()), &empty.get()).into_iter().map(|p|(p.id.clone(),p)).collect::<Vec<_>>()
                 } {
                     col height:min-content {
                         DraftPart model:(model) controller:(controller) part:(part.clone())
@@ -1821,7 +1818,17 @@ pub fn Conversation(model: Model) -> Element {
         set_effort: Rc::new(move |step| choose_effort(model, step)),
         toggle: Rc::new(move || ledger_open.set(!ledger_open.get_untracked())),
     };
-    let send: relay_ui::prelude::OnPress = Rc::new(move || buffer::send(model));
+    // Filled once the composer is built; pressing Send focuses its button.
+    let composer_element = Rc::new(RefCell::new(None::<Element>));
+    let send_composer = composer_element.clone();
+    let send_controller = controller.get_untracked();
+    let send: relay_ui::prelude::OnPress = Rc::new(move || {
+        let focused = send_composer
+            .borrow()
+            .as_ref()
+            .is_some_and(|composer| composer.interaction().focus_within());
+        send_keeping_focus(model, &send_controller, focused);
+    });
     let attach: relay_ui::prelude::OnPress = Rc::new(move || {
         if cfg!(target_arch = "wasm32") {
             crate::platform::pick_files(model);
@@ -1988,7 +1995,7 @@ pub fn Conversation(model: Model) -> Element {
                         on-send:(send) on-attach:(attach) editor:(Some(editor))
                         has-content:(Some(relay_ui::Live::from(has_content)))
                         hint:(relay_ui::Live::from(hint)) as composer
-                    { composer.label("Message composer"); }
+                    { composer.label("Message composer"); *composer_element.borrow_mut() = Some(composer.clone()); }
                 }
             }
     };
@@ -2951,6 +2958,58 @@ fn DraftPart(model: Model, controller: ControllerState, part: Part, mirror: bool
     }
 }
 
+/// The composer always ends in text, so the next words have a field to go to.
+fn composer_parts(mut parts: Vec<Part>, empty: &str) -> Vec<Part> {
+    if !parts
+        .last()
+        .is_some_and(|p| matches!(p.kind, PartKind::Text { .. }))
+    {
+        let id = parts
+            .last()
+            .map(|part| format!("{empty}-after-{}", part.id))
+            .unwrap_or_else(|| empty.to_owned());
+        parts.push(Part {
+            id,
+            kind: PartKind::Text {
+                text: String::new(),
+            },
+        });
+    }
+    parts
+}
+
+/// Sending replaces the draft text, remounting its field, and disables the
+/// pressed Send button; either drops keyboard focus. When the composer had
+/// focus, hand it to the trailing draft text so typing continues there.
+fn send_keeping_focus(model: Model, controller: &Shared, focused: bool) {
+    buffer::send(model);
+    if !focused {
+        return;
+    }
+    let empty = controller.borrow().empty_draft.clone();
+    let parts = composer_parts(buffer::parts(model, &model.session.get_untracked()), &empty);
+    let Some(Part {
+        id,
+        kind: PartKind::Text { text },
+    }) = parts.last()
+    else {
+        return;
+    };
+    let key = format!("draft-{id}");
+    let mounted = controller
+        .borrow()
+        .surfaces
+        .get(&key)
+        .map(|(field, _)| field.clone());
+    if let Some(field) = mounted {
+        field.focus();
+        field.reveal();
+    } else {
+        // The field mounts when the draft change flushes and takes focus then.
+        controller.borrow_mut().requested = Some((key, text.len()));
+    }
+}
+
 fn remove_draft_part(model: Model, controller: &Shared, id: &str, mirror: bool) {
     let session = model.session.get_untracked();
     let mut parts = buffer::parts(model, &session);
@@ -3634,6 +3693,7 @@ pub(crate) fn BufferText(
     let key_follow = follow.clone();
     let key_markdown = markdown.clone();
     let key_cursor = source_cursor.clone();
+    let key_draft = key.starts_with("draft-");
     field.on_key(move |event, ctx| {
         if !matches!(event.kind, KeyEventKind::Down { .. }) {
             return;
@@ -3651,7 +3711,7 @@ pub(crate) fn BufferText(
         let command = event.modifiers.command();
         if command && event.key == Key::Enter {
             if !matches!(event.kind, KeyEventKind::Down { repeat: true }) {
-                buffer::send(model);
+                send_keeping_focus(model, &key_controller, key_draft);
             }
             ctx.stop_propagation();
             return;
