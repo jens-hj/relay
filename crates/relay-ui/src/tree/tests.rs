@@ -594,7 +594,11 @@ fn focus_reroots_with_a_breadcrumb_and_depth() {
     let back = mounted.rect("Back to Root");
     let path = mounted.rect("root / a / b");
     let depth = mounted.rect("Depth 3");
-    assert_eq!(back.size.width, 44.0);
+    assert!(
+        (back.size.width - back.size.height).abs() < 0.5,
+        "back action is square: {:?}",
+        back.size
+    );
     assert!(
         back.size.height > 32.0,
         "back action fills the header height"

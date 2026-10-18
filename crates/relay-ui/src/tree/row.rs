@@ -594,8 +594,10 @@ fn row_key(
     }
 }
 
-/// The 12 × 34 expand/collapse control: a muted triangle pointing down
-/// when open, right when closed.
+/// The 12 × 34 expand/collapse control, drawn as part of the branch: the
+/// connector tick runs into its left edge at mid-height and a 1px muted
+/// chevron continues from there. Open, it falls from the tick to point down
+/// at the children; closed, it is an arrowhead on a stub extending the tick.
 fn caret(line: &AgentLine, on_toggle: Option<OnToggle>) -> Element {
     let expanded = line.expanded;
     let id = line.id.clone();
@@ -607,22 +609,28 @@ fn caret(line: &AgentLine, on_toggle: Option<OnToggle>) -> Element {
         let unit = ctx.rect.size.width / 12.0;
         let centre = ctx.rect.center();
         let local = |x: f32, y: f32| Vector2::new((x - 6.0) * unit, (y - 6.0) * unit);
-        let points = if expanded {
-            vec![local(2.5, 4.5), local(9.5, 4.5), local(6.0, 8.5)]
-        } else {
-            vec![local(4.5, 2.5), local(8.5, 6.0), local(4.5, 9.5)]
-        };
         let bounds = Rect::from_xywh(
             centre.x - 6.0 * unit,
             centre.y - 6.0 * unit,
             12.0 * unit,
             12.0 * unit,
         );
-        ctx.scene.shape(
-            mosaic::render::Shape::new(bounds)
-                .path(points, true)
-                .fill(color(ground.muted)),
-        );
+        let stroke = |scene: &mut mosaic::render::Scene, points: &[(f32, f32)]| {
+            let points: Vec<Vector2> = points.iter().map(|&(x, y)| local(x, y)).collect();
+            scene.shape(
+                mosaic::render::Shape::new(bounds).path(points, false).stroke(
+                    mosaic::render::Stroke::new(unit, color(ground.muted))
+                        .cap(mosaic::render::LineCap::Square)
+                        .join(mosaic::render::LineJoin::Miter),
+                ),
+            );
+        };
+        if expanded {
+            stroke(ctx.scene, &[(0.0, 6.0), (4.5, 10.5), (9.0, 6.0)]);
+        } else {
+            stroke(ctx.scene, &[(0.0, 6.0), (7.0, 6.0)]);
+            stroke(ctx.scene, &[(3.5, 2.5), (7.0, 6.0), (3.5, 9.5)]);
+        }
     });
     button.on_pointer(move |event, ctx| {
         if matches!(event.kind, PointerEventKind::Click(PointerButton::Primary)) {

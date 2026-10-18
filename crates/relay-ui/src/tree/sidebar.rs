@@ -217,10 +217,12 @@ pub fn FocusCrumb(
     on_back: OnPress,
 ) -> Element {
     let name_label = name.clone();
+    // The back cell is square: its width follows the laid-out row height.
+    let side = State::new(px(44.0));
     view! {
         row height:min-content shrink:0 align:center
             stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
-            button @click:{on_back()} label:"Back to Root" width:{px(44.0)}px height:fill shrink:0
+            button @click:{on_back()} label:"Back to Root" width:{side.get()}px height:fill shrink:0
                 align:center justify:center radius:0px pad:0px fill:(Color::TRANSPARENT)
                 stroke:(width:{px(1.0)} color:ground.hairline edges:right)
                 hover { fill:ground.hover } pressed { fill:ground.pressed }
@@ -230,7 +232,8 @@ pub fn FocusCrumb(
                 }
             }
             col width:1fr min-width:0px height:min-content gap:{px(4.0)}px
-                pad:(left:{px(12.0)}px right:{px(12.0)}px top:{px(12.0)}px bottom:{px(14.0)}px) {
+                pad:(left:{px(12.0)}px right:{px(12.0)}px top:{px(12.0)}px bottom:{px(14.0)}px)
+                @layout:{move |rect: Rect| side.set(rect.size.height)} {
                 PathText segments:(path)
                 row min-width:0px height:min-content clip label:{name_label.clone()} {
                     SerifTitle text:(name) size:(SerifSize::Medium)
