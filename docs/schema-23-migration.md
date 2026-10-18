@@ -21,18 +21,20 @@ How the migration behaves, from `crates/relay-server/src/lib.rs` (`Store::open`)
 - **Nix commands.** Every project loads with Nix Commands set to Off. The field is omitted from the snapshot while Off. The migration never turns it on; owners turn it on per project on the Connections page, which is a separate decision.
 - **Older servers.** A schema 21 server refuses any database newer than its schema ("Database schema is newer than this Relay server"). After migration, going back to the previous binary therefore **requires restoring the pre-migration database**.
 
-## Why the Current Helper Cannot Run This Release
+## Helper Support
 
-`nix/deploy-relay.py` takes one `schema_version` and checks it both before and after activation:
+Before `previous_schema_version`, `nix/deploy-relay.py` took one `schema_version` and checked it both before and after activation, so it could not run a release that changes the schema:
 
-- **Before activation.** `activate` reads the live database and fails with `pre-schema` unless its schema equals `schema_version`. This happens before the service is stopped.
-- **After activation.** `local()` fails with `schema-protocol` unless the migrated database also equals `schema_version`.
-- **Automatic restore.** `failure()` switches back to the previous bundle and restarts it only when the database schema still equals `schema_version`.
+- **`schema_version: 23`.** It refused safely with `pre-schema` and changed nothing.
+- **`schema_version: 21`.** The candidate migrated the database to 23, then `local()` failed with `schema-protocol`. Because the schema no longer equalled 21, `failure()` did not switch back. The attempt ended `failed` with the candidate active on a migrated database and the public service not started.
 
-That leaves two possible manifests, and neither works:
+The helper now reads an optional manifest field `previous_schema_version`:
 
-- **`schema_version: 23`.** The helper refuses safely with `pre-schema` and changes nothing.
-- **`schema_version: 21`.** The candidate migrates the database to 23, then `local()` fails with `schema-protocol`. Because the schema no longer equals 21, `failure()` does not switch back. The attempt ends `failed` with the candidate active on a migrated database and the public service not started. This is not an acceptable route.
+1. **Two schema fields.** When `previous_schema_version` is missing it defaults to `schema_version`, so same-schema releases behave as before. Both must be non-negative integers with `previous_schema_version <= schema_version`; otherwise the helper refuses the manifest before reading the database.
+2. **Before activation.** `activate` compares the live schema with `previous_schema_version` (`pre-schema`).
+3. **After activation.** `local()` compares with `schema_version` (`schema-protocol`).
+4. **Automatic restore.** `failure()` switches back to the previous bundle only while the schema still equals `previous_schema_version`, for example when the candidate failed before it migrated. Once the database is migrated, `failure()` records the failure and leaves recovery to the owner.
+5. **Tests.** `nix/test_deploy_relay.py` covers manifest validation, the check before activation against `previous_schema_version`, the check after activation against `schema_version`, a full activation that migrates a real SQLite database from 21 to 23, no automatic switch-back once the schema has changed, and unchanged behaviour when the field is absent. Run them with `nix develop --command just deploy-check`.
 
 **Do not work around these checks.** That means no:
 
@@ -41,31 +43,13 @@ That leaves two possible manifests, and neither works:
 - reusing an attempt's state directory,
 - starting a second server on the live database.
 
-Until the change below is reviewed and merged, the helper does not support this release.
-
-### Required Helper Change (Not Implemented)
-
-This is a narrow change, to be reviewed and tested separately before this release is deployed:
-
-1. **Two schema fields.** Add an optional manifest field `previous_schema_version`; when it is missing it defaults to `schema_version`. Require `previous_schema_version <= schema_version`.
-2. **Before activation.** `activate` compares the live schema with `previous_schema_version` (`pre-schema`).
-3. **After activation.** `local()` keeps comparing with `schema_version` (`schema-protocol`).
-4. **Automatic restore.** `failure()` switches back to the previous bundle only when the schema still equals `previous_schema_version`. Today it compares with `schema_version`. With a target of 23 it would therefore point the old binary at a migrated database. The old server would refuse to start, but it would never be a working rollback. After migration, `failure()` must record the failure and leave recovery to the owner.
-5. **Tests.** Add tests in `nix/test_deploy_relay.py` for:
-   - the check before activation against `previous_schema_version`,
-   - the check after activation against `schema_version`,
-   - no automatic switch-back once the schema has changed,
-   - unchanged behaviour when the field is absent.
-
-   Run them with `nix develop --command just deploy-check`.
-
-Without that change, the only alternative is an owner-performed manual activation (see [Activation](#activation)). It loses the helper's lock, its durable status and its checks after activation, so it is not recommended.
+Without the helper, the only alternative is an owner-performed manual activation (see [Activation](#activation)). It loses the helper's lock, its durable status and its checks after activation, so it is not recommended.
 
 ## Prerequisites
 
 - **Authorization.** The owner has explicitly authorized the merge to `main` and this deployment.
 - **Checks.** `nix develop --command just check` passes on the published commit. As of this plan it has **not** been run (see [evidence](#evidence)).
-- **Helper.** The helper change above is merged, its tests pass, and the manifest uses `previous_schema_version: 21` and `schema_version: 23`.
+- **Helper.** The published commit contains the [helper support](#helper-support), `nix develop --command just deploy-check` passes on it, and the manifest uses `previous_schema_version: 21` and `schema_version: 23`.
 - **Matching builds.** Build the server and browser packages from the same immutable commit. Proposed, not run:
 
   ```sh
@@ -164,7 +148,7 @@ Rehearse against a copy before any live activation. The rehearsal must never ope
 
 ## Activation
 
-**With the helper change** (recommended), follow [deployment](deployment.md#run-the-workflow).
+**With the helper** (recommended), follow [deployment](deployment.md#run-the-workflow).
 
 1. **Manifest.** Use `previous_schema_version: 21`, `schema_version: 23`, `protocol_version: 14`, the full `revision`, the candidate and previous bundles, and `server_executable` and `web_root` from the same build.
 2. **Activate.** Run `activate` once, from an independent user job. Proposed, not run:
@@ -186,7 +170,7 @@ How to handle each helper result:
 | Exit 2, `public-verification-pending` | The candidate stays active and locally healthy. Retry `verify` only, never `activate`. |
 | `deployed` | Continue with [Validation](#validation). |
 
-**Without the helper change**, the owner would repeat the helper's steps by hand: stop the services, back up with the backup API after the stop, switch the active link, `daemon-reload`, start the service, then run the checks in [Validation](#validation) and start the public service. This route has no activation lock, no durable status and no automatic local checks, so it needs the owner present for the whole release.
+**Without the helper**, the owner would repeat the helper's steps by hand: stop the services, back up with the backup API after the stop, switch the active link, `daemon-reload`, start the service, then run the checks in [Validation](#validation) and start the public service. This route has no activation lock, no durable status and no automatic local checks, so it needs the owner present for the whole release.
 
 ## Validation
 
@@ -236,5 +220,9 @@ Not done:
 - **Deployment.** No deployment or service change of any kind.
 - **Live data.** No backup or read of a live database.
 - **Rehearsal.** No rehearsal.
-- **Tests and builds.** No helper tests, Rust tests or builds. In the sandbox where these changes were integrated, Nix cannot reach the daemon. That includes the new test `schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off`, which has not run.
-- **Helper change.** Not written.
+- **Tests and builds.** No Rust tests, Clippy, formatting checks, builds or `just deploy-check`. In the sandbox where these changes were integrated, Nix cannot reach the daemon. That includes the new test `schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off`, which has not run.
+
+Done for the helper support only:
+
+- **Helper tests outside the project shell.** `python3 -B -I -m unittest discover -s nix -p test_deploy_relay.py` passed (23 tests) with a Python 3.14 interpreter from the Nix store, not the `.#web` shell. This does not replace `just deploy-check`.
+- **Test sensitivity.** With either schema comparison reverted to `schema_version`, the new tests fail.

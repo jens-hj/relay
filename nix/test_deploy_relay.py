@@ -1,9 +1,11 @@
+from contextlib import closing
 import importlib.util
 import json
 import os
 from pathlib import Path
 import tempfile
 import io
+import sqlite3
 import sys
 import unittest
 from unittest.mock import patch
@@ -204,6 +206,112 @@ class DeploymentTests(unittest.TestCase):
             self.obj.failure(d.Failure('schema'))
             run.assert_not_called()
         self.assertEqual(self.active.resolve(), self.candidate)
+
+    def migration(self, migrate=True, keep_drafts=True):
+        """Prepare a real schema 21 database whose candidate migrates it to 23 on restart."""
+        self.obj.link(self.previous)
+        self.obj.state = {}
+        database = self.root / 'workspace.sqlite3'
+        with sqlite3.connect(database) as db:
+            db.execute('CREATE TABLE workspace (id INTEGER PRIMARY KEY, snapshot TEXT)')
+            db.execute("INSERT INTO workspace VALUES (1, '{}')")
+            db.execute('PRAGMA user_version = 21')
+        db.close()
+        self.obj.m.update(database=str(database), protocol_version=14, schema_version=23,
+                          previous_schema_version=21,
+                          server_executable=str(Path('/proc', str(os.getpid()), 'exe').resolve()))
+        web = Path(self.obj.m['web_root'])
+        web.mkdir()
+        (web / 'app_bg.wasm').write_bytes(b'new')
+        (self.candidate / 'relay.service').write_text(
+            'Environment=RELAY_WEB_ROOT=' + str(web) + '\nExecStart=' + self.obj.m['server_executable'])
+
+        def run(*args):
+            if migrate and args[0] == 'restart' and self.active.resolve() == self.candidate:
+                with sqlite3.connect(database) as db:
+                    db.execute('PRAGMA user_version = 23')
+                db.close()
+        snapshot = {'protocol_version': 14, 'sessions': [{'id': 'kept'}]}
+
+        def get_json(endpoint, path):
+            if path == '/v1/drafts':
+                draft = {'session_id': 'kept', 'revision': 2, 'parts': []}
+                return [draft] if keep_drafts or self.active.resolve() == self.previous else []
+            return {'revision': 'new' if self.active.resolve() == self.candidate else 'old'}
+        return [patch.object(self.obj, 'run', side_effect=run), patch.object(self.obj, 'ready', return_value=snapshot),
+                patch.object(self.obj, 'get_json', side_effect=get_json),
+                patch.object(d.subprocess, 'check_output', return_value=str(os.getpid()).encode())]
+
+    def backup_schema(self):
+        with closing(sqlite3.connect(self.root / 'database-backup.sqlite3')) as db:
+            return db.execute('PRAGMA user_version').fetchone()[0]
+
+    def test_schema_versions_default_and_range(self):
+        self.assertEqual(d.schema_versions({'schema_version': 18}), (18, 18))
+        self.assertEqual(d.schema_versions({'schema_version': 23, 'previous_schema_version': 21}), (21, 23))
+        for previous in (24, True, '21', None, -1):
+            with self.subTest(previous=previous), self.assertRaises(d.Failure) as result:
+                d.schema_versions({'schema_version': 23, 'previous_schema_version': previous})
+            self.assertEqual(result.exception.args, ('schema-range',))
+        with self.assertRaises(d.Failure):
+            d.schema_versions({'schema_version': '23'})
+
+    def test_migration_activates_from_previous_schema_and_verifies_target(self):
+        patches = self.migration()
+        with patches[0] as run, patches[1], patches[2], patches[3], patch.object(self.obj, 'public'):
+            self.assertEqual(self.obj.activate(), 0)
+        self.assertEqual(self.obj.state['phase'], 'deployed')
+        self.assertEqual(self.active.resolve(), self.candidate)
+        self.assertEqual(self.obj.schema(), 23)
+        self.assertEqual(self.backup_schema(), 21)
+        self.assertEqual(sum(call.args[0] == 'restart' for call in run.call_args_list), 1)
+
+    def test_pre_schema_compares_with_previous_schema(self):
+        for manifest, live in (({'previous_schema_version': 21}, 23), ({'previous_schema_version': None}, 21)):
+            with self.subTest(manifest=manifest, live=live):
+                self.setUp()
+                patches = self.migration()
+                if manifest['previous_schema_version'] is None:
+                    del self.obj.m['previous_schema_version']
+                with closing(sqlite3.connect(self.obj.m['database'])) as db:
+                    db.execute('PRAGMA user_version = %d' % live)
+                with patches[0] as run, patches[1], patches[2], patches[3]:
+                    with self.assertRaises(d.Failure) as result:
+                        self.obj.activate()
+                    self.obj.failure(result.exception)
+                    run.assert_not_called()
+                self.assertEqual(self.obj.state['check'], 'pre-schema')
+                self.assertEqual(self.active.resolve(), self.previous)
+                self.assertFalse((self.root / 'database-backup.sqlite3').exists())
+
+    def test_local_check_requires_target_schema_after_activation(self):
+        patches = self.migration(migrate=False)
+        with patches[0] as run, patches[1], patches[2], patches[3], patch.object(self.obj, 'public') as public:
+            with self.assertRaises(d.Failure) as result:
+                self.obj.activate()
+            self.assertEqual(result.exception.args, ('schema-protocol',))
+            public.assert_not_called()
+            # The candidate never migrated, so the previous bundle can still run on schema 21.
+            self.obj.failure(result.exception)
+        self.assertEqual(self.active.resolve(), self.previous)
+        self.assertTrue(self.obj.state['restored_previous'])
+        self.assertEqual(self.obj.schema(), 21)
+        self.assertEqual(sum(call.args[0] == 'restart' for call in run.call_args_list), 2)
+
+    def test_failure_after_migration_never_switches_back(self):
+        patches = self.migration(keep_drafts=False)
+        with patches[0] as run, patches[1], patches[2], patches[3]:
+            with self.assertRaises(d.Failure) as result:
+                self.obj.activate()
+            self.obj.failure(result.exception)
+        self.assertEqual(self.obj.state['phase'], 'failed')
+        self.assertEqual(self.obj.state['check'], 'drafts')
+        self.assertFalse(self.obj.state['restored_previous'])
+        self.assertEqual(self.active.resolve(), self.candidate)
+        self.assertEqual(self.obj.schema(), 23)
+        self.assertEqual(self.backup_schema(), 21)
+        self.assertEqual(sum(call.args[0] == 'restart' for call in run.call_args_list), 1)
+        self.assertFalse([call for call in run.call_args_list if call.args[0] == 'start'])
 
     def test_public_revision_and_asset_mismatch_are_hard(self):
         web = Path(self.obj.m['web_root'])

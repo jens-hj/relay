@@ -38,6 +38,18 @@ class Ownership(Failure):
 PUBLIC_GATEWAY_STATUS = {408, 429, 502, 503, 504}
 
 
+def schema_versions(manifest):
+    """Return the (pre-activation, post-activation) schemas; a missing previous version means no migration."""
+    target = manifest['schema_version']
+    previous = manifest.get('previous_schema_version', target)
+    for version in (previous, target):
+        if type(version) is not int or version < 0:
+            raise Failure('schema-range')
+    if previous > target:
+        raise Failure('schema-range')
+    return previous, target
+
+
 def protected(path, directory=False):
     path = Path(path)
     if not path.is_absolute():
@@ -84,6 +96,7 @@ class Deployment:
         manifest = protected(manifest)
         protected(manifest.parent, True)
         self.m = json.loads(manifest.read_text())
+        schema_versions(self.m)
         self.manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
         self.root = protected(self.m['state_dir'], True)
         protected(self.m['credential_file'])
@@ -295,7 +308,7 @@ class Deployment:
             raise Failure('identical-bundles')
         if self.active() != Path(self.m['previous_bundle']).resolve(strict=True):
             raise Ownership('previous-bundle')
-        if self.schema() != self.m['schema_version']:
+        if self.schema() != schema_versions(self.m)[0]:
             raise Failure('pre-schema')
         web = Path(self.m['web_root'])
         if not any(self.m['revision'].encode() in p.read_bytes() for p in web.glob('*_bg.wasm')):
@@ -332,10 +345,11 @@ class Deployment:
             return
         restored = False
         # Never restore data automatically, nor run an older binary on a migrated schema.
+        # The previous bundle only runs on the schema it was deployed with.
         if not isinstance(error, Ownership) and self.state.get('stopped'):
             try:
                 expected = self.m['candidate_bundle'] if self.state.get('activated') else self.m['previous_bundle']
-                if self.active() == Path(expected).resolve() and self.schema() == self.m['schema_version']:
+                if self.active() == Path(expected).resolve() and self.schema() == schema_versions(self.m)[0]:
                     self.link(self.m['previous_bundle'])
                     self.run('daemon-reload')
                     self.run('restart', self.m.get('service', 'relay.service'))
@@ -348,7 +362,8 @@ class Deployment:
                  'local-transport', 'curl-transport', 'curl-failure', 'local-readiness', 'schema-protocol',
                  'history', 'drafts', 'local-revision', 'executable', 'login-gate', 'public-revision',
                  'assets-empty', 'public-asset', 'identical-bundles', 'previous-bundle', 'pre-schema',
-                 'frontend-revision', 'unit-package', 'wrapper-target', 'pre-protocol', 'concurrent-activation'}
+                 'frontend-revision', 'unit-package', 'wrapper-target', 'pre-protocol', 'concurrent-activation',
+                 'schema-range'}
         code = error.args[0] if isinstance(error, Failure) and error.args else None
         self.save('failed', category=getattr(error, 'category', 'internal'),
                   check=code if isinstance(code, str) and code in codes else 'internal',
