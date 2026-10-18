@@ -56,6 +56,20 @@ Record the active refresh rate and scale with `niri msg outputs`. Keep the scene
 
 For visual review without a display, render offscreen with Mesa: `nix develop .#ui-test --command cargo test -p relay-desktop shell_screenshots -- --ignored` writes the shell over the demo orchestration (conversation, manager, board, settings, profile, connections, command palette) to `target/relay-desktop-shots/`; set `RELAY_SHOT` to render one. The component gallery renders the same way from `relay-ui` (see `crates/relay-ui/src/tests.rs`). Compare both against `design/orchestrator-ui/screenshots/`.
 
+`nix develop .#ui-test --command just shots` renders the same views into `target/shots/`: `agents` (the default) is the `relay-ui` page that starts with the agent tree, `shell` is every desktop view, and any other name renders one desktop view, for example `just shots conversation`. `RELAY_UI_HEIGHT` sets the agents page height and `RELAY_UI_SCALE` its scale (default 2).
+
+Relay-managed workers render the same way, but two parts of the Claude Code sandbox get in the way:
+
+- **`.gitmodules` is masked.** The sandbox mounts a device node over `.gitmodules` (and other dotfiles) in the worktree, so `nix develop .#ui-test` fails with `parsing .gitmodules file: failed open ... Permission denied`. A `path:` flake reference fails on the same nodes. Name the commit instead. Nix then reads the flake from Git objects, while Cargo still builds the uncommitted working tree in the current directory:
+
+  ```sh
+  nix develop "git+file://$PWD?rev=$(git rev-parse HEAD)#ui-test" --command just shots
+  ```
+
+- **The Nix daemon is unreachable.** The deployed service gives harnesses only Git, the GitHub/GitLab CLIs, Bash, coreutils, bubblewrap and socat, so Rust and Mesa have to come from the flake. Automatic mode starts Claude Code with `allowAllUnixSockets: false` (`crates/relay-server/src/claude.rs`). The Linux sandbox therefore blocks every Unix socket, including `/nix/var/nix/daemon-socket/socket`, and every Nix command that needs the store fails with `cannot create Unix domain socket: Operation not permitted`. Agents must not work around this by using a system toolchain, store paths taken straight from `/nix/store`, or a copy of the store database.
+
+Until a worker can reach the daemon, someone with an unsandboxed shell runs the command above in the worker's worktree and attaches the PNGs from `target/shots/`. Whether to give workers that access, through Unrestricted Access for one worker or a server change to the sandbox's socket policy, is a security decision for the workspace owner. It also exposes every other Unix socket the worker can see.
+
 ```sh
 nix develop --command just dev
 ```

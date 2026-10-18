@@ -192,6 +192,17 @@ build-web:
 test:
     cargo test --locked --workspace
 
+# Render offscreen screenshots into target/shots: agents, shell, or one desktop view (use nix develop .#ui-test).
+shots view="agents":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export RELAY_UI_SCREENSHOTS="$PWD/target/shots" RELAY_SCREENSHOTS="$PWD/target/shots"
+    case "$1" in
+        agents) cargo test --locked -p relay-ui agents_gallery_screenshot -- --ignored --nocapture ;;
+        shell) cargo test --locked -p relay-desktop shell_screenshots -- --ignored --nocapture ;;
+        *) RELAY_SHOT="$1" cargo test --locked -p relay-desktop shell_screenshots -- --ignored --nocapture ;;
+    esac
+
 # Check Rust diagnostics with warnings treated as errors.
 lint:
     cargo clippy --locked --workspace --all-targets -- -D warnings
