@@ -167,10 +167,8 @@ fn ProjectSetup(model: Model) -> Element {
     let blocked = Derived::new(move || model.busy.get() || !model.connected.get());
     let create = press(move || {
         let draft = model.project_draft.get_untracked();
-        if draft.name.trim().is_empty() || !std::path::Path::new(draft.root.trim()).is_absolute() {
-            model
-                .notice
-                .set("Enter a name and an absolute root on the server.".into());
+        if let Some(problem) = setup_problem(&draft) {
+            model.notice.set(problem.into());
         } else {
             model.submit(
                 Command::CreateProject {
@@ -235,6 +233,27 @@ fn ProjectSetup(model: Model) -> Element {
     }
 }
 
+/// Whether `path` is absolute on the server. The server runs on Unix, so
+/// this must not use `std::path::Path::is_absolute`, which follows the
+/// client's platform: in the browser (wasm32-unknown-unknown) and on Windows
+/// it rejects every Unix path.
+pub(crate) fn server_absolute(path: &str) -> bool {
+    path.starts_with('/')
+}
+
+/// What blocks creating the drafted project, naming only the failing fields.
+pub(crate) fn setup_problem(draft: &ProjectDraft) -> Option<&'static str> {
+    match (
+        draft.name.trim().is_empty(),
+        server_absolute(draft.root.trim()),
+    ) {
+        (false, true) => None,
+        (true, true) => Some("Enter a project name."),
+        (false, false) => Some("Enter an absolute root on the server."),
+        (true, false) => Some("Enter a name and an absolute root on the server."),
+    }
+}
+
 fn connection_label(input: &ConnectionInput) -> String {
     match input {
         ConnectionInput::Repository { remote } => format!("Repository · {remote}"),
@@ -289,9 +308,7 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
         let address = address.get_untracked().trim().to_owned();
         let connection = match kind.get_untracked() {
             0 if !address.is_empty() => Some(ConnectionInput::Repository { remote: address }),
-            1 if std::path::Path::new(&address).is_absolute() => {
-                Some(ConnectionInput::Directory { path: address })
-            }
+            1 if server_absolute(&address) => Some(ConnectionInput::Directory { path: address }),
             2 | 3 if !address.is_empty() => number
                 .get_untracked()
                 .parse::<u64>()

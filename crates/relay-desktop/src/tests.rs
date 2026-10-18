@@ -4167,6 +4167,107 @@ fn new_project_preserves_full_setup_draft_and_appends_on_acknowledgement() {
     assert!(mounted.model.notice.get_untracked().is_empty());
 }
 
+/// Types into an input the way a person does: click it, then type keys.
+fn click_and_type(mounted: &Mounted, label: &str, text: &str) {
+    mounted.click(label);
+    mounted.key(Key::Character(text.into()), false);
+}
+
+fn add_initial_repository(mounted: &Mounted, remote: &str) {
+    mounted.click("Add connection");
+    click_and_type(mounted, "Connection address", remote);
+    mounted.click_nth("Add connection", 1);
+}
+
+fn assert_creates_playground(mounted: &mut Mounted) {
+    mounted.click("Create project");
+    assert_eq!(mounted.model.notice.get_untracked(), "");
+    let request = mounted
+        .commands
+        .try_recv()
+        .expect("CreateProject submitted");
+    assert!(
+        matches!(&request.command, Command::CreateProject { name, root, connections }
+            if name == "Playground"
+                && root == "/home/gmk/repos/kevork/playground"
+                && matches!(&connections[..], [ConnectionInput::Repository { remote }]
+                    if remote == "git@github.com:KevorkC/Up.git")),
+        "{:?}",
+        request.command
+    );
+}
+
+#[test]
+fn new_project_creates_when_the_connection_is_added_after_typing() {
+    let mut mounted = mount(false, 1380.0);
+    open_project_menu(&mounted);
+    mounted.click("New Project");
+    click_and_type(&mounted, "Project name", " Playground ");
+    click_and_type(
+        &mounted,
+        "Absolute project root on server",
+        "/home/gmk/repos/kevork/playground ",
+    );
+    add_initial_repository(&mounted, "git@github.com:KevorkC/Up.git");
+    assert_creates_playground(&mut mounted);
+}
+
+#[test]
+fn new_project_creates_when_the_connection_is_added_before_typing() {
+    let mut mounted = mount(false, 1380.0);
+    open_project_menu(&mounted);
+    mounted.click("New Project");
+    add_initial_repository(&mounted, "git@github.com:KevorkC/Up.git");
+    click_and_type(&mounted, "Project name", "Playground");
+    click_and_type(
+        &mounted,
+        "Absolute project root on server",
+        "/home/gmk/repos/kevork/playground",
+    );
+    assert_creates_playground(&mut mounted);
+}
+
+#[test]
+fn new_project_notice_names_only_the_failing_field() {
+    let mut mounted = mount(false, 1380.0);
+    open_project_menu(&mounted);
+    mounted.click("New Project");
+    click_and_type(
+        &mounted,
+        "Absolute project root on server",
+        "/home/gmk/repos/kevork/playground",
+    );
+    mounted.click("Create project");
+    assert_eq!(
+        mounted.model.notice.get_untracked(),
+        "Enter a project name."
+    );
+    click_and_type(&mounted, "Project name", "Playground");
+    type_in(
+        &mounted,
+        "Absolute project root on server",
+        "repos/playground",
+    );
+    mounted.click("Create project");
+    assert_eq!(
+        mounted.model.notice.get_untracked(),
+        "Enter an absolute root on the server."
+    );
+    assert!(mounted.commands.try_recv().is_err());
+}
+
+#[test]
+fn server_roots_are_checked_as_unix_paths_on_every_client_platform() {
+    // The browser client's std rejects every path as relative, so the check
+    // must not depend on the client's `Path::is_absolute` (#157).
+    assert!(crate::projects::server_absolute(
+        "/home/gmk/repos/kevork/playground"
+    ));
+    assert!(!crate::projects::server_absolute("repos/playground"));
+    assert!(!crate::projects::server_absolute(r"C:\projects\playground"));
+    assert!(!crate::projects::server_absolute(""));
+}
+
 #[test]
 fn board_memberships_selection_and_project_switching_preserve_running_sessions() {
     let mounted = mount(false, 1380.0);
