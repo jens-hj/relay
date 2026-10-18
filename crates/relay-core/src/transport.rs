@@ -377,6 +377,7 @@ mod tests {
             id: "m".into(),
             session_id: "s".into(),
             author: "a".into(),
+            sender: crate::Sender::User,
             kind: "tool_call".into(),
             body: "x".repeat(20_000),
             parts: vec![],

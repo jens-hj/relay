@@ -152,7 +152,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 19 {
+        if version > 20 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -172,7 +172,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 19;"
+             PRAGMA user_version = 20;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -242,10 +242,11 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
-        if version < 19 {
-            // Normalize legacy snapshots with defaults for naming and waiting state.
-            // Schema 18 protects explicit profile models from older servers;
-            // schema 19 keeps older servers from cascading a single-turn stop.
+        if version < 20 {
+            // Normalize legacy snapshots with defaults for naming, waiting state and
+            // prompt senders. Schema 18 protects explicit profile models, schema 19
+            // keeps older servers from cascading a single-turn stop and schema 20
+            // protects agent-sent prompt senders from older servers.
             let json: String = connection
                 .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
                     r.get(0)
@@ -485,6 +486,7 @@ impl Store {
                         id: format!("prompt-{}", envelope.request_id),
                         session_id: session_id.clone(),
                         author: "You".into(),
+                        sender: Sender::User,
                         kind: "user".into(),
                         body: prompt.clone(),
                         parts: vec![Part::text(&prompt)],
@@ -499,6 +501,7 @@ impl Store {
                         error: None,
                         interrupts_run: None,
                         last_edit_request: None,
+                        sender: Sender::User,
                     });
                     action = Some(Action::Run { session_id, prompt });
                 }
@@ -544,6 +547,7 @@ impl Store {
                         error: None,
                         interrupts_run: None,
                         last_edit_request: None,
+                        sender: Sender::User,
                     });
                 }
             }
@@ -683,6 +687,7 @@ impl Store {
                     command,
                     config,
                     &self.controls,
+                    Sender::User,
                 )?;
             }
             Command::SyncProject { project_id } => {
@@ -1008,6 +1013,7 @@ fn prompt_message(session: &str, request: &str, prompt: &str) -> Message {
         id: format!("prompt-{request}"),
         session_id: session.into(),
         author: "You".into(),
+        sender: Sender::User,
         kind: "prompt".into(),
         body: prompt.into(),
         parts: vec![],

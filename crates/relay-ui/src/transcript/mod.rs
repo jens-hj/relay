@@ -23,8 +23,27 @@ pub fn MessageRow(
     /// itself, a system); used when there is no harness.
     #[prop(optional)]
     icon: Option<SvgToken>,
+    /// Opens the speaker, such as the agent session that sent a message.
+    #[prop(optional)]
+    on_speaker: Option<OnPress>,
     #[prop(optional)] children: Children,
 ) -> Element {
+    let name = match on_speaker {
+        Some(press) => {
+            let label = speaker.clone();
+            view! {
+                button @click:{press()} width:1fr min-width:0px height:min-content radius:0px
+                    pad:0px fill:(Color::TRANSPARENT) label:{label.get()}
+                    hover { fill:ground.hover } pressed { fill:ground.pressed }
+                    focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(2.0)}) } {
+                    Ellipsis text:(speaker) role:(TextRole::Label) tone:(Tone::Muted) weight:500
+                }
+            }
+        }
+        None => view! {
+            Ellipsis text:(speaker) role:(TextRole::Label) tone:(Tone::Muted) weight:500
+        },
+    };
     view! {
         row height:min-content align:start min-width:0px {
             row width:{px(128.0)}px shrink:0 height:min-content gap:{px(7.0)}px align:center
@@ -34,7 +53,7 @@ pub fn MessageRow(
                 } else if icon.is_some() {
                     { parent.adopt(&crate::icons::icon_mark(icon.unwrap(), 12.0)); }
                 }
-                Ellipsis text:(speaker) role:(TextRole::Label) tone:(Tone::Muted) weight:500
+                { parent.adopt(&name); }
             }
             col width:1fr height:min-content min-width:0px gap:{px(12.0)}px font-size:{px(13.0)}px
                 line-height:1.7 font-color:ground.ink {

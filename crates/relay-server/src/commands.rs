@@ -131,6 +131,7 @@ pub(super) fn conversation(
         id: format!("conversation-{request}"),
         session_id: id.into(),
         author: "Relay".into(),
+        sender: Sender::User,
         kind: "harness_command".into(),
         body: if name == "resume" {
             "Resumed retained conversation".into()
@@ -1259,6 +1260,7 @@ pub(super) fn publish_fork(
             id: format!("fork-result-{run}"),
             session_id: source.into(),
             author: "Relay".into(),
+            sender: Sender::User,
             kind: "harness_command".into(),
             body: format!("Created {} in independent repository worktrees", fork.title),
             parts: vec![],

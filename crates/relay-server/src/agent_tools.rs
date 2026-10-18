@@ -475,6 +475,7 @@ async fn call(
                 id: format!("agent-stop-{}", uuid::Uuid::new_v4()),
                 session_id: caller.into(),
                 author: "Relay".into(),
+                sender: Sender::User,
                 kind: "agent_control".into(),
                 body: format!("Requested stop for {} and its descendants", args.agent),
                 parts: vec![],
@@ -571,6 +572,7 @@ fn tool_message(
         id: format!("agent-tool-{}", uuid::Uuid::new_v4()),
         session_id: session.into(),
         author: "Relay".into(),
+        sender: Sender::User,
         kind: kind.into(),
         body: body.into(),
         parts: vec![],
@@ -827,6 +829,9 @@ async fn spawn(
                 child_session_id: Some(id.clone()),
             });
         }
+        let from_caller = Sender::Agent {
+            session_id: caller.into(),
+        };
         current.sessions.push(child);
         current.submissions.push(Submission {
             id: child_run.clone(),
@@ -837,10 +842,12 @@ async fn spawn(
             error: None,
             interrupts_run: None,
             last_edit_request: None,
+            sender: from_caller.clone(),
         });
-        current
-            .messages
-            .push(prompt_message(&id, &child_run, &prompt));
+        current.messages.push(Message {
+            sender: from_caller,
+            ..prompt_message(&id, &child_run, &prompt)
+        });
         current.messages.push(tool_message(
             caller,
             run,
@@ -992,6 +999,9 @@ async fn message_agent(
             command.clone(),
             &workspace.config,
             &HashMap::new(),
+            Sender::Agent {
+                session_id: caller.into(),
+            },
         )?;
         if let Some(saved) = saved {
             transaction
@@ -1682,6 +1692,7 @@ mod tests {
                 error: None,
                 interrupts_run: None,
                 last_edit_request: None,
+                sender: Sender::User,
             });
         });
         let before = f.workspace.snapshots.borrow().clone();
@@ -2007,7 +2018,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 19);
+        assert_eq!(schema, 20);
         f.finish().await;
     }
     #[tokio::test]
@@ -2447,7 +2458,11 @@ mod tests {
                             Some(ToolDetail::Message { read: true, .. })
                         )
                 });
-                if read {
+                let prompted = snapshot
+                    .messages
+                    .iter()
+                    .any(|m| m.id == format!("prompt-{submission}"));
+                if read && prompted {
                     break;
                 }
                 events.changed().await.unwrap();
@@ -2455,6 +2470,31 @@ mod tests {
         })
         .await
         .unwrap();
+        // Both the spawned task and the queued message keep their sending agent.
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let sent_by_caller = Sender::Agent {
+            session_id: f.caller.clone(),
+        };
+        let prompts = snapshot
+            .messages
+            .iter()
+            .filter(|m| m.session_id == child && m.kind == "prompt")
+            .collect::<Vec<_>>();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts.iter().all(|m| m.sender == sent_by_caller));
+        assert!(
+            snapshot
+                .submissions
+                .iter()
+                .filter(|s| s.session_id == child)
+                .all(|s| s.sender == sent_by_caller)
+        );
+        assert!(
+            snapshot
+                .submissions
+                .iter()
+                .any(|s| s.id == submission && s.sender == sent_by_caller)
+        );
         f.finish().await;
     }
     #[tokio::test]

@@ -168,6 +168,7 @@ fn flush(workspace: &Workspace, parent: &str) -> Result<(), Error> {
         error: None,
         interrupts_run: None,
         last_edit_request: None,
+        sender: Sender::User,
     };
     if held {
         submission.state = SubmissionState::Paused;

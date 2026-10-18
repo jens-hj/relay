@@ -346,6 +346,8 @@ struct TranscriptEntry {
     message: Message,
     comments: Vec<Comment>,
     speaker: String,
+    /// The agent session that sent a prompt, when it still exists.
+    speaker_session: Option<String>,
     continues: bool,
     spacing: f32,
 }
@@ -364,22 +366,23 @@ fn transcript_index(model: Model) -> Derived<Rc<TranscriptIndex>> {
             }
             let mut previous: Option<(String, bool)> = None;
             for message in crate::adapt::transcript_messages(&snapshot.messages, &session) {
-                let speaker = if message.kind == "prompt" && message.author != "Relay" {
-                    "You"
+                let (speaker, speaker_session) = if message.kind == "prompt" {
+                    prompt_speaker(snapshot, message)
                 } else {
-                    &message.author
+                    (message.author.clone(), None)
                 };
                 let tool = message.tool.is_some()
                     || matches!(message.kind.as_str(), "command_execution" | "file_change");
-                let continues = previous.as_ref().is_some_and(|(name, _)| name == speaker);
+                let continues = previous.as_ref().is_some_and(|(name, _)| *name == speaker);
                 let entry = TranscriptEntry {
                     message: crate::tool_activity::with_legacy_tool(message.clone()),
                     comments: comments.remove(message.id.as_str()).unwrap_or_default(),
                     speaker: if continues {
                         String::new()
                     } else {
-                        speaker.to_owned()
+                        speaker.clone()
                     },
+                    speaker_session: speaker_session.filter(|_| !continues),
                     continues,
                     spacing: match previous.as_ref() {
                         None => 0.0,
@@ -387,13 +390,49 @@ fn transcript_index(model: Model) -> Derived<Rc<TranscriptIndex>> {
                         Some(_) => 28.0,
                     },
                 };
-                previous = Some((speaker.to_owned(), tool));
+                previous = Some((speaker, tool));
                 result.order.push(message.id.clone());
                 result.rows.insert(message.id.clone(), entry);
             }
             Rc::new(result)
         })
     })
+}
+
+/// A prompt's speaker: the user, or the sending agent named by its place in
+/// the session tree relative to the receiving session. A deleted sender is
+/// shown as "Agent" without a link.
+fn prompt_speaker(snapshot: &Snapshot, message: &Message) -> (String, Option<String>) {
+    // Relay notices are prompts Relay queues for itself, never the user or an agent.
+    if message.author == "Relay" {
+        return ("Relay".into(), None);
+    }
+    let Sender::Agent { session_id } = &message.sender else {
+        return ("You".into(), None);
+    };
+    let Some(sender) = snapshot.sessions.iter().find(|s| &s.id == session_id) else {
+        return ("Agent".into(), None);
+    };
+    let receiver_parent = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == message.session_id)
+        .and_then(|s| s.parent_session_id.as_deref());
+    let sender_parent = sender.parent_session_id.as_deref();
+    let relationship = if receiver_parent == Some(sender.id.as_str()) {
+        Some("Parent")
+    } else if sender_parent == Some(message.session_id.as_str()) {
+        Some("Child")
+    } else if sender_parent.is_some() && sender_parent == receiver_parent {
+        Some("Sibling")
+    } else {
+        None
+    };
+    let label = match relationship {
+        Some(relationship) => format!("{relationship} · {}", sender.title),
+        None => sender.title.clone(),
+    };
+    (label, Some(sender.id.clone()))
 }
 
 fn text_part(parts: &[Part], id: &str) -> Option<String> {
@@ -2584,6 +2623,24 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
                 .unwrap_or_default()
         })
     });
+    // Agent-sent prompts link to their sender's session.
+    let on_speaker = entry
+        .with_untracked(|entry| {
+            entry
+                .as_ref()
+                .and_then(|entry| entry.speaker_session.clone())
+        })
+        .map(|_| -> relay_ui::prelude::OnPress {
+            Rc::new(move || {
+                if let Some(id) = entry.with_untracked(|entry| {
+                    entry
+                        .as_ref()
+                        .and_then(|entry| entry.speaker_session.clone())
+                }) {
+                    model.open_session(id);
+                }
+            })
+        });
     // Relay's own messages (the context it sends with each turn) carry the
     // Relay mark rather than the session's harness glyph.
     let from_relay = initial.as_ref().is_some_and(|m| m.author == "Relay");
@@ -2676,7 +2733,7 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
         }
     } else if prompt {
         view! {
-            MessageRow speaker:(relay_ui::Live::from(speaker)) {
+            MessageRow speaker:(relay_ui::Live::from(speaker)) on-speaker:(on_speaker) {
                 UserMessage {
                     { parent.adopt(&body); }
                 }
@@ -4150,6 +4207,7 @@ mod tests {
                 message: projected_message("keep", "Agent", "assistant"),
                 comments: vec![],
                 speaker: "Agent".into(),
+                speaker_session: None,
                 continues: false,
                 spacing: 0.0,
             },
@@ -4249,6 +4307,7 @@ mod tests {
             id: id.into(),
             session_id: "indexed".into(),
             author: author.into(),
+            sender: Sender::User,
             kind: kind.into(),
             body: format!("Body {id}"),
             parts: vec![],
@@ -4581,6 +4640,7 @@ mod tests {
                         id: format!("row-{index}"),
                         session_id: "indexed".into(),
                         author: "Agent".into(),
+                        sender: Sender::User,
                         kind: "assistant".into(),
                         body: "Text".into(),
                         parts: vec![],
@@ -4724,6 +4784,7 @@ mod layout_regression {
                     id: id.into(),
                     session_id: "layout".into(),
                     author: "Relay".into(),
+                    sender: Sender::User,
                     kind: kind.into(),
                     parts: if id == "fence" {
                         vec![Part::text(&body)]

@@ -369,6 +369,7 @@ pub(super) fn apply(
     command: Command,
     config: &RuntimeConfig,
     controls: &HashMap<String, watch::Sender<bool>>,
+    sender: Sender,
 ) -> Result<Option<Action>, Error> {
     match command {
         Command::SubmitTurn {
@@ -435,6 +436,7 @@ pub(super) fn apply(
                 error: None,
                 interrupts_run: None,
                 last_edit_request: None,
+                sender,
             };
             snapshot.submissions.push(submission);
             store_draft(
@@ -703,6 +705,12 @@ pub(super) fn reserve(snapshot: &mut Snapshot, session: &str, id: &str, parts: &
         worker.last_usage = worker.usage.clone();
     }
     worker.usage = None;
+    let sender = snapshot
+        .submissions
+        .iter()
+        .find(|s| s.id == id)
+        .map(|s| s.sender.clone())
+        .unwrap_or_default();
     snapshot.messages.push(Message {
         id: format!("prompt-{id}"),
         session_id: session.into(),
@@ -712,6 +720,7 @@ pub(super) fn reserve(snapshot: &mut Snapshot, session: &str, id: &str, parts: &
             "You"
         }
         .into(),
+        sender,
         kind: "prompt".into(),
         body: plain_text(parts),
         parts: parts.to_vec(),

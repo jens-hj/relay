@@ -83,6 +83,7 @@ fn message(
             id: id.clone(),
             session_id: session.into(),
             author: "Claude Code".into(),
+            sender: Sender::User,
             kind: kind.into(),
             body: String::new(),
             parts: vec![],

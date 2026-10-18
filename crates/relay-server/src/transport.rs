@@ -744,6 +744,7 @@ mod tests {
                 id: format!("history-{index}"),
                 session_id: "session-plan".into(),
                 author: "Agent".into(),
+                sender: Sender::User,
                 kind: "assistant".into(),
                 body: format!("{index}: {}", "λ".repeat(1800)),
                 parts: vec![],
@@ -1007,6 +1008,7 @@ mod tests {
             error: None,
             interrupts_run: None,
             last_edit_request: None,
+            sender: Sender::User,
         });
         let mut projection = Projection::default();
         subscribe(&mut projection, &snapshot, 1);
@@ -1198,7 +1200,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            19
+            20
         );
     }
 
@@ -1271,7 +1273,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            19
+            20
         );
     }
 

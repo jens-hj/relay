@@ -17,6 +17,7 @@ fn windowed_history(count: usize) -> Mounted {
                 id: format!("window-{index}"),
                 session_id: "session-plan".into(),
                 author: "Codex".into(),
+                sender: Sender::User,
                 kind: "assistant".into(),
                 body: format!(
                     "Entry {index}. **Markdown**.\n\n{}",
@@ -694,6 +695,7 @@ fn diagnose_chat_history_scaling() {
                 snapshot.messages.push(Message {
                     id: format!("probe-{index}"), session_id: "session-plan".into(),
                     author: "Codex".into(), kind: "assistant".into(),
+                    sender: Sender::User,
                     body: format!("Message {index}. **Markdown** with a [link](https://example.com).\n\nA second paragraph."),
                     parts: vec![], tool: None,
                 });
@@ -753,6 +755,7 @@ fn transcript_keys_and_unchanged_source_survive_global_and_tail_updates() {
                 id: format!("indexed-{index}"),
                 session_id: "session-plan".into(),
                 author: "Codex".into(),
+                sender: Sender::User,
                 kind: "assistant".into(),
                 body: format!("Source {index}. **Text**."),
                 parts: vec![],
@@ -3061,6 +3064,7 @@ fn snapshot_prompt_and_comment_ids_confirm_ambiguous_writes() {
         id: format!("prompt-{}", send.request_id),
         session_id: "session-plan".into(),
         author: "User".into(),
+        sender: Sender::User,
         kind: "prompt".into(),
         body: "Continue exact session".into(),
         parts: vec![],
@@ -3251,6 +3255,7 @@ fn buffer_worker(mounted: &Mounted) {
         id: "prompt-active-run".into(),
         session_id: id.clone(),
         author: "You".into(),
+        sender: Sender::User,
         kind: "prompt".into(),
         body: "Original".into(),
         parts: vec![],
@@ -3543,6 +3548,7 @@ fn rapid_second_send_waits_for_ack_then_promotes_exact_queue_and_keeps_newer_dra
         error: None,
         interrupts_run: None,
         last_edit_request: None,
+        sender: Sender::User,
     });
     mounted.model.receive(NetworkState {
         acknowledged_revision: snapshot.revision,
@@ -6923,6 +6929,7 @@ fn conversation_tracks_constrain_recorded_text_and_draft_to_the_reading_width() 
         id: "reading-width".into(),
         session_id: session_id.clone(),
         author: "Codex".into(),
+        sender: Sender::User,
         kind: "agent_message".into(),
         body: "A recorded paragraph should wrap inside the reading column. ".repeat(10),
         parts: vec![],
@@ -7206,6 +7213,115 @@ fn direct_project_connections_and_header_actions_use_full_cells() {
             .value,
         format!("{expected:?}")
     );
+}
+
+#[test]
+fn agent_sent_prompts_name_their_sender_by_tree_relationship_and_link_to_it() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    for session in &mut snapshot.sessions {
+        match session.id.as_str() {
+            "session-plan" => session.title = "hi".into(),
+            "session-worker" => {
+                session.title = "Markdown crate".into();
+                session.parent_session_id = Some("session-plan".into());
+            }
+            "session-review" => {
+                session.title = "Disk usage".into();
+                session.parent_session_id = Some("session-plan".into());
+            }
+            _ => {}
+        }
+    }
+    let prompt = |id: &str, session: &str, sender: Sender| Message {
+        id: id.into(),
+        session_id: session.into(),
+        author: "You".into(),
+        sender,
+        kind: "prompt".into(),
+        body: format!("Body {id}"),
+        parts: vec![],
+        tool: None,
+    };
+    let agent = |id: &str| Sender::Agent {
+        session_id: id.into(),
+    };
+    snapshot.messages = vec![
+        prompt("from-user", "session-worker", Sender::User),
+        prompt("from-parent", "session-worker", agent("session-plan")),
+        prompt("from-sibling", "session-worker", agent("session-review")),
+        prompt("from-deleted", "session-worker", agent("session-deleted")),
+        prompt("from-child", "session-plan", agent("session-worker")),
+    ];
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_session("session-worker".into());
+    mounted.settle();
+    for label in ["You", "Parent · hi", "Sibling · Disk usage", "Agent"] {
+        assert!(has_label(&mounted, label), "{label}");
+    }
+    // The linked name keeps the plain label's place and size in the gutter.
+    let text = |label: &str| {
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .rfind(|n| n.label.as_deref() == Some(label))
+            .unwrap()
+            .rect
+    };
+    let (user, parent) = (text("You"), text("Parent · hi"));
+    assert_eq!(user.origin.x, parent.origin.x);
+    assert!(parent.size.width > 0.0);
+    assert_eq!(user.size.height, parent.size.height);
+    mounted.click("Parent · hi");
+    mounted.settle();
+    assert_eq!(mounted.model.session.get_untracked(), "session-plan");
+    assert!(has_label(&mounted, "Child · Markdown crate"));
+    mounted.click("Child · Markdown crate");
+    mounted.settle();
+    assert_eq!(mounted.model.session.get_untracked(), "session-worker");
+    // A deleted sender has no session to open.
+    mounted.click("Agent");
+    mounted.settle();
+    assert_eq!(mounted.model.session.get_untracked(), "session-worker");
+}
+
+#[test]
+fn relay_notice_prompts_keep_the_relay_label() {
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    let worker = snapshot
+        .sessions
+        .iter_mut()
+        .find(|s| s.id == "session-worker")
+        .unwrap();
+    worker.parent_session_id = Some("session-plan".into());
+    worker.title = "Markdown crate".into();
+    let notice = |sender: Sender| Message {
+        id: "prompt-relay-notice-1".into(),
+        session_id: "session-plan".into(),
+        author: "Relay".into(),
+        sender,
+        kind: "prompt".into(),
+        body: "Markdown crate ended without a result".into(),
+        parts: vec![],
+        tool: None,
+    };
+    for sender in [
+        Sender::User,
+        Sender::Agent {
+            session_id: "session-worker".into(),
+        },
+    ] {
+        snapshot.messages = vec![notice(sender)];
+        mounted.model.snapshot.set(snapshot.clone());
+        mounted.model.open_session("session-plan".into());
+        mounted.settle();
+        assert!(has_label(&mounted, "Relay"));
+        assert!(!has_label(&mounted, "You"));
+        assert!(!has_label(&mounted, "Child · Markdown crate"));
+    }
 }
 
 #[test]
@@ -7593,6 +7709,7 @@ fn streamed_messages_keep_the_bottom_visible_and_preserve_manual_reading_positio
             id: "stream-follow".into(),
             session_id: "session-plan".into(),
             author: "Agent".into(),
+            sender: Sender::User,
             kind: "assistant".into(),
             body: "line\n".repeat(80),
             parts: vec![],
@@ -7874,6 +7991,7 @@ fn scrolling_loads_one_older_page_and_preserves_the_visible_message() {
                 id: format!("paged-{i}"),
                 session_id: "session-plan".into(),
                 author: "Agent".into(),
+                sender: Sender::User,
                 kind: "assistant".into(),
                 body: format!("Message {i}\n{}", "line\n".repeat(5)),
                 parts: vec![],
@@ -7931,6 +8049,7 @@ fn scrolling_loads_one_older_page_and_preserves_the_visible_message() {
                 id: format!("paged-{i}"),
                 session_id: "session-plan".into(),
                 author: "Agent".into(),
+                sender: Sender::User,
                 kind: "assistant".into(),
                 body: format!("Earlier {i}\n{}", "line\n".repeat(5)),
                 parts: vec![],
@@ -8385,6 +8504,7 @@ fn consecutive_tool_calls_are_compact_while_prose_keeps_its_spacing() {
                     id: id.into(),
                     session_id: "session-plan".into(),
                     author: "Codex".into(),
+                    sender: Sender::User,
                     kind: kind.into(),
                     body: body.into(),
                     parts: vec![],
@@ -8871,6 +8991,7 @@ fn tool_activity_updates_in_place_and_opens_failures() {
                 id: "terminal-call".into(),
                 session_id: "session-plan".into(),
                 author: "Codex".into(),
+                sender: Sender::User,
                 kind: "tool_call".into(),
                 body: "first output\n".into(),
                 parts: vec![],
@@ -8964,6 +9085,7 @@ fn tool_kinds_keep_their_verbs_and_unknown_outcomes_stay_unclaimed() {
                 id: format!("tool-{i}"),
                 session_id: "session-plan".into(),
                 author: "Agent".into(),
+                sender: Sender::User,
                 kind: "tool_call".into(),
                 body: "result".into(),
                 parts: vec![],
@@ -9078,6 +9200,7 @@ fn the_header_pause_cell_and_p_hold_and_resume_the_queue() {
         error: None,
         interrupts_run: None,
         last_edit_request: None,
+        sender: Sender::User,
     };
     mounted
         .model
@@ -9772,6 +9895,7 @@ fn relay_context_messages_use_the_relay_mark_not_a_harness_glyph() {
             id: "context-relay".into(),
             session_id: "session-plan".into(),
             author: "Relay".into(),
+            sender: Sender::User,
             kind: "issue-context".into(),
             body: "{\"issue\":\"#2\"}".into(),
             parts: vec![],
@@ -10271,6 +10395,7 @@ fn incoming_messages_keep_the_focused_input_and_send_control_visible() {
                 id: "focused-stream".into(),
                 session_id: "session-plan".into(),
                 author: "Agent".into(),
+                sender: Sender::User,
                 kind: "assistant".into(),
                 body: "line\n".repeat(80),
                 parts: vec![],
@@ -10292,6 +10417,7 @@ fn incoming_messages_keep_the_focused_input_and_send_control_visible() {
                         id: "focused-new-message".into(),
                         session_id: "session-plan".into(),
                         author: "Agent".into(),
+                        sender: Sender::User,
                         kind: "assistant".into(),
                         body: "new message\n".repeat(30),
                         parts: vec![],
@@ -10538,6 +10664,7 @@ fn queued_gutter_actions_fit_short_messages_and_work_with_keyboard_at_each_scale
                 error: None,
                 interrupts_run: None,
                 last_edit_request: None,
+                sender: Sender::User,
             });
         });
         mounted.settle();
@@ -10815,6 +10942,7 @@ fn queued_and_paused_messages_render_images_between_their_text_and_preserve_edit
                 error: None,
                 interrupts_run: None,
                 last_edit_request: None,
+                sender: Sender::User,
             })
         });
         mounted.settle();
@@ -10969,6 +11097,7 @@ fn queued_reply_images_fetch_missing_bytes_and_appear_when_received() {
             error: Some("Queue paused".into()),
             interrupts_run: None,
             last_edit_request: None,
+            sender: Sender::User,
         })
     });
     mounted.settle();
@@ -11531,6 +11660,7 @@ fn progress_peek_uses_only_selected_active_run_metadata_without_loaded_tail() {
         id: "prompt-queued".into(),
         session_id: session.clone(),
         author: "You".into(),
+        sender: Sender::User,
         kind: "prompt".into(),
         body: "Next turn".into(),
         parts: vec![],
@@ -11704,6 +11834,7 @@ fn scroll_history(session: &str, count: usize) -> Vec<Message> {
         .map(|index| Message {
             id: format!("{session}-{index}"),
             session_id: session.into(),
+            sender: Sender::User,
             author: "Codex".into(),
             kind: "assistant".into(),
             body: format!(

@@ -183,6 +183,8 @@ pub struct Submission {
     pub interrupts_run: Option<String>,
     #[serde(default)]
     pub last_edit_request: Option<String>,
+    #[serde(default)]
+    pub sender: crate::Sender,
 }
 
 #[cfg(test)]
@@ -252,5 +254,15 @@ mod tests {
         let message: crate::Message = serde_json::from_str(legacy).unwrap();
         assert!(message.parts.is_empty());
         assert_eq!(message.body, "Keep history");
+        assert_eq!(message.sender, crate::Sender::User);
+        let legacy = r#"{"id":"q","session_id":"s","parts":[],"state":"queued","approve_implementation":false,"error":null}"#;
+        let submission: Submission = serde_json::from_str(legacy).unwrap();
+        assert_eq!(submission.sender, crate::Sender::User);
+        let sent = crate::Sender::Agent {
+            session_id: "parent".into(),
+        };
+        let json = serde_json::to_string(&sent).unwrap();
+        assert_eq!(json, r#"{"kind":"agent","session_id":"parent"}"#);
+        assert_eq!(serde_json::from_str::<crate::Sender>(&json).unwrap(), sent);
     }
 }

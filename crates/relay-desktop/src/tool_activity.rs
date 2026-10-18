@@ -100,6 +100,7 @@ mod tests {
             id: "old".into(),
             session_id: "session".into(),
             author: "Codex".into(),
+            sender: relay_core::Sender::User,
             kind: "command_execution".into(),
             body: "Command: cargo test\nExit: 0\ntests passed".into(),
             parts: vec![],

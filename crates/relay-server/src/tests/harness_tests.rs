@@ -1533,7 +1533,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        19
+        20
     );
     let worker = snapshot.sessions[0].worker.as_mut().unwrap();
     worker.model = Some("reported-model".into());
@@ -1691,6 +1691,7 @@ async fn restart_interrupts_unfinished_tool_records_without_erasing_output() {
         id: "unfinished-tool".into(),
         session_id: "session-plan".into(),
         author: "Codex".into(),
+        sender: Sender::User,
         kind: "tool_call".into(),
         body: "retained output".into(),
         parts: vec![],

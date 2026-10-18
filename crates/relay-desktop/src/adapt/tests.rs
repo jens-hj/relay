@@ -147,6 +147,7 @@ fn statuses_map_runs_permissions_and_queued_turns() {
         error: None,
         interrupts_run: None,
         last_edit_request: None,
+        sender: Sender::User,
     });
     assert_eq!(status(&snapshot, "session-review"), AgentStatus::Queued);
     snapshot.tool_permissions[0].decision = Some(true);
@@ -439,6 +440,7 @@ fn fingerprint_counts_older_transcripts_tool_messages() {
         id: id.into(),
         session_id: "s".into(),
         author: "Codex".into(),
+        sender: Sender::User,
         kind: kind.into(),
         body: body.into(),
         parts: vec![],

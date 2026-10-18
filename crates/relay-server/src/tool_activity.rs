@@ -90,6 +90,7 @@ pub(super) fn start(
         id,
         session_id: session.into(),
         author: author.into(),
+        sender: Sender::User,
         kind: "tool_call".into(),
         body: String::new(),
         parts: vec![],

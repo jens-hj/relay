@@ -220,11 +220,24 @@ pub struct WorkerRun {
     pub changes: Option<ChangeSet>,
 }
 
+/// Who submitted a prompt. Records written before senders were stored are the user's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum Sender {
+    #[default]
+    User,
+    Agent {
+        session_id: String,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub id: String,
     pub session_id: String,
     pub author: String,
+    #[serde(default)]
+    pub sender: Sender,
     pub kind: String,
     pub body: String,
     #[serde(default)]
