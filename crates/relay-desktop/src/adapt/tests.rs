@@ -468,6 +468,44 @@ fn fingerprint_counts_older_transcripts_tool_messages() {
 }
 
 #[test]
+fn session_fingerprint_prefers_whole_chat_counts_without_double_counting() {
+    let snapshot = demo();
+    let loaded = fingerprint(&snapshot.messages, "session-plan");
+    let pairs = |counts: Vec<relay_ui::prelude::ToolCount>| {
+        counts
+            .into_iter()
+            .map(|c| (c.kind, c.count))
+            .collect::<Vec<_>>()
+    };
+    // No server counts, or counts for another session: the loaded window.
+    let mut history = HistoryState::default();
+    assert_eq!(
+        session_fingerprint(&snapshot.messages, &history, "session-plan"),
+        loaded
+    );
+    history.session_id = "session-write".into();
+    history.tool_counts = Some(vec![relay_core::ToolCount {
+        kind: relay_core::ToolKind::Read,
+        count: 40,
+    }]);
+    assert_eq!(
+        session_fingerprint(&snapshot.messages, &history, "session-plan"),
+        loaded
+    );
+    // The selected session's whole-chat counts lead; loaded calls already
+    // inside them are not added again, and types they lack still show.
+    history.session_id = "session-plan".into();
+    let whole = pairs(session_fingerprint(
+        &snapshot.messages,
+        &history,
+        "session-plan",
+    ));
+    assert_eq!(whole[0], (UiKind::Read, 40));
+    assert_eq!(whole.len(), loaded.len());
+    assert_eq!(&whole[1..], &pairs(loaded)[1..]);
+}
+
+#[test]
 fn fingerprint_counts_every_tool_kind_once_in_first_seen_order() {
     let snapshot = demo();
     let counts = fingerprint(&snapshot.messages, "session-plan");

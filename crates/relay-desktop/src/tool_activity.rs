@@ -1,15 +1,14 @@
 //! Recorded tool activity: older transcripts' tool messages gain typed calls.
-use relay_core::{Message, ToolKind, ToolState};
+use relay_core::{Message, ToolState};
 
 /// Old transcripts lack lifecycle metadata. Give them a typed presentation.
 /// A recorded exit code is the outcome (zero completed, otherwise failed);
 /// without one the status stays unknown. Never infer success from prose.
 pub(crate) fn with_legacy_tool(mut message: Message) -> Message {
-    if message.tool.is_some()
-        || !matches!(message.kind.as_str(), "command_execution" | "file_change")
-    {
+    // The same category the server counts this message under.
+    let Some(kind) = relay_core::legacy_tool_kind(&message) else {
         return message;
-    }
+    };
     let (name, kind, input, target, output, code) =
         if let Some(command) = message.body.strip_prefix("Command: ") {
             let mut lines = command.splitn(3, '\n');
@@ -20,7 +19,7 @@ pub(crate) fn with_legacy_tool(mut message: Message) -> Message {
                 .and_then(|s| s.parse::<i64>().ok());
             (
                 "commandExecution".into(),
-                ToolKind::Run,
+                kind,
                 command.clone(),
                 command,
                 lines.next().unwrap_or("").into(),
@@ -29,7 +28,7 @@ pub(crate) fn with_legacy_tool(mut message: Message) -> Message {
         } else if message.kind == "file_change" {
             (
                 "fileChange".into(),
-                ToolKind::Edit,
+                kind,
                 message.body.clone(),
                 "Recorded file changes".into(),
                 message.body.clone(),
@@ -53,7 +52,7 @@ pub(crate) fn with_legacy_tool(mut message: Message) -> Message {
             .unwrap_or(name);
             (
                 name.into(),
-                ToolKind::from_name(name),
+                kind,
                 input.into(),
                 target.into(),
                 String::new(),
@@ -62,7 +61,7 @@ pub(crate) fn with_legacy_tool(mut message: Message) -> Message {
         } else {
             (
                 "Recorded tool".into(),
-                ToolKind::Other,
+                kind,
                 String::new(),
                 "Recorded tool output".into(),
                 message.body.clone(),
@@ -93,6 +92,7 @@ pub(crate) fn with_legacy_tool(mut message: Message) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use relay_core::ToolKind;
 
     #[test]
     fn legacy_activity_takes_its_status_from_the_recorded_exit_code() {

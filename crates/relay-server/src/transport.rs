@@ -115,6 +115,12 @@ fn progress_summary(snapshot: &Snapshot, session: &str) -> Option<Box<ProgressSu
     }))
 }
 
+/// Whole-transcript tool counts, derived from the complete stored snapshot on
+/// every projection so they match whatever history page the client loaded.
+fn session_tool_counts(snapshot: &Snapshot, session: &str) -> Option<Vec<relay_core::ToolCount>> {
+    (!session.is_empty()).then(|| relay_core::tool_counts(&snapshot.messages, session))
+}
+
 fn historical_submissions(
     snapshot: &Snapshot,
     messages: &[relay_core::Message],
@@ -303,6 +309,7 @@ pub(crate) fn history_page(
             generation: 0,
             active_run_ids: active_run_ids(snapshot),
             progress_summary: progress_summary(snapshot, session),
+            tool_counts: session_tool_counts(snapshot, session),
         },
     };
     // Include cursor, preview references, comments and receipt metadata in the budget.
@@ -350,6 +357,7 @@ impl Projection {
             generation: self.generation,
             active_run_ids: active_run_ids(snapshot),
             progress_summary: progress_summary(snapshot, &self.session),
+            tool_counts: session_tool_counts(snapshot, &self.session),
             ..Default::default()
         };
         let messages = snapshot
@@ -1096,6 +1104,139 @@ mod tests {
             snapshot.sessions[0].worker.as_mut().unwrap().status = status;
             assert!(projection.view(&snapshot).1.progress_summary.is_none());
         }
+    }
+
+    fn tool(kind: ToolKind) -> relay_core::ToolCall {
+        relay_core::ToolCall {
+            run_id: "run".into(),
+            name: format!("{kind:?}"),
+            kind,
+            state: ToolState::Running,
+            input: String::new(),
+            target: String::new(),
+            directory: None,
+            exit_code: None,
+            started_ms: None,
+            finished_ms: None,
+            detail: None,
+        }
+    }
+
+    /// 1000 messages: every fourth a typed Read/Edit/Run call, every tenth an
+    /// older transcript's untyped command, plus another session's call.
+    fn tool_archive() -> Snapshot {
+        let mut snapshot = archive();
+        let kinds = [ToolKind::Read, ToolKind::Edit, ToolKind::Run];
+        for (index, message) in snapshot.messages.iter_mut().enumerate() {
+            if index % 10 == 5 {
+                message.kind = "command_execution".into();
+                message.body = "Command: ls\nExit: 0\nok".into();
+            } else if index % 4 == 0 {
+                message.kind = "tool".into();
+                message.tool = Some(tool(kinds[(index / 4) % 3]));
+            }
+        }
+        let mut other = snapshot.messages[0].clone();
+        other.id = "other-tool".into();
+        other.session_id = "session-worker".into();
+        snapshot.messages.push(other);
+        snapshot
+    }
+
+    fn counts(history: &HistoryState) -> Vec<(ToolKind, u32)> {
+        history
+            .tool_counts
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|c| (c.kind, c.count))
+            .collect()
+    }
+
+    #[test]
+    fn tool_counts_cover_the_whole_transcript_and_follow_new_tool_events() {
+        let mut snapshot = tool_archive();
+        // 250 typed calls cycle Read/Edit/Run; 100 legacy commands count as Run.
+        let whole = vec![
+            (ToolKind::Read, 84),
+            (ToolKind::Edit, 83),
+            (ToolKind::Run, 83 + 100),
+        ];
+        let mut projection = Projection::default();
+        subscribe(&mut projection, &snapshot, 1);
+        let (view, history) = projection.view(&snapshot);
+        assert_eq!(view.messages.len(), 50);
+        assert_eq!(counts(&history), whole);
+        // Paging to older history changes the loaded window, not the counts.
+        let oldest = history.oldest_message_id.unwrap();
+        projection
+            .request(
+                &snapshot,
+                StreamRequest::Older {
+                    session_id: "session-plan".into(),
+                    generation: 1,
+                    before: oldest,
+                },
+            )
+            .unwrap();
+        let (view, history) = projection.view(&snapshot);
+        assert!(view.messages.len() > 50);
+        assert_eq!(counts(&history), whole);
+        let page = history_page(&snapshot, "session-plan", None, Some("history-30"), None).unwrap();
+        assert_eq!(counts(&page.history), whole);
+        // A new call counts once, in the update that carries it.
+        let mut call = snapshot.messages[0].clone();
+        call.id = "tool-new".into();
+        call.tool = Some(tool(ToolKind::Search));
+        snapshot.messages.push(call);
+        let (_, history) = projection.view(&snapshot);
+        assert_eq!(counts(&history)[3], (ToolKind::Search, 1));
+        // Finishing it and refining its category moves, never duplicates, the call.
+        let last = snapshot.messages.last_mut().unwrap().tool.as_mut().unwrap();
+        last.state = ToolState::Completed;
+        last.kind = ToolKind::Test;
+        let (_, history) = projection.view(&snapshot);
+        let total: u32 = counts(&history).iter().map(|(_, n)| n).sum();
+        assert_eq!(total, 351);
+        assert_eq!(counts(&history)[3], (ToolKind::Test, 1));
+        assert!(!counts(&history).iter().any(|(k, _)| *k == ToolKind::Search));
+    }
+
+    #[tokio::test]
+    async fn stored_transcripts_report_whole_tool_counts_after_reopening() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("db");
+        let mut store = Store::open(&path, AgentProfile::default()).unwrap();
+        store.save(&tool_archive()).unwrap();
+        drop(store);
+        let token = uuid::Uuid::new_v4().to_string();
+        let app = router(&path, token.clone(), AgentProfile::default()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let page: HistoryPage = reqwest::Client::new()
+            .get(format!(
+                "http://{address}/v1/sessions/session-plan/history?around=history-30"
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(page.messages.len() < 1000);
+        assert_eq!(
+            counts(&page.history),
+            vec![
+                (ToolKind::Read, 84),
+                (ToolKind::Edit, 83),
+                (ToolKind::Run, 183)
+            ]
+        );
+        server.abort();
     }
 
     #[tokio::test]

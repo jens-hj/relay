@@ -28,6 +28,10 @@ pub struct HistoryState {
     /// Bounded provider summary for the selected session's active run, independent of paging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_summary: Option<Box<ProgressSummary>>,
+    /// The selected session's tool calls per category over its whole transcript,
+    /// independent of paging. Absent from servers that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_counts: Option<Vec<crate::ToolCount>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

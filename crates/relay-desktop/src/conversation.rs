@@ -1832,7 +1832,11 @@ pub fn Conversation(model: Model) -> Element {
         }
     });
     let tools = Derived::new(move || {
-        crate::adapt::fingerprint(&model.snapshot.get().messages, &model.session.get())
+        crate::adapt::session_fingerprint(
+            &model.snapshot.get().messages,
+            &model.history.get(),
+            &model.session.get(),
+        )
     });
     let approvals = Derived::new(move || {
         crate::adapt::transcript_permissions(&model.snapshot.get(), &model.session.get())

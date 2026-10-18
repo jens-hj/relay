@@ -3,50 +3,17 @@
 use super::identity::{harness, session_model};
 use super::tree::{ancestor_path, session_status};
 use relay_core::{
-    HarnessCatalog, Message, Snapshot, ToolCall, ToolDetail as Measured, ToolKind as Kind,
-    ToolPermission, ToolState,
+    HarnessCatalog, HistoryState, Message, Snapshot, ToolCall, ToolDetail as Measured,
+    ToolKind as Kind, ToolPermission, ToolState,
 };
 use relay_ui::prelude::{
     AgentStatus, ApprovalView, CodeLine, Hunk, Opening, PlanStep, SearchFile, TestFailure,
     ToolCallView, ToolCount, ToolDetail, WaitAgent,
 };
 use relay_ui::tokens::ToolKind;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-/// The server's durable spawn receipt is a fallback for harnesses that omit
-/// tool events. Prefer the observed call when both identify the same child.
-/// Keep the underlying messages untouched for history and replay.
-pub fn transcript_messages<'a>(messages: &'a [Message], session: &str) -> Vec<&'a Message> {
-    fn spawn(message: &Message) -> Option<(&str, &str)> {
-        let tool = message.tool.as_ref()?;
-        if tool.kind != Kind::Spawn {
-            return None;
-        }
-        match &tool.detail {
-            Some(Measured::Spawn {
-                child_session_id: Some(child),
-            }) => Some((&tool.run_id, child)),
-            _ => None,
-        }
-    }
-    let receipt = |m: &Message| {
-        m.author == "Relay"
-            && m.id.starts_with("agent-tool-")
-            && m.kind == "tool"
-            && m.body.is_empty()
-            && m.parts.is_empty()
-    };
-    let observed: BTreeSet<_> = messages
-        .iter()
-        .filter(|m| m.session_id == session && !receipt(m))
-        .filter_map(spawn)
-        .collect();
-    messages
-        .iter()
-        .filter(|m| m.session_id == session)
-        .filter(|m| !receipt(m) || spawn(m).is_none_or(|key| !observed.contains(&key)))
-        .collect()
-}
+pub use relay_core::transcript_messages;
 
 /// Lines of tool output kept in a summary's tail.
 const TAIL: usize = 6;
@@ -415,19 +382,47 @@ pub fn tool_view(
 /// Calls per tool type in a session's loaded transcript, in the order the
 /// types first appear. Older transcripts' tool messages count as the typed
 /// calls the transcript shows them as.
+#[cfg(test)]
 pub fn fingerprint(messages: &[Message], session_id: &str) -> Vec<ToolCount> {
-    let mut counts: Vec<ToolCount> = Vec::new();
-    for tool in transcript_messages(messages, session_id)
-        .into_iter()
-        .filter_map(|m| crate::tool_activity::with_legacy_tool(m.clone()).tool)
+    let mut counts = Vec::new();
+    merge_counts(&mut counts, relay_core::tool_counts(messages, session_id));
+    counts
+}
+
+/// Calls per tool type over a session's whole transcript, whichever history
+/// page is loaded. The server's counts arrive in the same update as each new
+/// tool message; the loaded window only covers an older server or a session
+/// whose history has not arrived yet. Each type takes the larger of the two
+/// counts, so a loaded call is never counted twice.
+pub fn session_fingerprint(
+    messages: &[Message],
+    history: &HistoryState,
+    session_id: &str,
+) -> Vec<ToolCount> {
+    let mut counts = Vec::new();
+    if history.session_id == session_id
+        && let Some(whole) = &history.tool_counts
     {
+        merge_counts(&mut counts, whole.iter().copied());
+    }
+    merge_counts(&mut counts, relay_core::tool_counts(messages, session_id));
+    counts
+}
+
+fn merge_counts(
+    counts: &mut Vec<ToolCount>,
+    source: impl IntoIterator<Item = relay_core::ToolCount>,
+) {
+    for tool in source {
         let kind = ui_kind(tool.kind);
         match counts.iter_mut().find(|c| c.kind == kind) {
-            Some(count) => count.count += 1,
-            None => counts.push(ToolCount { kind, count: 1 }),
+            Some(count) => count.count = count.count.max(tool.count),
+            None => counts.push(ToolCount {
+                kind,
+                count: tool.count,
+            }),
         }
     }
-    counts
 }
 
 /// Pending permission requests a session's transcript shows: its own and

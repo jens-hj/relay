@@ -389,6 +389,95 @@ pub fn interrupt_tools(snapshot: &mut crate::Snapshot, session: &str, run: Optio
     changed
 }
 
+/// Calls of one tool category across a session's whole transcript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCount {
+    pub kind: ToolKind,
+    pub count: u32,
+}
+
+/// The category an older transcript's untyped activity message is shown as.
+/// Typed tool messages and ordinary messages have none.
+pub fn legacy_tool_kind(message: &crate::Message) -> Option<ToolKind> {
+    if message.tool.is_some()
+        || !matches!(message.kind.as_str(), "command_execution" | "file_change")
+    {
+        return None;
+    }
+    Some(if message.body.starts_with("Command: ") {
+        ToolKind::Run
+    } else if message.kind == "file_change" {
+        ToolKind::Edit
+    } else if let Some((name, input)) = message.body.split_once('\n')
+        && serde_json::from_str::<serde_json::Value>(input).is_ok_and(|v| v.is_object())
+    {
+        ToolKind::from_name(name)
+    } else {
+        ToolKind::Other
+    })
+}
+
+/// A session's transcript messages. The server's durable spawn receipt is a
+/// fallback for harnesses that omit tool events: prefer the observed call
+/// when both identify the same child. Keep the underlying messages untouched
+/// for history and replay.
+pub fn transcript_messages<'a>(
+    messages: &'a [crate::Message],
+    session: &str,
+) -> Vec<&'a crate::Message> {
+    fn spawn(message: &crate::Message) -> Option<(&str, &str)> {
+        let tool = message.tool.as_ref()?;
+        if tool.kind != ToolKind::Spawn {
+            return None;
+        }
+        match &tool.detail {
+            Some(ToolDetail::Spawn {
+                child_session_id: Some(child),
+            }) => Some((&tool.run_id, child)),
+            _ => None,
+        }
+    }
+    let receipt = |m: &crate::Message| {
+        m.author == "Relay"
+            && m.id.starts_with("agent-tool-")
+            && m.kind == "tool"
+            && m.body.is_empty()
+            && m.parts.is_empty()
+    };
+    let observed: std::collections::BTreeSet<_> = messages
+        .iter()
+        .filter(|m| m.session_id == session && !receipt(m))
+        .filter_map(spawn)
+        .collect();
+    messages
+        .iter()
+        .filter(|m| m.session_id == session)
+        .filter(|m| !receipt(m) || spawn(m).is_none_or(|key| !observed.contains(&key)))
+        .collect()
+}
+
+/// Calls per tool category in a session's transcript, in the order the
+/// categories first appear. Older transcripts' activity messages count as the
+/// typed calls the transcript shows them as.
+pub fn tool_counts(messages: &[crate::Message], session: &str) -> Vec<ToolCount> {
+    let mut counts: Vec<ToolCount> = Vec::new();
+    for kind in transcript_messages(messages, session)
+        .into_iter()
+        .filter_map(|m| {
+            m.tool
+                .as_ref()
+                .map(|t| t.kind)
+                .or_else(|| legacy_tool_kind(m))
+        })
+    {
+        match counts.iter_mut().find(|c| c.kind == kind) {
+            Some(count) => count.count += 1,
+            None => counts.push(ToolCount { kind, count: 1 }),
+        }
+    }
+    counts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

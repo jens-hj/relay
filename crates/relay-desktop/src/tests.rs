@@ -8543,6 +8543,73 @@ fn consecutive_tool_calls_are_compact_while_prose_keeps_its_spacing() {
 }
 
 #[test]
+fn fingerprint_shows_whole_chat_counts_with_one_page_loaded_and_follows_new_calls() {
+    let mounted = mount_orchestration(1380.0);
+    mounted.model.open_session("session-plan".into());
+    // As a connected client does; this harness has no transport to subscribe it.
+    mounted.model.subscribe_history("session-plan".into());
+    mounted.settle();
+    // The loaded page holds one Read call; the server counts 99 older ones.
+    let mut whole = relay_core::tool_counts(
+        &mounted.model.snapshot.get_untracked().messages,
+        "session-plan",
+    );
+    let loaded: u32 = whole.iter().map(|c| c.count).sum();
+    whole
+        .iter_mut()
+        .find(|c| c.kind == ToolKind::Read)
+        .unwrap()
+        .count += 99;
+    let receive = |snapshot: Snapshot, tool_counts: Vec<relay_core::ToolCount>| {
+        mounted.model.receive(NetworkState {
+            snapshot,
+            connected: true,
+            status: "Connected".into(),
+            history: HistoryState {
+                session_id: "session-plan".into(),
+                generation: mounted.model.history_generation.get_untracked(),
+                tool_counts: Some(tool_counts),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    };
+    receive(mounted.model.snapshot.get_untracked(), whole.clone());
+    mounted.settle();
+    let total = loaded + 99;
+    let read = |count: u32, total: u32| {
+        format!(
+            "Read: {count} calls, {} percent",
+            relay_ui::fingerprint::share(count, total)
+        )
+    };
+    assert!(has_label(&mounted, &read(100, total)));
+    // A new call arrives with the server's updated counts in the same update;
+    // the bar shows it at once and counts it once.
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    let mut call = snapshot
+        .messages
+        .iter()
+        .find(|m| {
+            m.session_id == "session-plan"
+                && m.tool.as_ref().is_some_and(|t| t.kind == ToolKind::Read)
+        })
+        .unwrap()
+        .clone();
+    call.id = "read-new".into();
+    snapshot.messages.push(call);
+    whole
+        .iter_mut()
+        .find(|c| c.kind == ToolKind::Read)
+        .unwrap()
+        .count += 1;
+    receive(snapshot, whole);
+    mounted.settle();
+    assert!(has_label(&mounted, &read(101, total + 1)));
+    assert!(!has_label(&mounted, &read(102, total + 2)));
+}
+
+#[test]
 fn tool_calls_open_in_three_steps_and_the_fingerprint_counts_them() {
     let mounted = mount_orchestration(1380.0);
     mounted.model.open_session("session-plan".into());
