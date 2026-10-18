@@ -60,6 +60,10 @@ pub struct Project {
     pub defaults: AgentProfile,
     #[serde(default)]
     pub github: Option<GitHubProject>,
+    /// Off unless the project owner enables it. Omitted while off, so
+    /// existing snapshots keep their shape.
+    #[serde(default, skip_serializing_if = "NixCommands::is_off")]
+    pub nix_commands: NixCommands,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,6 +344,12 @@ pub enum Command {
     RenameProject {
         project_id: String,
         name: String,
+    },
+    /// Whether the project's agents may run `nix develop --command` on the
+    /// server, outside their sandbox. Only workspace clients can send this.
+    SetNixCommands {
+        project_id: String,
+        mode: NixCommands,
     },
     AddConnection {
         project_id: String,
@@ -723,6 +733,7 @@ impl Snapshot {
 
             Command::CreateProject { .. }
             | Command::RenameProject { .. }
+            | Command::SetNixCommands { .. }
             | Command::AddConnection { .. }
             | Command::UpdateConnection { .. }
             | Command::RetryConnection { .. }

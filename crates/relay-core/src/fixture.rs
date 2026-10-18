@@ -20,6 +20,7 @@ pub fn demo_snapshot(defaults: AgentProfile) -> Snapshot {
         .collect(),
         defaults,
         github: None,
+        nix_commands: NixCommands::Off,
     };
     let issues = [
         ("issue-1", 1, "Connect the project board", "backlog", "integration", "Mirror the authoritative remote board and preserve its column order and issue identity. Relay adds agent activity alongside the existing workflow.", None),

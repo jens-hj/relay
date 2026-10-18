@@ -13,6 +13,7 @@ pub(super) fn handles(command: &Command) -> bool {
         command,
         Command::CreateProject { .. }
             | Command::RenameProject { .. }
+            | Command::SetNixCommands { .. }
             | Command::AddConnection { .. }
             | Command::UpdateConnection { .. }
             | Command::RetryConnection { .. }
@@ -384,6 +385,7 @@ pub(super) fn apply(
                 columns: local_columns(),
                 defaults,
                 github: None,
+                nix_commands: NixCommands::Off,
             });
             snapshot.agent_configs.push(AgentConfig {
                 automatic_name: false,
@@ -425,6 +427,14 @@ pub(super) fn apply(
                 .find(|p| p.id == project_id && !p.fixture)
                 .ok_or_else(|| Error::invalid("Project not found"))?;
             project.name = name;
+        }
+        Command::SetNixCommands { project_id, mode } => {
+            snapshot
+                .projects
+                .iter_mut()
+                .find(|p| p.id == project_id && !p.fixture)
+                .ok_or_else(|| Error::invalid("Project not found"))?
+                .nix_commands = mode;
         }
         Command::AddConnection {
             project_id,

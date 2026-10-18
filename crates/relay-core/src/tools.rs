@@ -27,7 +27,9 @@ impl ToolKind {
         let normalized = name.to_ascii_lowercase();
         let name = normalized.rsplit("__").next().unwrap_or(&normalized);
         match name {
-            "bash" | "shell" | "exec_command" | "write_stdin" | "commandexecution" => Self::Run,
+            "bash" | "shell" | "exec_command" | "write_stdin" | "commandexecution" | "run_nix" => {
+                Self::Run
+            }
             "read" | "read_file" => Self::Read,
             "edit" | "write" | "multiedit" | "notebookedit" | "apply_patch" | "filechange" => {
                 Self::Edit
@@ -533,6 +535,7 @@ mod tests {
             ("mcp__relay__message_agent", ToolKind::Message),
             ("mcp__relay__wait_for_agents", ToolKind::Wait),
             ("mcp__relay__report_result", ToolKind::Result),
+            ("mcp__relay__run_nix", ToolKind::Run),
             ("TodoWrite", ToolKind::Plan),
             ("Bash", ToolKind::Run),
             ("WebFetch", ToolKind::Fetch),

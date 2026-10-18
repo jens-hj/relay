@@ -24,6 +24,7 @@ mod conversation;
 mod deletion;
 mod github;
 mod harness;
+mod nix;
 mod notices;
 mod process;
 mod projects;
@@ -115,6 +116,8 @@ struct Store {
     notices: HashMap<String, Vec<notices::Notice>>,
     /// Ended runs whose notice waits for their own workers, keyed by session.
     held: HashMap<String, String>,
+    /// Sessions with a Nix command running; one at a time per session.
+    nix_runs: std::collections::HashSet<String>,
 }
 
 impl Store {
@@ -155,7 +158,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 22 {
+        if version > 23 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -175,7 +178,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_recovery(code_hash TEXT PRIMARY KEY);
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
-             PRAGMA user_version = 22;"
+             PRAGMA user_version = 23;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -245,15 +248,17 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
-        if version < 22 {
+        if version < 23 {
             // Normalize legacy snapshots with defaults for naming, waiting state,
             // prompt senders and worker model policies. Schema 18 protects explicit
             // profile models, schema 19 keeps older servers from cascading a
             // single-turn stop, schema 20 protects agent-sent prompt senders,
             // schema 21 stores each profile's worker model policy, which older
-            // servers would reject, and schema 22 keeps older servers from
-            // dropping spawn selection rationales. Missing policies take the
-            // default; older spawns have no rationale.
+            // servers would reject, schema 22 keeps older servers from dropping
+            // spawn selection rationales and schema 23 stores each project's
+            // Nix command setting, which older servers would silently drop.
+            // Missing policies take the default, older spawns have no rationale
+            // and missing Nix settings load as Off.
             let json: String = connection
                 .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
                     r.get(0)
@@ -280,6 +285,7 @@ impl Store {
             ancestor_stops: HashMap::new(),
             notices: HashMap::new(),
             held: HashMap::new(),
+            nix_runs: std::collections::HashSet::new(),
         })
     }
     fn snapshot(&self) -> Result<Snapshot, Error> {
@@ -1507,6 +1513,7 @@ pub fn router_with_browser(
                     title: "No status".into(),
                 }],
                 defaults,
+                nix_commands: NixCommands::Off,
                 github: Some(GitHubProject {
                     owner: remote.owner.clone(),
                     number: remote.number,

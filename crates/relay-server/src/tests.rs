@@ -1261,7 +1261,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            22
+            23
         );
         drop(store);
         let mut reopened = Store::open(&db, AgentProfile::default()).unwrap();
@@ -1355,7 +1355,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 23)
+        .pragma_update(None, "user_version", 24)
         .unwrap();
     drop(store);
     let error = Store::open(&db, AgentProfile::default()).err().unwrap();
@@ -1365,7 +1365,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        23
+        24
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -3585,7 +3585,7 @@ fn schema_twenty_one_adds_default_worker_model_policies_and_persists_changes() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 22);
+    assert_eq!(schema, 23);
     let stored: String = store
         .connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -3647,6 +3647,63 @@ fn schema_twenty_one_adds_default_worker_model_policies_and_persists_changes() {
     drop(store);
     let reopened = Store::open(&path, defaults).unwrap().snapshot().unwrap();
     assert_eq!(reopened.projects[0].defaults, profile);
+}
+
+#[test]
+fn schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nix-commands.sqlite");
+    let defaults = AgentProfile::default();
+    let store = Store::open(&path, defaults.clone()).unwrap();
+    // A schema 22 snapshot stores spawn rationales but no Nix command setting.
+    let mut original = store.snapshot().unwrap();
+    original.sessions[0].spawn = Some(SpawnGrant {
+        task: "Port the change".into(),
+        context: None,
+        permissions: Default::default(),
+        requested_by_run: None,
+        selection_rationale: Some("Mechanical port; a light model suffices".into()),
+    });
+    let json = serde_json::to_string(&original).unwrap();
+    assert!(!json.contains("nix_commands"));
+    store
+        .connection
+        .execute("UPDATE workspace SET snapshot=?1 WHERE id=1", [&json])
+        .unwrap();
+    store
+        .connection
+        .pragma_update(None, "user_version", 22)
+        .unwrap();
+    drop(store);
+    let store = Store::open(&path, defaults.clone()).unwrap();
+    let schema: u32 = store
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema, 23);
+    let upgraded = store.snapshot().unwrap();
+    assert_eq!(upgraded, original);
+    assert!(upgraded.projects.iter().all(|p| p.nix_commands.is_off()));
+    // A stored setting survives reopening at schema 23.
+    let mut allowed = upgraded.clone();
+    allowed.projects[0].nix_commands = NixCommands::Allow;
+    store
+        .connection
+        .execute(
+            "UPDATE workspace SET snapshot=?1 WHERE id=1",
+            [serde_json::to_string(&allowed).unwrap()],
+        )
+        .unwrap();
+    drop(store);
+    let reopened = Store::open(&path, defaults).unwrap().snapshot().unwrap();
+    assert_eq!(reopened.projects[0].nix_commands, NixCommands::Allow);
+    assert_eq!(
+        reopened.sessions[0]
+            .spawn
+            .as_ref()
+            .and_then(|g| g.selection_rationale.as_deref()),
+        Some("Mechanical port; a light model suffices")
+    );
 }
 
 #[test]
@@ -3716,7 +3773,7 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 22);
+    assert_eq!(schema, 23);
 }
 
 #[test]
@@ -3767,7 +3824,7 @@ fn schema_nineteen_snapshots_load_prompt_senders_as_the_user() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 22);
+    assert_eq!(schema, 23);
 }
 
 #[test]

@@ -4591,6 +4591,24 @@ fn new_project_form_remains_keyboard_reachable_at_two_hundred_percent() {
 }
 
 #[test]
+fn nix_commands_setting_sends_the_chosen_mode_for_the_project() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(local_project_snapshot());
+    mounted.model.page.set(Page::Connections);
+    mounted.settle();
+    let project = mounted.model.project.get_untracked();
+    for option in ["Off", "Ask", "Allow"] {
+        mounted.rect(&format!("Nix commands: {option}"));
+    }
+    mounted.click("Nix commands: Allow");
+    let command = mounted.commands.try_recv().unwrap().command;
+    assert!(
+        matches!(command, Command::SetNixCommands { ref project_id, mode: NixCommands::Allow } if *project_id == project),
+        "{command:?}"
+    );
+}
+
+#[test]
 fn connection_states_update_and_retry_and_remove_use_stable_connection_ids() {
     let mut mounted = mount(false, 1380.0);
     let mut snapshot = local_project_snapshot();

@@ -13,14 +13,19 @@ pub(super) struct Capability {
 fn digest(secret: &str) -> [u8; 32] {
     Sha256::digest(secret.as_bytes()).into()
 }
-fn unauthorized() -> Error {
+pub(super) fn unauthorized() -> Error {
     Error::new(
         StatusCode::UNAUTHORIZED,
         "agent_capability",
         "Agent capability unavailable or expired",
     )
 }
-fn active_caller(store: &Store, snapshot: &Snapshot, caller: &str, run: &str) -> Result<(), Error> {
+pub(super) fn active_caller(
+    store: &Store,
+    snapshot: &Snapshot,
+    caller: &str,
+    run: &str,
+) -> Result<(), Error> {
     if store.closing
         || store.run_id(caller)?.as_deref() != Some(run)
         || store.controls.get(caller).is_none_or(|c| *c.borrow())
@@ -428,9 +433,13 @@ async fn call(
                 .iter()
                 .find(|s| s.id == caller)
                 .ok_or_else(|| Error::invalid("Agent missing"))?;
-            Ok(tools(&profile(&snapshot, caller)?.worker_models))
+            Ok(tools(
+                &profile(&snapshot, caller)?.worker_models,
+                crate::nix::permission(&snapshot, caller)?,
+            ))
         }
         "spawn_agent" => spawn(workspace, caller, run, parse(input)?, stop).await,
+        crate::nix::TOOL => crate::nix::run(workspace, caller, run, input, stop).await,
         "stop_agent" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -1225,7 +1234,8 @@ fn worker_models(snapshot: &Snapshot, policy: &WorkerModelPolicy) -> Value {
     value
 }
 
-fn tools(policy: &WorkerModelPolicy) -> Value {
+/// This run's tools. run_nix is listed only when the agent may run Nix commands.
+fn tools(policy: &WorkerModelPolicy, nix: Permission) -> Value {
     let string = json!({"type":"string"});
     let (spawn_description, spawn_properties, spawn_required) = spawn_spec(policy);
     let specs = [
@@ -1272,7 +1282,11 @@ fn tools(policy: &WorkerModelPolicy) -> Value {
             vec![],
         ),
     ];
-    json!({"tools":specs.into_iter().map(|(name,description,properties,required)|json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})).collect::<Vec<_>>()})
+    let mut tools = specs.into_iter().map(|(name,description,properties,required)|json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})).collect::<Vec<_>>();
+    if nix != Permission::Deny {
+        tools.push(crate::nix::spec(nix));
+    }
+    json!({ "tools": tools })
 }
 /// Newline-delimited JSON-RPC over stdio. stdout contains protocol messages only.
 pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
@@ -1322,8 +1336,10 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
                             .await
                             .ok()
                             .filter(|v| v["tools"].is_array())
-                            .unwrap_or_else(|| tools(&WorkerModelPolicy::default())),
-                        _ => tools(&WorkerModelPolicy::default()),
+                            .unwrap_or_else(|| {
+                                tools(&WorkerModelPolicy::default(), Permission::Deny)
+                            }),
+                        _ => tools(&WorkerModelPolicy::default(), Permission::Deny),
                     },
                 ),
                 Some("tools/call") => {
@@ -1336,6 +1352,7 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
                         "wait_for_agents",
                         "report_result",
                         "list_agents",
+                        crate::nix::TOOL,
                     ]
                     .contains(&name)
                     {
@@ -1428,6 +1445,7 @@ mod tests {
             let config = RuntimeConfig {
                 repository: Some(repo.clone()),
                 codex: binary,
+                nix: directory.path().join("nix"),
                 ..crate::tests::config()
             };
             let workspace =
@@ -1816,7 +1834,7 @@ mod tests {
 
     #[test]
     fn archive_tool_schema_is_discoverable() {
-        let tools = tools(&WorkerModelPolicy::default());
+        let tools = tools(&WorkerModelPolicy::default(), Permission::Deny);
         let tool = tools["tools"]
             .as_array()
             .unwrap()
@@ -2171,7 +2189,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 22);
+        assert_eq!(schema, 23);
         f.finish().await;
     }
     #[tokio::test]
@@ -3966,6 +3984,696 @@ mod tests {
         assert!(text.contains("Quiet"), "{text}");
         assert!(text.contains("stopped, no result reported"), "{text}");
         assert!(text.contains("Review each reported result"), "{text}");
+        f.finish().await;
+    }
+
+    // run_nix uses a synthetic `nix` script; nothing here runs real Nix.
+    fn nix(f: &Fixture, body: &str) {
+        crate::tests::script(&f._directory.path().join("nix"), body);
+    }
+    fn nix_commands(f: &Fixture, mode: NixCommands) {
+        f.change(|s| s.projects.iter_mut().for_each(|p| p.nix_commands = mode));
+    }
+    fn set_permission(f: &Fixture, task: Task, permission: Permission) {
+        f.change(|s| {
+            for project in &mut s.projects {
+                project.defaults.permissions.insert(task, permission);
+            }
+            for session in &mut s.sessions {
+                if let Some(profile) = &mut session.profile {
+                    profile.permissions.insert(task, permission);
+                }
+            }
+        });
+    }
+    async fn lists_nix(f: &Fixture) -> bool {
+        f.call("tools", json!({})).await.unwrap()["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "run_nix")
+    }
+    fn assigned(f: &Fixture) -> std::path::PathBuf {
+        std::fs::canonicalize(f._directory.path().join("repo")).unwrap()
+    }
+    fn permission_requests(f: &Fixture) -> usize {
+        f.workspace.snapshots.borrow().tool_permissions.len()
+    }
+    fn nix_records(f: &Fixture) -> Vec<Message> {
+        f.workspace
+            .snapshots
+            .borrow()
+            .messages
+            .iter()
+            .filter(|m| m.id.starts_with("nix-command-"))
+            .cloned()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn nix_commands_are_off_by_default_and_not_listed() {
+        let f = Fixture::new(Permission::Allow);
+        let marker = f._directory.path().join("ran");
+        nix(&f, &format!("touch '{}'", marker.display()));
+        let requests = permission_requests(&f);
+        assert!(!lists_nix(&f).await);
+        let error = f
+            .call("run_nix", json!({"command":["true"]}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("off for this project"), "{error}");
+        assert!(!marker.exists());
+        assert_eq!(permission_requests(&f), requests);
+        assert!(nix_records(&f).is_empty());
+        // The setting is a project command; unknown projects are rejected.
+        {
+            let mut store = f.workspace.store.lock().unwrap();
+            let revision = store.snapshot().unwrap().revision;
+            assert!(
+                store
+                    .apply(
+                        crate::tests::env(
+                            revision,
+                            Command::SetNixCommands {
+                                project_id: "missing".into(),
+                                mode: NixCommands::Allow,
+                            },
+                        ),
+                        &f.workspace.config,
+                    )
+                    .is_err()
+            );
+            let (snapshot, _) = store
+                .apply(
+                    crate::tests::env(
+                        revision,
+                        Command::SetNixCommands {
+                            project_id: "live".into(),
+                            mode: NixCommands::Allow,
+                        },
+                    ),
+                    &f.workspace.config,
+                )
+                .unwrap();
+            assert_eq!(snapshot.projects[0].nix_commands, NixCommands::Allow);
+            f.workspace.snapshots.send_replace(snapshot);
+        }
+        assert!(lists_nix(&f).await);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn allowed_nix_commands_run_in_the_assigned_workspace_with_a_clean_environment() {
+        let f = Fixture::new(Permission::Allow);
+        nix_commands(&f, NixCommands::Allow);
+        let root = assigned(&f);
+        std::fs::create_dir(root.join("crates")).unwrap();
+        nix(
+            &f,
+            "printf 'args:%s\\n' \"$*\"\nprintf 'pwd:%s\\n' \"$(pwd -P)\"\nprintf 'env:%s\\n' \"$(env | cut -d= -f1 | sort | tr '\\n' ' ')\"\necho on-stderr >&2\nmkdir -p shots && printf png > shots/agents.png\nexit 3",
+        );
+        let requests = permission_requests(&f);
+        let tools = f.call("tools", json!({})).await.unwrap();
+        let spec = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "run_nix")
+            .unwrap()
+            .clone();
+        assert_eq!(spec["inputSchema"]["required"], json!(["command"]));
+        assert!(
+            !spec["description"]
+                .as_str()
+                .unwrap()
+                .contains("human approves")
+        );
+        let result = f
+            .call(
+                "run_nix",
+                json!({
+                    "command": ["cargo", "test", "-p", "relay-ui", "it's"],
+                    "directory": "crates",
+                    "artifacts": ["crates/shots/agents.png", "missing.png"],
+                }),
+            )
+            .await
+            .unwrap();
+        // Allow needs no approval; failures are results, not tool errors.
+        assert_eq!(permission_requests(&f), requests);
+        assert_eq!(result["exit_code"], 3);
+        assert_eq!(result["timed_out"], false);
+        let output = result["output"].as_str().unwrap();
+        assert!(
+            output.contains(&format!(
+                "args:develop {} --command cargo test -p relay-ui it's",
+                root.display()
+            )),
+            "{output}"
+        );
+        assert!(
+            output.contains(&format!("pwd:{}/crates\n", root.display())),
+            "{output}"
+        );
+        assert!(output.contains("on-stderr"), "{output}");
+        assert!(
+            result["command"]
+                .as_str()
+                .unwrap()
+                .ends_with("--command cargo test -p relay-ui 'it'\\''s'")
+        );
+        // Only the allowlisted server environment reaches the command.
+        let names = output
+            .lines()
+            .find_map(|l| l.strip_prefix("env:"))
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"PATH"), "{names:?}");
+        for name in names {
+            assert!(
+                crate::nix::ENVIRONMENT.contains(&name)
+                    || ["PWD", "OLDPWD", "SHLVL", "_"].contains(&name),
+                "{name} leaked into the Nix command"
+            );
+        }
+        assert_eq!(
+            result["artifacts"],
+            json!([{"path": root.join("crates/shots/agents.png").display().to_string(), "bytes": 3}])
+        );
+        assert_eq!(result["unavailable_artifacts"][0]["path"], "missing.png");
+        // The server records the command and its outcome for review.
+        let records = nix_records(&f);
+        assert_eq!(records.len(), 1);
+        let tool = records[0].tool.as_ref().unwrap();
+        assert_eq!(tool.name, "mcp__relay__run_nix");
+        assert_eq!(tool.kind, ToolKind::Run);
+        assert_eq!(tool.state, ToolState::Failed);
+        assert_eq!(tool.exit_code, Some(3));
+        assert_eq!(
+            tool.directory.as_deref(),
+            Some(root.join("crates").display().to_string().as_str())
+        );
+        assert!(records[0].body.contains("Exit: 3"), "{}", records[0].body);
+        assert!(records[0].body.contains("on-stderr"));
+        // A named development shell of the same flake.
+        let result = f
+            .call("run_nix", json!({"command":["true"],"shell":"ui-test"}))
+            .await
+            .unwrap();
+        assert!(
+            result["output"].as_str().unwrap().contains(&format!(
+                "args:develop {}#ui-test --command true",
+                root.display()
+            )),
+            "{result}"
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn ask_requires_human_approval_for_each_command() {
+        for (setting, verify, implement) in [
+            (NixCommands::Ask, Permission::Allow, Permission::Allow),
+            (NixCommands::Allow, Permission::Ask, Permission::Allow),
+            (NixCommands::Allow, Permission::Allow, Permission::Ask),
+        ] {
+            let f = Fixture::new(Permission::Allow);
+            nix_commands(&f, setting);
+            set_permission(&f, Task::Verify, verify);
+            set_permission(&f, Task::Implement, implement);
+            let marker = f._directory.path().join("ran");
+            nix(&f, &format!("touch '{}'", marker.display()));
+            assert!(lists_nix(&f).await);
+            let (denied, ()) = tokio::join!(
+                f.call("run_nix", json!({"command":["just","test"]})),
+                decide(
+                    &f.workspace,
+                    &f.caller,
+                    &f.run,
+                    false,
+                    "outside the agent sandbox"
+                )
+            );
+            assert!(
+                denied
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Human denied the Nix command")
+            );
+            assert!(!marker.exists());
+            let (allowed, ()) = tokio::join!(
+                f.call("run_nix", json!({"command":["just","test"]})),
+                decide(&f.workspace, &f.caller, &f.run, true, "--command just test")
+            );
+            assert_eq!(allowed.unwrap()["exit_code"], 0);
+            assert!(marker.exists());
+            f.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn profiles_that_deny_verify_or_implement_cannot_run_nix_commands() {
+        for task in [Task::Verify, Task::Implement] {
+            let f = Fixture::new(Permission::Allow);
+            nix_commands(&f, NixCommands::Allow);
+            set_permission(&f, task, Permission::Deny);
+            let marker = f._directory.path().join("ran");
+            nix(&f, &format!("touch '{}'", marker.display()));
+            let requests = permission_requests(&f);
+            assert!(!lists_nix(&f).await);
+            let error = f
+                .call("run_nix", json!({"command":["true"]}))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("profile denies"), "{error}");
+            assert!(!marker.exists());
+            assert_eq!(permission_requests(&f), requests);
+            f.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn nix_commands_stay_inside_assigned_workspaces() {
+        let f = Fixture::new(Permission::Allow);
+        nix_commands(&f, NixCommands::Allow);
+        let root = assigned(&f);
+        let marker = f._directory.path().join("ran");
+        nix(&f, &format!("touch '{}'", marker.display()));
+        // Another agent's workspace and an unrelated directory.
+        let other = f._directory.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("secret"), "synthetic").unwrap();
+        f.change(|s| {
+            let mut sibling = s.sessions[0].clone();
+            sibling.id = "other-agent".into();
+            sibling.workspaces[0].path = other.display().to_string();
+            sibling.worker.as_mut().unwrap().status = WorkerStatus::Completed;
+            s.sessions.push(sibling);
+        });
+        std::os::unix::fs::symlink(&other, root.join("link")).unwrap();
+        for (args, error) in [
+            (json!({"command":["true"],"workspace":other.display().to_string()}), "not assigned"),
+            (json!({"command":["true"],"workspace":"repo"}), "not assigned"),
+            (json!({"command":["true"],"workspace":"/"}), "not assigned"),
+            (json!({"command":["true"],"directory":"../other"}), "without .."),
+            (json!({"command":["true"],"directory":"crates/../../other"}), "without .."),
+            (json!({"command":["true"],"directory":other.display().to_string()}), "without .."),
+            (json!({"command":["true"],"directory":"link"}), "leaves the workspace"),
+            (json!({"command":["true"],"artifacts":["../other/secret"]}), "without .."),
+            (json!({"command":[]}), "1–256 arguments"),
+            (json!({"command":[""]}), "1–256 arguments"),
+            (json!({"command":["true"],"shell":"ui-test#evil"}), "development shell name"),
+            (json!({"command":["true"],"shell":"../other"}), "development shell name"),
+            (json!({"command":["true"],"timeout_s":0}), "timeout_s"),
+            (json!({"command":["true"],"timeout_s":601}), "timeout_s"),
+            (json!({"command":"true"}), "Invalid tool arguments"),
+            (json!({"command":["true"],"env":{"A":"B"}}), "Invalid tool arguments"),
+        ] {
+            let message = f.call("run_nix", args.clone()).await.unwrap_err().to_string();
+            assert!(message.contains(error), "{args}: {message}");
+        }
+        assert!(!marker.exists());
+        // An assigned workspace may be named by any path that resolves to it,
+        // and artifacts that resolve outside it are not returned.
+        let result = f
+            .call(
+                "run_nix",
+                json!({
+                    "command": ["true"],
+                    "workspace": root.join(".").display().to_string(),
+                    "artifacts": ["link/secret"],
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(marker.exists());
+        assert_eq!(result["artifacts"], json!([]));
+        assert_eq!(
+            result["unavailable_artifacts"],
+            json!([{"path":"link/secret","reason":"Path leaves the workspace"}])
+        );
+        assert!(!result.to_string().contains("synthetic"));
+        f.finish().await;
+    }
+
+    /// A synthetic command that leaves a background child in its group,
+    /// writes the child's PID to `pid` and then runs `then` (`wait` keeps the
+    /// leader alive; `exit 0` ends it first).
+    #[cfg(target_os = "linux")]
+    fn background_nix(f: &Fixture, then: &str) -> std::path::PathBuf {
+        let pidfile = f._directory.path().join("pid");
+        nix(
+            f,
+            &format!("sleep 30 &\necho $! > '{}'\n{then}", pidfile.display()),
+        );
+        pidfile
+    }
+    #[cfg(target_os = "linux")]
+    async fn background_pid(pidfile: &std::path::Path) -> u32 {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !std::fs::read_to_string(pidfile).is_ok_and(|s| s.ends_with('\n')) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        std::fs::read_to_string(pidfile).unwrap().trim().parse().unwrap()
+    }
+    /// Waits until `pid` has exited (gone, or a zombie awaiting its reaper).
+    #[cfg(target_os = "linux")]
+    async fn assert_ended(pid: u32) {
+        let ended = || match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')),
+            Err(_) => true,
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !ended() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stopping_the_run_terminates_the_nix_command_and_its_descendants() {
+        let f = Fixture::new(Permission::Allow);
+        nix_commands(&f, NixCommands::Allow);
+        let pidfile = background_nix(&f, "wait");
+        let stopper = async {
+            let pid = background_pid(&pidfile).await;
+            f.workspace.store.lock().unwrap().stop_control(&f.caller);
+            pid
+        };
+        let started = std::time::Instant::now();
+        let (result, pid) = tokio::join!(
+            f.call("run_nix", json!({"command":["sleep","30"]})),
+            stopper
+        );
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // The background child in the command's process group is gone.
+        assert_ended(pid).await;
+        assert!(f.workspace.store.lock().unwrap().nix_runs.is_empty());
+        f.finish().await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_leader_that_exits_first_still_has_its_group_ended() {
+        let f = Fixture::new(Permission::Allow);
+        nix_commands(&f, NixCommands::Allow);
+        // The leader exits at once, leaving a background child that holds
+        // its output open.
+        let pidfile = background_nix(&f, "exit 0");
+        let started = std::time::Instant::now();
+        let result = f
+            .call("run_nix", json!({"command":["true"]}))
+            .await
+            .unwrap();
+        assert_eq!(result["exit_code"], 0);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_ended(background_pid(&pidfile).await).await;
+        let records = nix_records(&f);
+        assert_eq!(records[0].tool.as_ref().unwrap().state, ToolState::Completed);
+        assert!(f.workspace.store.lock().unwrap().nix_runs.is_empty());
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn an_unsaved_audit_record_is_reported_and_saved_when_storage_recovers() {
+        let f = Fixture::new(Permission::Allow);
+        nix_commands(&f, NixCommands::Allow);
+        let go = f._directory.path().join("go");
+        nix(
+            &f,
+            &format!("while [ ! -e '{}' ]; do sleep 0.05; done", go.display()),
+        );
+        // A second connection to the workspace database injects the failure.
+        let database = rusqlite::Connection::open(f._directory.path().join("db")).unwrap();
+        let breaker = async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while nix_records(&f).is_empty() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let stored: String = database
+                .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| r.get(0))
+                .unwrap();
+            database
+                .execute("UPDATE workspace SET snapshot='unreadable' WHERE id=1", [])
+                .unwrap();
+            std::fs::write(&go, "").unwrap();
+            stored
+        };
+        let (result, stored) = tokio::join!(
+            f.call("run_nix", json!({"command":["true"]})),
+            breaker
+        );
+        // The command ran, but the call does not report plain success.
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("could not save its transcript record"),
+            "{error}"
+        );
+        assert!(error.contains("Exit: 0"), "{error}");
+        assert_eq!(
+            nix_records(&f)[0].tool.as_ref().unwrap().state,
+            ToolState::Running
+        );
+        // Once storage recovers, the retry saves the real outcome.
+        database
+            .execute("UPDATE workspace SET snapshot=?1 WHERE id=1", [&stored])
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while nix_records(&f)[0].tool.as_ref().unwrap().state != ToolState::Completed {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(nix_records(&f)[0].body.contains("Exit: 0"));
+        f.finish().await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_dropped_call_kills_the_command_group_and_finalizes_its_record() {
+        let f = Fixture::new(Permission::Allow);
+        nix_commands(&f, NixCommands::Allow);
+        let pidfile = background_nix(&f, "wait");
+        // Dropping the call, as when its request is abandoned, must not rely
+        // on Linux-only process identity to end the group.
+        let pid = tokio::select! {
+            result = f.call("run_nix", json!({"command":["sleep","30"]})) => panic!("{result:?}"),
+            pid = background_pid(&pidfile) => pid,
+        };
+        assert_ended(pid).await;
+        let records = nix_records(&f);
+        assert_eq!(records.len(), 1);
+        let tool = records[0].tool.as_ref().unwrap();
+        assert_eq!(tool.state, ToolState::Interrupted);
+        assert!(tool.finished_ms.is_some());
+        assert!(
+            records[0].body.contains("tool call ended before the command finished"),
+            "{}",
+            records[0].body
+        );
+        assert!(f.workspace.store.lock().unwrap().nix_runs.is_empty());
+        f.finish().await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_audit_record_is_written_before_launch_and_survives_the_run_ending() {
+        let f = Fixture::new(Permission::Allow);
+        nix_commands(&f, NixCommands::Allow);
+        let pidfile = background_nix(&f, "wait");
+        let ender = async {
+            let pid = background_pid(&pidfile).await;
+            // Recorded as Running before the command started.
+            let records = nix_records(&f);
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].tool.as_ref().unwrap().state, ToolState::Running);
+            assert!(records[0].body.contains("--command sleep 30"));
+            // The run ends while the command is still running.
+            f.change(|s| {
+                s.sessions
+                    .iter_mut()
+                    .find(|s| s.id == f.caller)
+                    .unwrap()
+                    .worker
+                    .as_mut()
+                    .unwrap()
+                    .status = WorkerStatus::Completed
+            });
+            pid
+        };
+        let (result, pid) = tokio::join!(
+            f.call("run_nix", json!({"command":["sleep","30"]})),
+            ender
+        );
+        assert!(result.is_err());
+        assert_ended(pid).await;
+        // The record still gets its outcome, in place.
+        let records = nix_records(&f);
+        assert_eq!(records.len(), 1);
+        let tool = records[0].tool.as_ref().unwrap();
+        assert_eq!(tool.state, ToolState::Interrupted);
+        assert!(tool.finished_ms.is_some());
+        assert!(
+            records[0].body.contains("Stopped with the agent's run"),
+            "{}",
+            records[0].body
+        );
+        // The ended run still accepts no ordinary transcript updates.
+        let messages = f.workspace.snapshots.borrow().messages.len();
+        assert!(
+            f.workspace
+                .update_run(&f.caller, &f.run, |s| {
+                    s.messages.clear();
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(f.workspace.snapshots.borrow().messages.len(), messages);
+        Shutdown {
+            workspace: f.workspace.clone(),
+        }
+        .shutdown()
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stops_and_policy_changes_before_launch_prevent_the_command() {
+        for change in ["stop", "shutdown", "off", "deny"] {
+            let f = Fixture::new(Permission::Allow);
+            nix_commands(&f, NixCommands::Allow);
+            let marker = f._directory.path().join("ran");
+            nix(&f, &format!("touch '{}'", marker.display()));
+            let (workspace, caller, run) = (f.workspace.clone(), f.caller.clone(), f.run.clone());
+            // Runs after the command is built and before the final checks.
+            crate::nix::BEFORE_LAUNCH.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move || match change {
+                    "stop" => workspace.store.lock().unwrap().stop_control(&caller),
+                    "shutdown" => workspace.store.lock().unwrap().closing = true,
+                    _ => workspace
+                        .update_run(&caller, &run, |s| {
+                            for project in &mut s.projects {
+                                if change == "off" {
+                                    project.nix_commands = NixCommands::Off;
+                                } else {
+                                    project
+                                        .defaults
+                                        .permissions
+                                        .insert(Task::Implement, Permission::Deny);
+                                }
+                            }
+                            for session in &mut s.sessions {
+                                if let Some(profile) = &mut session.profile {
+                                    profile.permissions.insert(Task::Implement, Permission::Deny);
+                                }
+                            }
+                            Ok(())
+                        })
+                        .unwrap(),
+                }));
+            });
+            let error = f
+                .call("run_nix", json!({"command":["true"]}))
+                .await
+                .unwrap_err()
+                .to_string();
+            let expected = if matches!(change, "off" | "deny") {
+                "policy changed"
+            } else {
+                "capability"
+            };
+            assert!(error.contains(expected), "{change}: {error}");
+            assert!(!marker.exists(), "{change}");
+            assert!(nix_records(&f).is_empty(), "{change}");
+            assert!(f.workspace.store.lock().unwrap().nix_runs.is_empty());
+            assert!(crate::nix::BEFORE_LAUNCH.with(|hook| hook.borrow().is_none()));
+            f.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn commands_too_long_to_show_for_approval_are_refused() {
+        for setting in [NixCommands::Ask, NixCommands::Allow] {
+            let f = Fixture::new(Permission::Allow);
+            nix_commands(&f, setting);
+            let marker = f._directory.path().join("ran");
+            nix(&f, &format!("touch '{}'", marker.display()));
+            let requests = permission_requests(&f);
+            // A benign prefix fills the approval, and the operation follows it.
+            let hidden = format!(
+                "echo {}; touch after-limit",
+                "a".repeat(crate::harness::DESCRIPTION_LIMIT)
+            );
+            let error = f
+                .call("run_nix", json!({"command":["sh","-c",hidden]}))
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("too long to show in full"),
+                "{error}"
+            );
+            assert!(!marker.exists());
+            assert_eq!(permission_requests(&f), requests);
+            assert!(nix_records(&f).is_empty());
+            if setting == NixCommands::Ask {
+                // A command that fits is shown to the approver in full.
+                let shown = format!("echo {}; touch after-limit", "a".repeat(15 * 1024));
+                let (result, ()) = tokio::join!(
+                    f.call("run_nix", json!({"command":["sh","-c",shown]})),
+                    decide(&f.workspace, &f.caller, &f.run, true, "; touch after-limit'")
+                );
+                assert_eq!(result.unwrap()["exit_code"], 0);
+                assert!(marker.exists());
+            }
+            f.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn nix_commands_time_out_and_bound_their_output() {
+        let f = Fixture::new(Permission::Allow);
+        nix_commands(&f, NixCommands::Allow);
+        nix(&f, "sleep 30");
+        let started = std::time::Instant::now();
+        let result = f
+            .call("run_nix", json!({"command":["sleep","30"],"timeout_s":1}))
+            .await
+            .unwrap();
+        assert_eq!(result["timed_out"], true);
+        assert_eq!(result["exit_code"], Value::Null);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(f.workspace.store.lock().unwrap().nix_runs.is_empty());
+
+        nix(&f, "head -c 200000 /dev/zero | tr '\\0' a\necho\necho END");
+        let result = f
+            .call("run_nix", json!({"command":["cargo","build"]}))
+            .await
+            .unwrap();
+        assert_eq!(result["output_bytes"], 200_005);
+        assert_eq!(result["output_truncated"], true);
+        let output = result["output"].as_str().unwrap();
+        assert!(output.len() < 33 * 1024, "{}", output.len());
+        assert!(output.starts_with("aaaa"));
+        assert!(output.contains("bytes of output omitted"));
+        assert!(output.ends_with("END\n"));
+        let records = nix_records(&f);
+        assert_eq!(records.len(), 2);
+        assert!(records[1].body.len() < 34 * 1024);
+        assert_eq!(records[1].tool.as_ref().unwrap().state, ToolState::Completed);
         f.finish().await;
     }
 }

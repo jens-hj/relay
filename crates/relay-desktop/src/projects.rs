@@ -524,7 +524,48 @@ fn Connections(model: Model) -> Element {
             Module title:"New Connection" icon:(Some(relay_ui::icons::mark.link)) {
                 ConnectionForm model:(model) initial:false
             }
+            Module title:"Nix Commands" icon:(Some(relay_ui::icons::call.run)) {
+                NixCommandsSetting model:(model)
+            }
             Operations model:(model)
+        }
+    }
+}
+
+/// Whether the project's agents may run `nix develop --command` on the
+/// server, outside their sandbox.
+#[component]
+fn NixCommandsSetting(model: Model) -> Element {
+    let selected = Derived::new(move || {
+        let project = model.project.get();
+        let mode = model
+            .snapshot
+            .get()
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .map(|p| p.nix_commands)
+            .unwrap_or_default();
+        NixCommands::ALL.iter().position(|m| *m == mode).unwrap_or(0)
+    });
+    let choose: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot: usize| {
+        model.action(Command::SetNixCommands {
+            project_id: model.project.get_untracked(),
+            mode: NixCommands::ALL[slot],
+        })
+    });
+    let blocked = Derived::new(move || model.busy.get() || !model.connected.get());
+    view! {
+        col height:min-content gap:0px {
+            row height:{px(40.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                Segments name:("Nix commands".to_string())
+                    options:(NixCommands::ALL.iter().map(|m| m.label().to_string()).collect::<Vec<_>>())
+                    tones:(vec![ground.ink, relay_ui::tokens::Signal::NeedsYou.token(), relay_ui::tokens::Signal::Failed.token()])
+                    selected:(relay_ui::Live::from(selected)) on-select:(choose)
+                    disabled:(relay_ui::Live::from(blocked))
+            }
+            Caption rule:false
+                text:"Agents can run nix develop --command in their assigned workspaces on the server, outside their sandbox and with the server user's access. Ask needs your approval for each command. Agents also need Verify and Implement permission."
         }
     }
 }

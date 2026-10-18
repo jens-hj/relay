@@ -69,6 +69,8 @@ pub(super) fn expire(snapshot: &mut Snapshot, session: &str, run: &str) {
         }
     }
 }
+/// The longest approval description kept; longer ones are truncated.
+pub(super) const DESCRIPTION_LIMIT: usize = 16 * 1024;
 pub(super) async fn permission(
     workspace: &Workspace,
     session: &str,
@@ -78,7 +80,7 @@ pub(super) async fn permission(
     stop: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<bool, Error> {
     let id = uuid::Uuid::new_v4().to_string();
-    let mut end = description.len().min(16 * 1024);
+    let mut end = description.len().min(DESCRIPTION_LIMIT);
     while !description.is_char_boundary(end) {
         end -= 1;
     }
@@ -171,6 +173,7 @@ pub(super) fn add_project(
                 title: "No status".into(),
             }],
             defaults,
+            nix_commands: NixCommands::Off,
             github: Some(GitHubProject {
                 owner: binding.owner.clone(),
                 number: binding.number,
