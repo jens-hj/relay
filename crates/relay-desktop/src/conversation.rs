@@ -1794,6 +1794,20 @@ pub fn Conversation(model: Model) -> Element {
         }
         .to_string()
     });
+    // Progress hints show at full strength; the idle key hint recedes.
+    let hint_feedback = Derived::new(move || {
+        let state = model.buffer.get();
+        !state.uploads.is_empty()
+            || state
+                .documents
+                .get(&model.session.get())
+                .is_some_and(|doc| {
+                    doc.finalize.is_some()
+                        || doc.submitting
+                        || doc.saving.is_some()
+                        || !state.connected
+                })
+    });
     let ledger_open = State::new(true);
     // Narrow conversations start with the ledger folded to its strip.
     Effect::new(move || {
@@ -1994,7 +2008,8 @@ pub fn Conversation(model: Model) -> Element {
                         pending:(relay_ui::Live::from(Derived::new(move || model.submission_pending())))
                         on-send:(send) on-attach:(attach) editor:(Some(editor))
                         has-content:(Some(relay_ui::Live::from(has_content)))
-                        hint:(relay_ui::Live::from(hint)) as composer
+                        hint:(relay_ui::Live::from(hint))
+                        hint-feedback:(relay_ui::Live::from(hint_feedback)) as composer
                     { composer.label("Message composer"); *composer_element.borrow_mut() = Some(composer.clone()); }
                 }
             }

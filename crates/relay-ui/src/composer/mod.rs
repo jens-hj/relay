@@ -19,6 +19,8 @@ pub struct LedgerActions {
 pub(crate) const MODEL_GLOW_OPEN_REACH: f32 = 0.85;
 pub(crate) const MODEL_GLOW_COLLAPSED_REACH: f32 = 2.3;
 pub(crate) const MODEL_GLOW_OPACITY: f32 = 0.8;
+/// The idle key hint's opacity; progress hints show at full strength.
+pub(crate) const HINT_IDLE_OPACITY: f32 = 0.8;
 fn quiet_send(fill: bool) -> Color {
     let dark = mosaic::core::theme::color(ground.page).to_srgb8()[0] < 128;
     if dark {
@@ -295,6 +297,10 @@ pub fn Composer(
     /// The key hint under the message; injected editors describe their own keys.
     #[prop(default = UiText::fixed("↵ send · ⇧↵ new line".to_owned()))]
     hint: UiText,
+    /// Whether the hint reports progress (sending, saving). The idle key hint
+    /// recedes so it does not read as draft text.
+    #[prop(default = Live::fixed(false))]
+    hint_feedback: Live<bool>,
 ) -> Element {
     let pending = Derived::new(move || pending.get());
     let disabled = Derived::new(move || disabled.get());
@@ -356,7 +362,9 @@ pub fn Composer(
         });
     }
     area.adopt(&view! {
-        Label text:(hint) role:(TextRole::Micro) tone:(Tone::Faint)
+        row height:min-content opacity:{if hint_feedback.get() { 1.0 } else { HINT_IDLE_OPACITY }} {
+            Label text:(hint) role:(TextRole::Micro) tone:(Tone::Faint)
+        }
     });
     if inline {
         let controls_stacked = stacked.clone();
