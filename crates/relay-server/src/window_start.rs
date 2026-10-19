@@ -58,8 +58,9 @@ const RELAY_ENV: [&str; 4] = [
 
 #[derive(Clone, Copy)]
 struct Limits {
-    /// Where Claude Code reads administrator policy on Linux.
-    managed: &'static str,
+    /// Where Claude Code reads administrator policy on Linux. `None` where
+    /// Relay does not know how to check policy, which is refused.
+    managed: Option<&'static str>,
     auth: Duration,
     catalog: Duration,
     message: Duration,
@@ -68,7 +69,7 @@ struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            managed: "/etc/claude-code",
+            managed: cfg!(target_os = "linux").then_some("/etc/claude-code"),
             auth: Duration::from_secs(10),
             catalog: Duration::from_secs(30),
             message: Duration::from_secs(90),
@@ -517,7 +518,10 @@ struct Prepared {
 async fn prepare(binary: PathBuf, limits: Limits) -> Result<Prepared, WindowStartFailure> {
     let directory = tempfile::tempdir().map_err(|_| WindowStartFailure::Failed)?;
     let subscription = verify_subscription(&binary, directory.path(), limits.auth).await?;
-    managed_hooks(Path::new(limits.managed), &subscription)?;
+    // Other platforms keep policy elsewhere, so their policy is refused
+    // rather than assumed to define no hooks.
+    let managed = limits.managed.ok_or(WindowStartFailure::ManagedHooks)?;
+    managed_hooks(Path::new(managed), &subscription)?;
     let (model, name) = haiku(&binary, directory.path(), limits.catalog).await?;
     Ok(Prepared {
         directory,
@@ -986,7 +990,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     const SHORT: Limits = Limits {
-        managed: "/nonexistent/relay-test-managed-settings",
+        managed: Some("/nonexistent/relay-test-managed-settings"),
         auth: Duration::from_secs(10),
         catalog: Duration::from_secs(10),
         message: Duration::from_secs(10),
@@ -2011,7 +2015,10 @@ echo "prompt $prompt" >> '{log}'
         )
         .unwrap();
         let managed: &'static str = Box::leak(policy.path().display().to_string().into_boxed_str());
-        let limits = Limits { managed, ..SHORT };
+        let limits = Limits {
+            managed: Some(managed),
+            ..SHORT
+        };
         let dir = tempfile::tempdir().unwrap();
         let fake = fake(MODELS, &reply(Some(now() + 3600)));
         let workspace = open(dir.path(), &expired(Some(now() - 30)), &fake);
@@ -2033,5 +2040,29 @@ echo "prompt $prompt" >> '{log}'
         let workspace = open(dir.path(), &expired(Some(now() - 30)), &fake);
         workspace.window_start_tick(limits).await;
         assert_eq!(fake.messages(), 1, "{:?}", fake.lines());
+    }
+
+    #[tokio::test]
+    async fn policy_that_cannot_be_checked_stops_the_attempt() {
+        assert_eq!(Limits::default().managed.is_some(), cfg!(target_os = "linux"));
+        // Off Linux, Claude Code's policy lives elsewhere; it is refused, not
+        // assumed absent.
+        let limits = Limits {
+            managed: None,
+            ..SHORT
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let fake = fake(MODELS, &reply(Some(now() + 3600)));
+        let workspace = open(dir.path(), &expired(Some(now() - 30)), &fake);
+        workspace.window_start_tick(limits).await;
+        assert_eq!(fake.count("catalog "), 0, "{:?}", fake.lines());
+        assert_eq!(fake.messages(), 0, "{:?}", fake.lines());
+        assert_eq!(
+            status(&workspace).last_outcome,
+            Some(WindowStartOutcome::Failed {
+                reason: WindowStartFailure::ManagedHooks,
+                attempts: 1
+            })
+        );
     }
 }

@@ -50,7 +50,7 @@ The sign-in check, the model-list request and the message are launched the same 
 
 Claude Code runs hooks from managed (policy) settings even under `--safe-mode` and with `disableAllHooks` in `--settings`: only `disableAllHooks` set in the policy itself suppresses them (read from the shipped 2.1.302 CLI by review, not exercised here). Relay does not override administrator policy, and no launch option can give a hook-free turn where policy defines hooks, so it refuses to launch there rather than weaken the guarantee. After the sign-in check and before the model list or the message, it reads only the managed settings files Claude Code uses on Linux, `/etc/claude-code/managed-settings.json` and the sorted `managed-settings.d/*.json`, and refuses with "Managed settings may run hooks" when they define hooks and the last `disableAllHooks` they set is not true, or when a file cannot be read or parsed.
 
-Owner prerequisite: administrator policy on the server must define no hooks, or set `"disableAllHooks": true`. Server-managed settings (Teams and Enterprise plans) cannot be read from the host, so on those plans the file policy must set `"disableAllHooks": true` explicitly. Other operating systems' policy locations are not inspected. This reads configuration, never credentials.
+Owner prerequisite: administrator policy on the server must define no hooks, or set `"disableAllHooks": true`. Server-managed settings (Teams and Enterprise plans) cannot be read from the host, so on those plans the file policy must set `"disableAllHooks": true` explicitly. Relay checks policy files only on Linux. On other operating systems Claude Code keeps policy elsewhere, so Relay refuses with the same message instead of assuming there is no policy. This reads configuration, never credentials.
 
 ### Subscription sign-in
 
@@ -75,7 +75,7 @@ So for a given reported reset, at most one message is handed over unless every e
 
 ## Schema 24
 
-The setting and status are stored in the snapshot (`claude_window_start`, omitted while untouched) and the claim table (with its `dispatched` column) is created at startup. Older servers would drop both, so the schema is 24. Existing databases load with the setting off. The [schema 21 to 23 plan](schema-23-migration.md) does not cover this step; a release containing it needs its own reviewed migration and recovery plan.
+The setting and status are stored in the snapshot (`claude_window_start`, omitted while untouched) and the claim table (with its `dispatched` column) is created at startup. Older servers would drop both, so the schema is 24. Existing databases load with the setting off. The [schema 21 to 24 plan](schema-24-migration.md) covers this step for a release from schema 21.
 
 ## Validation
 
@@ -92,6 +92,7 @@ Tests written but not run:
   - a gated model list during which a new window is published, real work is recorded by another process, or the setting is turned off;
   - a structured service rejection (retryable or settled) versus every other failure after hand-off, including partial replies followed by `ECONNRESET`, `ETIMEDOUT`, `ENOTFOUND`, a dropped stream, an authentication message or a limit message, none of which is resent after the lease and backoff are cleared; a crash after hand-off and a timeout, also not resent, with a timeout keeping its reports;
   - administrator policy: a table of managed settings files (hooks, disabled, overridden, drop-ins, hidden files, broken files, Teams and Enterprise plans) and an attempt that stops before the model list and message, then proceeds once policy disables hooks;
+  - a host whose policy Relay cannot check (not Linux), which stops before the model list and message;
   - a deterministic interleaving: another connection holds an uncommitted write that turns the setting off while the dispatch transition runs in a thread; it blocks until the commit and then refuses;
   - two stores on one database plus a restart;
   - turning the setting off mid-message;

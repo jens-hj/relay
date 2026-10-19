@@ -3707,6 +3707,88 @@ fn schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off() {
 }
 
 #[test]
+fn schema_twenty_one_upgrades_to_twenty_four_with_every_new_setting_off() {
+    // The release path: a schema 21 database has no spawn rationales, no Nix
+    // command setting, no window-start setting and no claim table.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("schema-21.sqlite");
+    let defaults = AgentProfile::default();
+    let store = Store::open(&path, defaults.clone()).unwrap();
+    let mut original = store.snapshot().unwrap();
+    original.sessions[0].spawn = Some(SpawnGrant {
+        task: "Port the change".into(),
+        context: None,
+        permissions: Default::default(),
+        requested_by_run: None,
+        selection_rationale: None,
+    });
+    let json = serde_json::to_string(&original).unwrap();
+    for field in ["selection_rationale", "nix_commands", "claude_window_start"] {
+        assert!(!json.contains(field), "{field}");
+    }
+    store
+        .connection
+        .execute("UPDATE workspace SET snapshot=?1 WHERE id=1", [&json])
+        .unwrap();
+    store
+        .connection
+        .execute_batch(
+            "DROP TABLE window_start_claims;
+             INSERT INTO receipts VALUES('kept-receipt','request');
+             INSERT INTO drafts VALUES('kept-draft','draft');
+             INSERT INTO assets VALUES('kept-asset','metadata',X'0102');
+             PRAGMA user_version=21;",
+        )
+        .unwrap();
+    drop(store);
+    let store = Store::open(&path, defaults).unwrap();
+    let schema: u32 = store
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema, 24);
+    let upgraded = store.snapshot().unwrap();
+    assert_eq!(upgraded, original);
+    assert!(upgraded.projects.iter().all(|p| p.nix_commands.is_off()));
+    assert!(!upgraded.claude_window_start.enabled);
+    assert_eq!(
+        upgraded.sessions[0]
+            .spawn
+            .as_ref()
+            .and_then(|g| g.selection_rationale.as_deref()),
+        None
+    );
+    // The rewritten snapshot still omits every new field while it is off.
+    let stored: String = store
+        .connection
+        .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| r.get(0))
+        .unwrap();
+    for field in ["selection_rationale", "nix_commands", "claude_window_start"] {
+        assert!(!stored.contains(field), "{field}");
+    }
+    for (table, column, key) in [
+        ("receipts", "request_id", "kept-receipt"),
+        ("drafts", "session_id", "kept-draft"),
+        ("assets", "id", "kept-asset"),
+    ] {
+        let count: i64 = store
+            .connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {column}=?1"),
+                [key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "{table}");
+    }
+    let claims: i64 = store
+        .connection
+        .query_row("SELECT COUNT(*) FROM window_start_claims", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(claims, 0);
+}
+
+#[test]
 fn schema_twenty_three_upgrades_with_claude_window_start_off_and_an_empty_claim_table() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("window-start.sqlite");
