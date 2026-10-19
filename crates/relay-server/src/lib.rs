@@ -48,17 +48,82 @@ use tokio::sync::watch;
 // permissions, profiles and run state. Replacements still need an exact revision.
 // Project and connection creation recheck root and resource uniqueness against
 // the current snapshot, so agent output committed meanwhile is not a conflict.
-fn accepts_stale_workspace_revision(command: &Command) -> bool {
-    matches!(
-        command,
+// Board syncs and retries of failed syncs, clones and connections are accepted
+// only while what the client saw is still current, as checked here against the
+// snapshot inside the command's transaction; the handlers then queue at most one.
+fn accepts_stale_workspace_revision(command: &Command, snapshot: &Snapshot) -> bool {
+    let retryable = |state: &OperationState| {
+        matches!(state, OperationState::Failed | OperationState::Interrupted)
+    };
+    // The board (true) or connection (false) an operation works on.
+    let target = |kind: &OperationKind| match kind {
+        OperationKind::Clone { connection_id } => Some((false, connection_id.clone())),
+        OperationKind::Sync { board_id }
+        | OperationKind::Publish { board_id, .. }
+        | OperationKind::MoveTask { board_id, .. }
+        | OperationKind::CreateTask { board_id, .. } => {
+            Some((true, snapshot.canonical_board_id(board_id).to_owned()))
+        }
+        OperationKind::EditTask { .. } => None,
+    };
+    // Whether an operation other than `except` is queued, running or awaiting
+    // reconciliation on `key`.
+    let busy = |except: &str, key: &Option<(bool, String)>| {
+        key.is_some()
+            && snapshot.operations.iter().any(|o| {
+                o.id != except
+                    && matches!(
+                        o.state,
+                        OperationState::Pending
+                            | OperationState::Running
+                            | OperationState::NeedsReconciliation
+                    )
+                    && target(&o.kind) == *key
+            })
+    };
+    match command {
         Command::SaveAgentTemplate { .. }
-            | Command::CreateAgentConfig { .. }
-            | Command::CreateProject { .. }
-            | Command::AddConnection { .. }
-            | Command::StartRootAgent { .. }
-            | Command::StartSession { .. }
-            | Command::SubmitTurn { .. }
-    )
+        | Command::CreateAgentConfig { .. }
+        | Command::CreateProject { .. }
+        | Command::AddConnection { .. }
+        | Command::StartRootAgent { .. }
+        | Command::StartSession { .. }
+        | Command::SubmitTurn { .. } => true,
+        // The handler refuses while the board's connection is removed or any
+        // operation on the board is queued or running, so it queues one sync.
+        Command::SyncBoard { .. } => true,
+        // A removed connection is restored only from the exact revision.
+        Command::RetryConnection { connection_id } => snapshot.connections.iter().any(|c| {
+            let key = match &c.kind {
+                ConnectionKind::Repository { .. } => Some((false, c.id.clone())),
+                ConnectionKind::Board { board_id } => {
+                    Some((true, snapshot.canonical_board_id(board_id).to_owned()))
+                }
+                ConnectionKind::Directory { .. } => None,
+            };
+            c.id == *connection_id
+                && c.enabled
+                && matches!(c.state, ConnectionState::Failed | ConnectionState::Interrupted)
+                && !busy("", &key)
+        }),
+        // Only reads and clones are retried stale. Retrying a provider write
+        // (publish, task creation, edit or move) still needs the exact revision.
+        Command::RetryOperation { operation_id } => snapshot.operations.iter().any(|o| {
+            let current = match &o.kind {
+                OperationKind::Sync { board_id } => snapshot.board_active(board_id),
+                OperationKind::Clone { connection_id } => snapshot
+                    .connections
+                    .iter()
+                    .any(|c| c.id == *connection_id && c.enabled),
+                _ => false,
+            };
+            o.id == *operation_id
+                && retryable(&o.state)
+                && current
+                && !busy(o.id.as_str(), &target(&o.kind))
+        }),
+        _ => false,
+    }
 }
 
 #[derive(Debug)]
@@ -373,7 +438,7 @@ impl Store {
         }
         if envelope.expected_revision > snapshot.revision
             || (snapshot.revision != envelope.expected_revision
-                && !accepts_stale_workspace_revision(&envelope.command))
+                && !accepts_stale_workspace_revision(&envelope.command, &snapshot))
         {
             return Err(Error::new(
                 StatusCode::CONFLICT,

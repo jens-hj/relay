@@ -453,6 +453,375 @@ fn stale_project_creation_survives_agent_output_but_not_resource_conflicts() {
 }
 
 #[test]
+fn stale_syncs_and_retries_queue_once_and_keep_real_conflicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
+    store.save(&live()).unwrap();
+    let base = store.snapshot().unwrap();
+    let create = env(
+        base.revision,
+        Command::CreateProject {
+            name: "Mosaic".into(),
+            root: dir.path().join("mosaic").display().to_string(),
+            connections: vec![
+                ConnectionInput::Repository {
+                    remote: "git@gitlab.com:unincorporated/mosaic/mosaic.git".into(),
+                },
+                ConnectionInput::Board {
+                    source: BoardSource::Gitlab {
+                        host: "gitlab.com".into(),
+                        group: true,
+                        path: "unincorporated/mosaic".into(),
+                        number: 11427455,
+                        url: "https://gitlab.com/groups/unincorporated/mosaic/-/boards/11427455"
+                            .into(),
+                    },
+                },
+            ],
+        },
+    );
+    let (created, _) = store.apply(create.clone(), &config()).unwrap();
+    let project = format!("project-{}", create.request_id);
+    let connection = |board: bool| {
+        created
+            .connections
+            .iter()
+            .find(|c| {
+                c.project_id == project
+                    && matches!(
+                        (&c.kind, board),
+                        (ConnectionKind::Board { .. }, true)
+                            | (ConnectionKind::Repository { .. }, false)
+                    )
+            })
+            .unwrap()
+            .clone()
+    };
+    let (repository, board_connection) = (connection(false), connection(true));
+    let ConnectionKind::Board { board_id: board } = board_connection.kind.clone() else {
+        unreachable!()
+    };
+    let operation = |sync: bool| {
+        created
+            .operations
+            .iter()
+            .find(|o| {
+                o.project_id == project
+                    && matches!(
+                        (&o.kind, sync),
+                        (OperationKind::Sync { .. }, true) | (OperationKind::Clone { .. }, false)
+                    )
+            })
+            .unwrap()
+            .id
+            .clone()
+    };
+    let (sync, clone) = (operation(true), operation(false));
+    // The first sync and clone failed, and so did both connections. A failed
+    // provider write is also waiting for a retry.
+    let mut failed = created.clone();
+    for o in failed.operations.iter_mut().filter(|o| o.project_id == project) {
+        o.state = OperationState::Failed;
+        o.error = Some("GitLab issue URL does not match board host".into());
+    }
+    for c in failed.connections.iter_mut() {
+        if c.id == repository.id || c.id == board_connection.id {
+            c.state = ConnectionState::Failed;
+        }
+    }
+    failed.operations.push(ProjectOperation {
+        id: "failed-move".into(),
+        project_id: project.clone(),
+        kind: OperationKind::MoveTask {
+            board_id: board.clone(),
+            issue_id: "issue".into(),
+            column_id: "gitlab-closed".into(),
+        },
+        state: OperationState::Failed,
+        error: None,
+        results: Default::default(),
+    });
+    failed.revision += 1;
+    store.save(&failed).unwrap();
+    // The client saw that state; agent output then moved the workspace on.
+    let seen = failed.revision;
+    let mut churn = failed.clone();
+    churn.revision += 25;
+    churn.sessions[0].title = "Busy transcript".into();
+    store.save(&churn).unwrap();
+    let state = |snapshot: &Snapshot, id: &str| {
+        snapshot
+            .operations
+            .iter()
+            .find(|o| o.id == id)
+            .unwrap()
+            .state
+            .clone()
+    };
+    let queued_syncs = |snapshot: &Snapshot| {
+        snapshot
+            .operations
+            .iter()
+            .filter(|o| {
+                matches!(&o.kind, OperationKind::Sync { board_id } if *board_id == board)
+                    && matches!(o.state, OperationState::Pending | OperationState::Running)
+            })
+            .count()
+    };
+    let code = |store: &mut Store, command: Command| {
+        store
+            .apply(env(seen, command), &config())
+            .err()
+            .map(|e| (e.code, e.message))
+    };
+    // Retrying a provider write still needs the exact revision.
+    let move_retry = Command::RetryOperation {
+        operation_id: "failed-move".into(),
+    };
+    assert_eq!(code(&mut store, move_retry).unwrap().0, "conflict");
+    // Retrying the failed sync from the stale view queues it once.
+    let retry = env(
+        seen,
+        Command::RetryOperation {
+            operation_id: sync.clone(),
+        },
+    );
+    let (after, action) = store.apply(retry.clone(), &config()).unwrap();
+    assert!(matches!(action, Some(Action::Operations(ref jobs)) if *jobs == [sync.clone()]));
+    assert_eq!(after.revision, churn.revision + 1);
+    assert_eq!(after.sessions, churn.sessions);
+    assert_eq!(state(&after, &sync), OperationState::Pending);
+    // The same request replays its receipt and queues nothing.
+    let (replayed, action) = store.apply(retry, &config()).unwrap();
+    assert_eq!(replayed, after);
+    assert!(action.is_none());
+    // A second retry, a manual sync and the board connection's retry, all from
+    // the same stale view, would each queue another sync.
+    let again = Command::RetryOperation {
+        operation_id: sync.clone(),
+    };
+    assert_eq!(code(&mut store, again).unwrap().0, "conflict");
+    let manual = Command::SyncBoard {
+        board_id: board.clone(),
+    };
+    assert_eq!(
+        code(&mut store, manual.clone()).unwrap(),
+        ("invalid", "Resolve the pending board operation first".to_string())
+    );
+    let board_retry = Command::RetryConnection {
+        connection_id: board_connection.id.clone(),
+    };
+    assert_eq!(code(&mut store, board_retry.clone()).unwrap().0, "conflict");
+    assert_eq!(queued_syncs(&store.snapshot().unwrap()), 1);
+    // Once that sync has failed again, a stale manual sync queues exactly one.
+    let mut done = store.snapshot().unwrap();
+    done.operations
+        .iter_mut()
+        .find(|o| o.id == sync)
+        .unwrap()
+        .state = OperationState::Failed;
+    done.revision += 1;
+    store.save(&done).unwrap();
+    let (synced, action) = store.apply(env(seen, manual.clone()), &config()).unwrap();
+    assert!(action.is_some());
+    assert_eq!(queued_syncs(&synced), 1);
+    assert_eq!(
+        code(&mut store, manual).unwrap().1,
+        "Resolve the pending board operation first"
+    );
+    assert_eq!(queued_syncs(&store.snapshot().unwrap()), 1);
+    // A failed repository connection is retried once from a stale view, and
+    // its old clone is then no longer retryable.
+    let repository_retry = Command::RetryConnection {
+        connection_id: repository.id.clone(),
+    };
+    let (retried, action) = store
+        .apply(env(seen, repository_retry.clone()), &config())
+        .unwrap();
+    assert!(action.is_some());
+    let cloning = OperationKind::Clone {
+        connection_id: repository.id.clone(),
+    };
+    let clones = retried
+        .operations
+        .iter()
+        .filter(|o| o.kind == cloning && o.state == OperationState::Pending)
+        .count();
+    assert_eq!(clones, 1);
+    assert_eq!(code(&mut store, repository_retry).unwrap().0, "conflict");
+    let old_clone = Command::RetryOperation {
+        operation_id: clone.clone(),
+    };
+    assert_eq!(code(&mut store, old_clone).unwrap().0, "conflict");
+    assert_eq!(state(&store.snapshot().unwrap(), &clone), OperationState::Failed);
+    // A connection removed meanwhile is never restored from a stale view, and
+    // its failed sync is not retried; the exact revision can still restore it.
+    let mut removed = store.snapshot().unwrap();
+    for o in removed.operations.iter_mut() {
+        if matches!(&o.kind, OperationKind::Sync { .. }) {
+            o.state = OperationState::Failed;
+        }
+    }
+    removed
+        .connections
+        .iter_mut()
+        .find(|c| c.id == board_connection.id)
+        .unwrap()
+        .enabled = false;
+    removed.revision += 1;
+    store.save(&removed).unwrap();
+    assert_eq!(code(&mut store, board_retry.clone()).unwrap().0, "conflict");
+    let stale_sync = Command::RetryOperation {
+        operation_id: sync.clone(),
+    };
+    assert_eq!(code(&mut store, stale_sync).unwrap().0, "conflict");
+    assert_eq!(code(&mut store, Command::SyncBoard { board_id: board }).unwrap().0, "invalid");
+    assert_eq!(store.snapshot().unwrap(), removed);
+    let (restored, _) = store
+        .apply(env(removed.revision, board_retry), &config())
+        .unwrap();
+    assert!(
+        restored
+            .connections
+            .iter()
+            .any(|c| c.id == board_connection.id && c.enabled)
+    );
+}
+
+#[tokio::test]
+async fn stale_board_retry_over_http_runs_once_while_other_writes_continue() {
+    let dir = tempfile::tempdir().unwrap();
+    // A GitLab CLI that fails after a pause, logging each run, so a sync is
+    // still running while the next requests arrive.
+    let log = dir.path().join("glab.log");
+    let glab = dir.path().join("glab");
+    script(&glab, &format!("echo run >> '{}'\nsleep 2\nexit 1", log.display()));
+    let mut c = config();
+    c.glab = glab;
+    let token = "retry-integration-token";
+    let app = router_with_config(
+        dir.path().join("db"),
+        token.into(),
+        AgentProfile::default(),
+        c,
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::new();
+    async fn read(client: &reqwest::Client, addr: std::net::SocketAddr, token: &str) -> Snapshot {
+        client
+            .get(format!("http://{addr}/v1/snapshot"))
+            .bearer_auth(token)
+            .header("x-relay-protocol", relay_core::PROTOCOL_VERSION.to_string())
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+    let send = |e: CommandEnvelope| {
+        client
+            .post(format!("http://{addr}/v1/commands"))
+            .bearer_auth(token)
+            .header("x-relay-protocol", relay_core::PROTOCOL_VERSION.to_string())
+            .json(&e)
+            .send()
+    };
+    let sync_state = |s: &Snapshot| {
+        s.operations
+            .iter()
+            .find(|o| matches!(o.kind, OperationKind::Sync { .. }))
+            .map(|o| o.state.clone())
+    };
+    let base = read(&client, addr, token).await;
+    let create = env(
+        base.revision,
+        Command::CreateProject {
+            name: "Mosaic".into(),
+            root: dir.path().join("mosaic").display().to_string(),
+            connections: vec![ConnectionInput::Board {
+                source: BoardSource::Gitlab {
+                    host: "gitlab.com".into(),
+                    group: true,
+                    path: "unincorporated/mosaic".into(),
+                    number: 11427455,
+                    url: "https://gitlab.com/groups/unincorporated/mosaic/-/boards/11427455"
+                        .into(),
+                },
+            }],
+        },
+    );
+    let project = format!("project-{}", create.request_id);
+    assert!(send(create).await.unwrap().status().is_success());
+    let mut failed = read(&client, addr, token).await;
+    for _ in 0..100 {
+        if sync_state(&failed) == Some(OperationState::Failed) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        failed = read(&client, addr, token).await;
+    }
+    assert_eq!(sync_state(&failed), Some(OperationState::Failed));
+    let (sync, board) = failed
+        .operations
+        .iter()
+        .find_map(|o| match &o.kind {
+            OperationKind::Sync { board_id } => Some((o.id.clone(), board_id.clone())),
+            _ => None,
+        })
+        .unwrap();
+    // Unrelated writes move the workspace on after the client saw the failure.
+    for name in ["One", "Two", "Three"] {
+        let current = read(&client, addr, token).await;
+        let rename = Command::RenameProject {
+            project_id: project.clone(),
+            name: name.into(),
+        };
+        let response = send(env(current.revision, rename)).await.unwrap();
+        assert!(response.status().is_success());
+    }
+    // Two stale retries at once: exactly one is queued, the other conflicts.
+    let retry = || {
+        env(
+            failed.revision,
+            Command::RetryOperation {
+                operation_id: sync.clone(),
+            },
+        )
+    };
+    let (a, b) = tokio::join!(send(retry()), send(retry()));
+    let mut statuses = [a.unwrap().status().as_u16(), b.unwrap().status().as_u16()];
+    statuses.sort_unstable();
+    assert_eq!(statuses, [200, 409]);
+    // A stale manual sync waits for the running one instead of queueing another.
+    let manual = send(env(failed.revision, Command::SyncBoard { board_id: board }))
+        .await
+        .unwrap();
+    assert_eq!(manual.status(), 422);
+    let mut done = read(&client, addr, token).await;
+    for _ in 0..100 {
+        if sync_state(&done) == Some(OperationState::Failed) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        done = read(&client, addr, token).await;
+    }
+    assert_eq!(sync_state(&done), Some(OperationState::Failed));
+    let syncs = done
+        .operations
+        .iter()
+        .filter(|o| matches!(o.kind, OperationKind::Sync { .. }))
+        .count();
+    assert_eq!(syncs, 1);
+    // The board was read once for the first sync and once for the retry.
+    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
+    server.abort();
+}
+
+#[test]
 fn stale_first_turn_validates_current_permissions_and_reserves_once() {
     let dir = tempfile::tempdir().unwrap();
     let mut initial = live();
