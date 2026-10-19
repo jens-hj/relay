@@ -536,6 +536,8 @@ enum End {
     Failed,
 }
 
+// The non-Unix `leader_exit` waits on the child, so it is passed mutably.
+#[cfg_attr(unix, allow(clippy::unnecessary_mut_passed))]
 pub(crate) async fn run(
     workspace: &Workspace,
     caller: &str,
