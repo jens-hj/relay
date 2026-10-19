@@ -2663,7 +2663,16 @@ fn live_initial_selection_and_dynamic_columns_metadata_remain_reactive() {
         s.projects[1].github.as_mut().unwrap().sync_error = Some("Sync failed".into());
     });
     mounted.settle();
-    mounted.rect("Sync project");
+    mounted.rect("Sync board");
+    // The sync action is an icon cell in the header's row: it follows the
+    // Last sync readout, fills its height and has no text of its own.
+    let readout = mounted.rect("Last sync");
+    let sync = mounted.rect("Sync board");
+    assert!((sync.size.width - 40.0).abs() < 0.5, "{sync:?}");
+    assert!((sync.origin.y - readout.origin.y).abs() < 0.5, "{sync:?} {readout:?}");
+    assert!((sync.size.height - readout.size.height).abs() < 0.5, "{sync:?} {readout:?}");
+    assert!(sync.origin.x >= readout.max_x() - 0.5, "{sync:?} {readout:?}");
+    assert!(!has_label(&mounted, "Sync"));
     mounted.rect("Column new-column");
     let snapshot = mounted.model.snapshot.get_untracked();
     let columns = &snapshot.projects[1].columns;
@@ -5012,6 +5021,298 @@ fn reconciliation_has_no_retry_and_tracks_live_operation_state() {
             .iter()
             .any(|n| n.label.as_deref() == Some("Use this result and continue"))
     );
+}
+
+fn clone_operation(id: &str, state: OperationState, error: Option<&str>) -> ProjectOperation {
+    ProjectOperation {
+        id: id.into(),
+        project_id: "demo".into(),
+        kind: OperationKind::Clone {
+            connection_id: "repo".into(),
+        },
+        state,
+        error: error.map(Into::into),
+        results: Default::default(),
+    }
+}
+
+#[test]
+fn operation_states_use_distinct_shared_status_marks_and_words() {
+    use crate::projects::{operation_state_word, operation_status, operations_summary};
+    use std::collections::HashSet;
+    let states = [
+        OperationState::Pending,
+        OperationState::Running,
+        OperationState::Completed,
+        OperationState::Failed,
+        OperationState::Interrupted,
+        OperationState::NeedsReconciliation,
+    ];
+    let marks: HashSet<_> = states.iter().map(operation_status).collect();
+    let words: HashSet<_> = states.iter().map(operation_state_word).collect();
+    assert_eq!(marks.len(), states.len());
+    assert_eq!(words.len(), states.len());
+    // Only a running operation uses the animated working mark.
+    assert_eq!(
+        states
+            .iter()
+            .filter(|s| operation_status(s) == relay_ui::prelude::AgentStatus::Working)
+            .count(),
+        1
+    );
+    assert_eq!(operations_summary(&[]), "");
+    assert_eq!(
+        operations_summary(&[
+            clone_operation("a", OperationState::Failed, None),
+            clone_operation("b", OperationState::Running, None),
+            clone_operation("c", OperationState::Running, None),
+            clone_operation("d", OperationState::Pending, None),
+        ]),
+        "2 running · 1 pending · 1 failed"
+    );
+}
+
+#[test]
+fn operation_details_describe_the_target_and_the_error_is_shown_once() {
+    use crate::projects::{operation_details, operation_shows_error};
+    let message = "GitLab issue URL does not match board host";
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    let board_id = snapshot
+        .boards
+        .iter()
+        .find(|b| b.project_id == "demo")
+        .unwrap()
+        .id
+        .clone();
+    for board in &mut snapshot.boards {
+        board.error = Some(message.into());
+    }
+    let mut sync = clone_operation("op-sync", OperationState::Failed, Some(message));
+    sync.kind = OperationKind::Sync {
+        board_id: board_id.clone(),
+    };
+    sync.results = [("pending".into(), "membership/issue-2".into())]
+        .into_iter()
+        .collect();
+    snapshot.operations.push(sync.clone());
+    let facts = operation_details(&snapshot, &sync);
+    let value = |key: &str| facts.iter().find(|f| f.0 == key).map(|f| f.1.clone());
+    assert_eq!(
+        value("Status").as_deref(),
+        Some("Failed. Stopped with an error. Retry is below.")
+    );
+    assert!(value("Board").is_some() && value("Source").is_some());
+    assert_eq!(
+        value("Last step").as_deref(),
+        Some("Adding the task to the board (membership/issue-2)")
+    );
+    // The error is the row's; details do not repeat it.
+    assert!(facts.iter().all(|f| !f.1.contains(message)));
+    let completed = ProjectOperation {
+        state: OperationState::Completed,
+        ..sync.clone()
+    };
+    assert!(
+        operation_details(&snapshot, &completed)
+            .iter()
+            .all(|f| f.0 != "Last step")
+    );
+    assert!(operation_shows_error(
+        &snapshot,
+        "demo",
+        Some(&board_id),
+        &format!(" {message} ")
+    ));
+    assert!(!operation_shows_error(&snapshot, "other", None, message));
+    assert!(!operation_shows_error(&snapshot, "demo", Some("other-board"), message));
+    assert!(!operation_shows_error(&snapshot, "demo", None, "Another error"));
+    assert!(!operation_shows_error(&snapshot, "demo", None, ""));
+
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.notice.set(message.into());
+    mounted.settle();
+    let shown = |label: &str| {
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .filter(|n| n.label.as_deref() == Some(label))
+            .count()
+    };
+    // The row shows it; the board strip and the plain notice do not.
+    assert_eq!(shown(message), 1);
+    mounted.click("Operation details op-sync");
+    mounted.settle();
+    assert_eq!(shown(message), 1);
+    assert!(has_label(&mounted, "Operation: op-sync"));
+    assert!(has_label(
+        &mounted,
+        "Adding the task to the board (membership/issue-2)"
+    ));
+}
+
+#[test]
+fn error_dedup_only_applies_to_rows_rendered_for_the_open_project() {
+    use crate::projects::notice_shown_by_operation;
+    let message = "GitLab issue URL does not match board host";
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    let board_id = snapshot
+        .boards
+        .iter()
+        .find(|b| b.project_id == "demo")
+        .unwrap()
+        .id
+        .clone();
+    for board in &mut snapshot.boards {
+        board.error = Some(message.into());
+    }
+    // The same failure belongs to a different project: it must not hide
+    // anything in this one.
+    let mut elsewhere = clone_operation("op-elsewhere", OperationState::Failed, Some(message));
+    elsewhere.project_id = "other-project".into();
+    elsewhere.kind = OperationKind::Sync {
+        board_id: board_id.clone(),
+    };
+    snapshot.operations.push(elsewhere);
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.notice.set(message.into());
+    mounted.settle();
+    let shown = |label: &str| {
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .filter(|n| n.label.as_deref() == Some(label))
+            .count()
+    };
+    // Board strip and notice both stay; no row renders for this project.
+    assert_eq!(shown(message), 2);
+    assert!(!notice_shown_by_operation(mounted.model, message));
+
+    // A matching row in this project suppresses the notice only on pages
+    // that render the operation list.
+    let mut local = clone_operation("op-local", OperationState::Failed, Some(message));
+    local.kind = OperationKind::Sync {
+        board_id: board_id.clone(),
+    };
+    mounted.model.snapshot.update(|s| s.operations.push(local));
+    mounted.settle();
+    for (page, expected) in [
+        (Page::Board, true),
+        (Page::Connections, true),
+        (Page::Publish, true),
+        (Page::Sessions, false),
+        (Page::Profiles, false),
+        (Page::Settings, false),
+        (Page::NewProject, false),
+        (Page::AgentStart, false),
+    ] {
+        mounted.model.page.set(page);
+        assert_eq!(
+            notice_shown_by_operation(mounted.model, message),
+            expected,
+            "{page:?}"
+        );
+    }
+    // An open issue replaces the board's list, so its notices stay.
+    mounted.model.page.set(Page::Board);
+    mounted.model.issue.set(Some("issue-2".into()));
+    assert!(!notice_shown_by_operation(mounted.model, message));
+    mounted.model.issue.set(None);
+    // Closing the issue brings the list, and the dedup, back.
+    assert!(notice_shown_by_operation(mounted.model, message));
+}
+
+#[test]
+fn operations_closes_with_the_strong_rule_and_keeps_the_wash_to_running_rows() {
+    let board = include_str!("ui/board.rs");
+    let projects = include_str!("projects.rs");
+    assert!(board.contains("Operations model:(model) separated:true"));
+    let list = projects
+        .split("pub fn Operations(")
+        .nth(1)
+        .and_then(|rest| rest.split("fn operation_status").next())
+        .unwrap();
+    assert!(list.contains("if separated"));
+    assert!(list.contains("fill:ground.rule-strong"));
+    let card = projects
+        .split("fn OperationCard(")
+        .nth(1)
+        .and_then(|rest| rest.split("fn reconciliation_instruction").next())
+        .unwrap();
+    let flat = card.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("if running.get() { Wash reach:(live_reach(2))"));
+    assert!(card.contains("StatusSquare status:(status)"));
+    assert_eq!(card.matches("Wash ").count(), 1);
+}
+
+#[test]
+fn operation_rows_show_status_marks_full_cell_details_and_keep_server_order() {
+    for (width, scale) in [(1380.0, 1.0), (760.0, 2.0), (420.0, 1.0)] {
+        let mounted = mount(false, width);
+        mounted.model.preferences.update(|p| p.scale = scale);
+        let mut snapshot = local_project_snapshot();
+        let ids = [
+            ("op-pending", OperationState::Pending, None),
+            ("op-failed", OperationState::Failed, Some("Clone failed")),
+            ("op-running", OperationState::Running, None),
+            ("op-interrupted", OperationState::Interrupted, None),
+        ];
+        for (id, state, error) in &ids {
+            snapshot
+                .operations
+                .push(clone_operation(id, state.clone(), *error));
+        }
+        mounted.model.snapshot.set(snapshot);
+        mounted.settle();
+        let nodes = mounted.ui.inspection_snapshot().nodes;
+        let node = |label: &str| {
+            nodes
+                .iter()
+                .find(|n| n.label.as_deref() == Some(label))
+                .unwrap_or_else(|| panic!("Missing control at {width}: {label}"))
+                .rect
+        };
+        let header = node("Operations");
+        let first_column = mounted.model.board_columns()[0].id.clone();
+        let column = node(&format!("Column {first_column}"));
+        let mut previous_top = header.origin.y;
+        for (id, state, error) in &ids {
+            let card = node(&format!("Operation {id}"));
+            // Server order is kept: rows never sort by state.
+            assert!(card.origin.y > previous_top, "{id} at {width}");
+            previous_top = card.origin.y;
+            assert!(card.origin.x >= 0.0 && card.max_x() <= width + 1.0, "{id}");
+            // Details fills its cell at the card's right edge.
+            let details = node(&format!("Operation details {id}"));
+            assert!((card.max_x() - details.max_x()).abs() <= 1.5, "{id}");
+            assert!(details.size.height >= card.size.height - 2.0, "{id}");
+            // Exactly the running row carries the working mark.
+            let working = nodes
+                .iter()
+                .filter(|n| n.role == Role::Image && n.label.as_deref() == Some("Working"))
+                .filter(|n| n.rect.origin.y >= card.origin.y && n.rect.max_y() <= card.max_y())
+                .count();
+            assert_eq!(working, usize::from(*state == OperationState::Running), "{id}");
+            let mark = crate::projects::operation_status(state).label();
+            assert!(
+                nodes.iter().any(|n| n.role == Role::Image
+                    && n.label.as_deref() == Some(mark)
+                    && n.rect.origin.y >= card.origin.y
+                    && n.rect.max_y() <= card.max_y()),
+                "{id} lacks its {mark} mark at {width}"
+            );
+            if let Some(error) = error {
+                assert!(has_label(&mounted, error), "{error} stays visible");
+            }
+        }
+        // The list sits above the board, never inside it.
+        assert!(column.origin.y >= header.max_y(), "board below list at {width}");
+    }
 }
 
 #[test]

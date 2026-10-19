@@ -2,7 +2,7 @@ use super::*;
 use crate::panels::{BoundedPanel, BoundedPanelProps};
 use crate::window_chrome::{WindowControlsSpace, WindowControlsSpaceProps};
 use mosaic::widgets::OverlayAlign;
-use relay_ui::overlay::{Popover, PopoverContent, PopoverProps};
+use relay_ui::overlay::{Popover, PopoverContent, PopoverProps, Tooltip, TooltipProps};
 use relay_ui::prelude::{
     CellButton, CellButtonProps, Ellipsis, EllipsisProps, Label, LabelProps, OnPress,
     PrimaryButton, PrimaryButtonProps, Rule, SecondaryButton, SecondaryButtonProps, TextRole, Tone,
@@ -84,9 +84,13 @@ pub(crate) fn sync_age(model: Model) -> Option<String> {
     )
 }
 
-/// The last synchronisation error of the visible board, if any.
+/// The last synchronisation error of the visible board, unless an
+/// unfinished operation of this project and board already shows it on its
+/// row (the operation list renders in the same view).
 pub(crate) fn board_error(model: Model) -> Option<String> {
-    let error = match model.selected_board() {
+    let board = model.selected_board();
+    let board_id = board.as_ref().map(|b| b.id.clone());
+    let error = match board {
         Some(board) => board.error,
         None => model
             .snapshot
@@ -96,7 +100,15 @@ pub(crate) fn board_error(model: Model) -> Option<String> {
             .find(|p| p.id == model.project.get())
             .and_then(|p| p.github.as_ref()?.sync_error.clone()),
     };
-    error.filter(|e| !e.trim().is_empty())
+    error.filter(|e| {
+        !e.trim().is_empty()
+            && !crate::projects::operation_shows_error(
+                &model.snapshot.get(),
+                &model.project.get(),
+                board_id.as_deref(),
+                e,
+            )
+    })
 }
 
 fn can_sync(model: Model) -> bool {
@@ -141,6 +153,7 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
     let width = State::new(1200.0f32);
     let height = State::new(900.0f32);
     let disclosure_limit = Derived::new(move || (height.get() - px(90.0)).max(0.0) * 0.5);
+    let operations_limit = Derived::new(move || (disclosure_limit.get() * 0.5).min(px(200.0)));
     // Full header cells need room; below this the source, sync and board
     // choice move into the Board actions menu.
     let full = Derived::new(move || width.get() >= px(960.0));
@@ -189,9 +202,15 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                 ReadoutCell key:"Source" value:(source)
             }
             if full.get() && can_sync(model) {
-                ReadoutCell key:"Last sync" value:(synced) {
-                    SecondaryButton text:"Sync" label:(Some("Sync project".into()))
-                        disabled:(sync_disabled) on-press:(press(move || model.sync_project()))
+                ReadoutCell key:"Last sync" value:(synced)
+                row width:{px(40.0)}px shrink:0 {
+                    Tooltip text:"Sync board" width:(Dimension::Fill) height:(Dimension::Fill) {
+                        CellButton label:"Sync board" rule:(Rule::Left) horizontal-inset:0.0
+                            disabled:(sync_disabled)
+                            on-press:(press(move || model.sync_project())) {
+                            { parent.adopt(&relay_ui::icons::icon_mark(relay_ui::icons::command.sync, 16.0)); }
+                        }
+                    }
                 }
             }
             if full.get() && active_boards(model).len() > 1 {
@@ -240,13 +259,13 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                 if managing.get() {
                     Columns model:(model) open:(managing)
                 }
-                if model.snapshot.get().operations.iter().any(|o| o.project_id == model.project.get() && o.state != OperationState::Completed) {
-                    Operations model:(model)
-                }
                 if history.get() {
                     OperationHistory model:(model) open:(history)
                 }
             }
+            // Unfinished operations sit directly over the board, closed by
+            // the strong rule so the list never reads as a board column.
+            Operations model:(model) separated:true limit:(Some(operations_limit))
             if stacked.get() {
                 scroll {
                     col height:min-content {
@@ -308,7 +327,7 @@ fn board_menu(
                             Label text:(Derived::new(move || format!("Last sync {}", synced.get())))
                                 role:(TextRole::Caption) tone:(Tone::Muted)
                         }
-                        SecondaryButton text:"Sync" label:(Some("Sync project".into()))
+                        SecondaryButton text:"Sync" label:(Some("Sync board".into()))
                             disabled:(sync_disabled)
                             on-press:(press(move || { model.sync_project(); menu.set(false); }))
                     }
