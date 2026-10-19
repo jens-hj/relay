@@ -6645,6 +6645,60 @@ fn provenance_names_connections_and_omits_unrecorded_values() {
 }
 
 #[test]
+fn provenance_shows_the_stored_model_choice_only_for_spawned_sessions() {
+    let mut snapshot = live_snapshot();
+    let mut child = snapshot.sessions[0].clone();
+    let parent = snapshot.sessions[0].title.clone();
+    child.id = "child".into();
+    child.parent_session_id = Some(snapshot.sessions[0].id.clone());
+    child.selection.model = Some("claude-sonnet-5-5".into());
+    child.selection.effort = Some("medium".into());
+    let reason = "Mostly wiring.\nSonnet at medium is enough; Opus is for\nsecurity work.".to_string();
+    child.spawn = Some(SpawnGrant {
+        task: "wire it".into(),
+        context: None,
+        permissions: Default::default(),
+        requested_by_run: None,
+        selection_rationale: Some(reason.clone()),
+        execution_approval: None,
+    });
+    snapshot.sessions.push(child.clone());
+    let group = &crate::conversation::provenance(&snapshot, &child, false)[0];
+    assert_eq!(group.title, "Model Choice");
+    assert_eq!(
+        group.note.as_deref(),
+        Some(format!("Parent's reason at spawn:\n{reason}").as_str())
+    );
+    assert!(group.rows.contains(&("Spawned By", parent)));
+    assert!(group.rows.contains(&("Current Model", "Sonnet 5.5".to_string())));
+    assert!(group.rows.contains(&("Current Effort", "medium".to_string())));
+
+    // The grant stores no copy of the choice, so editing the session after
+    // the spawn changes the labelled current values but never the reason.
+    let mut edited = child.clone();
+    edited.selection.model = Some("claude-opus-5-5".into());
+    edited.selection.effort = Some("max".into());
+    let after = &crate::conversation::provenance(&snapshot, &edited, false)[0];
+    assert!(after.rows.contains(&("Current Model", "Opus 5.5".to_string())));
+    assert!(after.rows.contains(&("Current Effort", "max".to_string())));
+    assert!(after.rows.iter().all(|(key, _)| !key.eq_ignore_ascii_case("model")));
+    assert_eq!(after.note, group.note);
+
+    // A grant without a rationale is reported as absent, not invented.
+    child.spawn.as_mut().unwrap().selection_rationale = None;
+    let group = &crate::conversation::provenance(&snapshot, &child, false)[0];
+    assert_eq!(group.note.as_deref(), Some("No reason recorded at spawn"));
+
+    // Sessions nobody spawned have no model choice.
+    child.spawn = None;
+    assert!(
+        crate::conversation::provenance(&snapshot, &child, false)
+            .iter()
+            .all(|g| g.key != "model-choice")
+    );
+}
+
+#[test]
 fn card_preview_strips_markers_and_collapses_whitespace() {
     let marker = "<!-- relay-operation:publish-1:task:issue-2 -->";
     assert_eq!(

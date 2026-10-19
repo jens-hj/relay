@@ -15,7 +15,7 @@ mod usage;
 mod tests;
 
 pub use context::context_view;
-pub use identity::{effort_choice, harness, selection_model, session_model};
+pub use identity::{effort_choice, harness, model_identity, selection_model, session_model};
 #[cfg(test)]
 pub use tools::fingerprint;
 pub use tools::{

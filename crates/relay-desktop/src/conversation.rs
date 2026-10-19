@@ -2172,6 +2172,11 @@ pub fn Conversation(model: Model) -> Element {
                                             value:(Derived::new(move || block.get().rows.into_iter().find(|r| r.0 == name).map(|r| r.1).unwrap_or_default()))
                                     }
                                 }
+                                if block.get().note.is_some() {
+                                    row height:min-content font-size:{px(12.0)}px {
+                                        text {block.get().note.unwrap_or_default()}
+                                    }
+                                }
                                 if block.get().changes.is_some() {
                                     row height:min-content font-size:{px(12.0)}px {
                                         text {block.get().changes.unwrap_or_default()}
@@ -4141,6 +4146,8 @@ pub(crate) struct ProvenanceGroup {
     pub title: String,
     pub rows: Vec<(&'static str, String)>,
     pub changes: Option<String>,
+    /// Wrapped prose under the rows, such as why the model was chosen.
+    pub note: Option<String>,
 }
 
 fn change_text(changes: Option<&ChangeSet>) -> String {
@@ -4158,6 +4165,54 @@ fn change_text(changes: Option<&ChangeSet>) -> String {
             )
         })
         .unwrap_or_else(|| "Changes unavailable".into())
+}
+
+/// A spawned session's model choice. The reason is the parent's stored
+/// `selection_rationale`, verbatim. The grant keeps no copy of the harness,
+/// model or effort chosen then, so those rows show the session's current
+/// configuration, which may have changed since. A grant without a rationale
+/// (fixed-model policy, older servers) says so rather than inventing one.
+fn model_choice(snapshot: &Snapshot, session: &Session) -> Option<ProvenanceGroup> {
+    let grant = session.spawn.as_ref()?;
+    let mut rows = Vec::new();
+    if let Some(parent) = session
+        .parent_session_id
+        .as_deref()
+        .and_then(|id| snapshot.sessions.iter().find(|s| s.id == id))
+    {
+        rows.push(("Spawned By", parent.title.clone()));
+    }
+    if let Some(worker) = &session.worker {
+        rows.push((
+            "Current Harness",
+            match worker.harness {
+                Harness::Codex => "Codex",
+                Harness::ClaudeCode => "Claude Code",
+            }
+            .to_string(),
+        ));
+    }
+    if let Some(model) = session
+        .selection
+        .model
+        .as_deref()
+        .or(session.worker.as_ref().and_then(|w| w.model.as_deref()))
+    {
+        rows.push(("Current Model", adapt::model_identity(model).short_name()));
+    }
+    if let Some(effort) = &session.selection.effort {
+        rows.push(("Current Effort", effort.clone()));
+    }
+    Some(ProvenanceGroup {
+        key: "model-choice".into(),
+        title: "Model Choice".into(),
+        rows,
+        changes: None,
+        note: Some(match &grant.selection_rationale {
+            Some(reason) => format!("Parent's reason at spawn:\n{reason}"),
+            None => "No reason recorded at spawn".into(),
+        }),
+    })
 }
 
 pub(crate) fn provenance(
@@ -4204,9 +4259,13 @@ pub(crate) fn provenance(
                 title,
                 rows,
                 changes: changes.then(|| change_text(w.changes.as_ref())),
+                note: None,
             }
         })
         .collect();
+    if let Some(group) = model_choice(snapshot, session) {
+        groups.insert(0, group);
+    }
     if let Some(worker) = &session.worker {
         let mut rows = vec![(
             "Harness",
@@ -4232,6 +4291,7 @@ pub(crate) fn provenance(
             rows,
             changes: (changes && session.workspaces.is_empty())
                 .then(|| change_text(worker.changes.as_ref())),
+            note: None,
         });
     }
     groups

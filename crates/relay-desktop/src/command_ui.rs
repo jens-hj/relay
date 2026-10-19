@@ -571,7 +571,7 @@ pub fn CommandPanel(model: Model) -> Element {
                     for (_, group) in {session.get().map(|s|crate::conversation::provenance(&model.snapshot.get(),&s,flow.get()=="diff")).unwrap_or_default().into_iter().map(|g|(g.key.clone(),g)).collect::<Vec<_>>()} {
                         let group=State::new(group.clone());
                         Caption tone:(Tone::Ink)
-                            text:(Derived::new(move || format!("{}\n{}{}",group.get().title,group.get().rows.iter().map(|(k,v)|format!("{k}: {v}")).collect::<Vec<_>>().join("\n"),if flow.get()=="diff"{group.get().changes.map(|c|format!("\n{c}")).unwrap_or_default()}else{String::new()})))
+                            text:(Derived::new(move || format!("{}\n{}{}{}",group.get().title,group.get().rows.iter().map(|(k,v)|format!("{k}: {v}")).collect::<Vec<_>>().join("\n"),group.get().note.map(|n|format!("\n{n}")).unwrap_or_default(),if flow.get()=="diff"{group.get().changes.map(|c|format!("\n{c}")).unwrap_or_default()}else{String::new()})))
                     }
                 } else if flow.get()=="mcp" {
                     if current.get().mcp.is_empty() {
