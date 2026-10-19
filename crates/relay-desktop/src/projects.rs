@@ -876,6 +876,153 @@ pub(crate) fn operations_summary(operations: &[ProjectOperation]) -> String {
     .collect::<Vec<_>>()
     .join(" · ")
 }
+
+/// What each state means and what the user can do next.
+fn operation_state_note(state: &OperationState) -> &'static str {
+    match state {
+        OperationState::Pending => "Waiting to start.",
+        OperationState::Running => "In progress. This updates as the server reports.",
+        OperationState::Completed => "Finished.",
+        OperationState::Failed => "Stopped with an error. Retry is below.",
+        OperationState::Interrupted => "Stopped before it finished. Retry is below.",
+        OperationState::NeedsReconciliation => {
+            "The provider result is unknown. Confirm it below before continuing."
+        }
+    }
+}
+
+/// The journal step an operation last recorded, in plain words.
+fn operation_step(key: &str) -> String {
+    let what = if key == "board" {
+        "Creating the remote board"
+    } else if key.starts_with("issue/") {
+        "Creating the remote issue"
+    } else if key.starts_with("membership/") {
+        "Adding the task to the board"
+    } else if key.starts_with("status/") {
+        "Setting the task's column"
+    } else if key.starts_with("edit/") {
+        "Updating the remote task"
+    } else {
+        return key.to_string();
+    };
+    format!("{what} ({key})")
+}
+
+/// Whether an unfinished operation already shows `text` as its error, so
+/// the board and notices need not repeat it.
+pub(crate) fn operation_shows_error(snapshot: &Snapshot, text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && snapshot.operations.iter().any(|o| {
+            o.state != OperationState::Completed
+                && o.error.as_deref().is_some_and(|e| e.trim() == text)
+        })
+}
+
+/// Labelled facts about an operation, from what the snapshot records: its
+/// state, target and last journal step. The error stays on the row and the
+/// provider receipts follow separately, so neither is repeated here.
+pub(crate) fn operation_details(
+    snapshot: &Snapshot,
+    operation: &ProjectOperation,
+) -> Vec<(String, String)> {
+    let board = |id: &str| {
+        snapshot
+            .board(id)
+            .map(|b| b.name.clone())
+            .unwrap_or_else(|_| id.to_string())
+    };
+    let task = |id: &str| {
+        snapshot
+            .issue(id)
+            .map(|i| format!("{} · {}", i.label(), i.title))
+            .unwrap_or_else(|_| id.to_string())
+    };
+    let mut rows = vec![(
+        "Status".to_string(),
+        format!(
+            "{}. {}",
+            operation_state_word(&operation.state),
+            operation_state_note(&operation.state)
+        ),
+    )];
+    match &operation.kind {
+        OperationKind::Clone { connection_id } => {
+            let connection = snapshot.connections.iter().find(|c| &c.id == connection_id);
+            rows.push((
+                "Connection".into(),
+                connection.map_or_else(|| connection_id.clone(), |c| c.name.clone()),
+            ));
+            if let Some(ConnectionKind::Repository {
+                remote, checkout, ..
+            }) = connection.map(|c| &c.kind)
+            {
+                rows.push(("Remote".into(), remote.clone()));
+                rows.push((
+                    "Checkout".into(),
+                    checkout.clone().unwrap_or_else(|| "Not cloned yet".into()),
+                ));
+            }
+        }
+        OperationKind::Sync { board_id } => {
+            rows.push(("Board".into(), board(board_id)));
+            if let Ok(found) = snapshot.board(board_id) {
+                rows.push(("Source".into(), source_label(&found.source)));
+                if let BoardSource::Github { url, .. } | BoardSource::Gitlab { url, .. } =
+                    &found.source
+                    && !url.is_empty()
+                {
+                    rows.push(("Board URL".into(), url.clone()));
+                }
+            }
+        }
+        OperationKind::Publish {
+            board_id,
+            target,
+            columns,
+            tasks,
+        } => {
+            rows.push(("Board".into(), board(board_id)));
+            rows.push((
+                "Destination".into(),
+                format!("{} · {}", target.name, source_label(&target.source)),
+            ));
+            rows.push(("Columns".into(), format!("{} mapped", columns.len())));
+            rows.push(("Tasks".into(), format!("{} to publish", tasks.len())));
+        }
+        OperationKind::EditTask {
+            issue_id, title, ..
+        } => {
+            rows.push(("Task".into(), task(issue_id)));
+            rows.push(("New title".into(), title.clone()));
+        }
+        OperationKind::MoveTask {
+            board_id,
+            issue_id,
+            column_id,
+        } => {
+            rows.push(("Task".into(), task(issue_id)));
+            rows.push(("Board".into(), board(board_id)));
+            let column = snapshot
+                .board(board_id)
+                .ok()
+                .and_then(|b| b.columns.iter().find(|c| &c.id == column_id))
+                .map_or_else(|| column_id.clone(), |c| c.title.clone());
+            rows.push(("Column".into(), column));
+        }
+        OperationKind::CreateTask { board_id, issue_id } => {
+            rows.push(("Task".into(), task(issue_id)));
+            rows.push(("Board".into(), board(board_id)));
+        }
+    }
+    if operation.state != OperationState::Completed
+        && let Some(step) = operation.results.get("pending")
+    {
+        rows.push(("Last step".into(), operation_step(step)));
+    }
+    rows
+}
 /// Completed operations for the project, opened from the board actions menu.
 #[component]
 pub fn OperationHistory(model: Model, open: State<bool>) -> Element {
@@ -934,6 +1081,7 @@ fn operation_results(operation: &ProjectOperation) -> Vec<(String, String, Strin
     operation
         .results
         .iter()
+        .filter(|(key, _)| key.as_str() != "pending")
         .map(|(key, value)| {
             if key == "board"
                 && let Ok(source) = serde_json::from_str::<BoardSource>(value)
@@ -1129,13 +1277,18 @@ fn OperationCard(model: Model, operation: ProjectOperation, history: bool) -> El
                 col height:min-content gap:{px(6.0)}px
                     pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px)
                     stroke:(width:{px(1.0)} color:ground.hairline edges:top) selectable {
-                    Label text:(Derived::new(move || format!("Operation: {}", id.get())))
-                        role:(TextRole::Caption) tone:(Tone::Muted)
+                    for (_, fact) in {operation_details(&model.snapshot.get(), &operation.get()).into_iter().map(|r| (r.0.clone(), r))} {
+                        let field = State::new(fact.0.clone());
+                        Readout key:(fact.0.clone())
+                            value:(Derived::new(move || operation_details(&model.snapshot.get(), &operation.get()).into_iter().find(|r| r.0 == field.get()).map(|r| r.1).unwrap_or_default()))
+                    }
                     for (_, result) in {operation_results(&operation.get()).into_iter().map(|r| (r.0.clone(), r))} {
                         let key = State::new(result.0.clone());
                         Readout key:(result.1.clone())
                             value:(Derived::new(move || operation_results(&operation.get()).into_iter().find(|r| r.0 == key.get()).map(|r| r.2).unwrap_or_default()))
                     }
+                    Label text:(Derived::new(move || format!("Operation: {}", id.get())))
+                        role:(TextRole::Caption) tone:(Tone::Muted)
                 }
             }
             if operation.get().error.is_some_and(|e| !e.is_empty()) {

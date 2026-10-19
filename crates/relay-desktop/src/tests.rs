@@ -4487,6 +4487,80 @@ fn operation_states_use_distinct_shared_status_marks_and_words() {
 }
 
 #[test]
+fn operation_details_describe_the_target_and_the_error_is_shown_once() {
+    use crate::projects::{operation_details, operation_shows_error};
+    let message = "GitLab issue URL does not match board host";
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    let board_id = snapshot
+        .boards
+        .iter()
+        .find(|b| b.project_id == "demo")
+        .unwrap()
+        .id
+        .clone();
+    for board in &mut snapshot.boards {
+        board.error = Some(message.into());
+    }
+    let mut sync = clone_operation("op-sync", OperationState::Failed, Some(message));
+    sync.kind = OperationKind::Sync {
+        board_id: board_id.clone(),
+    };
+    sync.results = [("pending".into(), "membership/issue-2".into())]
+        .into_iter()
+        .collect();
+    snapshot.operations.push(sync.clone());
+    let facts = operation_details(&snapshot, &sync);
+    let value = |key: &str| facts.iter().find(|f| f.0 == key).map(|f| f.1.clone());
+    assert_eq!(
+        value("Status").as_deref(),
+        Some("Failed. Stopped with an error. Retry is below.")
+    );
+    assert!(value("Board").is_some() && value("Source").is_some());
+    assert_eq!(
+        value("Last step").as_deref(),
+        Some("Adding the task to the board (membership/issue-2)")
+    );
+    // The error is the row's; details do not repeat it.
+    assert!(facts.iter().all(|f| !f.1.contains(message)));
+    let completed = ProjectOperation {
+        state: OperationState::Completed,
+        ..sync.clone()
+    };
+    assert!(
+        operation_details(&snapshot, &completed)
+            .iter()
+            .all(|f| f.0 != "Last step")
+    );
+    assert!(operation_shows_error(&snapshot, &format!(" {message} ")));
+    assert!(!operation_shows_error(&snapshot, "Another error"));
+    assert!(!operation_shows_error(&snapshot, ""));
+
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.notice.set(message.into());
+    mounted.settle();
+    let shown = |label: &str| {
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .filter(|n| n.label.as_deref() == Some(label))
+            .count()
+    };
+    // The row shows it; the board strip and the plain notice do not.
+    assert_eq!(shown(message), 1);
+    mounted.click("Operation details op-sync");
+    mounted.settle();
+    assert_eq!(shown(message), 1);
+    assert!(has_label(&mounted, "Operation: op-sync"));
+    assert!(has_label(
+        &mounted,
+        "Adding the task to the board (membership/issue-2)"
+    ));
+}
+
+#[test]
 fn operations_closes_with_the_strong_rule_and_keeps_the_wash_to_running_rows() {
     let board = include_str!("ui/board.rs");
     let projects = include_str!("projects.rs");

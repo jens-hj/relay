@@ -106,6 +106,14 @@ pub(crate) fn Notice(model: Model) -> Element {
         move || {
             let mut notice = model.notice.get();
             let retry = model.can_retry();
+            // A plain notice that an unfinished operation row already shows
+            // is not repeated; notices with actions always stay.
+            if !retry
+                && !model.can_rebase()
+                && crate::projects::operation_shows_error(&model.snapshot.get(), &notice)
+            {
+                notice.clear();
+            }
             if notice.is_empty() && retry {
                 notice = "Resolve the previous request before submitting another action. Your draft is retained.".into();
             }
