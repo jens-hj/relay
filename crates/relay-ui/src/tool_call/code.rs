@@ -45,7 +45,9 @@ pub fn CodeBlock(lines: Vec<CodeLine>, #[prop(default = 0)] more: usize) -> Elem
     }
     if more > 0 {
         block.adopt(&view! {
-            Label text:(format!("{more} more lines")) role:(TextRole::Label) tone:(Tone::Muted)
+            row height:min-content pad:(left:{px(12.0)}px right:{px(10.0)}px) {
+                Label text:(format!("{more} more lines")) role:(TextRole::Label) tone:(Tone::Muted)
+            }
         });
     }
     block

@@ -1208,3 +1208,157 @@ fn working_peek_bounds_long_unicode_and_keeps_keyboard_controls_inside_narrow_sc
         );
     }
 }
+
+const HEREDOC: &str = "bash -lc 'python3 - <<\"PY\"\nimport subprocess\nresult = subprocess.run([\"gh\", \"issue\", \"list\"])\nprint(result.returncode)\nPY'";
+
+fn run_call(command: &str, opening: Opening, tail: &[&str]) -> ToolCallView {
+    let lines = |text: &[&str]| -> Option<Vec<CodeLine>> {
+        Some(
+            text.iter()
+                .map(|line| CodeLine {
+                    text: (*line).into(),
+                    ..Default::default()
+                })
+                .collect(),
+        )
+    };
+    ToolCallView {
+        kind: ToolKind::Run,
+        status: AgentStatus::Failed,
+        verb: "Run".into(),
+        target: Some(command.into()),
+        opening,
+        detail: Some(ToolDetail::Run {
+            command: Some(command.into()),
+            exit_code: Some(127),
+            duration: Some("0ms".into()),
+            tail: lines(tail),
+            full: lines(tail),
+        }),
+    }
+}
+fn bottom(rect: Rect) -> f32 {
+    rect.origin.y + rect.size.height
+}
+fn right(rect: Rect) -> f32 {
+    rect.origin.x + rect.size.width
+}
+/// The outermost node carrying `label`: a one-line row and the text inside
+/// it can share a label.
+fn outer(mounted: &crate::testing::Mounted, label: &str) -> Rect {
+    mounted
+        .rects(label)
+        .into_iter()
+        .reduce(|a, b| if b.size.height > a.size.height { b } else { a })
+        .unwrap_or_else(|| panic!("missing {label}"))
+}
+
+#[test]
+fn multiline_and_overlong_commands_stay_inside_their_header_and_body() {
+    let long_line = format!("cargo test {}", "--features some-very-long-name ".repeat(30));
+    let stderr = ["bash: python3: command not found", long_line.as_str()];
+    for command in [HEREDOC.to_owned(), long_line.clone()] {
+        for width in [280.0, 480.0, 720.0] {
+            for opening in [Opening::Collapsed, Opening::Summary, Opening::Expanded] {
+                let state = State::new(run_call(&command, opening, &stderr));
+                let mounted = crate::testing::mount(Size::new(width, 600.0), || {
+                    view! {
+                        col height:min-content {
+                            ToolCallRow data:(state) on-opening:(Rc::new(|_| {}) as OnOpening)
+                        }
+                    }
+                });
+                let at = format!("{width}px {opening:?}");
+                let header = mounted.rect(opening.label());
+                assert_eq!(header.size.height, 30.0, "{at}");
+                assert_eq!(header.origin.y, 0.0, "{at}");
+                // The summary is one line inside the header, left of the status.
+                let summary = outer(&mounted, &command);
+                assert!(
+                    summary.origin.y >= -0.5 && bottom(summary) <= 30.5,
+                    "{at}: {summary:?}"
+                );
+                assert!(summary.size.height < 24.0, "{at}: {summary:?}");
+                let exit = outer(&mounted, "exit 127");
+                assert!(right(summary) <= exit.origin.x + 0.5, "{at}");
+                assert!(right(exit) <= width + 0.5, "{at}");
+                assert!(exit.origin.y >= 0.0 && bottom(exit) <= 30.5, "{at}");
+                assert!(mounted.has("0ms") && mounted.has("Failed"), "{at}");
+                // Nothing named is drawn above the card or past its right edge.
+                for node in mounted.ui.inspection_snapshot().nodes {
+                    if node.label.is_some() {
+                        assert!(node.rect.origin.y >= -0.5, "{at}: {:?}", node.label);
+                        assert!(right(node.rect) <= width + 0.5, "{at}: {:?}", node.label);
+                    }
+                }
+                // Body lines: the command's lines, then the output.
+                let mut labels: Vec<&str> = command.lines().chain(stderr).collect();
+                labels.sort_unstable();
+                labels.dedup();
+                let mut body: Vec<Rect> = Vec::new();
+                for label in labels {
+                    // The header summary is the whole command; a one-line
+                    // command repeats it as the body's first row.
+                    let header_copies = usize::from(label == command);
+                    body.extend(mounted.rects(label).into_iter().skip(header_copies));
+                }
+                if opening == Opening::Collapsed {
+                    assert!(!mounted.has("import subprocess"), "{at}");
+                    assert!(body.is_empty(), "{at}");
+                    continue;
+                }
+                assert!(!body.is_empty(), "{at}");
+                body.sort_by(|a, b| a.origin.y.total_cmp(&b.origin.y));
+                let mut previous: Option<Rect> = None;
+                for line in body {
+                    assert!(line.origin.y >= 30.0, "{at}: {line:?}");
+                    assert!(line.size.height <= 20.0, "{at}: {line:?}");
+                    if let Some(above) = previous {
+                        let inside = bottom(line) <= bottom(above) + 0.5;
+                        if inside {
+                            continue; // the text within the row above
+                        }
+                        assert!(line.origin.y >= bottom(above) - 0.5, "{at}: {line:?}");
+                    }
+                    previous = Some(line);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn command_lines_fold_in_summary_and_show_fully_expanded() {
+    let script = (0..20)
+        .map(|i| format!("step {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let state = State::new(run_call(&script, Opening::Summary, &["boom"]));
+    let change: OnOpening = Rc::new(move |opening| state.update(|v| v.opening = opening));
+    let mounted = crate::testing::mount(Size::new(480.0, 900.0), || {
+        view! {
+            col height:min-content {
+                ToolCallRow data:(state) on-opening:(change)
+            }
+        }
+    });
+    let shown =
+        |m: &crate::testing::Mounted| (0..20).filter(|i| m.has(&format!("step {i}"))).count();
+    assert_eq!(shown(&mounted), 6);
+    assert!(mounted.has("14 more lines"));
+    let first = outer(&mounted, "step 0");
+    assert_eq!(first.size.height, 19.0);
+    assert_eq!(outer(&mounted, "step 5").origin.y - first.origin.y, 5.0 * 19.0);
+    // The pointer then the keyboard cycle the opening; the control keeps focus.
+    mounted.click(mounted.rect(Opening::Summary.label()).origin + Vector2::new(80.0, 15.0));
+    assert_eq!(state.get_untracked().opening, Opening::Expanded);
+    assert_eq!(shown(&mounted), 20);
+    assert!(!mounted.has("14 more lines"));
+    assert_eq!(mounted.rect(Opening::Expanded.label()).size.height, 30.0);
+    let last = outer(&mounted, "step 19");
+    assert!(last.origin.y >= 30.0 && bottom(last) < 900.0);
+    mounted.key(Key::Enter);
+    assert_eq!(state.get_untracked().opening, Opening::Collapsed);
+    assert_eq!(shown(&mounted), 0);
+    assert_eq!(mounted.rect(Opening::Collapsed.label()).size.height, 30.0);
+}

@@ -1,4 +1,34 @@
 use super::*;
+/// Command lines shown before the summary opening folds the rest.
+pub(super) const COMMAND_SUMMARY_LINES: usize = 6;
+/// A command as one code line per source line, so a multi-line script
+/// keeps its shape instead of being drawn as one tall line. Summary shows
+/// the first lines and counts the rest; expanded shows all of them.
+pub(super) fn command_lines(command: &str, expanded: bool) -> Option<(Vec<CodeLine>, usize)> {
+    let mut lines: Vec<CodeLine> = command
+        .lines()
+        .map(|line| CodeLine {
+            text: line.trim_end().to_owned(),
+            ..Default::default()
+        })
+        .collect();
+    while lines.last().is_some_and(|line| line.text.is_empty()) {
+        lines.pop();
+    }
+    let skip = lines.iter().take_while(|line| line.text.is_empty()).count();
+    lines.drain(..skip);
+    if lines.is_empty() {
+        return None;
+    }
+    let shown = if expanded {
+        lines.len()
+    } else {
+        COMMAND_SUMMARY_LINES.min(lines.len())
+    };
+    let more = lines.len() - shown;
+    lines.truncate(shown);
+    Some((lines, more))
+}
 pub(super) fn body(vm: &ToolCallView, actions: ToolActions) -> Element {
     let expanded = vm.opening == Opening::Expanded;
     let body = view! {
@@ -158,9 +188,11 @@ pub(super) fn body(vm: &ToolCallView, actions: ToolActions) -> Element {
             full,
             ..
         } => {
-            if let Some(cmd) = command {
+            if let Some((lines, more)) =
+                command.as_deref().and_then(|c| command_lines(c, expanded))
+            {
                 body.adopt(&view! {
-                    CodeBlock lines:(vec![CodeLine { text:cmd.clone(), ..Default::default() }])
+                    CodeBlock lines:(lines) more:(more)
                 });
             }
             let lines = if expanded {
@@ -329,9 +361,11 @@ pub(super) fn body(vm: &ToolCallView, actions: ToolActions) -> Element {
             touches,
             blocks,
         } => {
-            if let Some(command) = command {
+            if let Some((lines, more)) =
+                command.as_deref().and_then(|c| command_lines(c, expanded))
+            {
                 body.adopt(&view! {
-                    CodeBlock lines:(vec![CodeLine { text:command.clone(), ..Default::default() }])
+                    CodeBlock lines:(lines) more:(more)
                 });
             }
             if expanded {
@@ -490,4 +524,27 @@ pub(super) fn test_grid(
         grid.adopt(&row);
     }
     grid
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(lines: &[CodeLine]) -> Vec<&str> {
+        lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
+    #[test]
+    fn commands_split_into_lines_and_fold_in_summary() {
+        let (lines, more) = command_lines("ls -la", false).unwrap();
+        assert_eq!((texts(&lines), more), (vec!["ls -la"], 0));
+        let (lines, more) = command_lines("\n  python3 - <<PY\n  print(1)\nPY\n\n", true).unwrap();
+        assert_eq!(texts(&lines), ["  python3 - <<PY", "  print(1)", "PY"]);
+        assert_eq!(more, 0);
+        let script = (0..10).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        let (lines, more) = command_lines(&script, false).unwrap();
+        assert_eq!((lines.len(), more), (COMMAND_SUMMARY_LINES, 4));
+        let (lines, more) = command_lines(&script, true).unwrap();
+        assert_eq!((lines.len(), more), (10, 0));
+        assert!(command_lines("  \n\n", true).is_none());
+    }
 }

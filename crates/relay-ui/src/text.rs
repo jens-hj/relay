@@ -167,12 +167,39 @@ pub fn SerifTitle(
     }
 }
 
+/// The first non-blank line of `text` and whether anything follows it.
+///
+/// Shaped text breaks at every newline, so a multi-line value in a
+/// one-line slot would draw outside it. Slots that promise one line show
+/// this instead.
+fn first_line(text: &str) -> (&str, bool) {
+    let mut rest = text;
+    loop {
+        match rest.find(['\n', '\r']) {
+            None => return (rest, false),
+            Some(end) if rest[..end].trim().is_empty() => rest = &rest[end + 1..],
+            Some(end) => return (&rest[..end], !rest[end..].trim().is_empty()),
+        }
+    }
+}
+
+/// `text` as a single line: its first non-blank line, with "…" appended
+/// when more follows.
+pub fn single_line(text: &str) -> String {
+    match first_line(text) {
+        (line, true) => format!("{}…", line.trim_end()),
+        (line, false) => line.to_string(),
+    }
+}
+
 /// The longest prefix of `text` that fits `width` with "…" appended, or
 /// `text` itself when it fits. Measured with the shaped advance of
-/// `style`.
+/// `style`. Only the first line of multi-line text is considered, and it
+/// always carries the "…" since the later lines are hidden.
 pub fn fit_text(fonts: &mut FontContext, text: &str, style: &TextStyle, width: f32) -> String {
+    let (text, cut) = first_line(text);
     let mut measure = |candidate: &str| fonts.shape(candidate, style, None).metrics().size.width;
-    if measure(text) <= width + 0.01 {
+    if !cut && measure(text) <= width + 0.01 {
         return text.to_string();
     }
     let bounds: Vec<usize> = text
@@ -215,7 +242,7 @@ pub fn Ellipsis(
             row width:1fr min-width:0px height:min-content clip
                 mask:linear(to:right stops:(0%:#FFFFFF 82%:#FFFFFF 100%:#FFFFFF00)) {
                 text font-family:monospace font-size:{px(role.size())}px font-weight:(weight.0)
-                    font-color:(token) {full.get()}
+                    font-color:(token) {single_line(&full.get())}
             }
         };
     };

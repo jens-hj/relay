@@ -952,3 +952,35 @@ fn gallery_scrolls_in_a_window() {
     let after = mounted.rect("EFFORT TRACKS").origin.y;
     assert!(before - after > 300.0, "scrolled from {before} to {after}");
 }
+
+#[test]
+fn ellipsis_keeps_multiline_text_on_one_line() {
+    let mut fonts = FontContext::embedded_only();
+    crate::fonts::install(&mut fonts);
+    let style = TextStyle::new(12.5)
+        .family(FontFamily::Monospace)
+        .weight(400);
+    // Later lines are hidden, and the cut is marked even when the first fits.
+    assert_eq!(fit_text(&mut fonts, "one\ntwo", &style, 400.0), "one…");
+    assert_eq!(fit_text(&mut fonts, "\n  \nfirst\r\nsecond", &style, 400.0), "first…");
+    assert_eq!(fit_text(&mut fonts, "only\n\n", &style, 400.0), "only");
+    let narrow = fit_text(&mut fonts, "a long first line here\nsecond", &style, 60.0);
+    assert!(narrow.ends_with('…') && !narrow.contains('\n'), "{narrow}");
+    assert!(fonts.shape(&narrow, &style, None).metrics().size.width <= 60.01);
+    assert_eq!(crate::text::single_line("one\ntwo"), "one…");
+    assert_eq!(crate::text::single_line("one"), "one");
+
+    let command = "bash -lc 'python3 - <<\"PY\"\nimport subprocess\nprint(1)\nPY'";
+    let mounted = mount(Size::new(400.0, 100.0), || {
+        view! {
+            row {
+                col width:{200.0}px {
+                    Ellipsis text:(command)
+                }
+            }
+        }
+    });
+    let rect = mounted.rect(command);
+    assert!(rect.size.height < 24.0, "{rect:?}");
+    assert!(rect.size.width <= 200.5, "{rect:?}");
+}
