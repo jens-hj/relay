@@ -892,11 +892,19 @@ fn create_issue(
                 "POST",
                 json!({"title":task.title,"description":body}),
             )?;
+            let iid = number(&v, "iid")?;
+            let url = gitlab::issue_url(host, repo, iid);
+            // GitLab may report the work item URL; it must name the same issue.
+            if gitlab::canonical_issue_url(host, &text(&v, "web_url")?).as_ref() != Some(&url) {
+                return Err(Error::invalid(
+                    "Provider returned a different issue repository or number",
+                ));
+            }
             IssueRef {
                 provider: Provider::Gitlab,
                 repository: repo.into(),
-                number: number(&v, "iid")?,
-                url: text(&v, "web_url")?,
+                number: iid,
+                url,
             }
         }
         BoardSource::Local => unreachable!(),
@@ -1599,14 +1607,13 @@ pub fn lookup_reconciliation(
                 "iid"
             },
         )?;
-        let accepted_url = text(
-            &issue,
-            if reference.provider == Provider::Github {
-                "html_url"
-            } else {
-                "web_url"
-            },
-        )?;
+        let accepted_url = if reference.provider == Provider::Github {
+            text(&issue, "html_url")?
+        } else {
+            // GitLab may report the work item URL for the stored issue URL.
+            let url = text(&issue, "web_url")?;
+            gitlab::canonical_issue_url(&reference_host(&reference)?, &url).unwrap_or(url)
+        };
         if accepted_number != reference.number || accepted_url != reference.url {
             return Err(Error::invalid("Provider returned a different issue"));
         }
@@ -1756,14 +1763,21 @@ fn issue_reference_from_url(source: &BoardSource, url: &str) -> Result<IssueRef,
     let path = url
         .strip_prefix(&format!("https://{host}/"))
         .ok_or_else(|| Error::invalid("Known issue URL does not match destination host"))?;
-    let (repo, number) = path
-        .rsplit_once(separator)
-        .ok_or_else(|| Error::invalid("Enter a remote issue URL"))?;
+    let (repo, number) = match provider {
+        Provider::Github => path.rsplit_once(separator),
+        // A work item URL names the same issue; it is stored as the issue URL.
+        Provider::Gitlab => gitlab::split_issue_url(host, url),
+    }
+    .ok_or_else(|| Error::invalid("Enter a remote issue URL"))?;
+    let number = positive_number(number)?;
     let reference = IssueRef {
         provider,
         repository: repo.into(),
-        number: positive_number(number)?,
-        url: url.into(),
+        number,
+        url: match provider {
+            Provider::Github => url.into(),
+            Provider::Gitlab => gitlab::issue_url(host, repo, number),
+        },
     };
     validate_reference(&reference)?;
     if let BoardSource::Gitlab { group, path, .. } = source

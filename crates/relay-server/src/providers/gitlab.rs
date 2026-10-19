@@ -232,12 +232,8 @@ pub(super) fn tasks(config: &RuntimeConfig, board: &RemoteBoard) -> Result<Vec<R
     )?;
     let mut result = Vec::new();
     for issue in issues {
-        let url = text(&issue, "web_url")?;
-        let repo = url
-            .strip_prefix(&format!("https://{host}/"))
-            .and_then(|s| s.split_once("/-/issues/"))
-            .map(|(p, _)| p.to_string())
-            .ok_or_else(|| Error::invalid("GitLab issue URL does not match board host"))?;
+        let iid = number(&issue, "iid")?;
+        let repo = issue_project(&board.board.source, &issue, iid)?;
         let labels: Vec<String> = array(&issue, "labels")?
             .iter()
             .map(|v| {
@@ -253,9 +249,9 @@ pub(super) fn tasks(config: &RuntimeConfig, board: &RemoteBoard) -> Result<Vec<R
         result.push(RemoteTask {
             reference: IssueRef {
                 provider: Provider::Gitlab,
+                url: issue_url(host, &repo, iid),
                 repository: repo,
-                number: number(&issue, "iid")?,
-                url,
+                number: iid,
             },
             title: text(&issue, "title")?,
             body: issue["description"].as_str().unwrap_or("").into(),
@@ -265,6 +261,67 @@ pub(super) fn tasks(config: &RuntimeConfig, board: &RemoteBoard) -> Result<Vec<R
         });
     }
     Ok(result)
+}
+/// The canonical URL Relay stores for a GitLab issue. GitLab also serves the
+/// issue at `/-/work_items/`, but stored references keep this form so tasks
+/// keep their identity whichever form GitLab reports.
+pub(super) fn issue_url(host: &str, repository: &str, iid: u64) -> String {
+    format!("https://{host}/{repository}/-/issues/{iid}")
+}
+/// Splits a GitLab issue page URL on `host` into its project path and number.
+/// Accepts the issue page (`/-/issues/N`) and the work item page that newer
+/// GitLab reports for the same issue (`/-/work_items/N`); anything else,
+/// including another host, is refused.
+pub(super) fn split_issue_url<'a>(host: &str, url: &'a str) -> Option<(&'a str, &'a str)> {
+    let path = url
+        .strip_prefix("https://")?
+        .strip_prefix(host)?
+        .strip_prefix('/')?;
+    path.split_once("/-/issues/")
+        .or_else(|| path.split_once("/-/work_items/"))
+        .filter(|(repo, number)| !repo.is_empty() && !number.is_empty())
+}
+/// The canonical form of a GitLab issue or work item page URL on `host`, or
+/// None when it is not one.
+pub(super) fn canonical_issue_url(host: &str, url: &str) -> Option<String> {
+    let (repo, number) = split_issue_url(host, url)?;
+    let number = number.parse::<u64>().ok().filter(|n| *n > 0)?;
+    Some(issue_url(host, repo, number))
+}
+/// The project path of a listed issue, read from its `web_url` and checked
+/// against everything else GitLab says about it: the board's host, the
+/// issue's own `iid`, `references.full` when present, and the board's scope
+/// (the project itself, or a project in the group or its subgroups).
+fn issue_project(source: &BoardSource, issue: &Value, iid: u64) -> Result<String, Error> {
+    let BoardSource::Gitlab {
+        host, group, path, ..
+    } = source
+    else {
+        unreachable!()
+    };
+    let url = text(issue, "web_url")?;
+    let (repo, tail) = split_issue_url(host, &url)
+        .ok_or_else(|| Error::invalid("GitLab issue URL does not match board host"))?;
+    if tail != iid.to_string() {
+        return Err(Error::invalid("GitLab issue URL does not match its number"));
+    }
+    if let Some(full) = issue["references"]["full"].as_str()
+        && full != format!("{repo}#{iid}")
+    {
+        return Err(Error::invalid("GitLab issue reference does not match its URL"));
+    }
+    // GitLab paths are case-insensitive; the board path is as the owner typed it.
+    let lower = repo.to_ascii_lowercase();
+    let scope = path.to_ascii_lowercase();
+    let inside = if *group {
+        lower.starts_with(&format!("{scope}/"))
+    } else {
+        lower == scope
+    };
+    if !inside {
+        return Err(Error::invalid("GitLab issue is outside the board scope"));
+    }
+    Ok(repo.to_owned())
 }
 fn memberships(board: &RemoteBoard, state: &str, labels: &[String]) -> Vec<String> {
     let mut columns = if state == "closed" {

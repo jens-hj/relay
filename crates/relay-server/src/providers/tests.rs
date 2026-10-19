@@ -2064,3 +2064,310 @@ fn github_known_board_urls_match_owner_case_insensitively() {
     assert!(matches!(found,BoardSource::Github{owner,number:1,..} if owner == "OWNER"));
     assert!(board_source_from_url(&source, "https://github.com/users/another/projects/1").is_err());
 }
+
+/// The verified gitlab.com group board: group `unincorporated/mosaic`, board
+/// 11427455, with issues in nested projects of that group.
+fn mosaic_source() -> BoardSource {
+    BoardSource::Gitlab {
+        host: "gitlab.com".into(),
+        group: true,
+        path: "unincorporated/mosaic".into(),
+        number: 11427455,
+        url: "https://gitlab.com/groups/unincorporated/mosaic/-/boards/11427455".into(),
+    }
+}
+fn mosaic_metadata() -> Vec<(&'static str, Value, i32)> {
+    vec![
+        (
+            "groups/unincorporated%2Fmosaic/boards/11427455 ",
+            json!({"id":11427455,"name":"Development","hide_backlog_list":false,"hide_closed_list":false,"milestone":null,"labels":[],"weight":null}),
+            0,
+        ),
+        (
+            "groups/unincorporated%2Fmosaic/boards/11427455/lists?per_page=100&page=1",
+            json!([{"id":5,"list_type":"label","position":0,"label":{"name":"Doing"}}]),
+            0,
+        ),
+        (
+            "groups/unincorporated%2Fmosaic --method GET",
+            json!({"permissions":{"group_access":{"access_level":40}}}),
+            0,
+        ),
+    ]
+}
+/// An issue as gitlab.com's group issues API lists it now: `web_url` points at
+/// the work item page of its project.
+fn mosaic_issue(project: &str, iid: u64, state: &str, labels: &[&str]) -> Value {
+    json!({
+        "id": iid + 1000,
+        "iid": iid,
+        "project_id": 83983428,
+        "state": state,
+        "title": format!("Issue {iid}"),
+        "description": "Body",
+        "labels": labels,
+        "type": "ISSUE",
+        "issue_type": "issue",
+        "web_url": format!("https://gitlab.com/unincorporated/mosaic/{project}/-/work_items/{iid}"),
+        "references": {
+            "short": format!("#{iid}"),
+            "relative": format!("{project}#{iid}"),
+            "full": format!("unincorporated/mosaic/{project}#{iid}"),
+        },
+    })
+}
+fn mosaic_tasks(issues: Value) -> Result<Vec<RemoteTask>, Error> {
+    let mut steps = mosaic_metadata();
+    steps.push((
+        "groups/unincorporated%2Fmosaic/issues?state=all&with_labels_details=false&per_page=100&page=1",
+        issues,
+        0,
+    ));
+    let fake = Fake::new(steps);
+    let board = metadata(&fake.config(), &mosaic_source())?;
+    tasks(&fake.config(), &board)
+}
+#[test]
+fn gitlab_work_item_urls_in_nested_group_projects_keep_canonical_issue_identity() {
+    let mut legacy = mosaic_issue("mosaic", 7, "opened", &[]);
+    legacy["web_url"] = json!("https://gitlab.com/unincorporated/mosaic/mosaic/-/issues/7");
+    let tasks = mosaic_tasks(json!([
+        mosaic_issue("mosaic", 150, "opened", &["Doing"]),
+        mosaic_issue("mosaic-vscode", 3, "closed", &[]),
+        legacy,
+    ]))
+    .unwrap();
+    let references: Vec<_> = tasks
+        .iter()
+        .map(|t| {
+            (
+                t.reference.repository.as_str(),
+                t.reference.number,
+                t.reference.url.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        references,
+        [
+            (
+                "unincorporated/mosaic/mosaic",
+                150,
+                "https://gitlab.com/unincorporated/mosaic/mosaic/-/issues/150"
+            ),
+            (
+                "unincorporated/mosaic/mosaic-vscode",
+                3,
+                "https://gitlab.com/unincorporated/mosaic/mosaic-vscode/-/issues/3"
+            ),
+            (
+                "unincorporated/mosaic/mosaic",
+                7,
+                "https://gitlab.com/unincorporated/mosaic/mosaic/-/issues/7"
+            ),
+        ]
+    );
+    assert_eq!(tasks[0].columns, ["gitlab-list-5"]);
+    assert_eq!(tasks[1].columns, ["gitlab-closed"]);
+    assert_eq!(tasks[2].columns, ["gitlab-open"]);
+    assert_eq!(tasks[0].item_id, "1150");
+    // A task synced before GitLab reported work item URLs keeps its identity,
+    // and a pasted work item URL names the same issue.
+    let source = mosaic_source();
+    for url in [
+        "https://gitlab.com/unincorporated/mosaic/mosaic/-/issues/150",
+        "https://gitlab.com/unincorporated/mosaic/mosaic/-/work_items/150",
+    ] {
+        assert_eq!(issue_reference_from_url(&source, url).unwrap(), tasks[0].reference);
+    }
+    let elsewhere = "https://gitlab.example/unincorporated/mosaic/mosaic/-/work_items/150";
+    assert!(issue_reference_from_url(&source, elsewhere).is_err());
+}
+#[test]
+fn gitlab_issue_urls_must_name_the_board_host_issue_and_scope() {
+    let host = "GitLab issue URL does not match board host";
+    let cases = [
+        ("https://gitlab.example/unincorporated/mosaic/mosaic/-/work_items/8", host),
+        ("https://gitlab.com.evil.example/unincorporated/mosaic/mosaic/-/work_items/8", host),
+        ("https://gitlab.com@evil.example/unincorporated/mosaic/mosaic/-/work_items/8", host),
+        ("http://gitlab.com/unincorporated/mosaic/mosaic/-/work_items/8", host),
+        ("https://gitlab.com/unincorporated/mosaic/mosaic/-/merge_requests/8", host),
+        ("https://gitlab.com/-/work_items/8", host),
+        (
+            "https://gitlab.com/unincorporated/mosaic/mosaic/-/work_items/9",
+            "GitLab issue URL does not match its number",
+        ),
+        (
+            "https://gitlab.com/unincorporated/mosaic/mosaic/-/work_items/8?x=1",
+            "GitLab issue URL does not match its number",
+        ),
+    ];
+    for (url, message) in cases {
+        let mut issue = mosaic_issue("mosaic", 8, "opened", &[]);
+        issue["web_url"] = json!(url);
+        let error = mosaic_tasks(json!([issue])).unwrap_err();
+        assert_eq!(error.message, message, "{url}");
+    }
+    // The reference GitLab gives must name the same project and number.
+    let mut issue = mosaic_issue("mosaic", 8, "opened", &[]);
+    issue["references"]["full"] = json!("unincorporated/mosaic/other#8");
+    assert_eq!(
+        mosaic_tasks(json!([issue])).unwrap_err().message,
+        "GitLab issue reference does not match its URL"
+    );
+    // Issues outside the board's group are refused, not imported.
+    let mut issue = mosaic_issue("mosaic", 8, "opened", &[]);
+    issue["web_url"] = json!("https://gitlab.com/unincorporated/mosaicx/repo/-/work_items/8");
+    issue["references"]["full"] = json!("unincorporated/mosaicx/repo#8");
+    assert_eq!(
+        mosaic_tasks(json!([issue])).unwrap_err().message,
+        "GitLab issue is outside the board scope"
+    );
+    // Missing URLs are an error, never invented.
+    let mut issue = mosaic_issue("mosaic", 8, "opened", &[]);
+    issue.as_object_mut().unwrap().remove("web_url");
+    assert!(mosaic_tasks(json!([issue])).is_err());
+    // GitLab paths are case-insensitive; the stored path is GitLab's.
+    let mut issue = mosaic_issue("mosaic", 8, "opened", &[]);
+    issue["web_url"] = json!("https://gitlab.com/Unincorporated/Mosaic/mosaic/-/work_items/8");
+    issue["references"]["full"] = json!("Unincorporated/Mosaic/mosaic#8");
+    let tasks = mosaic_tasks(json!([issue])).unwrap();
+    assert_eq!(tasks[0].reference.repository, "Unincorporated/Mosaic/mosaic");
+    assert_eq!(
+        tasks[0].reference.url,
+        "https://gitlab.com/Unincorporated/Mosaic/mosaic/-/issues/8"
+    );
+}
+#[tokio::test]
+async fn failed_gitlab_sync_keeps_existing_tasks_and_memberships() {
+    // The page holds one good issue and one on another host.
+    let mut foreign = mosaic_issue("mosaic", 151, "opened", &[]);
+    foreign["web_url"] =
+        json!("https://gitlab.example/unincorporated/mosaic/mosaic/-/work_items/151");
+    let mut steps = mosaic_metadata();
+    steps.push((
+        "groups/unincorporated%2Fmosaic/issues?state=all",
+        json!([mosaic_issue("mosaic", 150, "closed", &[]), foreign]),
+        0,
+    ));
+    let fake = Fake::new(steps);
+    let (_temp, workspace) = workspace(fake.config()).await;
+    let reference = IssueRef {
+        provider: Provider::Gitlab,
+        repository: "unincorporated/mosaic/mosaic".into(),
+        number: 150,
+        url: "https://gitlab.com/unincorporated/mosaic/mosaic/-/issues/150".into(),
+    };
+    let board = Board {
+        id: "board".into(),
+        project_id: "project".into(),
+        name: "Development".into(),
+        source: mosaic_source(),
+        columns: vec![BoardColumn {
+            id: "gitlab-open".into(),
+            title: "Open".into(),
+        }],
+        last_synced_at: Some(42),
+        error: None,
+    };
+    let membership = BoardMembership {
+        board_id: "board".into(),
+        issue_id: "task".into(),
+        column_ids: vec!["gitlab-open".into()],
+        remote_item_id: Some("1150".into()),
+    };
+    workspace
+        .update_project(|s| {
+            s.boards.push(board.clone());
+            s.issues.push(Issue {
+                repository_connection_id: None,
+                id: "task".into(),
+                project_id: "project".into(),
+                reference: Some(reference.clone()),
+                title: "Issue 150".into(),
+                body: "Body".into(),
+                column_id: "gitlab-open".into(),
+                labels: vec![],
+                result: None,
+            });
+            s.memberships.push(membership.clone());
+            s.operations.push(sample_operation(OperationKind::Sync {
+                board_id: "board".into(),
+            }));
+            Ok(())
+        })
+        .unwrap();
+    assert!(execute(&workspace, "operation").is_err());
+    let snapshot = workspace.snapshots.borrow();
+    let retained = snapshot.board("board").unwrap();
+    assert_eq!(retained.columns, board.columns);
+    assert_eq!(retained.last_synced_at, Some(42));
+    assert_eq!(
+        retained.error.as_deref(),
+        Some("GitLab issue URL does not match board host")
+    );
+    assert_eq!(
+        snapshot
+            .memberships
+            .iter()
+            .filter(|m| m.board_id == "board")
+            .collect::<Vec<_>>(),
+        [&membership]
+    );
+    let task = snapshot.issues.iter().find(|i| i.id == "task").unwrap();
+    assert_eq!(task.reference.as_ref(), Some(&reference));
+    assert_eq!(task.column_id, "gitlab-open");
+    assert_eq!(
+        operation(&snapshot, "operation").unwrap().state,
+        OperationState::Failed
+    );
+}
+#[test]
+fn gitlab_created_issue_work_item_url_is_stored_canonically() {
+    let issue = Issue {
+        repository_connection_id: None,
+        id: "task".into(),
+        project_id: "project".into(),
+        reference: None,
+        title: "New".into(),
+        body: "Body".into(),
+        column_id: "gitlab-open".into(),
+        labels: vec![],
+        result: None,
+    };
+    let created = |web_url: &str| {
+        let fake = Fake::new(vec![(
+            "projects/unincorporated%2Fmosaic%2Fmosaic/issues --method POST",
+            json!({"id":1200,"iid":200,"web_url":web_url}),
+            0,
+        )]);
+        create_issue(
+            &fake.config(),
+            &mosaic_source(),
+            "unincorporated/mosaic/mosaic",
+            &issue,
+            "operation",
+        )
+    };
+    let reference =
+        created("https://gitlab.com/unincorporated/mosaic/mosaic/-/work_items/200").unwrap();
+    assert_eq!(
+        reference.url,
+        "https://gitlab.com/unincorporated/mosaic/mosaic/-/issues/200"
+    );
+    assert_eq!(
+        created("https://gitlab.com/unincorporated/mosaic/mosaic/-/issues/200").unwrap(),
+        reference
+    );
+    for wrong in [
+        "https://gitlab.example/unincorporated/mosaic/mosaic/-/work_items/200",
+        "https://gitlab.com/unincorporated/mosaic/other/-/work_items/200",
+        "https://gitlab.com/unincorporated/mosaic/mosaic/-/work_items/201",
+    ] {
+        assert_eq!(
+            created(wrong).unwrap_err().message,
+            "Provider returned a different issue repository or number",
+            "{wrong}"
+        );
+    }
+}
