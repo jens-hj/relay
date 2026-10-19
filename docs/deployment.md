@@ -19,7 +19,7 @@ Public HTTP `408`, `429`, `502`, `503`, and `504` responses are retryable transp
 
 ## Preparation and Recovery
 
-This helper handles releases that preserve the installed protocol, and releases whose candidate migrates the database schema at startup. A schema-changing release needs a separately reviewed migration and recovery plan; the helper refuses mismatched pre-deployment versions. The schema 21 to 23 release has a [proposed plan](schema-23-migration.md).
+This helper handles releases that preserve the installed protocol, and releases whose candidate migrates the database schema at startup. A schema-changing release needs a separately reviewed migration and recovery plan; the helper refuses mismatched pre-deployment versions. The schema 21 to 23 release has a [proposed plan](schema-23-migration.md). [Claude window start](claude-window-start.md) adds schema 24, which that plan does not cover.
 
 Build the server and browser packages from the same immutable commit, and preserve the previous package bundle as a Nix GC root. Prepare a private deployment directory outside Git with mode `0700`; keep its manifest, status, logs, and backups owner-readable. Manifests contain credential file paths, never credential values. Credentials are read only inside authenticated requests and never placed in command-line arguments or logs.
 

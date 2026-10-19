@@ -54,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "http://{}",
         std::net::SocketAddr::new(ip, address.port())
     ));
+    shutdown.start_window_start();
     eprintln!(
         "Relay server listening on {} · database {}",
         listener.local_addr()?,

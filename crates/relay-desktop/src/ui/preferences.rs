@@ -94,6 +94,10 @@ pub(crate) fn Settings(model: Model) -> Element {
                     { parent.adopt(&caption(Derived::new(move || model.settings_store.get().backup.map(|b| format!("Previous settings file kept at {}", b.display())).unwrap_or_default()), true)); }
                 }
                 { parent.adopt(&harnesses); }
+                Module title:"Claude Window Start" icon:(Some(relay_ui::icons::harness.claude_code))
+                    note:(Some(UiText::from("Saved on the connected server"))) {
+                    WindowStartSetting model:(model)
+                }
                 Module title:"Appearance" icon:(Some(relay_ui::icons::section.appearance))
                     note:(Some(UiText::from("Saved on this machine"))) {
                     AppearanceRow model:(model) title:"Theme"
@@ -124,6 +128,103 @@ pub(crate) fn Settings(model: Model) -> Element {
         }
     };
     root
+}
+
+/// "2d 4h", "3h 05m" or "12m".
+fn span(seconds: u64) -> String {
+    let (days, hours, minutes) = (seconds / 86_400, seconds / 3600 % 24, seconds / 60 % 60);
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes:02}m")
+    } else {
+        format!("{}m", minutes.max(1))
+    }
+}
+
+/// What to do about a failure, when there is something to do.
+fn failure_hint(reason: WindowStartFailure) -> &'static str {
+    match reason {
+        WindowStartFailure::SignedOut => {
+            " Sign in to Claude Code on the server, then turn this off and on."
+        }
+        WindowStartFailure::NotSubscription => {
+            " Sign in with a Claude subscription on the server, then turn this off and on."
+        }
+        WindowStartFailure::ManagedHooks => {
+            " Administrator policy can run hooks, which this message must not. Set \"disableAllHooks\": true in the managed settings on the server, then turn this off and on."
+        }
+        WindowStartFailure::ModelUnavailable => {
+            " Relay only uses a canonical Haiku model and does not substitute another."
+        }
+        WindowStartFailure::WeeklyLimit => " It waits for the weekly limit to reset.",
+        _ => "",
+    }
+}
+
+/// The last message and the next one due, in words. `now` is Unix seconds.
+pub(crate) fn window_start_status(start: &WindowStart, now: u64) -> String {
+    let ago = start
+        .last_attempt_at
+        .map(|at| format!(" {} ago", span(now.saturating_sub(at))))
+        .unwrap_or_default();
+    let mut text = match &start.last_outcome {
+        None => "No message sent yet.".to_string(),
+        Some(WindowStartOutcome::Sent { model }) => format!("Last message sent to {model}{ago}."),
+        Some(WindowStartOutcome::NotNeeded) => {
+            "Claude had other work after the window ended, so no message was sent.".to_string()
+        }
+        Some(WindowStartOutcome::Failed { reason, attempts }) => format!(
+            "Last message failed{ago}: {} (attempt {attempts}).{}",
+            reason.label(),
+            failure_hint(*reason)
+        ),
+        Some(WindowStartOutcome::Unconfirmed { reason }) => format!(
+            "Last message may have been delivered{ago}: {}. Nothing more is sent for this window until Claude reports a new one, or you turn this off and on.",
+            reason.label()
+        ),
+    };
+    if start.enabled {
+        text.push_str(&match start.next_due_at {
+            Some(at) if at > now => format!(" Next message in {}.", span(at - now)),
+            Some(_) => " Next message is due now.".to_string(),
+            None => " No message is scheduled until Claude reports a window end.".to_string(),
+        });
+    }
+    text
+}
+
+/// Whether the server sends one tiny Claude message after each reported
+/// five-hour window ends. Off until the owner turns it on; it spends
+/// subscription usage, so the cost is stated beside the control.
+#[component]
+fn WindowStartSetting(model: Model) -> Element {
+    let selected = Derived::new(move || {
+        usize::from(model.snapshot.get().claude_window_start.enabled)
+    });
+    let choose: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot: usize| {
+        model.action(Command::SetClaudeWindowStart { enabled: slot == 1 })
+    });
+    let blocked = Derived::new(move || model.busy.get() || !model.connected.get());
+    let status = Derived::new(move || {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        window_start_status(&model.snapshot.get().claude_window_start, now)
+    });
+    view! {
+        col height:min-content gap:0px {
+            row height:{px(40.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                Segments name:("Claude window start".to_string())
+                    options:(vec!["Off".to_string(), "On".to_string()])
+                    tones:(vec![ground.ink, relay_ui::tokens::Signal::NeedsYou.token()])
+                    selected:(relay_ui::Live::from(selected)) on-select:(choose)
+                    disabled:(relay_ui::Live::from(blocked))
+            }
+            Caption text:"When Claude reports that a five-hour window has ended, the server sends one tiny message (Reply OK.) through its Claude Code subscription sign-in, using a canonical Haiku model, unless other Claude work has already started a window. Nothing is sent until Claude has reported a window end. It refuses to send unless Claude Code is verifiably signed in with a subscription, not an API key, and where administrator-managed hooks could run. Each message uses a little of your Claude usage. This reduces idle gaps; it does not add usage or change weekly limits, and Anthropic does not guarantee when a window starts. Use it on one Relay server per Claude account: servers do not coordinate with each other."
+            { parent.adopt(&caption(status, false)); }
+        }
+    }
 }
 
 /// An appearance setting: its caps name, its control and its reset cell.
@@ -288,5 +389,56 @@ pub(crate) fn HarnessPanel(model: Model, harness: Harness) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_start_status_names_the_last_outcome_and_the_next_message() {
+        let now = 1_000_000;
+        let mut start = WindowStart::default();
+        assert_eq!(window_start_status(&start, now), "No message sent yet.");
+        start.set_enabled(true, now);
+        assert_eq!(
+            window_start_status(&start, now),
+            "No message sent yet. No message is scheduled until Claude reports a window end."
+        );
+        start.last_attempt_at = Some(now - 3 * 3600 - 300);
+        start.last_outcome = Some(WindowStartOutcome::Sent {
+            model: "Haiku 4.5".into(),
+        });
+        start.next_due_at = Some(now + 4 * 3600);
+        assert_eq!(
+            window_start_status(&start, now),
+            "Last message sent to Haiku 4.5 3h 05m ago. Next message in 4h 00m."
+        );
+        start.last_outcome = Some(WindowStartOutcome::Failed {
+            reason: WindowStartFailure::SignedOut,
+            attempts: 1,
+        });
+        start.next_due_at = None;
+        let text = window_start_status(&start, now);
+        assert!(text.contains("Claude Code is signed out (attempt 1)"), "{text}");
+        assert!(text.contains("Sign in to Claude Code on the server"), "{text}");
+        // Turned off, the last outcome stays and nothing is scheduled.
+        start.set_enabled(false, now);
+        let text = window_start_status(&start, now);
+        assert!(!text.contains("Next message") && !text.contains("scheduled"), "{text}");
+        // A message that may have been delivered says so and is not retried.
+        start.last_outcome = Some(WindowStartOutcome::Unconfirmed {
+            reason: WindowStartFailure::TimedOut,
+        });
+        let text = window_start_status(&start, now);
+        assert!(text.contains("may have been delivered"), "{text}");
+        assert!(text.contains("Nothing more is sent for this window"), "{text}");
+        start.last_outcome = Some(WindowStartOutcome::Failed {
+            reason: WindowStartFailure::NotSubscription,
+            attempts: 1,
+        });
+        let text = window_start_status(&start, now);
+        assert!(text.contains("not signed in with a subscription"), "{text}");
     }
 }

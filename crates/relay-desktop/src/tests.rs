@@ -4609,6 +4609,24 @@ fn nix_commands_setting_sends_the_chosen_mode_for_the_project() {
 }
 
 #[test]
+fn claude_window_start_is_off_until_chosen_and_sends_the_setting() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(local_project_snapshot());
+    mounted.model.page.set(Page::Settings);
+    mounted.settle();
+    assert!(!mounted.model.snapshot.get_untracked().claude_window_start.enabled);
+    for option in ["Off", "On"] {
+        mounted.rect(&format!("Claude window start: {option}"));
+    }
+    mounted.click("Claude window start: On");
+    let command = mounted.commands.try_recv().unwrap().command;
+    assert!(
+        matches!(command, Command::SetClaudeWindowStart { enabled: true }),
+        "{command:?}"
+    );
+}
+
+#[test]
 fn connection_states_update_and_retry_and_remove_use_stable_connection_ids() {
     let mut mounted = mount(false, 1380.0);
     let mut snapshot = local_project_snapshot();

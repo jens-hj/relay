@@ -14,6 +14,7 @@ pub(super) fn handles(command: &Command) -> bool {
         Command::CreateProject { .. }
             | Command::RenameProject { .. }
             | Command::SetNixCommands { .. }
+            | Command::SetClaudeWindowStart { .. }
             | Command::AddConnection { .. }
             | Command::UpdateConnection { .. }
             | Command::RetryConnection { .. }
@@ -435,6 +436,11 @@ pub(super) fn apply(
                 .find(|p| p.id == project_id && !p.fixture)
                 .ok_or_else(|| Error::invalid("Project not found"))?
                 .nix_commands = mode;
+        }
+        Command::SetClaudeWindowStart { enabled } => {
+            snapshot
+                .claude_window_start
+                .set_enabled(enabled, crate::now());
         }
         Command::AddConnection {
             project_id,

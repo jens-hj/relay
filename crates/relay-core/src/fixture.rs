@@ -176,6 +176,7 @@ pub fn demo_snapshot(defaults: AgentProfile) -> Snapshot {
         submissions: vec![],
         usage_limits: vec![],
         usage_ledger: vec![],
+        claude_window_start: WindowStart::default(),
     }
 }
 

@@ -18,9 +18,11 @@ mod profile;
 mod tree;
 pub use tree::*;
 mod usage;
+mod window_start;
 mod worker_model;
 pub use conversation::*;
 pub use usage::*;
+pub use window_start::*;
 pub use worker_model::*;
 
 pub use fixture::{demo_catalog, demo_orchestration, demo_snapshot, demo_usage};
@@ -307,6 +309,10 @@ pub struct Snapshot {
     pub usage_limits: Vec<UsageLimit>,
     #[serde(default)]
     pub usage_ledger: Vec<UsageEntry>,
+    /// The Claude window-start message setting and status; omitted until the
+    /// owner touches it, so existing snapshots keep their shape.
+    #[serde(default, skip_serializing_if = "WindowStart::is_default")]
+    pub claude_window_start: WindowStart,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -350,6 +356,12 @@ pub enum Command {
     SetNixCommands {
         project_id: String,
         mode: NixCommands,
+    },
+    /// Whether the server sends one tiny Claude message after each reported
+    /// five-hour window ends. It uses subscription usage, so it stays off
+    /// until the owner turns it on. Only workspace clients can send this.
+    SetClaudeWindowStart {
+        enabled: bool,
     },
     AddConnection {
         project_id: String,
@@ -734,6 +746,7 @@ impl Snapshot {
             Command::CreateProject { .. }
             | Command::RenameProject { .. }
             | Command::SetNixCommands { .. }
+            | Command::SetClaudeWindowStart { .. }
             | Command::AddConnection { .. }
             | Command::UpdateConnection { .. }
             | Command::RetryConnection { .. }

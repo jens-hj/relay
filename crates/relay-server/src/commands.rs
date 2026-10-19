@@ -574,7 +574,7 @@ async fn read_response(
     }
 }
 
-fn add_models(catalog: &mut HarnessCatalog, data: &Value, harness: Harness) {
+pub(super) fn add_models(catalog: &mut HarnessCatalog, data: &Value, harness: Harness) {
     let field = if harness == Harness::Codex {
         "data"
     } else {
