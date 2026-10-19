@@ -420,28 +420,62 @@ pub(crate) fn form_connection(form: &ConnectionDraft) -> Result<ConnectionInput,
     }
 }
 
-/// Adds a connection to the project being drafted, or to the open project.
-/// False when the draft already has it.
-fn commit_connection(model: Model, initial: bool, connection: ConnectionInput) -> bool {
+/// What adding a connection to the project did.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Added {
+    /// Put in the draft, or queued to save on the open project.
+    Yes,
+    /// The same connection is already in the draft.
+    Duplicate,
+    /// Not queued: a save or sync is running or the server is unreachable.
+    /// Nothing changed, so the caller keeps what the user entered.
+    Blocked,
+}
+
+/// Whether two pending connections are the same resource. A board is the same
+/// board however its address was entered, so the presentation URL is ignored
+/// (the server refuses a project that connects one board twice).
+pub(crate) fn same_connection(a: &ConnectionInput, b: &ConnectionInput) -> bool {
+    match (a, b) {
+        (ConnectionInput::Board { source: a }, ConnectionInput::Board { source: b }) => {
+            a.same_board(b)
+        }
+        _ => a == b,
+    }
+}
+
+/// Adds a connection to the project being drafted, or queues it on the open
+/// project. A queued command counts only when it is the request now awaiting
+/// acknowledgement: a submit that is dropped must not clear the form.
+fn commit_connection(model: Model, initial: bool, connection: ConnectionInput) -> Added {
     if initial {
         if model
             .project_draft
             .get_untracked()
             .connections
-            .contains(&connection)
+            .iter()
+            .any(|known| same_connection(known, &connection))
         {
-            return false;
+            return Added::Duplicate;
         }
         model
             .project_draft
             .update(|d| d.connections.push(connection));
-    } else {
-        model.action(Command::AddConnection {
-            project_id: model.project.get_untracked(),
-            connection,
-        });
+        return Added::Yes;
     }
-    true
+    if !model.can_submit() {
+        return Added::Blocked;
+    }
+    let project_id = model.project.get_untracked();
+    model.action(Command::AddConnection {
+        project_id: project_id.clone(),
+        connection: connection.clone(),
+    });
+    if model.queued_connection(&project_id, &connection) {
+        Added::Yes
+    } else {
+        Added::Blocked
+    }
 }
 
 fn board_number(source: &BoardSource) -> u64 {
@@ -479,10 +513,12 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
     // Problems show once Add has been pressed, then follow the fields until
     // they are fixed.
     let attempted = State::new(false);
-    // The pasted address being looked up, the boards it offered when it named
-    // more than one, and why a lookup found none.
+    // The pasted address being looked up, the boards found for an address
+    // (kept with that address), and why a lookup or add did not finish.
+    // Editing the address drops all three: an answer belongs to the exact
+    // address that was sent.
     let requested = State::new(None::<LookupRequest>);
-    let choices = State::new(Vec::<BoardChoice>::new());
+    let found = State::new(None::<(String, Vec<BoardChoice>)>);
     let lookup_error = State::new(String::new());
     if initial {
         Effect::new(move || {
@@ -498,8 +534,28 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
             model.project_draft.update(|d| d.connection_form = form);
         });
     }
+    Effect::new(move || {
+        let current = url.get().trim().to_owned();
+        if requested
+            .get_untracked()
+            .is_some_and(|request| request.url != current)
+        {
+            requested.set(None);
+        }
+        if found
+            .get_untracked()
+            .is_some_and(|(address, _)| address != current)
+        {
+            found.set(None);
+        }
+        if !lookup_error.get_untracked().is_empty() {
+            lookup_error.set(String::new());
+        }
+    });
     // The server answers a lookup for this form's address: one board is added
-    // at once, several wait in the picker, and none shows the server's reason.
+    // at once, several wait in the picker, and none shows the server's
+    // reason. A board that cannot be added now (a save is running, the server
+    // is unreachable) waits in the picker with the address kept.
     Effect::new(move || {
         let Some(request) = requested.get() else {
             return;
@@ -512,22 +568,21 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
             return;
         };
         requested.set(None);
+        if url.get_untracked().trim() != request.url {
+            return;
+        }
         match result {
-            Ok(mut boards) if boards.len() == 1 => {
-                let board = boards.remove(0);
-                if commit_connection(
-                    model,
-                    initial,
-                    ConnectionInput::Board {
-                        source: board.source,
-                    },
-                ) {
-                    url.set(String::new());
-                } else {
-                    lookup_error.set("That board is already added.".into());
+            Ok(boards) if boards.len() == 1 => {
+                let connection = ConnectionInput::Board {
+                    source: boards[0].source.clone(),
+                };
+                match commit_connection(model, initial, connection) {
+                    Added::Yes => url.set(String::new()),
+                    Added::Duplicate => lookup_error.set("That board is already added.".into()),
+                    Added::Blocked => found.set(Some((request.url, boards))),
                 }
             }
-            Ok(boards) => choices.set(boards),
+            Ok(boards) => found.set(Some((request.url, boards))),
             Err(message) => lookup_error.set(message),
         }
     });
@@ -542,8 +597,8 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
         }
         attempted.set(false);
         requested.set(None);
+        found.set(None);
         lookup_error.set(String::new());
-        choices.set(Vec::new());
         kind.set(slot);
     });
     let picker_width = State::new(0.0f32);
@@ -567,7 +622,13 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
         match form_connection(&form) {
             Err(problem) => Some(problem),
             Ok(connection)
-                if initial && model.project_draft.get().connections.contains(&connection) =>
+                if initial
+                    && model
+                        .project_draft
+                        .get()
+                        .connections
+                        .iter()
+                        .any(|known| same_connection(known, &connection)) =>
             {
                 Some("That connection is already added.")
             }
@@ -581,6 +642,11 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
             String::new()
         }
     });
+    // An open project takes a connection only through a save, which the model
+    // refuses while another save or sync runs or the server is unreachable.
+    let saving_blocked = Derived::new(move || {
+        !initial && (model.busy.get() || model.syncing.get() || !model.connected.get())
+    });
     let add = press(move || {
         if kind.get_untracked() == BOARD_URL {
             attempted.set(true);
@@ -592,7 +658,7 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
                 id: uuid::Uuid::new_v4().to_string(),
             };
             lookup_error.set(String::new());
-            choices.set(Vec::new());
+            found.set(None);
             requested.set(Some(request.clone()));
             let sent = model
                 .lookup_requests
@@ -617,15 +683,17 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
             attempted.set(true);
             return;
         };
-        if !commit_connection(model, initial, connection) {
-            attempted.set(true);
-            return;
-        }
-        if initial {
-            // Ready for the next one: the kind, host and board scope stay.
-            address.set(String::new());
-            number.set(String::new());
-            attempted.set(false);
+        match commit_connection(model, initial, connection) {
+            Added::Yes => {
+                // Ready for the next one: the kind, host and board scope stay.
+                if initial {
+                    address.set(String::new());
+                    number.set(String::new());
+                    attempted.set(false);
+                }
+            }
+            Added::Duplicate => attempted.set(true),
+            Added::Blocked => {}
         }
     });
     let searching = Derived::new(move || requested.get().is_some());
@@ -633,7 +701,7 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
         if kind.get() == BOARD_URL {
             searching.get() || !model.connected.get()
         } else {
-            !initial && (model.busy.get() || !model.connected.get())
+            saving_blocked.get()
         }
     });
     let add_label = Derived::new(move || {
@@ -651,6 +719,15 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
     let provider = Derived::new(move || usize::from(gitlab.get()));
     let choose_provider: std::rc::Rc<dyn Fn(usize)> =
         std::rc::Rc::new(move |slot: usize| gitlab.set(slot == 1));
+    // The boards found for the address now in the field.
+    let offered = Derived::new(move || {
+        let current = url.get().trim().to_owned();
+        found
+            .get()
+            .filter(|(address, _)| *address == current)
+            .map(|(_, boards)| boards)
+            .unwrap_or_default()
+    });
     view! {
         col height:min-content gap:0px {
             row height:{px(40.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
@@ -712,19 +789,35 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
                 Caption text:(Derived::new(move || lookup_error.get()))
                     tone:(Tone::Signal(relay_ui::tokens::Signal::Failed))
             }
-            if choices.get().len() > 1 {
-                Caption text:"Several boards found. Choose one." tone:(Tone::Ink)
-                for (_, item) in {choices.get().iter().enumerate().map(|(index, choice)| (format!("{index}"), (choice_title(&choices.get(), index), choice.source.clone()))).collect::<Vec<_>>()} {
+            if !offered.get().is_empty() {
+                Caption
+                    text:(Derived::new(move || if offered.get().len() > 1 {
+                        "Several boards found. Choose one.".to_string()
+                    } else {
+                        "Board found. Add it when saving is available.".to_string()
+                    }))
+                    tone:(Tone::Ink)
+                for (_, item) in {offered.get().iter().enumerate().map(|(index, choice)| (format!("{index}"), (choice_title(&offered.get(), index), choice.source.clone()))).collect::<Vec<_>>()} {
                     let label = format!("Add board {}", item.0);
                     let title = item.0.clone();
                     let source = item.1.clone();
                     ActionCell label:(label) text:(Some(UiText::from(title)))
+                        disabled:(saving_blocked)
                         on-press:(press(move || {
-                            if commit_connection(model, initial, ConnectionInput::Board { source: source.clone() }) {
-                                choices.set(Vec::new());
-                                url.set(String::new());
-                            } else {
-                                lookup_error.set("That board is already added.".into());
+                            let current = url.get_untracked().trim().to_owned();
+                            if found.get_untracked().is_none_or(|(address, _)| address != current) {
+                                return;
+                            }
+                            let connection = ConnectionInput::Board { source: source.clone() };
+                            match commit_connection(model, initial, connection) {
+                                Added::Yes => {
+                                    found.set(None);
+                                    url.set(String::new());
+                                }
+                                Added::Duplicate => {
+                                    lookup_error.set("That board is already added.".into());
+                                }
+                                Added::Blocked => {}
                             }
                         }))
                 }

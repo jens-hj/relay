@@ -584,6 +584,19 @@ impl Model {
             self.notice.set(String::new());
         }
     }
+    /// Whether a command would be sent now: [`Model::submit`] drops it while a
+    /// save or sync is running or the connection is down.
+    pub fn can_submit(&self) -> bool {
+        !self.busy.get_untracked() && !self.syncing.get_untracked() && self.connected.get_untracked()
+    }
+    /// Whether `connection` for the project is the request now awaiting
+    /// acknowledgement, so a submit that was just made actually queued it.
+    pub fn queued_connection(&self, project_id: &str, connection: &ConnectionInput) -> bool {
+        self.pending.get_untracked().is_some_and(|pending| {
+            matches!(&pending.envelope.command, Command::AddConnection { project_id: id, connection: queued }
+                if id == project_id && queued == connection)
+        })
+    }
     pub fn submit(&self, command: Command, revision: u64, saved: Saved) {
         if self.busy.get_untracked() {
             return;

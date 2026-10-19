@@ -20,10 +20,12 @@ fn positive(segment: &str) -> Option<u64> {
 
 /// The scope a pasted address names. The number is the board it names, or 0
 /// when the address only names a group or project (GitLab `…/-/boards`); the
-/// caller then lists that scope's boards. Fragments and queries carry only
-/// view state and are dropped. Anything that is not a plain `https` board
-/// address on a bare host name is refused: user names, passwords, ports,
-/// encoded or relative path parts, and addresses that name neither provider.
+/// caller then lists that scope's boards. A GitLab `id` query parameter picks a
+/// board the way the path number does, so it is read and checked; the fragment
+/// and the other query parameters carry only view state and are dropped.
+/// Anything that is not a plain `https` board address on a bare host name is
+/// refused: user names, passwords, ports, encoded or relative path parts, and
+/// addresses that name neither provider.
 pub(super) fn parse(input: &str) -> Result<BoardSource, Error> {
     let input = input.trim();
     if input.is_empty()
@@ -80,8 +82,29 @@ pub(super) fn parse(input: &str) -> Result<BoardSource, Error> {
     if host == "github.com" || host == "www.github.com" {
         github(&segments)
     } else {
-        gitlab(host, &segments)
+        gitlab(host, &segments, query_id(&url)?)
     }
+}
+
+/// The board a GitLab address selects with `?id=`, if it has one. Several
+/// different values, or one that is not a positive whole number, are refused
+/// instead of being dropped, so the address cannot name another board than the
+/// one resolved.
+fn query_id(url: &reqwest::Url) -> Result<Option<u64>, Error> {
+    let mut selected = None;
+    for (key, value) in url.query_pairs() {
+        if key != "id" {
+            continue;
+        }
+        let id = positive(&value).ok_or_else(|| {
+            Error::invalid("The board number in the address must be a positive whole number")
+        })?;
+        if selected.is_some_and(|known| known != id) {
+            return Err(Error::invalid("The address names more than one board"));
+        }
+        selected = Some(id);
+    }
+    Ok(selected)
 }
 
 fn github(segments: &[&str]) -> Result<BoardSource, Error> {
@@ -114,7 +137,7 @@ fn github(segments: &[&str]) -> Result<BoardSource, Error> {
 /// `https://HOST/NAMESPACE/PROJECT/-/boards[/ID]` a project board. Groups and
 /// projects can nest, so the path before `/-/` is taken whole; a group address
 /// is never read as a project.
-fn gitlab(host: String, segments: &[&str]) -> Result<BoardSource, Error> {
+fn gitlab(host: String, segments: &[&str], query_id: Option<u64>) -> Result<BoardSource, Error> {
     let Some(marker) = segments.iter().position(|s| *s == "-") else {
         return Err(Error::invalid(
             "Paste the board address from GitLab; it contains /-/boards",
@@ -131,6 +154,12 @@ fn gitlab(host: String, segments: &[&str]) -> Result<BoardSource, Error> {
                 "Paste the board address from GitLab; it contains /-/boards",
             ));
         }
+    };
+    let number = match (number, query_id) {
+        (0, id) => id.unwrap_or(0),
+        (path_number, None) => path_number,
+        (path_number, Some(id)) if path_number == id => path_number,
+        _ => return Err(Error::invalid("The address names more than one board")),
     };
     let (group, path) = match scope {
         ["groups", path @ ..] if !path.is_empty() => (true, path),

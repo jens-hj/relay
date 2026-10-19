@@ -1,19 +1,4 @@
-use crate::{Error, Workspub(crate) fn default_projects_root() -> Option<PathBuf> {
-    projects_root_from(|key| std::env::var_os(key))
-}
-pub(crate) fn projects_root_from(
-    var: impl Fn(&str) -> Option<std::ffi::OsString>,
-) -> Option<PathBuf> {
-    let absolute =
-        |value: std::ffi::OsString| Some(PathBuf::from(value)).filter(|p| p.is_absolute());
-    if let Some(path) = var("RELAY_PROJECTS_DIR").and_then(absolute) {
-        return Some(path);
-    }
-    if let Some(data) = var("XDG_DATA_HOME").and_then(absolute) {
-        return Some(data.join("relay").join("projects"));
-    }
-    var("HOME")
-        .and_then(absolute)ace};
+use crate::{Error, Workspace};
 use relay_core::*;
 use rusqlite::OptionalExtension;
 use std::{

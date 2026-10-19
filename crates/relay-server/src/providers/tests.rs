@@ -2286,3 +2286,49 @@ fn a_real_group_listing_with_one_large_board_id_resolves_to_that_board() {
         }]
     );
 }
+
+#[test]
+fn a_gitlab_id_query_selects_the_board_like_the_path_number() {
+    use board_url::parse;
+    assert_eq!(
+        parse("https://gitlab.com/groups/team/-/boards?id=7").unwrap(),
+        gitlab_scope("gitlab.com", true, "team", 7)
+    );
+    assert_eq!(
+        parse("https://gitlab.com/team/app/-/boards/7?id=7&group_by=epic#/").unwrap(),
+        gitlab_scope("gitlab.com", false, "team/app", 7)
+    );
+    assert_eq!(
+        parse("https://gitlab.com/groups/team/-/boards?label_name[]=x&id=7&id=7").unwrap(),
+        gitlab_scope("gitlab.com", true, "team", 7)
+    );
+    // Other query parameters are view state; an identity that disagrees or is
+    // not a number is refused rather than dropped.
+    for address in [
+        "https://gitlab.com/groups/team/-/boards/7?id=8",
+        "https://gitlab.com/groups/team/-/boards?id=7&id=8",
+        "https://gitlab.com/groups/team/-/boards?id=0",
+        "https://gitlab.com/groups/team/-/boards?id=abc",
+        "https://gitlab.com/groups/team/-/boards?id=",
+        "https://gitlab.com/groups/team/-/boards?id=-3",
+        "https://gitlab.com/groups/team/-/boards?id=7x",
+    ] {
+        assert!(board_url::parse(address).is_err(), "{address}");
+    }
+    assert!(matches!(
+        parse("https://github.com/orgs/team/projects/3?id=9").unwrap(),
+        BoardSource::Github { number: 3, .. }
+    ));
+}
+
+#[test]
+fn an_id_query_address_checks_that_board_instead_of_listing_the_scope() {
+    let fake = Fake::new(gl_metadata());
+    let choices =
+        resolve_board_url(&fake.config(), "https://gitlab.example/groups/group/-/boards?id=2")
+            .unwrap();
+    assert_eq!(choices.len(), 1);
+    assert_eq!(source_number(&choices[0].source), 2);
+    assert!(fake.calls().contains("boards/2"));
+    assert!(!fake.calls().contains("boards?per_page"));
+}

@@ -1,13 +1,6 @@
 use crate::{
     model::{EditTarget, Model, Page},
-                .any(|n| n.label.as_deref() == Some("Repository URL"))
-    );
-    mounted.focus("New connection");
-    mounted.click("New connection");
-    for label in [
-        "Project name",
-        "Project root on server",
-        "Repository URL",etwork::NetworkState,
+    network::NetworkState,
     ui,
 };
 use mosaic::{core::reactive::flush, prelude::*, text::FontContext};
@@ -4667,6 +4660,166 @@ fn a_board_answer_for_another_request_is_ignored() {
             .connections
             .is_empty()
     );
+    answer_lookup(&mounted, request, Ok(vec![gitlab_choice("Roadmap", 7)]));
+    assert_eq!(
+        mounted
+            .model
+            .project_draft
+            .get_untracked()
+            .connections
+            .len(),
+        1
+    );
+}
+
+fn offers_board(mounted: &Mounted, title: &str) -> bool {
+    let label = format!("Add board {title}");
+    mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .iter()
+        .any(|n| n.label.as_deref() == Some(label.as_str()))
+}
+
+#[test]
+fn editing_the_address_discards_an_answer_for_the_old_one() {
+    let mounted = mount(false, 1380.0);
+    let request = submit_pasted_board(&mounted);
+    click_and_type(&mounted, "Board URL", "x");
+    let edited = mounted
+        .model
+        .project_draft
+        .get_untracked()
+        .connection_form
+        .url;
+    assert_ne!(edited, PASTED_BOARD);
+    answer_lookup(&mounted, request, Ok(vec![gitlab_choice("Roadmap", 7)]));
+    let draft = mounted.model.project_draft.get_untracked();
+    // Nothing is added for the old address and the new one is not erased.
+    assert!(draft.connections.is_empty());
+    assert_eq!(draft.connection_form.url, edited);
+}
+
+#[test]
+fn editing_the_address_withdraws_the_boards_found_for_the_old_one() {
+    let mounted = mount(false, 1380.0);
+    let request = submit_pasted_board(&mounted);
+    answer_lookup(
+        &mounted,
+        request,
+        Ok(vec![
+            gitlab_choice("Roadmap", 7),
+            gitlab_choice("Sprint", 9),
+        ]),
+    );
+    assert!(offers_board(&mounted, "Sprint"));
+    click_and_type(&mounted, "Board URL", "x");
+    mounted.settle();
+    assert!(!offers_board(&mounted, "Sprint"));
+    assert!(
+        mounted
+            .model
+            .project_draft
+            .get_untracked()
+            .connections
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_board_that_cannot_be_queued_stays_offered_with_its_address() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(local_project_snapshot());
+    mounted.model.page.set(Page::Connections);
+    mounted.settle();
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.lookup_requests.set(Some(sender));
+    mounted.click("Connection type: Board URL");
+    click_and_type(&mounted, "Board URL", PASTED_BOARD);
+    mounted.click("Add board");
+    let request = receiver.try_recv().expect("board lookup requested");
+    // Another save is running when the answer arrives.
+    mounted.model.busy.set(true);
+    mounted.settle();
+    answer_lookup(&mounted, request, Ok(vec![gitlab_choice("Roadmap", 7)]));
+    assert!(mounted.commands.try_recv().is_err());
+    assert!(offers_board(&mounted, "Roadmap"));
+    // Once the save finishes, the offered board is queued as a command.
+    mounted.model.busy.set(false);
+    mounted.settle();
+    mounted.click("Add board Roadmap");
+    let sent = mounted.commands.try_recv().expect("AddConnection queued");
+    assert!(matches!(
+        &sent.command,
+        Command::AddConnection {
+            connection: ConnectionInput::Board { source },
+            ..
+        } if *source == gitlab_choice("Roadmap", 7).source
+    ));
+    assert!(!offers_board(&mounted, "Roadmap"));
+}
+
+#[test]
+fn the_same_board_is_one_connection_however_its_address_was_entered() {
+    use crate::projects::same_connection;
+    let board = |url: &str, number: u64| ConnectionInput::Board {
+        source: BoardSource::Gitlab {
+            host: "gitlab.com".into(),
+            group: true,
+            path: "unincorporated/mosaic".into(),
+            number,
+            url: url.into(),
+        },
+    };
+    let numbered = board(
+        "https://gitlab.com/groups/unincorporated/mosaic/-/boards/7",
+        7,
+    );
+    // A numbered address returns the canonical URL; a listing or manual entry
+    // leaves it empty. Both are the board the server refuses to connect twice.
+    assert!(same_connection(&numbered, &board("", 7)));
+    assert!(!same_connection(&numbered, &board("", 8)));
+    let github = |owner: &str| ConnectionInput::Board {
+        source: BoardSource::Github {
+            owner: owner.into(),
+            number: 3,
+            url: String::new(),
+        },
+    };
+    assert!(same_connection(&github("Team"), &github("team")));
+    assert!(!same_connection(&github("team"), &numbered));
+    let repository = |remote: &str| ConnectionInput::Repository {
+        remote: remote.into(),
+    };
+    assert!(same_connection(&repository("a/b"), &repository("a/b")));
+    assert!(!same_connection(&repository("a/b"), &repository("a/c")));
+}
+
+#[test]
+fn a_board_found_twice_is_added_to_the_draft_once() {
+    let mounted = mount(false, 1380.0);
+    let request = submit_pasted_board(&mounted);
+    let mut numbered = gitlab_choice("Roadmap", 7);
+    if let BoardSource::Gitlab { url, .. } = &mut numbered.source {
+        *url = "https://gitlab.com/groups/unincorporated/mosaic/-/boards/7".into();
+    }
+    answer_lookup(&mounted, request, Ok(vec![numbered]));
+    assert_eq!(
+        mounted
+            .model
+            .project_draft
+            .get_untracked()
+            .connections
+            .len(),
+        1
+    );
+    // The same board again, as a listing would return it.
+    click_and_type(&mounted, "Board URL", PASTED_BOARD);
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.lookup_requests.set(Some(sender));
+    mounted.click("Add board");
+    let request = receiver.try_recv().expect("second lookup requested");
     answer_lookup(&mounted, request, Ok(vec![gitlab_choice("Roadmap", 7)]));
     assert_eq!(
         mounted
