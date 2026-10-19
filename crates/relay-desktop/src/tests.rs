@@ -1,6 +1,13 @@
 use crate::{
     model::{EditTarget, Model, Page},
-    network::NetworkState,
+                .any(|n| n.label.as_deref() == Some("Repository URL"))
+    );
+    mounted.focus("New connection");
+    mounted.click("New connection");
+    for label in [
+        "Project name",
+        "Project root on server",
+        "Repository URL",etwork::NetworkState,
     ui,
 };
 use mosaic::{core::reactive::flush, prelude::*, text::FontContext};
@@ -4108,11 +4115,11 @@ fn new_project_preserves_full_setup_draft_and_appends_on_acknowledgement() {
     open_project_menu(&mounted);
     mounted.click("New Project");
     type_in(&mounted, "Project name", "Second project");
-    type_in(&mounted, "Absolute project root on server", "/srv/second");
-    mounted.click("Add connection");
+    type_in(&mounted, "Project root on server", "/srv/second");
+    mounted.click("New connection");
     type_in(
         &mounted,
-        "Connection address",
+        "Repository URL",
         "git@example.com:team/second.git",
     );
     mounted.click("Settings");
@@ -4174,9 +4181,9 @@ fn click_and_type(mounted: &Mounted, label: &str, text: &str) {
 }
 
 fn add_initial_repository(mounted: &Mounted, remote: &str) {
+    mounted.click("New connection");
+    click_and_type(mounted, "Repository URL", remote);
     mounted.click("Add connection");
-    click_and_type(mounted, "Connection address", remote);
-    mounted.click_nth("Add connection", 1);
 }
 
 fn assert_creates_playground(mounted: &mut Mounted) {
@@ -4205,7 +4212,7 @@ fn new_project_creates_when_the_connection_is_added_after_typing() {
     click_and_type(&mounted, "Project name", " Playground ");
     click_and_type(
         &mounted,
-        "Absolute project root on server",
+        "Project root on server",
         "/home/gmk/repos/kevork/playground ",
     );
     add_initial_repository(&mounted, "git@github.com:KevorkC/Up.git");
@@ -4221,7 +4228,7 @@ fn new_project_creates_when_the_connection_is_added_before_typing() {
     click_and_type(&mounted, "Project name", "Playground");
     click_and_type(
         &mounted,
-        "Absolute project root on server",
+        "Project root on server",
         "/home/gmk/repos/kevork/playground",
     );
     assert_creates_playground(&mut mounted);
@@ -4234,7 +4241,7 @@ fn new_project_notice_names_only_the_failing_field() {
     mounted.click("New Project");
     click_and_type(
         &mounted,
-        "Absolute project root on server",
+        "Project root on server",
         "/home/gmk/repos/kevork/playground",
     );
     mounted.click("Create project");
@@ -4245,7 +4252,7 @@ fn new_project_notice_names_only_the_failing_field() {
     click_and_type(&mounted, "Project name", "Playground");
     type_in(
         &mounted,
-        "Absolute project root on server",
+        "Project root on server",
         "repos/playground",
     );
     mounted.click("Create project");
@@ -4266,6 +4273,237 @@ fn server_roots_are_checked_as_unix_paths_on_every_client_platform() {
     assert!(!crate::projects::server_absolute("repos/playground"));
     assert!(!crate::projects::server_absolute(r"C:\projects\playground"));
     assert!(!crate::projects::server_absolute(""));
+}
+
+fn project_draft(name: &str, root: &str) -> crate::projects::ProjectDraft {
+    crate::projects::ProjectDraft {
+        name: name.into(),
+        root: root.into(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn an_empty_root_is_the_servers_automatic_folder() {
+    use crate::projects::{root_hint, setup_problem};
+    let base = "/srv/relay/projects";
+    assert_eq!(setup_problem(&project_draft("Mosaic", ""), base), None);
+    assert_eq!(setup_problem(&project_draft("Mosaic", "  "), base), None);
+    assert_eq!(
+        setup_problem(&project_draft("Mosaic", "/srv/custom"), ""),
+        None
+    );
+    assert_eq!(
+        setup_problem(&project_draft("Mosaic", ""), ""),
+        Some("Enter an absolute root on the server.")
+    );
+    assert_eq!(
+        setup_problem(&project_draft("", ""), base),
+        Some("Enter a project name.")
+    );
+    assert_eq!(
+        setup_problem(&project_draft("!!!", ""), base),
+        Some("Use letters or numbers in the project name, or enter a root on the server.")
+    );
+    assert_eq!(
+        setup_problem(&project_draft("!!!", "/srv/custom"), base),
+        None
+    );
+    assert_eq!(
+        setup_problem(&project_draft("Mosaic", "projects/mosaic"), base),
+        Some("Enter an absolute root on the server.")
+    );
+    assert_eq!(root_hint(base, "Mosaic"), "/srv/relay/projects/mosaic");
+    assert_eq!(root_hint(base, "My  App"), "/srv/relay/projects/my-app");
+    assert_eq!(root_hint(base, ""), "/srv/relay/projects/project-name");
+    assert_eq!(root_hint("", "Mosaic"), "Absolute path on the server");
+}
+
+#[test]
+fn new_project_sends_an_empty_root_when_the_automatic_folder_is_kept() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.server_build.set(Some(BuildInfo {
+        projects_root: "/srv/relay/projects".into(),
+        ..Default::default()
+    }));
+    open_project_menu(&mounted);
+    mounted.click("New Project");
+    click_and_type(&mounted, "Project name", "Mosaic");
+    mounted.click("Create project");
+    assert_eq!(mounted.model.notice.get_untracked(), "");
+    let request = mounted
+        .commands
+        .try_recv()
+        .expect("CreateProject submitted");
+    assert!(
+        matches!(&request.command, Command::CreateProject { name, root, connections }
+            if name == "Mosaic" && root.is_empty() && connections.is_empty()),
+        "{:?}",
+        request.command
+    );
+}
+
+#[test]
+fn new_project_keeps_a_typed_root_over_the_automatic_folder() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.server_build.set(Some(BuildInfo {
+        projects_root: "/srv/relay/projects".into(),
+        ..Default::default()
+    }));
+    open_project_menu(&mounted);
+    mounted.click("New Project");
+    click_and_type(&mounted, "Project name", "Mosaic");
+    click_and_type(&mounted, "Project root on server", "/srv/existing/mosaic");
+    mounted.click("Create project");
+    let request = mounted
+        .commands
+        .try_recv()
+        .expect("CreateProject submitted");
+    assert!(
+        matches!(&request.command, Command::CreateProject { root, .. }
+            if root == "/srv/existing/mosaic"),
+        "{:?}",
+        request.command
+    );
+}
+
+#[test]
+fn new_project_without_a_reported_server_folder_asks_for_a_root() {
+    let mut mounted = mount(false, 1380.0);
+    open_project_menu(&mounted);
+    mounted.click("New Project");
+    click_and_type(&mounted, "Project name", "Mosaic");
+    mounted.click("Create project");
+    assert_eq!(
+        mounted.model.notice.get_untracked(),
+        "Enter an absolute root on the server."
+    );
+    assert!(mounted.commands.try_recv().is_err());
+}
+
+#[test]
+fn connection_forms_describe_each_kind_or_name_the_problem() {
+    use crate::projects::{ConnectionDraft, form_connection};
+    let form = |kind, address: &str, host: &str, number: &str, group| ConnectionDraft {
+        kind,
+        address: address.into(),
+        host: host.into(),
+        number: number.into(),
+        group,
+    };
+    assert_eq!(
+        form_connection(&form(0, " git@example.com:team/a.git ", "", "", false)),
+        Ok(ConnectionInput::Repository {
+            remote: "git@example.com:team/a.git".into()
+        })
+    );
+    assert!(form_connection(&form(0, " ", "", "", false)).is_err());
+    assert_eq!(
+        form_connection(&form(1, "/srv/data", "", "", false)),
+        Ok(ConnectionInput::Directory {
+            path: "/srv/data".into()
+        })
+    );
+    assert!(form_connection(&form(1, "data", "", "", false)).is_err());
+    assert_eq!(
+        form_connection(&form(2, "team", "gitlab.com", " 12 ", true)),
+        Ok(ConnectionInput::Board {
+            source: BoardSource::Github {
+                owner: "team".into(),
+                number: 12,
+                url: String::new()
+            }
+        })
+    );
+    assert_eq!(
+        form_connection(&form(3, "team/group", " gitlab.example ", "7", true)),
+        Ok(ConnectionInput::Board {
+            source: BoardSource::Gitlab {
+                host: "gitlab.example".into(),
+                path: "team/group".into(),
+                group: true,
+                number: 7,
+                url: String::new()
+            }
+        })
+    );
+    for number in ["", "0", "-1", "x", "1.5"] {
+        assert_eq!(
+            form_connection(&form(2, "team", "", number, false)),
+            Err("Enter the number of an existing board.")
+        );
+    }
+    assert_eq!(
+        form_connection(&form(2, "", "", "1", false)),
+        Err("Enter the GitHub user or organization.")
+    );
+    assert_eq!(
+        form_connection(&form(3, "", "gitlab.com", "1", false)),
+        Err("Enter the GitLab project or group path.")
+    );
+    assert_eq!(
+        form_connection(&form(3, "team/app", " ", "1", false)),
+        Err("Enter the GitLab host.")
+    );
+}
+
+#[test]
+fn several_connections_of_different_kinds_can_be_added_before_creating() {
+    let mounted = mount(false, 1380.0);
+    open_project_menu(&mounted);
+    mounted.click("New Project");
+    mounted.click("New connection");
+    // An incomplete form adds nothing.
+    mounted.click("Add connection");
+    assert!(
+        mounted
+            .model
+            .project_draft
+            .get_untracked()
+            .connections
+            .is_empty()
+    );
+    click_and_type(&mounted, "Repository URL", "owner/one");
+    mounted.click("Add connection");
+    // The form stays open and empty for the next repository.
+    assert!(
+        mounted
+            .model
+            .project_draft
+            .get_untracked()
+            .connection_form
+            .address
+            .is_empty()
+    );
+    click_and_type(&mounted, "Repository URL", "owner/two");
+    mounted.click("Add connection");
+    mounted.click("Connection type: GitLab board");
+    click_and_type(&mounted, "GitLab project or group path", "team/group");
+    mounted.click("GitLab board scope: Group board");
+    click_and_type(&mounted, "Existing board number", "7");
+    mounted.click("Add connection");
+    let draft = mounted.model.project_draft.get_untracked();
+    assert_eq!(
+        draft.connections,
+        vec![
+            ConnectionInput::Repository {
+                remote: "owner/one".into()
+            },
+            ConnectionInput::Repository {
+                remote: "owner/two".into()
+            },
+            ConnectionInput::Board {
+                source: BoardSource::Gitlab {
+                    host: "gitlab.com".into(),
+                    path: "team/group".into(),
+                    group: true,
+                    number: 7,
+                    url: String::new()
+                }
+            },
+        ]
+    );
+    assert_eq!(draft.connection_form.kind, 3);
 }
 
 #[test]
@@ -4570,14 +4808,14 @@ fn new_project_form_remains_keyboard_reachable_at_two_hundred_percent() {
             .inspection_snapshot()
             .nodes
             .iter()
-            .any(|n| n.label.as_deref() == Some("Connection address"))
+            .any(|n| n.label.as_deref() == Some("Repository URL"))
     );
-    mounted.focus("Add connection");
-    mounted.click("Add connection");
+    mounted.focus("New connection");
+    mounted.click("New connection");
     for label in [
         "Project name",
-        "Absolute project root on server",
-        "Connection address",
+        "Project root on server",
+        "Repository URL",
         "Add connection",
         "Create project",
     ] {
@@ -6198,7 +6436,7 @@ fn inverse_controls_show_hover_and_press_in_every_palette() {
         open_project_menu(&mounted);
         mounted.click("New Project");
         hold("Create project", "Create project");
-        mounted.click("Add connection");
+        mounted.click("New connection");
     }
 }
 
@@ -8522,6 +8760,7 @@ fn connection_status_reports_state_latency_endpoint_protocol_and_builds() {
     mounted.model.server_build.set(Some(BuildInfo {
         version: "0.1.0".into(),
         revision: "1234567890123456789012345678901234567890".into(),
+        ..Default::default()
     }));
     mounted.model.round_trip_ms.set(Some(42));
     mounted.settle();
@@ -11518,6 +11757,7 @@ fn deployed_build(digit: &str) -> BuildInfo {
     BuildInfo {
         version: BuildInfo::current().version,
         revision: digit.repeat(40),
+        ..Default::default()
     }
 }
 
@@ -11537,6 +11777,7 @@ fn deployment_notifications_compare_loaded_build_and_dismiss_each_revision_once(
         mounted.model.server_build.set(Some(BuildInfo {
             version: loaded.version.clone(),
             revision: unknown.into(),
+            ..Default::default()
         }));
         assert!(mounted.model.available_update().is_none());
     }

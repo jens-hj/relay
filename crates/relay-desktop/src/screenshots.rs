@@ -657,6 +657,7 @@ fn connection_shot(
     model.server_build.set(Some(BuildInfo {
         version: "0.1.0".into(),
         revision: "9c1f0a2".into(),
+        ..Default::default()
     }));
     settle();
     let button = ui

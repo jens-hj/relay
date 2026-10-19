@@ -5,8 +5,8 @@ use mosaic::prelude::*;
 use relay_core::*;
 use relay_ui::Live;
 use relay_ui::prelude::{
-    CellButton, CellButtonProps, Label, LabelProps, OnPress, PrimaryButton, PrimaryButtonProps,
-    Rule, Segments, SegmentsProps, TextRole, Tone, UiText,
+    CellButton, CellButtonProps, Ellipsis, EllipsisProps, Label, LabelProps, OnPress,
+    PrimaryButton, PrimaryButtonProps, Rule, Segments, SegmentsProps, TextRole, Tone, UiText,
 };
 use relay_ui::surfaces::{
     Field, FieldProps, Module, ModuleProps, RemoveCell, RemoveCellProps, TextInput, TextInputProps,
@@ -16,6 +16,7 @@ use relay_ui::tokens::{ground, px};
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ProjectDraft {
     pub name: String,
+    /// A root typed by the user; empty means the server's automatic folder.
     pub root: String,
     pub connections: Vec<ConnectionInput>,
     pub connection_form: ConnectionDraft,
@@ -150,24 +151,37 @@ pub fn ProjectPage(model: Model) -> Element {
 fn ProjectSetup(model: Model) -> Element {
     let name = State::new(model.project_draft.get_untracked().name);
     let root = State::new(model.project_draft.get_untracked().root);
-    let connections_open = State::new(
-        !model
-            .project_draft
-            .get_untracked()
-            .connection_form
-            .address
-            .is_empty(),
-    );
+    let form = model.project_draft.get_untracked().connection_form;
+    let connections_open = State::new(!form.address.is_empty() || !form.number.is_empty());
     Effect::new(move || {
         model.project_draft.update(|d| {
             d.name = name.get();
             d.root = root.get();
         })
     });
+    // Where the server puts a project that has no root of its own. Unknown
+    // until the server reports it, and for servers that predate it.
+    let projects_root = Derived::new(move || {
+        model
+            .server_build
+            .get()
+            .map(|build| build.projects_root)
+            .unwrap_or_default()
+    });
+    let root_placeholder = Derived::new(move || root_hint(&projects_root.get(), &name.get()));
+    let root_note = Derived::new(move || {
+        if !root.get().trim().is_empty() {
+            "Clear the field to use the automatic folder.".to_string()
+        } else if server_absolute(&projects_root.get()) {
+            "Leave empty to use the automatic folder on the server. A local board is created automatically.".to_string()
+        } else {
+            "Enter an absolute folder on the server.".to_string()
+        }
+    });
     let blocked = Derived::new(move || model.busy.get() || !model.connected.get());
     let create = press(move || {
         let draft = model.project_draft.get_untracked();
-        if let Some(problem) = setup_problem(&draft) {
+        if let Some(problem) = setup_problem(&draft, &projects_root.get_untracked()) {
             model.notice.set(problem.into());
         } else {
             model.submit(
@@ -181,49 +195,84 @@ fn ProjectSetup(model: Model) -> Element {
             );
         }
     });
-    let form_label = Derived::new(move || {
-        if connections_open.get() {
-            "Hide connection form".to_string()
+    let form_dirty = Derived::new(move || {
+        let form = model.project_draft.get().connection_form;
+        !form.address.trim().is_empty() || !form.number.trim().is_empty()
+    });
+    let toggle_text = Derived::new(move || {
+        if !connections_open.get() {
+            "New connection".to_string()
+        } else if form_dirty.get() {
+            "Cancel".to_string()
         } else {
-            "Add connection".to_string()
+            "Close".to_string()
         }
     });
+    let toggle_label = Derived::new(move || {
+        if !connections_open.get() {
+            "New connection".to_string()
+        } else if form_dirty.get() {
+            "Cancel new connection".to_string()
+        } else {
+            "Close connection form".to_string()
+        }
+    });
+    let toggle = press(move || {
+        if connections_open.get_untracked() {
+            // Cancel drops what was typed; the kind and GitLab host stay.
+            model.project_draft.update(|d| {
+                d.connection_form.address.clear();
+                d.connection_form.number.clear();
+            });
+            connections_open.set(false);
+        } else {
+            connections_open.set(true);
+        }
+    });
+    let head = view! {
+        row width:max-content shrink:0 {
+            CellButton label:(toggle_label) on-press:(toggle) rule:(Rule::Left)
+                selected:(connections_open) {
+                Label text:(toggle_text) role:(TextRole::Label) weight:500
+            }
+        }
+    };
     view! {
         col height:min-content gap:0px {
             Module title:"Project" icon:(Some(relay_ui::icons::command.project)) {
                 Field label:"Name" name:(Some("Project name".to_string())) value:(name)
                     placeholder:"Project name"
-                Field label:"Root on server"
-                    name:(Some("Absolute project root on server".to_string())) value:(root)
-                    placeholder:"/home/you/projects/project"
-                Caption
-                    text:"The root is on the connected server. A local board is created automatically."
-                    rule:false
+                Field label:"Root on server" name:(Some("Project root on server".to_string()))
+                    value:(root) placeholder:(root_placeholder)
+                Caption text:(root_note) rule:false
             }
-            Module title:"Connections" icon:(Some(relay_ui::icons::mark.link)) {
+            Module title:"Connections" icon:(Some(relay_ui::icons::mark.link))
+                head-end:(Some(head)) {
                 for (index, _connection) in {model.project_draft.get().connections.into_iter().enumerate()} {
                     let index = *index;
                     let connection = Derived::new(move || model.project_draft.get().connections.get(index).cloned());
+                    let summary = Derived::new(move || connection.get().as_ref().map(connection_label).unwrap_or_default());
                     row height:{px(40.0)}px align:center gap:0px
                         stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                         row width:1fr min-width:0px height:min-content
                             pad:(horizontal:{px(18.0)}px vertical:0px) {
-                            Label
-                                text:(Derived::new(move || connection.get().as_ref().map(connection_label).unwrap_or_default()))
-                                role:(TextRole::Body)
+                            Ellipsis text:(summary) role:(TextRole::Body)
                         }
                         row width:max-content shrink:0 {
-                            CellButton label:"Remove initial connection" rule:(Rule::Left)
+                            CellButton
+                                label:(Derived::new(move || format!("Remove {}", summary.get())))
+                                rule:(Rule::Left)
                                 on-press:(press(move || model.project_draft.update(|d| { d.connections.remove(index); }))) {
                                 Label text:"Remove" role:(TextRole::Label) weight:500
                             }
                         }
                     }
                 }
-                ActionCell label:(form_label)
-                    on-press:(press(move || connections_open.set(!connections_open.get_untracked())))
                 if connections_open.get() {
                     ConnectionForm model:(model) initial:true
+                } else if model.project_draft.get().connections.is_empty() {
+                    Caption text:"Optional. Connections can also be added after creating the project."
+                        rule:false
                 }
             }
             row height:{px(44.0)}px {
@@ -241,12 +290,34 @@ pub(crate) fn server_absolute(path: &str) -> bool {
     path.starts_with('/')
 }
 
+/// The root field's hint: where the server will put a project of this name
+/// when the field stays empty.
+pub(crate) fn root_hint(projects_root: &str, name: &str) -> String {
+    default_project_root(projects_root, name).unwrap_or_else(|| {
+        let base = projects_root.trim();
+        if server_absolute(base) {
+            format!("{}/project-name", base.trim_end_matches('/'))
+        } else {
+            "Absolute path on the server".into()
+        }
+    })
+}
+
 /// What blocks creating the drafted project, naming only the failing fields.
-pub(crate) fn setup_problem(draft: &ProjectDraft) -> Option<&'static str> {
-    match (
-        draft.name.trim().is_empty(),
-        server_absolute(draft.root.trim()),
-    ) {
+/// An empty root is the server's automatic folder under `projects_root`, so
+/// it needs a base the server has reported and a name with a letter or digit.
+pub(crate) fn setup_problem(draft: &ProjectDraft, projects_root: &str) -> Option<&'static str> {
+    let name = draft.name.trim();
+    let root = draft.root.trim();
+    let root_ok = if root.is_empty() {
+        server_absolute(projects_root.trim())
+    } else {
+        server_absolute(root)
+    };
+    match (name.is_empty(), root_ok) {
+        (false, true) if root.is_empty() && project_directory(name).is_none() => {
+            Some("Use letters or numbers in the project name, or enter a root on the server.")
+        }
         (false, true) => None,
         (true, true) => Some("Enter a project name."),
         (false, false) => Some("Enter an absolute root on the server."),
@@ -278,6 +349,56 @@ fn source_label(source: &BoardSource) -> String {
     }
 }
 
+/// The connection a form describes, or the first thing wrong with it. The
+/// kinds are 0 repository, 1 directory, 2 GitHub board and 3 GitLab board.
+pub(crate) fn form_connection(form: &ConnectionDraft) -> Result<ConnectionInput, &'static str> {
+    let address = form.address.trim().to_owned();
+    match form.kind {
+        0 if address.is_empty() => Err("Enter a repository URL or owner/repo."),
+        0 => Ok(ConnectionInput::Repository { remote: address }),
+        1 if !server_absolute(&address) => Err("Enter an absolute directory path on the server."),
+        1 => Ok(ConnectionInput::Directory { path: address }),
+        kind => {
+            let github = kind == 2;
+            if address.is_empty() {
+                return Err(if github {
+                    "Enter the GitHub user or organization."
+                } else {
+                    "Enter the GitLab project or group path."
+                });
+            }
+            let host = form.host.trim().to_owned();
+            if !github && host.is_empty() {
+                return Err("Enter the GitLab host.");
+            }
+            let number = form
+                .number
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or("Enter the number of an existing board.")?;
+            Ok(ConnectionInput::Board {
+                source: if github {
+                    BoardSource::Github {
+                        owner: address,
+                        number,
+                        url: String::new(),
+                    }
+                } else {
+                    BoardSource::Gitlab {
+                        host,
+                        path: address,
+                        group: form.group,
+                        number,
+                        url: String::new(),
+                    }
+                },
+            })
+        }
+    }
+}
+
 #[component]
 fn ConnectionForm(model: Model, initial: bool) -> Element {
     let draft = if initial {
@@ -290,6 +411,9 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
     let host = State::new(draft.host);
     let number = State::new(draft.number);
     let group = State::new(draft.group);
+    // Problems show once Add connection has been pressed, then follow the
+    // fields until they are fixed.
+    let attempted = State::new(false);
     if initial {
         Effect::new(move || {
             let form = ConnectionDraft {
@@ -302,55 +426,83 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
             model.project_draft.update(|d| d.connection_form = form);
         });
     }
-    let select: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot| kind.set(slot));
+    // A repository URL means nothing as a directory or a board owner, so
+    // moving between those kinds clears the address and number. GitHub and
+    // GitLab boards keep them.
+    let select: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot: usize| {
+        if kind.get_untracked().min(2) != slot.min(2) {
+            address.set(String::new());
+            number.set(String::new());
+        }
+        attempted.set(false);
+        kind.set(slot);
+    });
     let picker_width = State::new(0.0f32);
-    let add = press(move || {
-        let address = address.get_untracked().trim().to_owned();
-        let connection = match kind.get_untracked() {
-            0 if !address.is_empty() => Some(ConnectionInput::Repository { remote: address }),
-            1 if server_absolute(&address) => Some(ConnectionInput::Directory { path: address }),
-            2 | 3 if !address.is_empty() => number
-                .get_untracked()
-                .parse::<u64>()
-                .ok()
-                .filter(|n| *n > 0)
-                .map(|number| ConnectionInput::Board {
-                    source: if kind.get_untracked() == 2 {
-                        BoardSource::Github {
-                            owner: address,
-                            number,
-                            url: String::new(),
-                        }
-                    } else {
-                        BoardSource::Gitlab {
-                            host: host.get_untracked(),
-                            path: address,
-                            group: group.get_untracked(),
-                            number,
-                            url: String::new(),
-                        }
-                    },
-                }),
-            _ => None,
+    let problem = Derived::new(move || {
+        let form = ConnectionDraft {
+            kind: kind.get(),
+            address: address.get(),
+            host: host.get(),
+            number: number.get(),
+            group: group.get(),
         };
-        if let Some(connection) = connection {
-            if initial {
-                model
-                    .project_draft
-                    .update(|d| d.connections.push(connection));
-            } else {
-                model.action(Command::AddConnection {
-                    project_id: model.project.get_untracked(),
-                    connection,
-                });
+        match form_connection(&form) {
+            Err(problem) => Some(problem),
+            Ok(connection)
+                if initial && model.project_draft.get().connections.contains(&connection) =>
+            {
+                Some("That connection is already added.")
             }
+            Ok(_) => None,
+        }
+    });
+    let shown_problem = Derived::new(move || {
+        if attempted.get() {
+            problem.get().unwrap_or_default().to_string()
         } else {
+            String::new()
+        }
+    });
+    let add = press(move || {
+        let form = ConnectionDraft {
+            kind: kind.get_untracked(),
+            address: address.get_untracked(),
+            host: host.get_untracked(),
+            number: number.get_untracked(),
+            group: group.get_untracked(),
+        };
+        let Ok(connection) = form_connection(&form) else {
+            attempted.set(true);
+            return;
+        };
+        if initial {
+            if model
+                .project_draft
+                .get_untracked()
+                .connections
+                .contains(&connection)
+            {
+                attempted.set(true);
+                return;
+            }
             model
-                .notice
-                .set("Enter a valid connection address and existing board number.".into());
+                .project_draft
+                .update(|d| d.connections.push(connection));
+            // Ready for the next one: the kind, host and board scope stay.
+            address.set(String::new());
+            number.set(String::new());
+            attempted.set(false);
+        } else {
+            model.action(Command::AddConnection {
+                project_id: model.project.get_untracked(),
+                connection,
+            });
         }
     });
     let blocked = Derived::new(move || !initial && (model.busy.get() || !model.connected.get()));
+    let scope = Derived::new(move || usize::from(group.get()));
+    let choose_scope: std::rc::Rc<dyn Fn(usize)> =
+        std::rc::Rc::new(move |slot: usize| group.set(slot == 1));
     view! {
         col height:min-content gap:0px {
             row height:{px(40.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
@@ -363,19 +515,42 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
                 } as picker_scroll
                 { picker_scroll.content().style_dyn(move || Style::column().width(picker_width.get().max(px(448.0))).height(px(40.0)).shrink(0.0)); }
             }
-            InputCell value:(address) label:"Connection address"
-                placeholder:(Derived::new(move || match kind.get() {0=>"Repository URL or SSH remote",1=>"Absolute directory on server",2=>"GitHub user or organization",_=>"GitLab project or group path"}.to_string()))
+            if kind.get() == 0 {
+                Field label:"Repository" name:(Some("Repository URL".to_string())) value:(address)
+                    placeholder:"owner/repo or Git URL"
+            }
+            if kind.get() == 1 {
+                Field label:"Directory" name:(Some("Directory on server".to_string()))
+                    value:(address) placeholder:"/absolute/path"
+            }
+            if kind.get() == 2 {
+                Field label:"Owner" name:(Some("GitHub user or organization".to_string()))
+                    value:(address) placeholder:"User or organization"
+            }
             if kind.get() == 3 {
-                InputCell value:(host) label:"GitLab host"
-                ActionCell
-                    label:(Derived::new(move || if group.get() {"Group board".to_string()} else {"Project Board".to_string()}))
-                    on-press:(press(move || group.set(!group.get_untracked())))
+                Field label:"Host" name:(Some("GitLab host".to_string())) value:(host)
+                    placeholder:"gitlab.com"
+                Field label:"Path" name:(Some("GitLab project or group path".to_string()))
+                    value:(address) placeholder:"group/project"
+                row height:{px(40.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                    Segments name:("GitLab board scope".to_string())
+                        options:(vec!["Project board".to_string(), "Group board".to_string()])
+                        selected:(relay_ui::Live::from(scope)) on-select:(choose_scope)
+                }
             }
             if kind.get() >= 2 {
-                InputCell value:(number) label:"Board number" placeholder:"Existing board number"
+                Field label:"Board number" name:(Some("Existing board number".to_string()))
+                    value:(number) placeholder:"Number from the board URL"
             }
             Caption
-                text:(Derived::new(move || if kind.get()==0 {"Repositories are cloned by the server.".to_string()} else if kind.get()==1 {"Directory access follows the session execution mode.".to_string()} else {"Connect an existing remote board.".to_string()}))
+                text:(Derived::new(move || match kind.get() {
+                    0 => "Repositories are cloned by the server.",
+                    1 => "Directory access follows the session execution mode.",
+                    _ => "Connect an existing remote board. Relay does not create it.",
+                }.to_string()))
+            if attempted.get() && problem.get().is_some() {
+                Caption text:(shown_problem) tone:(Tone::Signal(relay_ui::tokens::Signal::Failed))
+            }
             ActionCell label:"Add connection" on-press:(add) disabled:(blocked)
         }
     }

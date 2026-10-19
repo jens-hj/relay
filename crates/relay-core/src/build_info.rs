@@ -1,10 +1,15 @@
 use serde::{Deserialize, Serialize};
 
 /// Identity of a running binary, independent of persisted workspace revisions.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildInfo {
     pub version: String,
     pub revision: String,
+    /// The absolute directory on the server that holds projects created
+    /// without an explicit root. Empty when the server has none or is older.
+    /// Only a running server fills it in; it is not part of the build.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub projects_root: String,
 }
 
 impl BuildInfo {
@@ -12,6 +17,7 @@ impl BuildInfo {
         Self {
             version: env!("CARGO_PKG_VERSION").into(),
             revision: env!("RELAY_BUILD_REVISION").into(),
+            projects_root: String::new(),
         }
     }
 

@@ -1713,8 +1713,15 @@ async fn authorize(
     Ok(next.run(request).await)
 }
 
-async fn build_version() -> Json<BuildInfo> {
-    Json(BuildInfo::current())
+async fn build_version(State(workspace): State<Workspace>) -> Json<BuildInfo> {
+    let mut build = BuildInfo::current();
+    build.projects_root = workspace
+        .config
+        .projects_root
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    Json(build)
 }
 
 async fn snapshot(

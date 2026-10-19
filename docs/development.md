@@ -100,6 +100,7 @@ The default server address is `127.0.0.1:7331`. Both processes require the token
 | `RELAY_GITHUB_PROJECT_OWNER` | Server | GitHub user or organization that owns the board |
 | `RELAY_GITHUB_PROJECT_NUMBER` | Server | Projects v2 number from the board URL |
 | `RELAY_REPO_PATH` | Server | Legacy bootstrap checkout on the server; New Project manages named roots and connections |
+| `RELAY_PROJECTS_DIR` | Server | Absolute directory where New Project places a project that has no root of its own, in a folder named after the project. Defaults to `$XDG_DATA_HOME/relay/projects`, else `~/.local/share/relay/projects` of the user running the server |
 | `RELAY_CODEX_BIN` / `RELAY_CLAUDE_BIN` | Server | Optional executable overrides; saved Harnesses configuration takes precedence |
 | `RELAY_SHARED_BUILD_CACHE` | Server | Off by default: each worktree builds into its own `target/`. `1` makes agents share `ROOT/.relay/cache/cargo-target` as `CARGO_TARGET_DIR`; concurrent builds in different worktrees can then overwrite each other's test binaries. An existing `CARGO_TARGET_DIR` takes precedence. Use a compiler cache such as `sccache` to share dependencies safely |
 | `RELAY_BACKGROUND_TASK_LIMIT_SECS` | Server | Longest wait, in seconds, for Claude Code background tasks after a turn's result; default 3600 |
@@ -252,7 +253,7 @@ The foundation was verified on Linux with Xvfb and Mesa software Vulkan: light/d
 
 ## Named projects and local work
 
-Choose **New Project** in the sidebar's project menu. Supply a name and an absolute root on the connected server; with `just dev`, this is your local machine. Initial repository, board and directory connections are optional. The project appears alongside existing projects with a local Backlog / In Progress / Done board and default director. Create a task or open the director to start planning without GitHub/GitLab credentials.
+Choose **New Project** in the sidebar's project menu. Supply a name. The root on the connected server is optional: left empty, Relay creates the project in a folder named after it under the server user's project directory (shown in the Root field as the automatic path, and updated as you type the name; see `RELAY_PROJECTS_DIR`). To use another folder, enter its absolute path; an existing folder keeps its files. With `just dev`, the server is your local machine. Initial repository, board and directory connections are optional. The project appears alongside existing projects with a local Backlog / In Progress / Done board and default director. Create a task or open the director to start planning without GitHub/GitLab credentials.
 
 Open **Connections** from the project's menu or command palette. Repository shorthand such as `owner/repo` uses GitHub SSH; full SSH/HTTPS URLs also work. Relay clones beneath the project root and displays progress or a retryable error. Ordinary directory connections permit direct editing. Repositories get isolated session worktrees and separate reviews. Select fewer workspaces when starting a session if needed; resumed sessions keep their original selection.
 

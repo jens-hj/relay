@@ -1,4 +1,4 @@
-use super::*;
+use su        w.config.projects_root.as_ref().and_then(|p| p.to_str())er::*;
 use serde_json::Value;
 
 pub(crate) const CODEX: &str = r#"
@@ -591,7 +591,18 @@ async fn catalog_and_session_choices_cross_http_and_reconnect_without_replaying_
         .json()
         .await
         .unwrap();
-    assert_eq!(build, BuildInfo::current());
+    // The server also reports where it keeps projects created without a root.
+    assert_eq!(
+        build,
+        BuildInfo {
+            projects_root: build.projects_root.clone(),
+            ..BuildInfo::current()
+        }
+    );
+    assert_eq!(
+        Some(build.projects_root.as_str()).filter(|r| !r.is_empty()),
+        w.config.projects_root.as_ref().and_then(|p| p.to_str())
+    );
     let catalog: HarnessCatalog = client
         .get(format!("{endpoint}/v1/sessions/{id}/catalog"))
         .bearer_auth("relay-test-token-command")

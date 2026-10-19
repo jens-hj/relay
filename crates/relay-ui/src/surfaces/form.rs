@@ -30,14 +30,16 @@ fn label_cell(label: &str, width: f32) -> Element {
     }
 }
 
-/// A labelled text field in a ruled 40px row. Pass `editor` to embed
-/// another editing element (a code or buffer editor) in place of the plain
-/// input.
+/// A labelled text field in a ruled 40px row. The label stays visible beside
+/// the input; the input sits on the code surface, so typed text, hint text and
+/// the label read as different things, and an ink ring marks the focused
+/// input. Pass `editor` to embed another editing element (a code or buffer
+/// editor) in place of the plain input. The placeholder may follow state.
 #[component]
 pub fn Field(
     label: String,
     value: State<String>,
-    #[prop(optional)] placeholder: String,
+    #[prop(default = UiText::fixed(String::new()))] placeholder: UiText,
     /// Width of the label cell in logical pixels before UI scale.
     #[prop(default = 140.0)]
     label_width: f32,
@@ -48,6 +50,7 @@ pub fn Field(
     name: Option<String>,
 ) -> Element {
     let name = name.unwrap_or_else(|| label.clone());
+    let hint = placeholder.clone();
     let row = view! {
         row height:{px(40.0)}px shrink:0 align:center
             stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {}
@@ -57,9 +60,9 @@ pub fn Field(
         Some(editor) => editor,
         None => view! {
             input width:1fr height:fill radius:0px pad:(horizontal:{px(14.0)}px vertical:0px)
-                fill:(Color::TRANSPARENT) stroke:(width:0px color:ground.rule) font-family:monospace
-                font-size:{px(12.5)}px font-color:ground.ink label:(name) placeholder:(placeholder)
-                focused { fill:ground.hover } value
+                fill:ground.code stroke:(width:0px color:ground.rule) font-family:monospace
+                font-size:{px(12.5)}px font-color:ground.ink label:(name) placeholder:{hint.get()}
+                focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } value
         },
     };
     row.adopt(&input);

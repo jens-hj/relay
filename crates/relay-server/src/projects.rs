@@ -349,6 +349,20 @@ pub(super) fn apply(
             if connections.len() > 128 {
                 return Err(Error::invalid("Too many initial connections"));
             }
+            let root = if root.trim().is_empty() {
+                let base = config.projects_root.as_deref().ok_or_else(|| {
+                    Error::invalid(
+                        "This server has no default project folder. Enter a root on the server",
+                    )
+                })?;
+                default_project_root(&base.display().to_string(), &name).ok_or_else(|| {
+                    Error::invalid(
+                        "Use letters or numbers in the project name, or enter a root on the server",
+                    )
+                })?
+            } else {
+                root.trim().to_owned()
+            };
             let root = absolute(&root, true)?.display().to_string();
             if snapshot
                 .projects
@@ -1458,6 +1472,150 @@ mod tests {
         )
         .unwrap();
         format!("project-{request}")
+    }
+
+    fn create_with(
+        snapshot: &mut Snapshot,
+        config: &RuntimeConfig,
+        name: &str,
+        root: &str,
+    ) -> Result<String, Error> {
+        let request = uuid::Uuid::new_v4().to_string();
+        apply(
+            snapshot,
+            Command::CreateProject {
+                name: name.into(),
+                root: root.into(),
+                connections: vec![],
+            },
+            &request,
+            AgentProfile::default(),
+            config,
+        )?;
+        Ok(format!("project-{request}"))
+    }
+
+    #[test]
+    fn an_empty_root_places_the_project_under_the_servers_project_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("projects");
+        let config = RuntimeConfig {
+            projects_root: Some(base.clone()),
+            ..Default::default()
+        };
+        let mut s = Snapshot::default();
+        let id = create_with(&mut s, &config, "  My Mosaic App ", "  ").unwrap();
+        let project = s.projects.iter().find(|p| p.id == id).unwrap();
+        let expected = base.join("my-mosaic-app").canonicalize().unwrap();
+        assert_eq!(
+            project.root.as_deref(),
+            Some(expected.display().to_string().as_str())
+        );
+        assert!(expected.join("workspace").is_dir());
+        assert_eq!(project.name, "My Mosaic App");
+        // The same name cannot claim the same automatic path twice.
+        assert!(create_with(&mut s, &config, "my mosaic app", "").is_err());
+        assert_eq!(s.projects.len(), 1);
+    }
+
+    #[test]
+    fn a_typed_root_wins_over_the_default_and_leaves_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = RuntimeConfig {
+            projects_root: Some(dir.path().join("projects")),
+            ..Default::default()
+        };
+        let custom = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&custom).unwrap();
+        std::fs::write(custom.join("keep.txt"), "existing").unwrap();
+        let mut s = Snapshot::default();
+        let id = create_with(&mut s, &config, "Mosaic", &custom.display().to_string()).unwrap();
+        let project = s.projects.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(
+            project.root.as_deref(),
+            Some(custom.canonicalize().unwrap().display().to_string().as_str())
+        );
+        assert_eq!(
+            std::fs::read_to_string(custom.join("keep.txt")).unwrap(),
+            "existing"
+        );
+        assert!(!dir.path().join("projects").exists());
+        assert!(create_with(&mut s, &config, "Mosaic", "relative/path").is_err());
+    }
+
+    #[test]
+    fn automatic_paths_cannot_leave_the_project_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("projects");
+        let config = RuntimeConfig {
+            projects_root: Some(base.clone()),
+            ..Default::default()
+        };
+        let mut s = Snapshot::default();
+        for name in ["../escape", "/etc/passwd", "..", "a/../../b"] {
+            if let Ok(id) = create_with(&mut s, &config, name, "") {
+                let root = s.projects.iter().find(|p| p.id == id).unwrap().root.clone();
+                let root = PathBuf::from(root.unwrap());
+                assert_eq!(root.parent(), Some(base.canonicalize().unwrap().as_path()));
+            }
+        }
+        assert!(create_with(&mut s, &config, "..", "").is_err());
+        assert!(create_with(&mut s, &config, "!!!", "").is_err());
+        assert!(!dir.path().join("escape").exists());
+    }
+
+    #[test]
+    fn an_empty_root_needs_a_server_project_directory() {
+        let config = RuntimeConfig {
+            projects_root: None,
+            ..Default::default()
+        };
+        let mut s = Snapshot::default();
+        assert!(create_with(&mut s, &config, "Mosaic", "").is_err());
+        assert!(s.projects.is_empty());
+    }
+
+    #[test]
+    fn the_server_project_directory_follows_the_environment_in_order() {
+        let from = |pairs: &[(&str, &str)]| {
+            let pairs: Vec<(String, String)> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            runtime::projects_root_from(move |key| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, v)| std::ffi::OsString::from(v))
+            })
+        };
+        let home = ("HOME", "/home/someone");
+        assert_eq!(
+            from(&[home]),
+            Some(PathBuf::from("/home/someone/.local/share/relay/projects"))
+        );
+        assert_eq!(
+            from(&[home, ("XDG_DATA_HOME", "/data")]),
+            Some(PathBuf::from("/data/relay/projects"))
+        );
+        assert_eq!(
+            from(&[home, ("XDG_DATA_HOME", "relative")]),
+            Some(PathBuf::from("/home/someone/.local/share/relay/projects"))
+        );
+        assert_eq!(
+            from(&[
+                home,
+                ("XDG_DATA_HOME", "/data"),
+                ("RELAY_PROJECTS_DIR", "/srv/relay"),
+            ]),
+            Some(PathBuf::from("/srv/relay"))
+        );
+        assert_eq!(
+            from(&[home, ("RELAY_PROJECTS_DIR", "srv/relay")]),
+            Some(PathBuf::from("/home/someone/.local/share/relay/projects"))
+        );
+        assert_eq!(from(&[("HOME", "relative")]), None);
+        assert_eq!(from(&[]), None);
     }
 
     #[test]
