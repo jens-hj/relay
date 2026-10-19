@@ -2261,3 +2261,28 @@ fn an_unparseable_address_never_starts_a_provider_process() {
     assert!(resolve_board_url(&fake.config(), "https://user:pw@gitlab.com/groups/t/-/boards").is_err());
     assert!(fake.calls().is_empty());
 }
+
+/// The shape of a real read-only lookup of the unincorporated/mosaic group:
+/// one board, with a large provider ID and extra fields the server ignores.
+#[test]
+fn a_real_group_listing_with_one_large_board_id_resolves_to_that_board() {
+    let fake = Fake::new(vec![(
+        LISTING,
+        json!([{
+            "id": 11427455,
+            "name": "Development",
+            "group": {"id": 137148688, "name": "mosaic"},
+            "labels": [],
+            "lists": [{"label": {"name": "next-up"}}, {"label": {"name": "in-progress"}}]
+        }]),
+        0,
+    )]);
+    let choices = resolve_board_url(&fake.config(), GROUP_ADDRESS).unwrap();
+    assert_eq!(
+        choices,
+        vec![BoardChoice {
+            name: "Development".into(),
+            source: gitlab_scope("gitlab.com", true, "unincorporated/mosaic", 11427455),
+        }]
+    );
+}
