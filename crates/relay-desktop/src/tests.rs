@@ -4729,7 +4729,7 @@ fn editing_the_address_withdraws_the_boards_found_for_the_old_one() {
 
 #[test]
 fn a_board_that_cannot_be_queued_stays_offered_with_its_address() {
-    let mounted = mount(false, 1380.0);
+    let mut mounted = mount(false, 1380.0);
     mounted.model.snapshot.set(local_project_snapshot());
     mounted.model.page.set(Page::Connections);
     mounted.settle();
