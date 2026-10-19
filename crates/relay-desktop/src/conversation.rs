@@ -4198,7 +4198,7 @@ fn model_choice(snapshot: &Snapshot, session: &Session) -> Option<ProvenanceGrou
         .as_deref()
         .or(session.worker.as_ref().and_then(|w| w.model.as_deref()))
     {
-        rows.push(("Current Model", adapt::model_identity(model).short_name()));
+        rows.push(("Current Model", crate::adapt::model_identity(model).short_name()));
     }
     if let Some(effort) = &session.selection.effort {
         rows.push(("Current Effort", effort.clone()));

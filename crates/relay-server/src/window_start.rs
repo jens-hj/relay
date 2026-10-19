@@ -2020,12 +2020,12 @@ echo "prompt $prompt" >> '{log}'
             ..SHORT
         };
         let dir = tempfile::tempdir().unwrap();
-        let fake = fake(MODELS, &reply(Some(now() + 3600)));
-        let workspace = open(dir.path(), &expired(Some(now() - 30)), &fake);
+        let refused = fake(MODELS, &reply(Some(now() + 3600)));
+        let workspace = open(dir.path(), &expired(Some(now() - 30)), &refused);
         workspace.window_start_tick(limits).await;
-        assert_eq!(fake.count("auth "), 1, "{:?}", fake.lines());
-        assert_eq!(fake.count("catalog "), 0, "{:?}", fake.lines());
-        assert_eq!(fake.messages(), 0, "{:?}", fake.lines());
+        assert_eq!(refused.count("auth "), 1, "{:?}", refused.lines());
+        assert_eq!(refused.count("catalog "), 0, "{:?}", refused.lines());
+        assert_eq!(refused.messages(), 0, "{:?}", refused.lines());
         assert_eq!(
             status(&workspace).last_outcome,
             Some(WindowStartOutcome::Failed {

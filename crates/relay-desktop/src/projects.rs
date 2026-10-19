@@ -715,8 +715,6 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
         }
     });
     let scope = Derived::new(move || usize::from(group.get()));
-    let choose_scope: std::rc::Rc<dyn Fn(usize)> =
-        std::rc::Rc::new(move |slot: usize| group.set(slot == 1));
     let provider = Derived::new(move || usize::from(gitlab.get()));
     let choose_provider: std::rc::Rc<dyn Fn(usize)> =
         std::rc::Rc::new(move |slot: usize| gitlab.set(slot == 1));
@@ -757,7 +755,7 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
                 row height:{px(40.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                     Segments name:("Board provider".to_string())
                         options:(vec!["GitHub".to_string(), "GitLab".to_string()])
-                        selected:(relay_ui::Live::from(provider)) on-select:(choose_provider)
+                        selected:(relay_ui::Live::from(provider)) on-select:(choose_provider.clone())
                 }
                 if gitlab.get() {
                     Field label:"Host" name:(Some("GitLab host".to_string())) value:(host)
@@ -767,7 +765,8 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
                     row height:{px(40.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                         Segments name:("GitLab board scope".to_string())
                             options:(vec!["Project board".to_string(), "Group board".to_string()])
-                            selected:(relay_ui::Live::from(scope)) on-select:(choose_scope)
+                            selected:(relay_ui::Live::from(scope))
+                            on-select:(std::rc::Rc::new(move |slot: usize| group.set(slot == 1)) as std::rc::Rc<dyn Fn(usize)>)
                     }
                 } else {
                     Field label:"Owner" name:(Some("GitHub user or organization".to_string()))

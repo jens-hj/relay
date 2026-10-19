@@ -1813,14 +1813,15 @@ fn issue_reference_from_url(source: &BoardSource, url: &str) -> Result<IssueRef,
     }
     .ok_or_else(|| Error::invalid("Enter a remote issue URL"))?;
     let number = positive_number(number)?;
+    let url = match provider {
+        Provider::Github => url.into(),
+        Provider::Gitlab => gitlab::issue_url(host, repo, number),
+    };
     let reference = IssueRef {
         provider,
         repository: repo.into(),
         number,
-        url: match provider {
-            Provider::Github => url.into(),
-            Provider::Gitlab => gitlab::issue_url(host, repo, number),
-        },
+        url,
     };
     validate_reference(&reference)?;
     if let BoardSource::Gitlab { group, path, .. } = source
