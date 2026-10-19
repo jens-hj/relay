@@ -46,11 +46,15 @@ use tokio::sync::watch;
 // These commands append request-ID-owned records or consume a separately
 // versioned draft. Their transactional handlers validate current references,
 // permissions, profiles and run state. Replacements still need an exact revision.
+// Project and connection creation recheck root and resource uniqueness against
+// the current snapshot, so agent output committed meanwhile is not a conflict.
 fn accepts_stale_workspace_revision(command: &Command) -> bool {
     matches!(
         command,
         Command::SaveAgentTemplate { .. }
             | Command::CreateAgentConfig { .. }
+            | Command::CreateProject { .. }
+            | Command::AddConnection { .. }
             | Command::StartRootAgent { .. }
             | Command::StartSession { .. }
             | Command::SubmitTurn { .. }

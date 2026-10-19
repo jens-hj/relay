@@ -204,6 +204,89 @@ async fn protocol_guard_and_multiple_local_projects_round_trip_without_remote_cr
 }
 
 #[tokio::test]
+async fn stale_project_creates_tolerate_unrelated_writes_and_race_on_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(&dir.path().join("db")).await;
+    let base = snapshot(&server).await;
+    // Another client commits unrelated writes after this client captured its base.
+    let mut current = base.clone();
+    for _ in 0..3 {
+        current = applied(&server, &envelope(current.revision, comment())).await;
+    }
+    assert!(current.revision > base.revision);
+    let root = dir.path().join("Mosaic").display().to_string();
+    let create = |name: &str| {
+        envelope(
+            base.revision,
+            Command::CreateProject {
+                name: name.into(),
+                root: root.clone(),
+                connections: vec![],
+            },
+        )
+    };
+    let (first, second) = (create("First"), create("Second"));
+    let (a, b) = tokio::join!(send(&server, &first), send(&server, &second));
+    let statuses = [a.status(), b.status()];
+    assert_eq!(
+        statuses.iter().filter(|s| s.is_success()).count(),
+        1,
+        "{statuses:?}"
+    );
+    let (won, lost) = if statuses[0].is_success() {
+        (first, b)
+    } else {
+        (second, a)
+    };
+    assert_eq!(lost.status(), 422);
+    assert_eq!(
+        lost.json::<ApiError>().await.unwrap().message,
+        "That project root is already in use"
+    );
+    let created = snapshot(&server).await;
+    let project = format!("project-{}", won.request_id);
+    let live: Vec<_> = created.projects.iter().filter(|p| !p.fixture).collect();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].id, project);
+    assert_eq!(created.comments, current.comments);
+    assert_eq!(applied(&server, &won).await, created, "exact retry receipt");
+    let stale_rename = send(
+        &server,
+        &envelope(
+            base.revision,
+            Command::RenameProject {
+                project_id: project,
+                name: "Renamed".into(),
+            },
+        ),
+    )
+    .await;
+    assert_eq!(stale_rename.status(), 409);
+    assert_eq!(
+        stale_rename.json::<ApiError>().await.unwrap().code,
+        "conflict"
+    );
+    let unauthenticated = reqwest::Client::new()
+        .post(format!("{}/v1/commands", server.endpoint))
+        .bearer_auth("wrong-token")
+        .header("x-relay-protocol", PROTOCOL_VERSION.to_string())
+        .json(&envelope(
+            base.revision,
+            Command::CreateProject {
+                name: "Intruder".into(),
+                root: dir.path().join("Intruder").display().to_string(),
+                connections: vec![],
+            },
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), 401);
+    assert!(!dir.path().join("Intruder").exists());
+    assert_eq!(snapshot(&server).await, created);
+}
+
+#[tokio::test]
 async fn authentication_covers_reads_writes_and_event_upgrade() {
     let db = tempfile::tempdir().unwrap();
     let server = start(&db.path().join("relay.sqlite3")).await;

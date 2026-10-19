@@ -293,6 +293,166 @@ fn stale_independent_creates_preserve_background_state_and_receipts() {
 }
 
 #[test]
+fn stale_project_creation_survives_agent_output_but_not_resource_conflicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let initial = live();
+    let mut store = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
+    store.save(&initial).unwrap();
+    // Agent transcript output commits after the client captured its base revision.
+    let mut background = initial.clone();
+    background.revision += 25;
+    background.sessions[0].title = "Busy transcript".into();
+    let mut output = background.messages[0].clone();
+    output.id = "agent-output".into();
+    output.body = "Streaming agent output".into();
+    background.messages.push(output);
+    store.save(&background).unwrap();
+    let root = dir.path().join("mosaic").display().to_string();
+    let shared = dir.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    let board = BoardSource::Gitlab {
+        host: "gitlab.com".into(),
+        group: true,
+        path: "mosaic".into(),
+        number: 11427455,
+        url: "https://gitlab.com/groups/mosaic/-/boards/11427455".into(),
+    };
+    let create = env(
+        initial.revision,
+        Command::CreateProject {
+            name: "Mosaic".into(),
+            root: root.clone(),
+            connections: vec![
+                ConnectionInput::Repository {
+                    remote: "git@gitlab.com:mosaic/core.git".into(),
+                },
+                ConnectionInput::Repository {
+                    remote: "git@gitlab.com:mosaic/ui.git".into(),
+                },
+                ConnectionInput::Directory {
+                    path: shared.display().to_string(),
+                },
+                ConnectionInput::Board {
+                    source: board.clone(),
+                },
+            ],
+        },
+    );
+    let (created, action) = store.apply(create.clone(), &config()).unwrap();
+    assert!(matches!(action, Some(Action::Operations(ref jobs)) if jobs.len() == 3));
+    assert_eq!(created.revision, background.revision + 1);
+    assert_eq!(created.sessions, background.sessions);
+    assert_eq!(created.messages, background.messages);
+    let project = format!("project-{}", create.request_id);
+    assert!(
+        created
+            .projects
+            .iter()
+            .any(|p| p.id == project && p.name == "Mosaic")
+    );
+    assert_eq!(
+        created
+            .connections
+            .iter()
+            .filter(|c| c.project_id == project)
+            .count(),
+        5
+    );
+    // An exact retry of the stale envelope replays its receipt.
+    let (replayed, action) = store.apply(create.clone(), &config()).unwrap();
+    assert_eq!(replayed, created);
+    assert!(action.is_none());
+    let mut reused = create;
+    reused.expected_revision = created.revision;
+    assert_eq!(
+        store.apply(reused, &config()).err().unwrap().code,
+        "invalid"
+    );
+    // A second create from the same stale base still meets the current root.
+    let same_root = env(
+        initial.revision,
+        Command::CreateProject {
+            name: "Other".into(),
+            root,
+            connections: vec![],
+        },
+    );
+    let error = store.apply(same_root, &config()).err().unwrap();
+    assert_eq!(error.code, "invalid");
+    assert_eq!(error.message, "That project root is already in use");
+    // Stale connection additions are checked against current connections.
+    let add = |connection| {
+        env(
+            initial.revision,
+            Command::AddConnection {
+                project_id: project.clone(),
+                connection,
+            },
+        )
+    };
+    let repository = add(ConnectionInput::Repository {
+        remote: "git@gitlab.com:mosaic/core.git".into(),
+    });
+    assert_eq!(
+        store.apply(repository, &config()).err().unwrap().message,
+        "Repository is already connected"
+    );
+    let duplicate_board = add(ConnectionInput::Board { source: board });
+    assert_eq!(
+        store.apply(duplicate_board, &config()).err().unwrap().message,
+        "Board is already connected"
+    );
+    let docs = add(ConnectionInput::Repository {
+        remote: "git@gitlab.com:mosaic/docs.git".into(),
+    });
+    let (current, action) = store.apply(docs.clone(), &config()).unwrap();
+    assert!(action.is_some());
+    assert!(
+        current
+            .connections
+            .iter()
+            .any(|c| c.id == format!("connection-{}", docs.request_id) && c.project_id == project)
+    );
+    // Replacements and bases from the future still require the exact revision.
+    let workspace_connection = format!("workspace-{project}");
+    for command in [
+        Command::RenameProject {
+            project_id: project.clone(),
+            name: "Renamed".into(),
+        },
+        Command::SetNixCommands {
+            project_id: project.clone(),
+            mode: NixCommands::Allow,
+        },
+        Command::RemoveConnection {
+            connection_id: workspace_connection,
+        },
+    ] {
+        assert_eq!(
+            store
+                .apply(env(created.revision, command), &config())
+                .err()
+                .unwrap()
+                .code,
+            "conflict"
+        );
+    }
+    let future = env(
+        current.revision + 1,
+        Command::CreateProject {
+            name: "Future".into(),
+            root: dir.path().join("future").display().to_string(),
+            connections: vec![],
+        },
+    );
+    assert_eq!(
+        store.apply(future, &config()).err().unwrap().code,
+        "conflict"
+    );
+    assert_eq!(store.snapshot().unwrap(), current);
+}
+
+#[test]
 fn stale_first_turn_validates_current_permissions_and_reserves_once() {
     let dir = tempfile::tempdir().unwrap();
     let mut initial = live();
