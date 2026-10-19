@@ -4541,9 +4541,16 @@ fn operation_details_describe_the_target_and_the_error_is_shown_once() {
             .iter()
             .all(|f| f.0 != "Last step")
     );
-    assert!(operation_shows_error(&snapshot, &format!(" {message} ")));
-    assert!(!operation_shows_error(&snapshot, "Another error"));
-    assert!(!operation_shows_error(&snapshot, ""));
+    assert!(operation_shows_error(
+        &snapshot,
+        "demo",
+        Some(&board_id),
+        &format!(" {message} ")
+    ));
+    assert!(!operation_shows_error(&snapshot, "other", None, message));
+    assert!(!operation_shows_error(&snapshot, "demo", Some("other-board"), message));
+    assert!(!operation_shows_error(&snapshot, "demo", None, "Another error"));
+    assert!(!operation_shows_error(&snapshot, "demo", None, ""));
 
     mounted.model.snapshot.set(snapshot);
     mounted.model.notice.set(message.into());
@@ -4567,6 +4574,80 @@ fn operation_details_describe_the_target_and_the_error_is_shown_once() {
         &mounted,
         "Adding the task to the board (membership/issue-2)"
     ));
+}
+
+#[test]
+fn error_dedup_only_applies_to_rows_rendered_for_the_open_project() {
+    use crate::projects::notice_shown_by_operation;
+    let message = "GitLab issue URL does not match board host";
+    let mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    let board_id = snapshot
+        .boards
+        .iter()
+        .find(|b| b.project_id == "demo")
+        .unwrap()
+        .id
+        .clone();
+    for board in &mut snapshot.boards {
+        board.error = Some(message.into());
+    }
+    // The same failure belongs to a different project: it must not hide
+    // anything in this one.
+    let mut elsewhere = clone_operation("op-elsewhere", OperationState::Failed, Some(message));
+    elsewhere.project_id = "other-project".into();
+    elsewhere.kind = OperationKind::Sync {
+        board_id: board_id.clone(),
+    };
+    snapshot.operations.push(elsewhere);
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.notice.set(message.into());
+    mounted.settle();
+    let shown = |label: &str| {
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .filter(|n| n.label.as_deref() == Some(label))
+            .count()
+    };
+    // Board strip and notice both stay; no row renders for this project.
+    assert_eq!(shown(message), 2);
+    assert!(!notice_shown_by_operation(mounted.model, message));
+
+    // A matching row in this project suppresses the notice only on pages
+    // that render the operation list.
+    let mut local = clone_operation("op-local", OperationState::Failed, Some(message));
+    local.kind = OperationKind::Sync {
+        board_id: board_id.clone(),
+    };
+    mounted.model.snapshot.update(|s| s.operations.push(local));
+    mounted.settle();
+    for (page, expected) in [
+        (Page::Board, true),
+        (Page::Connections, true),
+        (Page::Publish, true),
+        (Page::Sessions, false),
+        (Page::Profiles, false),
+        (Page::Settings, false),
+        (Page::NewProject, false),
+        (Page::AgentStart, false),
+    ] {
+        mounted.model.page.set(page);
+        assert_eq!(
+            notice_shown_by_operation(mounted.model, message),
+            expected,
+            "{page:?}"
+        );
+    }
+    // An open issue replaces the board's list, so its notices stay.
+    mounted.model.page.set(Page::Board);
+    mounted.model.issue.set(Some("issue-2".into()));
+    assert!(!notice_shown_by_operation(mounted.model, message));
+    mounted.model.issue.set(None);
+    // Closing the issue brings the list, and the dedup, back.
+    assert!(notice_shown_by_operation(mounted.model, message));
 }
 
 #[test]

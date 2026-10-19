@@ -85,9 +85,12 @@ pub(crate) fn sync_age(model: Model) -> Option<String> {
 }
 
 /// The last synchronisation error of the visible board, unless an
-/// unfinished operation row already shows it.
+/// unfinished operation of this project and board already shows it on its
+/// row (the operation list renders in the same view).
 pub(crate) fn board_error(model: Model) -> Option<String> {
-    let error = match model.selected_board() {
+    let board = model.selected_board();
+    let board_id = board.as_ref().map(|b| b.id.clone());
+    let error = match board {
         Some(board) => board.error,
         None => model
             .snapshot
@@ -98,7 +101,13 @@ pub(crate) fn board_error(model: Model) -> Option<String> {
             .and_then(|p| p.github.as_ref()?.sync_error.clone()),
     };
     error.filter(|e| {
-        !e.trim().is_empty() && !crate::projects::operation_shows_error(&model.snapshot.get(), e)
+        !e.trim().is_empty()
+            && !crate::projects::operation_shows_error(
+                &model.snapshot.get(),
+                &model.project.get(),
+                board_id.as_deref(),
+                e,
+            )
     })
 }
 

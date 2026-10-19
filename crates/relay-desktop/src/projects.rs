@@ -909,15 +909,49 @@ fn operation_step(key: &str) -> String {
     format!("{what} ({key})")
 }
 
-/// Whether an unfinished operation already shows `text` as its error, so
-/// the board and notices need not repeat it.
-pub(crate) fn operation_shows_error(snapshot: &Snapshot, text: &str) -> bool {
+/// The board an operation acts on, for the kinds that name one.
+fn operation_board(kind: &OperationKind) -> Option<&str> {
+    match kind {
+        OperationKind::Sync { board_id }
+        | OperationKind::Publish { board_id, .. }
+        | OperationKind::MoveTask { board_id, .. }
+        | OperationKind::CreateTask { board_id, .. } => Some(board_id),
+        OperationKind::Clone { .. } | OperationKind::EditTask { .. } => None,
+    }
+}
+
+/// Whether an unfinished operation of `project` shows `text` as its error
+/// on its row. With `board`, only an operation on that board counts.
+pub(crate) fn operation_shows_error(
+    snapshot: &Snapshot,
+    project: &str,
+    board: Option<&str>,
+    text: &str,
+) -> bool {
     let text = text.trim();
+    let board = board.map(|id| snapshot.canonical_board_id(id));
     !text.is_empty()
         && snapshot.operations.iter().any(|o| {
-            o.state != OperationState::Completed
+            o.project_id == project
+                && o.state != OperationState::Completed
                 && o.error.as_deref().is_some_and(|e| e.trim() == text)
+                && board.is_none_or(|id| {
+                    operation_board(&o.kind).is_some_and(|b| snapshot.canonical_board_id(b) == id)
+                })
         })
+}
+
+/// Whether a notice repeats an error that an operation row of the open
+/// project is showing right now. Operation rows render on the board (when
+/// no issue is open) and on the Connections and Publish pages; elsewhere
+/// the notice always stays.
+pub(crate) fn notice_shown_by_operation(model: Model, text: &str) -> bool {
+    let rendered = match model.page.get() {
+        Page::Board => model.issue.get().is_none(),
+        Page::Connections | Page::Publish => true,
+        _ => false,
+    };
+    rendered && operation_shows_error(&model.snapshot.get(), &model.project.get(), None, text)
 }
 
 /// Labelled facts about an operation, from what the snapshot records: its

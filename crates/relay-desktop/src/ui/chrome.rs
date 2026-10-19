@@ -110,7 +110,7 @@ pub(crate) fn Notice(model: Model) -> Element {
             // is not repeated; notices with actions always stay.
             if !retry
                 && !model.can_rebase()
-                && crate::projects::operation_shows_error(&model.snapshot.get(), &notice)
+                && crate::projects::notice_shown_by_operation(model, &notice)
             {
                 notice.clear();
             }
