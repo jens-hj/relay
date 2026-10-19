@@ -1,4 +1,4 @@
-# Schema 21 to 24 Migration and Recovery Plan
+# Schema 21 to 25 Migration and Recovery Plan
 
 Status: **proposed, not executed, not independently reviewed or accepted.** Nothing in this document has been run against a live installation, a live database or a copy of one. Every command below is a proposal for the workspace owner. The [evidence](#evidence) section lists what was actually checked.
 
@@ -9,25 +9,26 @@ This is the separately reviewed migration and recovery plan that [deployment](de
 | Item | Value |
 | --- | --- |
 | Base | `ff326a7` (schema 21, protocol 14) |
-| Changes | Schema 22 stores `SpawnGrant::selection_rationale`; schema 23 stores `Project::nix_commands`; schema 24 stores `Snapshot::claude_window_start` and adds the `window_start_claims` table ([Claude window start](claude-window-start.md)) |
+| Changes | Schema 22 stores `SpawnGrant::selection_rationale`; schema 23 stores `Project::nix_commands`; schema 24 stores `Snapshot::claude_window_start` and adds the `window_start_claims` table ([Claude window start](claude-window-start.md)); schema 25 stores `Project::spawn_execution_approval` and `SpawnGrant::execution_approval` ([worker execution approval](architecture.md#worker-execution-approval)) |
 | Protocol | 14, unchanged |
 | Revision to deploy | The full commit hash of the published `main` commit that contains these changes, not a worktree commit |
 
 How the migration behaves, from `crates/relay-server/src/lib.rs` (`Store::open`):
 
 - **Automatic at startup.** The migration runs when the candidate server first opens the database. There is no separate migration command.
-- **One transaction.** Everything runs in a single `BEGIN IMMEDIATE` … `COMMIT` transaction: the empty `window_start_claims` table is created, the stored snapshot is rewritten with defaults, `protocol_version` is set to 14 and `user_version` to 24. A crash before `COMMIT` leaves the schema 21 database intact.
+- **One transaction.** Everything runs in a single `BEGIN IMMEDIATE` … `COMMIT` transaction: the empty `window_start_claims` table is created, the stored snapshot is rewritten with defaults, `protocol_version` is set to 14 and `user_version` to 25. A crash before `COMMIT` leaves the schema 21 database intact.
 - **Spawn grants.** Existing spawn grants load without a selection rationale. The field is omitted while absent.
 - **Nix commands.** Every project loads with Nix Commands set to Off. The field is omitted from the snapshot while Off. The migration never turns it on; owners turn it on per project on the Connections page, which is a separate decision.
 - **Claude window start.** The workspace loads with Claude Window Start Off and the claims table empty. The field is omitted from the snapshot until the owner changes it. While it is off the server sends no Claude message and runs no Claude Code check for it. The migration never turns it on; turning it on in Settings is a separate owner decision that authorizes background Claude usage, and this release does not include it.
+- **Worker execution approval.** Every project loads with Worker Execution Approval set to Standard, and existing spawn grants load with no requested execution mode. Both fields are omitted from the snapshot at those defaults. Standard asks a human for any child execution mode above the parent's and for every Unrestricted Access child. Existing children keep the execution settings they already have; the migration changes no session's mode.
 - **Older servers.** A schema 21 server refuses any database newer than its schema ("Database schema is newer than this Relay server"). After migration, going back to the previous binary therefore **requires restoring the pre-migration database**.
 
 ## Helper Support
 
 Before `previous_schema_version`, `nix/deploy-relay.py` took one `schema_version` and checked it both before and after activation, so it could not run a release that changes the schema:
 
-- **`schema_version: 24`.** It refused safely with `pre-schema` and changed nothing.
-- **`schema_version: 21`.** The candidate migrated the database to 24, then `local()` failed with `schema-protocol`. Because the schema no longer equalled 21, `failure()` did not switch back. The attempt ended `failed` with the candidate active on a migrated database and the public service not started.
+- **`schema_version: 25`.** It refused safely with `pre-schema` and changed nothing.
+- **`schema_version: 21`.** The candidate migrated the database to 25, then `local()` failed with `schema-protocol`. Because the schema no longer equalled 21, `failure()` did not switch back. The attempt ended `failed` with the candidate active on a migrated database and the public service not started.
 
 The helper now reads an optional manifest field `previous_schema_version`:
 
@@ -35,7 +36,7 @@ The helper now reads an optional manifest field `previous_schema_version`:
 2. **Before activation.** `activate` compares the live schema with `previous_schema_version` (`pre-schema`).
 3. **After activation.** `local()` compares with `schema_version` (`schema-protocol`).
 4. **Automatic restore.** `failure()` switches back to the previous bundle only while the schema still equals `previous_schema_version`, for example when the candidate failed before it migrated. Once the database is migrated, `failure()` records the failure and leaves recovery to the owner.
-5. **Tests.** `nix/test_deploy_relay.py` covers manifest validation, the check before activation against `previous_schema_version`, the check after activation against `schema_version`, a full activation that migrates a real SQLite database from 21 to 24, no automatic switch-back once the schema has changed, and unchanged behaviour when the field is absent. Run them with `nix develop --command just deploy-check`.
+5. **Tests.** `nix/test_deploy_relay.py` covers manifest validation, the check before activation against `previous_schema_version`, the check after activation against `schema_version`, a full activation that migrates a real SQLite database from 21 to 25, no automatic switch-back once the schema has changed, and unchanged behaviour when the field is absent. Run them with `nix develop --command just deploy-check`.
 
 **Do not work around these checks.** That means no:
 
@@ -50,7 +51,7 @@ Without the helper, the only alternative is an owner-performed manual activation
 
 - **Authorization.** The owner has explicitly authorized the merge to `main` and this deployment.
 - **Checks.** `nix develop --command just check` passes on the published commit. As of this plan it has **not** been run (see [evidence](#evidence)).
-- **Helper.** The published commit contains the [helper support](#helper-support), `nix develop --command just deploy-check` passes on it, and the manifest uses `previous_schema_version: 21` and `schema_version: 24`.
+- **Helper.** The published commit contains the [helper support](#helper-support), `nix develop --command just deploy-check` passes on it, and the manifest uses `previous_schema_version: 21` and `schema_version: 25`.
 - **Matching builds.** Build the server and browser packages from the same immutable commit. Proposed, not run:
 
   ```sh
@@ -68,7 +69,7 @@ Without the helper, the only alternative is an owner-performed manual activation
   nix develop .#web --command python3 -I -c 'import sqlite3,sys; d=sqlite3.connect("file:"+sys.argv[1]+"?mode=ro",uri=True); print(d.execute("PRAGMA quick_check").fetchone()[0], d.execute("PRAGMA user_version").fetchone()[0])' "$DB"
   ```
 
-  If the result is anything other than `ok 21`, stop. This plan covers only 21 to 24.
+  If the result is anything other than `ok 21`, stop. This plan covers only 21 to 25.
 
 `DB` is the manifest's `database` (default `~/.local/share/relay/workspace.sqlite3`). `R` is a protected rehearsal directory, created with `install -d -m 0700 "$R"` outside every Git checkout.
 
@@ -129,7 +130,7 @@ Rehearse against a copy before any live activation. The rehearsal must never ope
 
    v0, s0, r0, c0 = load(sys.argv[1])
    v1, s1, r1, c1 = load(sys.argv[2])
-   assert (v0, v1) == (21, 24), (v0, v1)
+   assert (v0, v1) == (21, 25), (v0, v1)
    assert (c0, c1) == (None, 0), (c0, c1)  # the claims table is new and empty
    assert s1['protocol_version'] == 14
    assert 'claude_window_start' not in s1  # Off is omitted
@@ -139,16 +140,18 @@ Rehearse against a copy before any live activation. The rehearsal must never ope
    before = {p['id']: p for p in s0['projects']}
    for project in s1['projects']:
        assert 'nix_commands' not in project, project['id']  # Off is omitted
+       assert 'spawn_execution_approval' not in project, project['id']  # Standard is omitted
        assert project['defaults'].get('worker_models') == before[project['id']]['defaults'].get('worker_models')
    for session in s1['sessions']:
        assert 'selection_rationale' not in (session.get('spawn') or {}), session['id']
+       assert 'execution_approval' not in (session.get('spawn') or {}), session['id']
    print('ok')
    ```
 
    Run it with `nix develop .#web --command python3 -I "$R/scripts/check-copy.py" "$R/before.sqlite3" "$R/copy.sqlite3"`. Any failure stops the release until it is understood.
 5. **Old binary refuses the migrated copy.** Start the previous server package against a further copy of the migrated database, the same way.
    - Expect it to exit with "Database schema is newer than this Relay server".
-   - Check that the copy still reads `user_version` 24.
+   - Check that the copy still reads `user_version` 25.
 6. **Rollback works.** Restore `$R/before.sqlite3` to a fresh copy with the backup API and start the previous server package on it. Expect it to open at schema 21.
 7. **Clean up.** Stop every rehearsal server, then delete or keep the rehearsal files as the owner decides. Never commit or upload them.
 
@@ -156,7 +159,7 @@ Rehearse against a copy before any live activation. The rehearsal must never ope
 
 **With the helper** (recommended), follow [deployment](deployment.md#run-the-workflow).
 
-1. **Manifest.** Use `previous_schema_version: 21`, `schema_version: 24`, `protocol_version: 14`, the full `revision`, the candidate and previous bundles, and `server_executable` and `web_root` from the same build.
+1. **Manifest.** Use `previous_schema_version: 21`, `schema_version: 25`, `protocol_version: 14`, the full `revision`, the candidate and previous bundles, and `server_executable` and `web_root` from the same build.
 2. **Activate.** Run `activate` once, from an independent user job. Proposed, not run:
 
    ```sh
@@ -182,10 +185,10 @@ How to handle each helper result:
 
 After activation, check:
 
-- **Local endpoint.** `/v1/version` reports the candidate revision; `/v1/snapshot` reports `protocol_version` 14; the database reads `user_version` 24 and passes `quick_check`.
+- **Local endpoint.** `/v1/version` reports the candidate revision; `/v1/snapshot` reports `protocol_version` 14; the database reads `user_version` 25 and passes `quick_check`.
 - **Running executable.** The `MainPID` of `relay.service` runs the candidate `server_executable`.
 - **Data preserved.** No project, session, agent configuration, issue, message, connection or board ID present before activation is missing. Draft revisions did not go backwards.
-- **New fields.** Every project's Nix Commands setting is Off, Claude Window Start is Off with an empty `window_start_claims` table, and no existing spawn grant has gained a rationale.
+- **New fields.** Every project's Nix Commands setting is Off and its Worker Execution Approval is Standard, Claude Window Start is Off with an empty `window_start_claims` table, and no existing spawn grant has gained a rationale or a requested execution mode.
 - **Public endpoint.** Public HTTPS shows the login gate, reports the candidate revision and serves browser assets whose hashes match `web_root`.
 
 The helper's `local()` and `verify` already perform these checks except the new-field checks. After a successful activation the owner can read those from the stored snapshot with the read-only check above. Credentials are read only by the helper, inside its requests.
@@ -212,6 +215,7 @@ Rollback restores only the database:
 - Credential files, other units and unrelated persistent data are not touched.
 - Interrupted agent turns stay interrupted. Rollback does not replay them.
 - The restored database has no Claude Window Start setting or claims. Because the setting stays Off in this release, no claim is lost.
+- The restored database has no Worker Execution Approval policy or requested spawn modes. A policy the owner changed after activation, and children spawned after activation, are lost with the rest of the post-activation work. The schema 21 server does not ask for approval of a spawned child's execution mode, so after rollback that protection is gone until the release is deployed again.
 
 ## Evidence
 
@@ -227,7 +231,7 @@ Not done:
 - **Deployment.** No deployment or service change of any kind.
 - **Live data.** No backup or read of a live database.
 - **Rehearsal.** No rehearsal.
-- **Tests and builds.** No Rust tests, Clippy, formatting checks, builds or `just deploy-check`. In the sandbox where these changes were integrated, Nix cannot reach the daemon. That includes the schema tests `schema_twenty_one_upgrades_to_twenty_four_with_every_new_setting_off`, `schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off` and `schema_twenty_three_upgrades_with_claude_window_start_off_and_an_empty_claim_table`, none of which has run. The Claude window-start source has not been compiled either; see [its validation](claude-window-start.md#validation).
+- **Tests and builds.** No Rust tests, Clippy, formatting checks, builds or `just deploy-check`. In the sandbox where these changes were integrated, Nix cannot reach the daemon. That includes the schema tests `schema_twenty_one_upgrades_to_twenty_five_with_every_new_setting_off`, `schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off`, `schema_twenty_three_upgrades_with_claude_window_start_off_and_an_empty_claim_table` and `schema_twenty_four_upgrades_with_standard_spawn_execution_approval`, none of which has run. Neither the Claude window-start source ([its validation](claude-window-start.md#validation)) nor the worker execution approval source has been compiled.
 
 Done for the helper support only:
 

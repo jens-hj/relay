@@ -75,7 +75,7 @@ So for a given reported reset, at most one message is handed over unless every e
 
 ## Schema 24
 
-The setting and status are stored in the snapshot (`claude_window_start`, omitted while untouched) and the claim table (with its `dispatched` column) is created at startup. Older servers would drop both, so the schema is 24. Existing databases load with the setting off. The [schema 21 to 24 plan](schema-24-migration.md) covers this step for a release from schema 21.
+The setting and status are stored in the snapshot (`claude_window_start`, omitted while untouched) and the claim table (with its `dispatched` column) is created at startup. Older servers would drop both, so the schema is 24. Existing databases load with the setting off. The [schema 21 to 25 plan](schema-25-migration.md) covers this step for a release from schema 21.
 
 ## Validation
 
@@ -98,7 +98,7 @@ Tests written but not run:
   - turning the setting off mid-message;
   - exclusive, due-checked claims.
 - `relay-desktop`: the status text and the control sending the setting.
-- Schema assertions now expect 24 in all places that open a database with `Store::open`: `tests.rs` (two, including the 23→24 upgrade), `tests/harness_tests.rs`, `transport.rs` (two), `browser/tests.rs` and `agent_tools.rs`.
+- The 23→24 upgrade test in `tests.rs`. Schema 25 ([worker execution approval](architecture.md#worker-execution-approval)) followed, so the schema assertions in every place that opens a database with `Store::open` now expect 25.
 
 Not verified:
 

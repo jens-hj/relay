@@ -3708,9 +3708,10 @@ fn schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off() {
 }
 
 #[test]
-fn schema_twenty_one_upgrades_to_twenty_four_with_every_new_setting_off() {
+fn schema_twenty_one_upgrades_to_twenty_five_with_every_new_setting_off() {
     // The release path: a schema 21 database has no spawn rationales, no Nix
-    // command setting, no window-start setting and no claim table.
+    // command setting, no window-start setting, no claim table, no spawn
+    // execution approval policy and no requested spawn execution mode.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("schema-21.sqlite");
     let defaults = AgentProfile::default();
@@ -3758,11 +3759,24 @@ fn schema_twenty_one_upgrades_to_twenty_four_with_every_new_setting_off() {
     assert_eq!(upgraded, original);
     assert!(upgraded.projects.iter().all(|p| p.nix_commands.is_off()));
     assert!(!upgraded.claude_window_start.enabled);
+    assert!(
+        upgraded
+            .projects
+            .iter()
+            .all(|p| p.spawn_execution_approval == SpawnExecutionApproval::Standard)
+    );
     assert_eq!(
         upgraded.sessions[0]
             .spawn
             .as_ref()
             .and_then(|g| g.selection_rationale.as_deref()),
+        None
+    );
+    assert_eq!(
+        upgraded.sessions[0]
+            .spawn
+            .as_ref()
+            .and_then(|g| g.execution_approval),
         None
     );
     // The rewritten snapshot still omits every new field while it is off.
@@ -3774,6 +3788,7 @@ fn schema_twenty_one_upgrades_to_twenty_four_with_every_new_setting_off() {
         "selection_rationale",
         "nix_commands",
         "claude_window_start",
+        // Also matches the project's spawn_execution_approval.
         "execution_approval",
     ] {
         assert!(!stored.contains(field), "{field}");
