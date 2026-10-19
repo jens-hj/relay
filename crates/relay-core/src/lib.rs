@@ -176,9 +176,10 @@ pub struct SpawnGrant {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selection_rationale: Option<String>,
     /// The execution mode the parent asked the child to run in, approved by
-    /// a human first when the project's policy required it. The child's
-    /// worker execution setting holds it for every launch and resume. None
-    /// when the spawn named no mode and the child runs in its parent's.
+    /// a human first when the project's policy required it. None when the
+    /// spawn named no mode and the child took its parent's. Either way the
+    /// decided mode is frozen on the child's worker execution setting,
+    /// which every launch and resume reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_approval: Option<ApprovalMode>,
 }

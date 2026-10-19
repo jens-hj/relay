@@ -158,7 +158,7 @@ The percentage limits are per worker, not a total, and Relay does not cap concur
 
 ## Worker execution approval
 
-Workers that agents start with `spawn_agent` run in their parent's execution mode unless the agent names another with `execution_approval`. The project's Worker Execution Approval setting, on the Connections page, decides when you approve that mode first. Every choice asks for a mode above the parent's (Ask < Automatic < Unrestricted Access). Standard, the default, also asks for every Unrestricted Access worker, even under an Unrestricted Access parent. Strict asks for every worker above Ask. Relaxed asks only for a raised mode. The request appears inline with the spawn's other approvals, such as Delegate Ask and widened permissions, as one approval. Task permissions apply in every mode; see [worker execution approval](architecture.md#worker-execution-approval).
+Workers that agents start with `spawn_agent` run in their parent's execution mode unless the agent names another with `execution_approval`, and keep that mode when profiles change later. The project's Worker Execution Approval setting, on the Connections page, decides when you approve that mode first. Every choice asks for a mode above the parent's (Ask < Automatic < Unrestricted Access). Standard, the default, also asks for every Unrestricted Access worker, even under an Unrestricted Access parent. Strict asks for every worker above Ask. Relaxed asks only for a raised mode. The request appears inline with the spawn's other approvals, such as Delegate Ask and widened permissions, as one approval. Task permissions apply in every mode; see [worker execution approval](architecture.md#worker-execution-approval).
 
 ## Nix commands from agents
 
