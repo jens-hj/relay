@@ -141,6 +141,7 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
     let width = State::new(1200.0f32);
     let height = State::new(900.0f32);
     let disclosure_limit = Derived::new(move || (height.get() - px(90.0)).max(0.0) * 0.5);
+    let operations_limit = Derived::new(move || (disclosure_limit.get() * 0.5).min(px(200.0)));
     // Full header cells need room; below this the source, sync and board
     // choice move into the Board actions menu.
     let full = Derived::new(move || width.get() >= px(960.0));
@@ -240,13 +241,13 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                 if managing.get() {
                     Columns model:(model) open:(managing)
                 }
-                if model.snapshot.get().operations.iter().any(|o| o.project_id == model.project.get() && o.state != OperationState::Completed) {
-                    Operations model:(model)
-                }
                 if history.get() {
                     OperationHistory model:(model) open:(history)
                 }
             }
+            // Unfinished operations sit directly over the board, closed by
+            // the strong rule so the list never reads as a board column.
+            Operations model:(model) separated:true limit:(Some(operations_limit))
             if stacked.get() {
                 scroll {
                     col height:min-content {

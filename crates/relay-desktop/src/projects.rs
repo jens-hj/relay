@@ -5,13 +5,14 @@ use mosaic::prelude::*;
 use relay_core::*;
 use relay_ui::Live;
 use relay_ui::prelude::{
-    CellButton, CellButtonProps, Label, LabelProps, OnPress, PrimaryButton, PrimaryButtonProps,
-    Rule, Segments, SegmentsProps, TextRole, Tone, UiText,
+    AgentStatus, CellButton, CellButtonProps, Ellipsis, EllipsisProps, Label, LabelProps, OnPress,
+    PrimaryButton, PrimaryButtonProps, Rule, Segments, SegmentsProps, StatusSquare,
+    StatusSquareProps, TextRole, Tone, UiText, Wash, WashProps, live_reach,
 };
 use relay_ui::surfaces::{
     Field, FieldProps, Module, ModuleProps, RemoveCell, RemoveCellProps, TextInput, TextInputProps,
 };
-use relay_ui::tokens::{ground, px};
+use relay_ui::tokens::{Signal, ground, px};
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ProjectDraft {
@@ -760,17 +761,120 @@ fn ColumnEditor(model: Model, column: BoardColumn) -> Element {
     }
 }
 
+/// The project's unfinished operations in server order, under a header
+/// that counts them by state. Nothing is shown when there are none.
+/// `separated` closes the list with the strong rule that sits above module
+/// headings, for use directly over the board. `limit` bounds the list's
+/// height; it scrolls beyond that.
 #[component]
-pub fn Operations(model: Model) -> Element {
+pub fn Operations(
+    model: Model,
+    #[prop(default = false)] separated: bool,
+    #[prop(optional)] limit: Option<Derived<f32>>,
+) -> Element {
+    let limit = limit.unwrap_or_else(|| Derived::new(|| px(200.0)));
+    let active = Derived::new(move || {
+        let project = model.project.get();
+        model
+            .snapshot
+            .get()
+            .operations
+            .into_iter()
+            .filter(|o| o.project_id == project && o.state != OperationState::Completed)
+            .collect::<Vec<_>>()
+    });
+    let summary = Derived::new(move || operations_summary(&active.get()));
     view! {
-        BoundedPanel limit:(Derived::new(|| px(200.0))) {
-            col height:min-content gap:0px {
-                for (_, operation) in {model.snapshot.get().operations.into_iter().filter(|o|o.project_id==model.project.get() && o.state!=OperationState::Completed).map(|o|(o.id.clone(),o)).collect::<Vec<_>>()} {
-                    OperationCard model:(model) operation:(operation.clone())
+        col height:min-content shrink:0 min-width:0px gap:0px {
+            if !active.get().is_empty() {
+                row height:{px(28.0)}px shrink:0 gap:{px(12.0)}px align:center
+                    pad:(left:{px(18.0)}px right:{px(18.0)}px top:0px bottom:0px)
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
+                    label:"Operations" {
+                    Label text:"Operations" role:(TextRole::Caption) tone:(Tone::Muted) weight:500
+                        caps:true
+                    row width:1fr min-width:0px height:min-content justify:end {
+                        Ellipsis text:(summary) role:(TextRole::Caption) tone:(Tone::Muted)
+                    }
+                }
+                BoundedPanel limit:(limit) {
+                    col height:min-content gap:0px {
+                        for (_, operation) in {active.get().into_iter().map(|o|(o.id.clone(),o)).collect::<Vec<_>>()} {
+                            OperationCard model:(model) operation:(operation.clone()) history:false
+                        }
+                    }
+                }
+                if separated {
+                    el width:fill height:{px(1.0)}px shrink:0 fill:ground.rule-strong nohit {}
                 }
             }
         }
     }
+}
+
+/// The shared status mark of an operation: queued for pending, the
+/// breathing working square for running, done, failed, amber for a result
+/// the user must confirm, and the idle dash for an interrupted run.
+pub(crate) fn operation_status(state: &OperationState) -> AgentStatus {
+    match state {
+        OperationState::Pending => AgentStatus::Queued,
+        OperationState::Running => AgentStatus::Working,
+        OperationState::Completed => AgentStatus::Done,
+        OperationState::Failed => AgentStatus::Failed,
+        OperationState::Interrupted => AgentStatus::Idle,
+        OperationState::NeedsReconciliation => AgentStatus::Waiting,
+    }
+}
+
+pub(crate) fn operation_state_word(state: &OperationState) -> &'static str {
+    match state {
+        OperationState::Pending => "Pending",
+        OperationState::Running => "Running",
+        OperationState::Completed => "Completed",
+        OperationState::Failed => "Failed",
+        OperationState::Interrupted => "Interrupted",
+        OperationState::NeedsReconciliation => "Needs confirmation",
+    }
+}
+
+fn operation_state_tone(state: &OperationState) -> Tone {
+    match state {
+        OperationState::Running => Tone::Signal(Signal::Live),
+        OperationState::Failed => Tone::Signal(Signal::Failed),
+        OperationState::NeedsReconciliation => Tone::Signal(Signal::NeedsYou),
+        OperationState::Pending | OperationState::Completed | OperationState::Interrupted => {
+            Tone::Muted
+        }
+    }
+}
+
+fn operation_title(kind: &OperationKind) -> &'static str {
+    match kind {
+        OperationKind::Clone { .. } => "Clone",
+        OperationKind::Sync { .. } => "Sync",
+        OperationKind::Publish { .. } => "Publish",
+        OperationKind::CreateTask { .. } => "Create task",
+        OperationKind::MoveTask { .. } => "Move task",
+        OperationKind::EditTask { .. } => "Edit task",
+    }
+}
+
+/// The operations header's count, such as `2 running · 1 failed`. Active
+/// states come first, then those that need attention.
+pub(crate) fn operations_summary(operations: &[ProjectOperation]) -> String {
+    let count = |state: OperationState| operations.iter().filter(|o| o.state == state).count();
+    [
+        (count(OperationState::Running), "running"),
+        (count(OperationState::Pending), "pending"),
+        (count(OperationState::NeedsReconciliation), "to confirm"),
+        (count(OperationState::Interrupted), "interrupted"),
+        (count(OperationState::Failed), "failed"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, word)| format!("{n} {word}"))
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 /// Completed operations for the project, opened from the board actions menu.
 #[component]
@@ -790,7 +894,7 @@ pub fn OperationHistory(model: Model, open: State<bool>) -> Element {
                 BoundedPanel limit:(Derived::new(|| px(180.0))) {
                     col height:min-content gap:0px {
                         for (_, operation) in {model.snapshot.get().operations.into_iter().filter(|o|o.project_id==model.project.get() && o.state==OperationState::Completed).map(|o|(o.id.clone(),o)).collect::<Vec<_>>()} {
-                            OperationCard model:(model) operation:(operation.clone())
+                            OperationCard model:(model) operation:(operation.clone()) history:true
                         }
                         if !model.snapshot.get().operations.iter().any(|o|o.project_id==model.project.get() && o.state==OperationState::Completed) {
                             Caption text:"No completed operations" rule:false
@@ -854,8 +958,10 @@ fn operation_results(operation: &ProjectOperation) -> Vec<(String, String, Strin
         .collect()
 }
 
+/// One operation. Its top hairline separates it from the row above; the
+/// first row of a list sits under a header that already has a rule.
 #[component]
-fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
+fn OperationCard(model: Model, operation: ProjectOperation, history: bool) -> Element {
     let expanded = State::new(false);
     let id = State::new(operation.id.clone());
     let fallback = operation;
@@ -867,6 +973,18 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
             .into_iter()
             .find(|o| o.id == id.get())
             .unwrap_or_else(|| fallback.clone())
+    });
+    let first = Derived::new(move || {
+        let project = model.project.get();
+        model
+            .snapshot
+            .get()
+            .operations
+            .iter()
+            .find(|o| {
+                o.project_id == project && (o.state == OperationState::Completed) == history
+            })
+            .is_some_and(|o| o.id == id.get())
     });
     let key = Derived::new(move || {
         operation
@@ -911,7 +1029,24 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
             })
         })
     });
-    let failed = Tone::Signal(relay_ui::tokens::Signal::Failed);
+    let failed = Tone::Signal(Signal::Failed);
+    let running = Derived::new(move || operation.get().state == OperationState::Running);
+    let status = Derived::new(move || operation_status(&operation.get().state));
+    let title = Derived::new(move || operation_title(&operation.get().kind).to_string());
+    // The state word follows the operation's live state, tinted for the
+    // states that need the user's eye.
+    let state_label = view! {
+        row width:max-content height:min-content shrink:0 {}
+    };
+    state_label.switch(
+        move || operation.get().state,
+        |parent, state| {
+            parent.adopt(&view! {
+                Label text:(operation_state_word(state)) role:(TextRole::Caption)
+                    tone:(operation_state_tone(state))
+            });
+        },
+    );
     let blocked = Derived::new(move || model.busy.get() || !model.connected.get());
     let check_blocked = Derived::new(move || blocked.get() || url.get().trim().is_empty());
     let check = move || {
@@ -966,19 +1101,29 @@ fn OperationCard(model: Model, operation: ProjectOperation) -> Element {
         }
     };
     view! {
-        col height:min-content gap:0px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
+        col height:min-content gap:0px
+            stroke:(width:{if first.get() { 0.0 } else { px(1.0) }} color:ground.hairline edges:top)
             label:{format!("Operation {}", id.get())} {
-            row height:min-content gap:0px {
-                col width:1fr height:min-content min-width:0px gap:{px(3.0)}px
-                    pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px) {
-                    Label
-                        text:(Derived::new(move || format!("{} · {:?}", match operation.get().kind { OperationKind::Clone{..} => "Clone", OperationKind::Sync{..} => "Sync", OperationKind::Publish{..} => "Publish", OperationKind::CreateTask{..} => "Create task", OperationKind::MoveTask{..} => "Move task", OperationKind::EditTask{..} => "Edit task" }, operation.get().state)))
-                        role:(TextRole::Body)
-                    Label
-                        text:(Derived::new(move || operation_subject(&model.snapshot.get(), &operation.get())))
-                        role:(TextRole::Caption) tone:(Tone::Muted)
+            stack height:min-content clip {
+                if running.get() {
+                    Wash reach:(live_reach(2)) over:(ground.page)
                 }
-                { parent.adopt(&details); }
+                row height:min-content gap:0px {
+                    col width:1fr height:min-content min-width:0px gap:{px(3.0)}px
+                        pad:(horizontal:{px(18.0)}px vertical:{px(10.0)}px) {
+                        row height:min-content gap:{px(8.0)}px align:center {
+                            StatusSquare status:(status)
+                            Label text:(title) role:(TextRole::Body) weight:500
+                            { parent.adopt(&state_label); }
+                        }
+                        row height:min-content pad:(left:{px(18.0)}px right:0px top:0px bottom:0px) {
+                            Label
+                                text:(Derived::new(move || operation_subject(&model.snapshot.get(), &operation.get())))
+                                role:(TextRole::Caption) tone:(Tone::Muted)
+                        }
+                    }
+                    { parent.adopt(&details); }
+                }
             }
             if expanded.get() {
                 col height:min-content gap:{px(6.0)}px

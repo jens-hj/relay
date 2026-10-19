@@ -4437,6 +4437,143 @@ fn reconciliation_has_no_retry_and_tracks_live_operation_state() {
     );
 }
 
+fn clone_operation(id: &str, state: OperationState, error: Option<&str>) -> ProjectOperation {
+    ProjectOperation {
+        id: id.into(),
+        project_id: "demo".into(),
+        kind: OperationKind::Clone {
+            connection_id: "repo".into(),
+        },
+        state,
+        error: error.map(Into::into),
+        results: Default::default(),
+    }
+}
+
+#[test]
+fn operation_states_use_distinct_shared_status_marks_and_words() {
+    use crate::projects::{operation_state_word, operation_status, operations_summary};
+    use std::collections::HashSet;
+    let states = [
+        OperationState::Pending,
+        OperationState::Running,
+        OperationState::Completed,
+        OperationState::Failed,
+        OperationState::Interrupted,
+        OperationState::NeedsReconciliation,
+    ];
+    let marks: HashSet<_> = states.iter().map(operation_status).collect();
+    let words: HashSet<_> = states.iter().map(operation_state_word).collect();
+    assert_eq!(marks.len(), states.len());
+    assert_eq!(words.len(), states.len());
+    // Only a running operation uses the animated working mark.
+    assert_eq!(
+        states
+            .iter()
+            .filter(|s| operation_status(s) == relay_ui::prelude::AgentStatus::Working)
+            .count(),
+        1
+    );
+    assert_eq!(operations_summary(&[]), "");
+    assert_eq!(
+        operations_summary(&[
+            clone_operation("a", OperationState::Failed, None),
+            clone_operation("b", OperationState::Running, None),
+            clone_operation("c", OperationState::Running, None),
+            clone_operation("d", OperationState::Pending, None),
+        ]),
+        "2 running · 1 pending · 1 failed"
+    );
+}
+
+#[test]
+fn operations_closes_with_the_strong_rule_and_keeps_the_wash_to_running_rows() {
+    let board = include_str!("ui/board.rs");
+    let projects = include_str!("projects.rs");
+    assert!(board.contains("Operations model:(model) separated:true"));
+    let list = projects
+        .split("pub fn Operations(")
+        .nth(1)
+        .and_then(|rest| rest.split("fn operation_status").next())
+        .unwrap();
+    assert!(list.contains("if separated"));
+    assert!(list.contains("fill:ground.rule-strong"));
+    let card = projects
+        .split("fn OperationCard(")
+        .nth(1)
+        .and_then(|rest| rest.split("fn reconciliation_instruction").next())
+        .unwrap();
+    let flat = card.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat.contains("if running.get() { Wash reach:(live_reach(2))"));
+    assert!(card.contains("StatusSquare status:(status)"));
+    assert_eq!(card.matches("Wash ").count(), 1);
+}
+
+#[test]
+fn operation_rows_show_status_marks_full_cell_details_and_keep_server_order() {
+    for (width, scale) in [(1380.0, 1.0), (760.0, 2.0), (420.0, 1.0)] {
+        let mounted = mount(false, width);
+        mounted.model.preferences.update(|p| p.scale = scale);
+        let mut snapshot = local_project_snapshot();
+        let ids = [
+            ("op-pending", OperationState::Pending, None),
+            ("op-failed", OperationState::Failed, Some("Clone failed")),
+            ("op-running", OperationState::Running, None),
+            ("op-interrupted", OperationState::Interrupted, None),
+        ];
+        for (id, state, error) in &ids {
+            snapshot
+                .operations
+                .push(clone_operation(id, state.clone(), *error));
+        }
+        mounted.model.snapshot.set(snapshot);
+        mounted.settle();
+        let nodes = mounted.ui.inspection_snapshot().nodes;
+        let node = |label: &str| {
+            nodes
+                .iter()
+                .find(|n| n.label.as_deref() == Some(label))
+                .unwrap_or_else(|| panic!("Missing control at {width}: {label}"))
+                .rect
+        };
+        let header = node("Operations");
+        let first_column = mounted.model.board_columns()[0].id.clone();
+        let column = node(&format!("Column {first_column}"));
+        let mut previous_top = header.origin.y;
+        for (id, state, error) in &ids {
+            let card = node(&format!("Operation {id}"));
+            // Server order is kept: rows never sort by state.
+            assert!(card.origin.y > previous_top, "{id} at {width}");
+            previous_top = card.origin.y;
+            assert!(card.origin.x >= 0.0 && card.max_x() <= width + 1.0, "{id}");
+            // Details fills its cell at the card's right edge.
+            let details = node(&format!("Operation details {id}"));
+            assert!((card.max_x() - details.max_x()).abs() <= 1.5, "{id}");
+            assert!(details.size.height >= card.size.height - 2.0, "{id}");
+            // Exactly the running row carries the working mark.
+            let working = nodes
+                .iter()
+                .filter(|n| n.role == Role::Image && n.label.as_deref() == Some("Working"))
+                .filter(|n| n.rect.origin.y >= card.origin.y && n.rect.max_y() <= card.max_y())
+                .count();
+            assert_eq!(working, usize::from(*state == OperationState::Running), "{id}");
+            let mark = crate::projects::operation_status(state).label();
+            assert!(
+                nodes.iter().any(|n| n.role == Role::Image
+                    && n.label.as_deref() == Some(mark)
+                    && n.rect.origin.y >= card.origin.y
+                    && n.rect.max_y() <= card.max_y()),
+                "{id} lacks its {mark} mark at {width}"
+            );
+            if let Some(error) = error {
+                assert!(has_label(&mounted, error), "{error} stays visible");
+            }
+        }
+        // The list sits above the board, never inside it.
+        assert!(column.origin.y >= header.max_y(), "board below list at {width}");
+    }
+}
+
 #[test]
 fn appearance_radios_arrow_keys_and_scale_stepper_keep_accessible_semantics() {
     let mounted = mount(false, 1380.0);
