@@ -44,6 +44,35 @@ pub fn start_recovery(
     });
     requests
 }
+pub fn start_lookup(
+    config: Config,
+    sender: StateSender<LookupUpdate>,
+) -> mpsc::UnboundedSender<LookupRequest> {
+    let (requests, mut receiver) = mpsc::unbounded_channel::<LookupRequest>();
+    spawn_local(async move {
+        while let Some(request) = receiver.recv().await {
+            let result = post::<BoardChoices>(
+                &config,
+                "v1/boards/resolve",
+                &BoardLookup {
+                    url: request.url.clone(),
+                },
+            )
+            .await
+            .map(|choices| choices.boards);
+            if sender
+                .send(LookupUpdate {
+                    request: Some(request),
+                    result: Some(result),
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    requests
+}
 async fn post<T: serde::de::DeserializeOwned>(
     config: &Config,
     path: &str,

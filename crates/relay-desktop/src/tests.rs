@@ -4384,29 +4384,31 @@ fn new_project_without_a_reported_server_folder_asks_for_a_root() {
 #[test]
 fn connection_forms_describe_each_kind_or_name_the_problem() {
     use crate::projects::{ConnectionDraft, form_connection};
-    let form = |kind, address: &str, host: &str, number: &str, group| ConnectionDraft {
+    let form = |kind, address: &str, host: &str, number: &str, gitlab, group| ConnectionDraft {
         kind,
         address: address.into(),
         host: host.into(),
         number: number.into(),
         group,
+        url: String::new(),
+        gitlab,
     };
     assert_eq!(
-        form_connection(&form(0, " git@example.com:team/a.git ", "", "", false)),
+        form_connection(&form(0, " git@example.com:team/a.git ", "", "", false, false)),
         Ok(ConnectionInput::Repository {
             remote: "git@example.com:team/a.git".into()
         })
     );
-    assert!(form_connection(&form(0, " ", "", "", false)).is_err());
+    assert!(form_connection(&form(0, " ", "", "", false, false)).is_err());
     assert_eq!(
-        form_connection(&form(1, "/srv/data", "", "", false)),
+        form_connection(&form(1, "/srv/data", "", "", false, false)),
         Ok(ConnectionInput::Directory {
             path: "/srv/data".into()
         })
     );
-    assert!(form_connection(&form(1, "data", "", "", false)).is_err());
+    assert!(form_connection(&form(1, "data", "", "", false, false)).is_err());
     assert_eq!(
-        form_connection(&form(2, "team", "gitlab.com", " 12 ", true)),
+        form_connection(&form(3, "team", "gitlab.com", " 12 ", false, true)),
         Ok(ConnectionInput::Board {
             source: BoardSource::Github {
                 owner: "team".into(),
@@ -4416,7 +4418,7 @@ fn connection_forms_describe_each_kind_or_name_the_problem() {
         })
     );
     assert_eq!(
-        form_connection(&form(3, "team/group", " gitlab.example ", "7", true)),
+        form_connection(&form(3, "team/group", " gitlab.example ", "7", true, true)),
         Ok(ConnectionInput::Board {
             source: BoardSource::Gitlab {
                 host: "gitlab.example".into(),
@@ -4429,22 +4431,24 @@ fn connection_forms_describe_each_kind_or_name_the_problem() {
     );
     for number in ["", "0", "-1", "x", "1.5"] {
         assert_eq!(
-            form_connection(&form(2, "team", "", number, false)),
+            form_connection(&form(3, "team", "", number, false, false)),
             Err("Enter the number of an existing board.")
         );
     }
     assert_eq!(
-        form_connection(&form(2, "", "", "1", false)),
+        form_connection(&form(3, "", "", "1", false, false)),
         Err("Enter the GitHub user or organization.")
     );
     assert_eq!(
-        form_connection(&form(3, "", "gitlab.com", "1", false)),
+        form_connection(&form(3, "", "gitlab.com", "1", true, false)),
         Err("Enter the GitLab project or group path.")
     );
     assert_eq!(
-        form_connection(&form(3, "team/app", " ", "1", false)),
+        form_connection(&form(3, "team/app", " ", "1", true, false)),
         Err("Enter the GitLab host.")
     );
+    // A board URL is resolved by the server, never built from the form.
+    assert!(form_connection(&form(2, "team", "gitlab.com", "1", false, false)).is_err());
 }
 
 #[test]
@@ -4477,7 +4481,8 @@ fn several_connections_of_different_kinds_can_be_added_before_creating() {
     );
     click_and_type(&mounted, "Repository URL", "owner/two");
     mounted.click("Add connection");
-    mounted.click("Connection type: GitLab board");
+    mounted.click("Connection type: Manual board");
+    mounted.click("Board provider: GitLab");
     click_and_type(&mounted, "GitLab project or group path", "team/group");
     mounted.click("GitLab board scope: Group board");
     click_and_type(&mounted, "Existing board number", "7");
@@ -4504,6 +4509,187 @@ fn several_connections_of_different_kinds_can_be_added_before_creating() {
         ]
     );
     assert_eq!(draft.connection_form.kind, 3);
+}
+
+fn gitlab_choice(name: &str, number: u64) -> BoardChoice {
+    BoardChoice {
+        name: name.into(),
+        source: BoardSource::Gitlab {
+            host: "gitlab.com".into(),
+            group: true,
+            path: "unincorporated/mosaic".into(),
+            number,
+            url: String::new(),
+        },
+    }
+}
+
+const PASTED_BOARD: &str = "https://gitlab.com/groups/unincorporated/mosaic/-/boards#/";
+
+/// A New Project form on the Board URL tab with a lookup channel, and the
+/// request the server would receive after the address is submitted.
+fn submit_pasted_board(
+    mounted: &Mounted,
+) -> crate::project_network::LookupRequest {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.lookup_requests.set(Some(sender));
+    open_project_menu(mounted);
+    mounted.click("New Project");
+    mounted.click("New connection");
+    mounted.click("Connection type: Board URL");
+    click_and_type(mounted, "Board URL", PASTED_BOARD);
+    mounted.click("Add board");
+    receiver.try_recv().expect("board lookup requested")
+}
+
+fn answer_lookup(
+    mounted: &Mounted,
+    request: crate::project_network::LookupRequest,
+    result: Result<Vec<BoardChoice>, String>,
+) {
+    mounted.model.lookup.set(crate::project_network::LookupUpdate {
+        request: Some(request),
+        result: Some(result),
+    });
+    mounted.settle();
+}
+
+#[test]
+fn a_pasted_board_address_with_one_board_is_added_without_a_number() {
+    let mounted = mount(false, 1380.0);
+    let request = submit_pasted_board(&mounted);
+    assert_eq!(request.url, PASTED_BOARD);
+    // Nothing is added until the server answers.
+    assert!(
+        mounted
+            .model
+            .project_draft
+            .get_untracked()
+            .connections
+            .is_empty()
+    );
+    answer_lookup(&mounted, request, Ok(vec![gitlab_choice("Roadmap", 7)]));
+    let draft = mounted.model.project_draft.get_untracked();
+    assert_eq!(
+        draft.connections,
+        vec![ConnectionInput::Board {
+            source: gitlab_choice("Roadmap", 7).source
+        }]
+    );
+    assert!(draft.connection_form.url.is_empty());
+}
+
+#[test]
+fn a_pasted_board_address_with_several_boards_offers_a_picker_by_name() {
+    let mounted = mount(false, 1380.0);
+    let request = submit_pasted_board(&mounted);
+    answer_lookup(
+        &mounted,
+        request,
+        Ok(vec![
+            gitlab_choice("Roadmap", 7),
+            gitlab_choice("Sprint", 9),
+        ]),
+    );
+    assert!(
+        mounted
+            .model
+            .project_draft
+            .get_untracked()
+            .connections
+            .is_empty()
+    );
+    mounted.click("Add board Sprint");
+    let draft = mounted.model.project_draft.get_untracked();
+    assert_eq!(
+        draft.connections,
+        vec![ConnectionInput::Board {
+            source: gitlab_choice("Sprint", 9).source
+        }]
+    );
+    assert!(!mounted.ui.inspection_snapshot().nodes.iter().any(|n| {
+        n.label
+            .as_deref()
+            .is_some_and(|l| l.starts_with("Add board Roadmap"))
+    }));
+}
+
+#[test]
+fn a_pasted_board_address_that_finds_nothing_adds_nothing_and_says_why() {
+    let mounted = mount(false, 1380.0);
+    let request = submit_pasted_board(&mounted);
+    answer_lookup(
+        &mounted,
+        request,
+        Err("No boards found in unincorporated/mosaic. Create a board in GitLab, then paste its address.".into()),
+    );
+    assert!(
+        mounted
+            .model
+            .project_draft
+            .get_untracked()
+            .connections
+            .is_empty()
+    );
+    // The address stays for correction and the form can look again.
+    assert_eq!(
+        mounted.model.project_draft.get_untracked().connection_form.url,
+        PASTED_BOARD
+    );
+    mounted.click("Add board");
+}
+
+#[test]
+fn an_empty_board_address_is_not_sent_to_the_server() {
+    let mounted = mount(false, 1380.0);
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.lookup_requests.set(Some(sender));
+    open_project_menu(&mounted);
+    mounted.click("New Project");
+    mounted.click("New connection");
+    mounted.click("Connection type: Board URL");
+    mounted.click("Add board");
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn a_board_answer_for_another_request_is_ignored() {
+    let mounted = mount(false, 1380.0);
+    let request = submit_pasted_board(&mounted);
+    let mut other = request.clone();
+    other.id = "another-lookup".into();
+    answer_lookup(&mounted, other, Ok(vec![gitlab_choice("Roadmap", 7)]));
+    assert!(
+        mounted
+            .model
+            .project_draft
+            .get_untracked()
+            .connections
+            .is_empty()
+    );
+    answer_lookup(&mounted, request, Ok(vec![gitlab_choice("Roadmap", 7)]));
+    assert_eq!(
+        mounted
+            .model
+            .project_draft
+            .get_untracked()
+            .connections
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn board_choices_with_the_same_name_show_their_numbers() {
+    use crate::projects::choice_title;
+    let boards = vec![
+        gitlab_choice("Board", 1),
+        gitlab_choice("Board", 2),
+        gitlab_choice("Other", 3),
+    ];
+    assert_eq!(choice_title(&boards, 0), "Board (1)");
+    assert_eq!(choice_title(&boards, 1), "Board (2)");
+    assert_eq!(choice_title(&boards, 2), "Other");
 }
 
 #[test]

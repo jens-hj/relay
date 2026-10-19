@@ -1641,6 +1641,7 @@ pub fn router_with_browser(
     Ok((
         Router::new()
             .route("/v1/boards/discover", post(discover_board))
+            .route("/v1/boards/resolve", post(resolve_board))
             .route(
                 "/v1/projects/{project}/catalog/{harness}",
                 get(commands::profile_catalog),
@@ -1783,6 +1784,24 @@ async fn discover_board(
             columns: b.columns,
         })
     })
+}
+
+async fn resolve_board(
+    State(workspace): State<Workspace>,
+    headers: HeaderMap,
+    Json(lookup): Json<BoardLookup>,
+) -> Result<Json<BoardChoices>, Error> {
+    workspace.authorize(&headers)?;
+    let job = ProjectJob::new(&workspace);
+    tokio::task::spawn_blocking(move || {
+        let _job = job;
+        process::with_cancellation(workspace.transport_shutdown.subscribe(), || {
+            providers::resolve_board_url(&workspace.config, &lookup.url)
+        })
+    })
+    .await
+    .map_err(Error::internal)?
+    .map(|boards| Json(BoardChoices { boards }))
 }
 
 async fn reconcile_lookup(

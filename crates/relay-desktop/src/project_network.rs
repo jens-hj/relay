@@ -1,6 +1,6 @@
 use crate::network::Config;
 use mosaic::prelude::StateSender;
-use relay_core::{ApiError, BoardDiscovery, BoardSource};
+use relay_core::{ApiError, BoardChoice, BoardChoices, BoardDiscovery, BoardLookup, BoardSource};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -265,6 +265,180 @@ mod recovery_tests {
                 .unwrap(),
             result
         );
+        server.join().unwrap();
+    }
+}
+
+/// A pasted board address to resolve; `id` tells repeated lookups of the same
+/// address apart.
+#[derive(Clone, PartialEq, Eq)]
+pub struct LookupRequest {
+    pub url: String,
+    pub id: String,
+}
+#[derive(Clone, Default)]
+pub struct LookupUpdate {
+    pub request: Option<LookupRequest>,
+    pub result: Option<Result<Vec<BoardChoice>, String>>,
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub fn start_lookup(
+    config: Config,
+    sender: StateSender<LookupUpdate>,
+) -> mpsc::UnboundedSender<LookupRequest> {
+    let (requests, mut receiver) = mpsc::unbounded_channel::<LookupRequest>();
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let client = reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(5))
+                    .timeout(Duration::from_secs(60))
+                    .build()
+                    .unwrap();
+                while let Some(request) = receiver.recv().await {
+                    let result = lookup(&client, &config, &request.url).await;
+                    if sender
+                        .send(LookupUpdate {
+                            request: Some(request),
+                            result: Some(result),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+    });
+    requests
+}
+/// The boards a pasted address resolves to. The server reads them with its own
+/// provider login; nothing is created.
+#[cfg(not(target_arch = "wasm32"))]
+async fn lookup(
+    client: &reqwest::Client,
+    config: &Config,
+    url: &str,
+) -> Result<Vec<BoardChoice>, String> {
+    let response = client
+        .post(config.url("v1/boards/resolve"))
+        .bearer_auth(&config.token)
+        .header("X-Relay-Protocol", relay_core::PROTOCOL_VERSION.to_string())
+        .json(&BoardLookup { url: url.into() })
+        .send()
+        .await
+        .map_err(|_| "Cannot look up the board. Check the server connection and retry.".to_owned())?;
+    let status = response.status();
+    if status.is_success() {
+        let choices: BoardChoices = response
+            .json()
+            .await
+            .map_err(|_| "Server returned an incompatible board list".to_owned())?;
+        return Ok(choices.boards);
+    }
+    Err(match response.json::<ApiError>().await {
+        Ok(error) => error.message,
+        Err(_) if matches!(status.as_u16(), 404 | 405) => {
+            "This server cannot look up board addresses. Update the server, or enter the board details manually.".into()
+        }
+        Err(_) => format!("Board lookup failed ({status})"),
+    })
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod lookup_tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+    fn serve(status: &str, body: String) -> (Config, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let status = status.to_owned();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            while !String::from_utf8_lossy(&bytes).contains("\"url\"") {
+                let mut chunk = [0; 2048];
+                let count = socket.read(&mut chunk).unwrap();
+                assert_ne!(count, 0);
+                bytes.extend_from_slice(&chunk[..count]);
+            }
+            write!(socket,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            String::from_utf8_lossy(&bytes).to_lowercase()
+        });
+        (
+            Config {
+                endpoint: reqwest::Url::parse(&format!("http://{address}/")).unwrap(),
+                token: "test".into(),
+            },
+            server,
+        )
+    }
+    fn choice(name: &str, number: u64) -> BoardChoice {
+        BoardChoice {
+            name: name.into(),
+            source: BoardSource::Gitlab {
+                host: "gitlab.com".into(),
+                group: true,
+                path: "team".into(),
+                number,
+                url: String::new(),
+            },
+        }
+    }
+    #[tokio::test]
+    async fn lookup_posts_the_pasted_address_and_decodes_every_choice() {
+        let boards = vec![choice("Roadmap", 7), choice("Sprint", 9)];
+        let body = serde_json::to_string(&BoardChoices {
+            boards: boards.clone(),
+        })
+        .unwrap();
+        let (config, server) = serve("200 OK", body);
+        let found = lookup(
+            &reqwest::Client::new(),
+            &config,
+            "https://gitlab.com/groups/team/-/boards#/",
+        )
+        .await
+        .unwrap();
+        assert_eq!(found, boards);
+        let request = server.join().unwrap();
+        assert!(request.starts_with("post /v1/boards/resolve "));
+        assert!(request.contains("authorization: bearer test"));
+        assert!(request.contains(&format!(
+            "x-relay-protocol: {}",
+            relay_core::PROTOCOL_VERSION
+        )));
+        assert!(request.contains("https://gitlab.com/groups/team/-/boards#/"));
+    }
+    #[tokio::test]
+    async fn lookup_reports_the_servers_reason_and_old_servers() {
+        let body = serde_json::to_string(&ApiError {
+            code: "invalid".into(),
+            message: "No boards found in team. Create a board in GitLab, then paste its address."
+                .into(),
+        })
+        .unwrap();
+        let (config, server) = serve("422 Unprocessable Entity", body);
+        assert_eq!(
+            lookup(&reqwest::Client::new(), &config, "https://gitlab.com/groups/team/-/boards")
+                .await
+                .unwrap_err(),
+            "No boards found in team. Create a board in GitLab, then paste its address."
+        );
+        server.join().unwrap();
+        let (config, server) = serve("404 Not Found", String::new());
+        let error = lookup(&reqwest::Client::new(), &config, "https://gitlab.com/groups/team/-/boards")
+            .await
+            .unwrap_err();
+        assert!(error.contains("cannot look up board addresses"), "{error}");
         server.join().unwrap();
     }
 }

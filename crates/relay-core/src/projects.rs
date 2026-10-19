@@ -55,6 +55,27 @@ pub struct BoardDiscovery {
     pub columns: Vec<BoardColumn>,
 }
 
+/// A board address pasted by the user, such as the browser address of a GitLab
+/// group board or a GitHub project.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardLookup {
+    pub url: String,
+}
+
+/// One existing board an address can mean; `source` names it completely.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardChoice {
+    pub name: String,
+    pub source: BoardSource,
+}
+
+/// The boards a pasted address resolves to, never empty. One means the address
+/// named it or the scope has only that board; several are for the user to pick.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardChoices {
+    pub boards: Vec<BoardChoice>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconciliationInput {
     pub operation_id: String,

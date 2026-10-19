@@ -122,6 +122,15 @@ fn run(config: network::Config) -> Result<(), String> {
                     recovery_sender,
                 )));
             Effect::new(move || model.recovery.set(recovery_updates.get()));
+            let (lookup_updates, lookup_sender) =
+                state_channel(project_network::LookupUpdate::default());
+            model
+                .lookup_requests
+                .set(Some(project_network::start_lookup(
+                    config.clone(),
+                    lookup_sender,
+                )));
+            Effect::new(move || model.lookup.set(lookup_updates.get()));
             let (buffer_updates, buffer_sender) = state_channel(buffer_network::Update::default());
             model
                 .buffer_requests

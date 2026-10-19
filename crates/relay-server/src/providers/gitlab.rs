@@ -355,3 +355,34 @@ pub(super) fn move_task(
     rest(config, &host, &path, "PUT", fields)?;
     Ok(())
 }
+
+/// Every board of a group or project as `(number, name)`, read only.
+pub(super) fn boards(
+    config: &RuntimeConfig,
+    host: &str,
+    group: bool,
+    path: &str,
+) -> Result<Vec<(u64, String)>, Error> {
+    let source = BoardSource::Gitlab {
+        host: host.into(),
+        group,
+        path: path.into(),
+        number: 0,
+        url: String::new(),
+    };
+    let (_, base) = scope(&source);
+    let mut boards: Vec<(u64, String)> = Vec::new();
+    for board in paged(config, host, &format!("{base}/boards"))? {
+        let id = super::number(&board, "id")?;
+        if boards.iter().any(|(known, _)| *known == id) {
+            continue;
+        }
+        let name = board["name"]
+            .as_str()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map_or_else(|| format!("Board {id}"), str::to_owned);
+        boards.push((id, name));
+    }
+    Ok(boards)
+}

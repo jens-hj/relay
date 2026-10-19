@@ -603,6 +603,30 @@ async fn catalog_and_session_choices_cross_http_and_reconnect_without_replaying_
         Some(build.projects_root.as_str()).filter(|r| !r.is_empty()),
         w.config.projects_root.as_ref().and_then(|p| p.to_str())
     );
+    // Board address lookup needs the token and refuses addresses that carry
+    // credentials before any provider process starts.
+    let lookup = serde_json::json!({"url": "https://user:pw@gitlab.com/groups/t/-/boards"});
+    let resolve = |token: Option<&str>| {
+        let mut request = client
+            .post(format!("{endpoint}/v1/boards/resolve"))
+            .header("x-relay-protocol", PROTOCOL_VERSION.to_string())
+            .json(&lookup);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        request.send()
+    };
+    assert_eq!(
+        resolve(None).await.unwrap().status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        resolve(Some("relay-test-token-command"))
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    );
     let catalog: HarnessCatalog = client
         .get(format!("{endpoint}/v1/sessions/{id}/catalog"))
         .bearer_auth("relay-test-token-command")
