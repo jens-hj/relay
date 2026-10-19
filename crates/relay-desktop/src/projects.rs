@@ -975,6 +975,14 @@ pub(crate) fn operation_details(
                 {
                     rows.push(("Board URL".into(), url.clone()));
                 }
+                if found.source != BoardSource::Local {
+                    rows.push((
+                        "Last synced".into(),
+                        crate::ui::sync_label(found.last_synced_at)
+                            .trim_start_matches("Last synced ")
+                            .to_string(),
+                    ));
+                }
             }
         }
         OperationKind::Publish {

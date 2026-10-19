@@ -84,8 +84,8 @@ pub(crate) fn sync_age(model: Model) -> Option<String> {
     )
 }
 
-/// The last synchronisation error of the visible board, if any.
-/// The board's sync error, unless an unfinished operation row already shows it.
+/// The last synchronisation error of the visible board, unless an
+/// unfinished operation row already shows it.
 pub(crate) fn board_error(model: Model) -> Option<String> {
     let error = match model.selected_board() {
         Some(board) => board.error,
