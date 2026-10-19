@@ -3,11 +3,77 @@ use crate::*;
 
 pub const PROTOCOL_VERSION: u32 = 14;
 
+/// The most letters and digits in an automatically placed project's directory.
+const PROJECT_DIRECTORY_LIMIT: usize = 64;
+
+/// The directory name for a project created without an explicit root: the
+/// name in lowercase, each run of characters other than letters, digits and
+/// `_` collapsed to one `-`, with no leading or trailing `-`. The result has
+/// no `/` or `.`, so it cannot name a parent or hidden directory. `None` when
+/// the name has no letter or digit.
+pub fn project_directory(name: &str) -> Option<String> {
+    let mut directory = String::new();
+    let mut count = 0;
+    let mut separate = false;
+    for c in name.trim().chars() {
+        if !(c.is_alphanumeric() || c == '_') {
+            separate = true;
+            continue;
+        }
+        if count == PROJECT_DIRECTORY_LIMIT {
+            break;
+        }
+        if separate && !directory.is_empty() {
+            directory.push('-');
+        }
+        separate = false;
+        directory.extend(c.to_lowercase());
+        count += 1;
+    }
+    (!directory.is_empty()).then_some(directory)
+}
+
+/// Where a project named `name` lives when created without a root: below the
+/// server's absolute `projects_root`. `None` when the base is not absolute or
+/// the name yields no directory.
+pub fn default_project_root(projects_root: &str, name: &str) -> Option<String> {
+    let base = projects_root.trim();
+    if !base.starts_with('/') {
+        return None;
+    }
+    Some(format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        project_directory(name)?
+    ))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BoardDiscovery {
     pub source: BoardSource,
     pub name: String,
     pub columns: Vec<BoardColumn>,
+}
+
+/// A board address pasted by the user, such as the browser address of a GitLab
+/// group board or a GitHub project.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardLookup {
+    pub url: String,
+}
+
+/// One existing board an address can mean; `source` names it completely.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardChoice {
+    pub name: String,
+    pub source: BoardSource,
+}
+
+/// The boards a pasted address resolves to, never empty. One means the address
+/// named it or the scope has only that board; several are for the user to pick.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardChoices {
+    pub boards: Vec<BoardChoice>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,5 +500,65 @@ mod alias_tests {
             .issue_aliases
             .extend([("a".into(), "b".into()), ("b".into(), "a".into())]);
         assert_eq!(snapshot.canonical_issue_id("a"), "a");
+    }
+}
+
+#[cfg(test)]
+mod project_directory_tests {
+    use super::*;
+
+    #[test]
+    fn names_become_one_safe_lowercase_directory() {
+        assert_eq!(project_directory("mosaic").as_deref(), Some("mosaic"));
+        assert_eq!(
+            project_directory("  My Project: v2 ").as_deref(),
+            Some("my-project-v2")
+        );
+        assert_eq!(project_directory("a__b").as_deref(), Some("a__b"));
+        for unsafe_name in ["../..", "..", ".", "/", "/etc/passwd ", "a/../b"] {
+            let directory = project_directory(unsafe_name);
+            assert!(
+                directory
+                    .as_deref()
+                    .is_none_or(|d| !d.contains(['/', '.']) && !d.starts_with('-')),
+                "{unsafe_name}: {directory:?}"
+            );
+        }
+        assert_eq!(project_directory("../etc").as_deref(), Some("etc"));
+        assert_eq!(project_directory("").as_deref(), None);
+        assert_eq!(project_directory(" -- ").as_deref(), None);
+        assert_eq!(project_directory(&"a".repeat(200)).unwrap().len(), 64);
+    }
+
+    #[test]
+    fn the_default_root_needs_an_absolute_base_and_a_usable_name() {
+        let base = "/srv/relay/projects";
+        assert_eq!(
+            default_project_root(base, "Mosaic").as_deref(),
+            Some("/srv/relay/projects/mosaic")
+        );
+        assert_eq!(
+            default_project_root("/srv/relay/projects/", "Mosaic").as_deref(),
+            Some("/srv/relay/projects/mosaic")
+        );
+        assert_eq!(default_project_root("", "Mosaic"), None);
+        assert_eq!(default_project_root("projects", "Mosaic"), None);
+        assert_eq!(default_project_root(base, "!!!"), None);
+    }
+
+    #[test]
+    fn build_info_without_a_projects_root_keeps_its_old_shape() {
+        let build = BuildInfo::current();
+        let json = serde_json::to_value(&build).unwrap();
+        assert!(json.get("projects_root").is_none());
+        let with_root = BuildInfo {
+            projects_root: "/srv/projects".into(),
+            ..build.clone()
+        };
+        let round: BuildInfo =
+            serde_json::from_value(serde_json::to_value(&with_root).unwrap()).unwrap();
+        assert_eq!(round, with_root);
+        let old: BuildInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(old, build);
     }
 }

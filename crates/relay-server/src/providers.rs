@@ -7,6 +7,7 @@
 //! `pending` = key of an in-flight write (plain). It is persisted *before* a write;
 //! an interrupted/ambiguous write cannot replay until that key has a known result.
 //! Reconciliation must supply the exact result type above, never an arbitrary OK.
+mod board_url;
 mod github;
 mod gitlab;
 #[cfg(test)]
@@ -20,6 +21,8 @@ use std::{collections::HashSet, process::Command, time::Duration};
 const LIMIT: usize = 16 * 1024 * 1024;
 const MAX_PAGES: usize = 10_000;
 const NO_STATUS: &str = "github-no-status";
+/// The most boards one address can offer.
+const MAX_CHOICES: usize = 100;
 
 fn text(v: &Value, key: &str) -> Result<String, Error> {
     v[key]
@@ -162,6 +165,46 @@ pub fn discover(config: &RuntimeConfig, source: &BoardSource) -> Result<Board, E
         });
     }
     Ok(metadata(config, source)?.board)
+}
+/// The boards a pasted board address means, read only: the one board it names,
+/// or for a GitLab group or project address every board of that scope. Nothing
+/// is guessed or created: a scope without boards is an error.
+pub fn resolve_board_url(config: &RuntimeConfig, address: &str) -> Result<Vec<BoardChoice>, Error> {
+    let source = board_url::parse(address)?;
+    validate_source(&source)?;
+    if source_number(&source) > 0 {
+        let board = metadata(config, &source)?.board;
+        return Ok(vec![BoardChoice {
+            name: board.name,
+            source: board.source,
+        }]);
+    }
+    let BoardSource::Gitlab {
+        host, group, path, ..
+    } = &source
+    else {
+        return Err(Error::invalid("Paste the address of an existing board"));
+    };
+    let boards = gitlab::boards(config, host, *group, path)?;
+    if boards.is_empty() {
+        return Err(Error::invalid(format!(
+            "No boards found in {path}. Create a board in GitLab, then paste its address."
+        )));
+    }
+    Ok(boards
+        .into_iter()
+        .take(MAX_CHOICES)
+        .map(|(number, name)| BoardChoice {
+            name,
+            source: BoardSource::Gitlab {
+                host: host.clone(),
+                group: *group,
+                path: path.clone(),
+                number,
+                url: String::new(),
+            },
+        })
+        .collect())
 }
 fn metadata(config: &RuntimeConfig, source: &BoardSource) -> Result<RemoteBoard, Error> {
     validate_source(source)?;

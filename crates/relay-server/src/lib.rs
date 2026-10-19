@@ -1716,6 +1716,7 @@ pub fn router_with_browser(
     Ok((
         Router::new()
             .route("/v1/boards/discover", post(discover_board))
+            .route("/v1/boards/resolve", post(resolve_board))
             .route(
                 "/v1/projects/{project}/catalog/{harness}",
                 get(commands::profile_catalog),
@@ -1788,8 +1789,15 @@ async fn authorize(
     Ok(next.run(request).await)
 }
 
-async fn build_version() -> Json<BuildInfo> {
-    Json(BuildInfo::current())
+async fn build_version(State(workspace): State<Workspace>) -> Json<BuildInfo> {
+    let mut build = BuildInfo::current();
+    build.projects_root = workspace
+        .config
+        .projects_root
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    Json(build)
 }
 
 async fn snapshot(
@@ -1851,6 +1859,24 @@ async fn discover_board(
             columns: b.columns,
         })
     })
+}
+
+async fn resolve_board(
+    State(workspace): State<Workspace>,
+    headers: HeaderMap,
+    Json(lookup): Json<BoardLookup>,
+) -> Result<Json<BoardChoices>, Error> {
+    workspace.authorize(&headers)?;
+    let job = ProjectJob::new(&workspace);
+    tokio::task::spawn_blocking(move || {
+        let _job = job;
+        process::with_cancellation(workspace.transport_shutdown.subscribe(), || {
+            providers::resolve_board_url(&workspace.config, &lookup.url)
+        })
+    })
+    .await
+    .map_err(Error::internal)?
+    .map(|boards| Json(BoardChoices { boards }))
 }
 
 async fn reconcile_lookup(

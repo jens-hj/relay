@@ -355,6 +355,8 @@ pub enum Command {
     },
     CreateProject {
         name: String,
+        /// An absolute directory on the server. Empty places the project
+        /// under the server's own project directory, named after the project.
         root: String,
         connections: Vec<ConnectionInput>,
     },

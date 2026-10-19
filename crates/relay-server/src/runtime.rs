@@ -342,6 +342,9 @@ pub struct RemoteConfig {
 pub struct RuntimeConfig {
     pub remote: Option<RemoteConfig>,
     pub repository: Option<PathBuf>,
+    /// The server directory under which projects created without a root get
+    /// their own directory; `None` when the server has no usable location.
+    pub projects_root: Option<PathBuf>,
     pub(crate) gh: PathBuf,
     pub(crate) glab: PathBuf,
     pub(crate) codex: PathBuf,
@@ -391,11 +394,33 @@ fn executable(path: &Path) -> bool {
         true
     }
 }
+/// Where the server keeps projects created without a root: `RELAY_PROJECTS_DIR`,
+/// else `relay/projects` under `XDG_DATA_HOME`, else `~/.local/share/relay/projects`
+/// in the home of the user the server runs as. Relative locations are ignored.
+pub(crate) fn default_projects_root() -> Option<PathBuf> {
+    projects_root_from(|key| std::env::var_os(key))
+}
+pub(crate) fn projects_root_from(
+    var: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let absolute =
+        |value: std::ffi::OsString| Some(PathBuf::from(value)).filter(|p| p.is_absolute());
+    if let Some(path) = var("RELAY_PROJECTS_DIR").and_then(absolute) {
+        return Some(path);
+    }
+    if let Some(data) = var("XDG_DATA_HOME").and_then(absolute) {
+        return Some(data.join("relay").join("projects"));
+    }
+    var("HOME")
+        .and_then(absolute)
+        .map(|home| home.join(".local/share/relay/projects"))
+}
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             remote: None,
             repository: None,
+            projects_root: default_projects_root(),
             gh: "gh".into(),
             glab: "glab".into(),
             codex: installed_binary("codex", "RELAY_CODEX_BIN"),
@@ -459,6 +484,13 @@ impl RuntimeConfig {
         {
             return Err(Error::invalid(
                 "RELAY_REPO_PATH must be an existing absolute repository path",
+            ));
+        }
+        if let Some(path) = std::env::var_os("RELAY_PROJECTS_DIR")
+            && !Path::new(&path).is_absolute()
+        {
+            return Err(Error::invalid(
+                "RELAY_PROJECTS_DIR must be an absolute directory path",
             ));
         }
         Ok(Self {

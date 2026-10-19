@@ -2371,3 +2371,270 @@ fn gitlab_created_issue_work_item_url_is_stored_canonically() {
         );
     }
 }
+fn gitlab_scope(host: &str, group: bool, path: &str, number: u64) -> BoardSource {
+    BoardSource::Gitlab {
+        host: host.into(),
+        group,
+        path: path.into(),
+        number,
+        url: String::new(),
+    }
+}
+
+#[test]
+fn pasted_board_addresses_name_the_provider_scope_and_board() {
+    use board_url::parse;
+    assert_eq!(
+        parse("https://gitlab.com/groups/unincorporated/mosaic/-/boards#/").unwrap(),
+        gitlab_scope("gitlab.com", true, "unincorporated/mosaic", 0)
+    );
+    assert_eq!(
+        parse("  https://gitlab.com/groups/team/-/boards/  ").unwrap(),
+        gitlab_scope("gitlab.com", true, "team", 0)
+    );
+    assert_eq!(
+        parse("https://GitLab.Example/team/sub/app/-/boards/12?group_by=epic#fragment").unwrap(),
+        gitlab_scope("gitlab.example", false, "team/sub/app", 12)
+    );
+    assert_eq!(
+        parse("https://gitlab.com:443/groups/team/-/boards/4").unwrap(),
+        gitlab_scope("gitlab.com", true, "team", 4)
+    );
+    assert_eq!(
+        parse("https://github.com/orgs/team/projects/3/views/1?pane=issue").unwrap(),
+        BoardSource::Github {
+            owner: "team".into(),
+            number: 3,
+            url: String::new()
+        }
+    );
+    assert!(matches!(
+        parse("https://github.com/users/me/projects/9").unwrap(),
+        BoardSource::Github { owner, number: 9, .. } if owner == "me"
+    ));
+}
+
+#[test]
+fn pasted_addresses_that_could_point_elsewhere_are_refused() {
+    for address in [
+        "",
+        "not an address",
+        "http://gitlab.com/groups/t/-/boards",
+        "ftp://gitlab.com/groups/t/-/boards",
+        "https://user:password@gitlab.com/groups/t/-/boards",
+        "https://token@gitlab.com/groups/t/-/boards",
+        "https://gitlab.com:8443/groups/t/-/boards",
+        "https://gitlab.com\\@evil.example/groups/t/-/boards",
+        "https://gitlab.com/groups/t/../u/-/boards",
+        "https://gitlab.com/groups/%2e%2e/-/boards",
+        "https://gitlab.com/groups/t%2Fu/-/boards",
+        "https://gitlab.com/groups/t//u/-/boards",
+        "https://gitlab.com/groups/t u/-/boards",
+        "https://[::1]/groups/t/-/boards",
+        "https://gitlab.com./groups/t/-/boards",
+        "https://gitlab.com/groups/t/-/boards/0",
+        "https://gitlab.com/groups/t/-/boards/abc",
+        "https://gitlab.com/groups/t/-/boards/+5",
+        "https://gitlab.com/groups/t/-/boards/1/extra",
+        "https://gitlab.com/groups/-/boards",
+        "https://gitlab.com/solo/-/boards",
+        "https://gitlab.com/groups/t",
+        "https://gitlab.com/t/app/-/issues",
+        "https://github.com/orgs/team/projects",
+        "https://github.com/orgs/team/projects/0",
+        "https://github.com/team/repo/projects/1",
+        "https://github.com/orgs/team/projects/3/settings",
+    ] {
+        assert!(board_url::parse(address).is_err(), "{address}");
+    }
+    assert!(board_url::parse(&format!("https://gitlab.com/{}", "a/".repeat(2000))).is_err());
+}
+
+#[test]
+fn a_group_address_is_never_read_as_a_project() {
+    let BoardSource::Gitlab { group, path, .. } =
+        board_url::parse("https://gitlab.com/groups/team/app/-/boards").unwrap()
+    else {
+        panic!("GitLab address");
+    };
+    assert!(group);
+    assert_eq!(path, "team/app");
+}
+
+const LISTING: &str = "groups/unincorporated%2Fmosaic/boards?per_page=100&page=1";
+const GROUP_ADDRESS: &str = "https://gitlab.com/groups/unincorporated/mosaic/-/boards#/";
+
+#[test]
+fn one_board_in_the_scope_is_chosen_without_a_number() {
+    let fake = Fake::new(vec![(LISTING, json!([{"id":7,"name":"Roadmap"}]), 0)]);
+    let choices = resolve_board_url(&fake.config(), GROUP_ADDRESS).unwrap();
+    assert_eq!(
+        choices,
+        vec![BoardChoice {
+            name: "Roadmap".into(),
+            source: gitlab_scope("gitlab.com", true, "unincorporated/mosaic", 7),
+        }]
+    );
+    let calls = fake.calls();
+    assert!(calls.contains("--hostname gitlab.com"));
+    assert!(calls.contains("--method GET"));
+    assert!(!calls.contains("POST") && !calls.contains("PUT") && !calls.contains("DELETE"));
+}
+
+#[test]
+fn several_boards_are_offered_by_name_in_provider_order() {
+    let fake = Fake::new(vec![(
+        LISTING,
+        json!([{"id":9,"name":"Sprint"},{"id":7,"name":"Roadmap"},{"id":9,"name":"Sprint"},{"id":11}]),
+        0,
+    )]);
+    let choices = resolve_board_url(&fake.config(), GROUP_ADDRESS).unwrap();
+    assert_eq!(
+        choices
+            .iter()
+            .map(|c| (c.name.as_str(), source_number(&c.source)))
+            .collect::<Vec<_>>(),
+        [("Sprint", 9), ("Roadmap", 7), ("Board 11", 11)]
+    );
+}
+
+#[test]
+fn a_project_address_lists_the_project_boards() {
+    let fake = Fake::new(vec![(
+        "projects/team%2Fsub%2Fapp/boards?per_page=100",
+        json!([{"id":3,"name":"Development"}]),
+        0,
+    )]);
+    let choices =
+        resolve_board_url(&fake.config(), "https://gitlab.com/team/sub/app/-/boards").unwrap();
+    assert_eq!(
+        choices[0].source,
+        gitlab_scope("gitlab.com", false, "team/sub/app", 3)
+    );
+}
+
+#[test]
+fn a_scope_without_boards_is_an_error_and_creates_nothing() {
+    let fake = Fake::new(vec![(LISTING, json!([]), 0)]);
+    let error = resolve_board_url(&fake.config(), GROUP_ADDRESS)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("No boards found in unincorporated/mosaic"), "{error}");
+    assert!(!fake.calls().contains("POST"));
+}
+
+#[test]
+fn a_failed_provider_login_is_reported_without_guessing_a_board() {
+    let fake = Fake::new(vec![(LISTING, json!({"message":"401 Unauthorized"}), 1)]);
+    let error = resolve_board_url(&fake.config(), GROUP_ADDRESS)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("authentication"), "{error}");
+    assert_eq!(fake.calls().lines().count(), 1);
+}
+
+#[test]
+fn a_numbered_gitlab_address_checks_that_board_and_returns_its_name() {
+    let fake = Fake::new(gl_metadata());
+    let choices = resolve_board_url(
+        &fake.config(),
+        "https://gitlab.example/groups/group/-/boards/2?label_name[]=x",
+    )
+    .unwrap_or_else(|_| panic!("{}", fake.calls()));
+    assert_eq!(choices.len(), 1);
+    assert_eq!(choices[0].name, "GitLab");
+    assert_eq!(source_number(&choices[0].source), 2);
+    assert!(!fake.calls().contains("POST"));
+}
+
+#[test]
+fn a_numbered_github_address_checks_that_project_and_returns_its_title() {
+    let fake = Fake::new(gh_metadata());
+    let choices =
+        resolve_board_url(&fake.config(), "https://github.com/users/owner/projects/1/views/2")
+            .unwrap();
+    assert_eq!(choices.len(), 1);
+    assert_eq!(choices[0].name, "Remote");
+    assert!(matches!(
+        &choices[0].source,
+        BoardSource::Github { owner, number: 1, .. } if owner == "owner"
+    ));
+}
+
+#[test]
+fn an_unparseable_address_never_starts_a_provider_process() {
+    let fake = Fake::new(vec![]);
+    assert!(resolve_board_url(&fake.config(), "https://user:pw@gitlab.com/groups/t/-/boards").is_err());
+    assert!(fake.calls().is_empty());
+}
+
+/// The shape of a real read-only lookup of the unincorporated/mosaic group:
+/// one board, with a large provider ID and extra fields the server ignores.
+#[test]
+fn a_real_group_listing_with_one_large_board_id_resolves_to_that_board() {
+    let fake = Fake::new(vec![(
+        LISTING,
+        json!([{
+            "id": 11427455,
+            "name": "Development",
+            "group": {"id": 137148688, "name": "mosaic"},
+            "labels": [],
+            "lists": [{"label": {"name": "next-up"}}, {"label": {"name": "in-progress"}}]
+        }]),
+        0,
+    )]);
+    let choices = resolve_board_url(&fake.config(), GROUP_ADDRESS).unwrap();
+    assert_eq!(
+        choices,
+        vec![BoardChoice {
+            name: "Development".into(),
+            source: gitlab_scope("gitlab.com", true, "unincorporated/mosaic", 11427455),
+        }]
+    );
+}
+
+#[test]
+fn a_gitlab_id_query_selects_the_board_like_the_path_number() {
+    use board_url::parse;
+    assert_eq!(
+        parse("https://gitlab.com/groups/team/-/boards?id=7").unwrap(),
+        gitlab_scope("gitlab.com", true, "team", 7)
+    );
+    assert_eq!(
+        parse("https://gitlab.com/team/app/-/boards/7?id=7&group_by=epic#/").unwrap(),
+        gitlab_scope("gitlab.com", false, "team/app", 7)
+    );
+    assert_eq!(
+        parse("https://gitlab.com/groups/team/-/boards?label_name[]=x&id=7&id=7").unwrap(),
+        gitlab_scope("gitlab.com", true, "team", 7)
+    );
+    // Other query parameters are view state; an identity that disagrees or is
+    // not a number is refused rather than dropped.
+    for address in [
+        "https://gitlab.com/groups/team/-/boards/7?id=8",
+        "https://gitlab.com/groups/team/-/boards?id=7&id=8",
+        "https://gitlab.com/groups/team/-/boards?id=0",
+        "https://gitlab.com/groups/team/-/boards?id=abc",
+        "https://gitlab.com/groups/team/-/boards?id=",
+        "https://gitlab.com/groups/team/-/boards?id=-3",
+        "https://gitlab.com/groups/team/-/boards?id=7x",
+    ] {
+        assert!(board_url::parse(address).is_err(), "{address}");
+    }
+    assert!(matches!(
+        parse("https://github.com/orgs/team/projects/3?id=9").unwrap(),
+        BoardSource::Github { number: 3, .. }
+    ));
+}
+
+#[test]
+fn an_id_query_address_checks_that_board_instead_of_listing_the_scope() {
+    let fake = Fake::new(gl_metadata());
+    let choices =
+        resolve_board_url(&fake.config(), "https://gitlab.example/groups/group/-/boards?id=2")
+            .unwrap();
+    assert_eq!(choices.len(), 1);
+    assert_eq!(source_number(&choices[0].source), 2);
+    assert!(fake.calls().contains("boards/2"));
+    assert!(!fake.calls().contains("boards?per_page"));
+}
