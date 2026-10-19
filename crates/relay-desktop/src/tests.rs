@@ -4526,6 +4526,21 @@ fn gitlab_choice(name: &str, number: u64) -> BoardChoice {
     }
 }
 
+/// Types into the Board URL input. Its label cell carries the same name, so
+/// the input is picked by role.
+fn type_board_url(mounted: &Mounted, text: &str) {
+    let input = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .iter()
+        .filter(|n| n.label.as_deref() == Some("Board URL"))
+        .position(|n| n.role == Role::TextInput)
+        .expect("Board URL input");
+    mounted.click_nth("Board URL", input);
+    mounted.key(Key::Character(text.into()), false);
+}
+
 const PASTED_BOARD: &str = "https://gitlab.com/groups/unincorporated/mosaic/-/boards#/";
 
 /// A New Project form on the Board URL tab with a lookup channel, and the
@@ -4539,7 +4554,7 @@ fn submit_pasted_board(
     mounted.click("New Project");
     mounted.click("New connection");
     mounted.click("Connection type: Board URL");
-    click_and_type(mounted, "Board URL", PASTED_BOARD);
+    type_board_url(mounted, PASTED_BOARD);
     mounted.click("Add board");
     receiver.try_recv().expect("board lookup requested")
 }
@@ -4695,7 +4710,7 @@ fn offers_board(mounted: &Mounted, title: &str) -> bool {
 fn editing_the_address_discards_an_answer_for_the_old_one() {
     let mounted = mount(false, 1380.0);
     let request = submit_pasted_board(&mounted);
-    click_and_type(&mounted, "Board URL", "x");
+    type_board_url(&mounted, "x");
     let edited = mounted
         .model
         .project_draft
@@ -4723,7 +4738,7 @@ fn editing_the_address_withdraws_the_boards_found_for_the_old_one() {
         ]),
     );
     assert!(offers_board(&mounted, "Sprint"));
-    click_and_type(&mounted, "Board URL", "x");
+    type_board_url(&mounted, "x");
     mounted.settle();
     assert!(!offers_board(&mounted, "Sprint"));
     assert!(
@@ -4745,7 +4760,7 @@ fn a_board_that_cannot_be_queued_stays_offered_with_its_address() {
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     mounted.model.lookup_requests.set(Some(sender));
     mounted.click("Connection type: Board URL");
-    click_and_type(&mounted, "Board URL", PASTED_BOARD);
+    type_board_url(&mounted, PASTED_BOARD);
     mounted.click("Add board");
     let request = receiver.try_recv().expect("board lookup requested");
     // Another save is running when the answer arrives.
@@ -4824,7 +4839,7 @@ fn a_board_found_twice_is_added_to_the_draft_once() {
         1
     );
     // The same board again, as a listing would return it.
-    click_and_type(&mounted, "Board URL", PASTED_BOARD);
+    type_board_url(&mounted, PASTED_BOARD);
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     mounted.model.lookup_requests.set(Some(sender));
     mounted.click("Add board");
@@ -5287,10 +5302,28 @@ fn operation_rows_show_status_marks_full_cell_details_and_keep_server_order() {
             assert!(card.origin.y > previous_top, "{id} at {width}");
             previous_top = card.origin.y;
             assert!(card.origin.x >= 0.0 && card.max_x() <= width + 1.0, "{id}");
-            // Details fills its cell at the card's right edge.
+            // Details fills its cell at the card's right edge: the whole card,
+            // or the summary above an error and the Retry row below it.
             let details = node(&format!("Operation details {id}"));
             assert!((card.max_x() - details.max_x()).abs() <= 1.5, "{id}");
-            assert!(details.size.height >= card.size.height - 2.0, "{id}");
+            assert!((details.origin.y - card.origin.y).abs() <= 1.0, "{id}");
+            let below = nodes
+                .iter()
+                .filter(|n| {
+                    n.label.as_deref() == Some("Retry operation")
+                        || error.is_some_and(|error| n.label.as_deref() == Some(error))
+                })
+                .map(|n| n.rect)
+                .filter(|r| r.origin.y > card.origin.y && r.max_y() <= card.max_y() + 0.5)
+                .map(|r| r.origin.y)
+                .reduce(f32::min);
+            match below {
+                None => assert!(details.size.height >= card.size.height - 2.0, "{id}"),
+                Some(top) => {
+                    assert!(details.max_y() <= top + 0.5, "{id}");
+                    assert!(details.size.height >= 36.0, "{id}");
+                }
+            }
             // Exactly the running row carries the working mark.
             let working = nodes
                 .iter()

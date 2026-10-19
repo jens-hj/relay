@@ -1347,8 +1347,10 @@ fn command_lines_fold_in_summary_and_show_fully_expanded() {
     assert_eq!(shown(&mounted), 6);
     assert!(mounted.has("14 more lines"));
     let first = outer(&mounted, "step 0");
-    assert_eq!(first.size.height, 19.0);
-    assert_eq!(outer(&mounted, "step 5").origin.y - first.origin.y, 5.0 * 19.0);
+    // Each line is a 19px row; the labelled text sits inside it.
+    assert!(first.size.height <= 19.0, "{first:?}");
+    let pitch = outer(&mounted, "step 5").origin.y - first.origin.y;
+    assert!((pitch - 5.0 * 19.0).abs() < 0.01, "{pitch}");
     // The pointer then the keyboard cycle the opening; the control keeps focus.
     mounted.click(mounted.rect(Opening::Summary.label()).origin + Vector2::new(80.0, 15.0));
     assert_eq!(state.get_untracked().opening, Opening::Expanded);

@@ -800,6 +800,13 @@ async fn spawn(
     // and shows its model's default from the start, and the policy checks
     // that resolved effort.
     let requested_effort = selection.effort.clone();
+    // A model outside the policy is refused as such, not as missing from
+    // another harness's catalog.
+    if !policy.allows_model(harness, &selected_model) {
+        policy
+            .permits(harness, &selected_model, None, None)
+            .map_err(Error::invalid)?;
+    }
     if let Some(catalog) = &catalog {
         commands::validate_selection(catalog, &selection)?;
         selection.effort = catalog.effective_effort(&selection, None);
