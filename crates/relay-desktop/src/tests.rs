@@ -2663,7 +2663,16 @@ fn live_initial_selection_and_dynamic_columns_metadata_remain_reactive() {
         s.projects[1].github.as_mut().unwrap().sync_error = Some("Sync failed".into());
     });
     mounted.settle();
-    mounted.rect("Sync project");
+    mounted.rect("Sync board");
+    // The sync action is an icon cell in the header's row: it follows the
+    // Last sync readout, fills its height and has no text of its own.
+    let readout = mounted.rect("Last sync");
+    let sync = mounted.rect("Sync board");
+    assert!((sync.size.width - 40.0).abs() < 0.5, "{sync:?}");
+    assert!((sync.origin.y - readout.origin.y).abs() < 0.5, "{sync:?} {readout:?}");
+    assert!((sync.size.height - readout.size.height).abs() < 0.5, "{sync:?} {readout:?}");
+    assert!(sync.origin.x >= readout.max_x() - 0.5, "{sync:?} {readout:?}");
+    assert!(!has_label(&mounted, "Sync"));
     mounted.rect("Column new-column");
     let snapshot = mounted.model.snapshot.get_untracked();
     let columns = &snapshot.projects[1].columns;

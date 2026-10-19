@@ -2,7 +2,7 @@ use super::*;
 use crate::panels::{BoundedPanel, BoundedPanelProps};
 use crate::window_chrome::{WindowControlsSpace, WindowControlsSpaceProps};
 use mosaic::widgets::OverlayAlign;
-use relay_ui::overlay::{Popover, PopoverContent, PopoverProps};
+use relay_ui::overlay::{Popover, PopoverContent, PopoverProps, Tooltip, TooltipProps};
 use relay_ui::prelude::{
     CellButton, CellButtonProps, Ellipsis, EllipsisProps, Label, LabelProps, OnPress,
     PrimaryButton, PrimaryButtonProps, Rule, SecondaryButton, SecondaryButtonProps, TextRole, Tone,
@@ -193,9 +193,15 @@ pub(crate) fn Board(model: Model, narrow: Derived<bool>) -> Element {
                 ReadoutCell key:"Source" value:(source)
             }
             if full.get() && can_sync(model) {
-                ReadoutCell key:"Last sync" value:(synced) {
-                    SecondaryButton text:"Sync" label:(Some("Sync project".into()))
-                        disabled:(sync_disabled) on-press:(press(move || model.sync_project()))
+                ReadoutCell key:"Last sync" value:(synced)
+                row width:{px(40.0)}px shrink:0 {
+                    Tooltip text:"Sync board" width:(Dimension::Fill) height:(Dimension::Fill) {
+                        CellButton label:"Sync board" rule:(Rule::Left) horizontal-inset:0.0
+                            disabled:(sync_disabled)
+                            on-press:(press(move || model.sync_project())) {
+                            { parent.adopt(&relay_ui::icons::icon_mark(relay_ui::icons::command.sync, 16.0)); }
+                        }
+                    }
                 }
             }
             if full.get() && active_boards(model).len() > 1 {
@@ -312,7 +318,7 @@ fn board_menu(
                             Label text:(Derived::new(move || format!("Last sync {}", synced.get())))
                                 role:(TextRole::Caption) tone:(Tone::Muted)
                         }
-                        SecondaryButton text:"Sync" label:(Some("Sync project".into()))
+                        SecondaryButton text:"Sync" label:(Some("Sync board".into()))
                             disabled:(sync_disabled)
                             on-press:(press(move || { model.sync_project(); menu.set(false); }))
                     }
