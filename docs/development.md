@@ -156,6 +156,10 @@ Harnesses raise their `oom_score_adj` to 500 so the kernel prefers them and thei
 
 The percentage limits are per worker, not a total, and Relay does not cap concurrent builds. On a 15 GB machine without swap, keep `MemoryMax` at or below about 6 GB and ask workers to build with `CARGO_BUILD_JOBS=2` and test only the crates they touch. Nix deployments set the limits with `services.relay.workerMemory.{scope,high,max}`; other deployments use the environment variables above.
 
+## Worker execution approval
+
+Workers that agents start with `spawn_agent` run in their parent's execution mode unless the agent names another with `execution_approval`. The project's Worker Execution Approval setting, on the Connections page, decides when you approve that mode first. Every choice asks for a mode above the parent's (Ask < Automatic < Unrestricted Access). Standard, the default, also asks for every Unrestricted Access worker, even under an Unrestricted Access parent. Strict asks for every worker above Ask. Relaxed asks only for a raised mode. The request appears inline with the spawn's other approvals, such as Delegate Ask and widened permissions, as one approval. Task permissions apply in every mode; see [worker execution approval](architecture.md#worker-execution-approval).
+
 ## Nix commands from agents
 
 Harness sandboxes cannot reach the Nix daemon, so a sandboxed agent cannot run `nix develop`, `just test` or the offscreen screenshot tests itself. To let a project's agents run them through the server, open the project's Connections page and set Nix Commands to Ask (approve each command) or Allow. It is Off by default. Each agent also needs Verify and Implement permission; the strictest of the three applies. The agent's own shell stays sandboxed.

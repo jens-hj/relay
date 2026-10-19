@@ -21,6 +21,7 @@ pub fn demo_snapshot(defaults: AgentProfile) -> Snapshot {
         defaults,
         github: None,
         nix_commands: NixCommands::Off,
+        spawn_execution_approval: SpawnExecutionApproval::Standard,
     };
     let issues = [
         ("issue-1", 1, "Connect the project board", "backlog", "integration", "Mirror the authoritative remote board and preserve its column order and issue identity. Relay adds agent activity alongside the existing workflow.", None),
@@ -331,6 +332,7 @@ fn grant(task: &str) -> SpawnGrant {
         permissions: [(Task::Implement, Permission::Allow)].into(),
         requested_by_run: None,
         selection_rationale: None,
+        execution_approval: None,
     }
 }
 

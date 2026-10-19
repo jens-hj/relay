@@ -254,6 +254,8 @@ struct Spawn {
     rationale: Option<String>,
     #[serde(default)]
     permissions: BTreeMap<Task, Permission>,
+    /// The child's execution mode; omitted, the child runs in the parent's.
+    execution_approval: Option<ApprovalMode>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -433,9 +435,14 @@ async fn call(
                 .iter()
                 .find(|s| s.id == caller)
                 .ok_or_else(|| Error::invalid("Agent missing"))?;
+            let approval = snapshot
+                .project(&caller.project_id)
+                .map_err(Error::invalid)?
+                .spawn_execution_approval;
             Ok(tools(
                 &profile(&snapshot, caller)?.worker_models,
                 crate::nix::permission(&snapshot, caller)?,
+                Some((crate::harness::mode(&snapshot, &caller.id)?, approval)),
             ))
         }
         "spawn_agent" => spawn(workspace, caller, run, parse(input)?, stop).await,
@@ -762,47 +769,73 @@ async fn spawn(
             selection.effort.as_deref(),
         )
         .map_err(Error::invalid)?;
+    let prompt = match &args.context {
+        Some(context) => format!("{}\n\nContext:\n{}", args.task, context),
+        None => args.task.clone(),
+    };
+    validate_prompt(&prompt)?;
     let mut permissions = effective.permissions.clone();
-    let widened = args
-        .permissions
-        .iter()
-        .filter(|(task, p)| rank(**p) > rank(effective.permissions[task]))
-        .map(|(task, p)| {
-            format!(
-                "{} {} (parent: {})",
-                task.label().to_lowercase(),
-                p.label().to_lowercase(),
-                effective.permissions[task].label().to_lowercase()
-            )
-        })
-        .collect::<Vec<_>>();
+    permissions.extend(args.permissions.clone());
+    // The child runs in the parent's current execution mode unless the spawn
+    // names another. The project owner's policy, not the parent, decides
+    // which child modes a human must approve; a lower mode never needs it.
+    let parent_mode = crate::harness::mode(&snapshot, caller)?;
+    let requested_mode = args.execution_approval;
+    let child_mode = requested_mode.unwrap_or(parent_mode);
+    let execution_policy = snapshot
+        .project(&parent.project_id)
+        .map_err(Error::invalid)?
+        .spawn_execution_approval;
+    // Everything this spawn needs a human for, asked once in one request.
+    let mut reasons = vec![];
     match effective.permissions[&Task::Delegate] {
         Permission::Deny => return Err(Error::invalid("Parent denies delegation")),
-        Permission::Ask => {
-            approval(
-                workspace,
-                caller,
-                run,
-                "mcp__relay__spawn_agent",
-                &format!("Spawn {}: delegation requires approval", args.title),
-                stop,
-            )
-            .await?
-        }
+        Permission::Ask => reasons.push("delegation requires approval".to_string()),
         Permission::Allow => {}
     }
-    if !widened.is_empty() {
+    if execution_policy.requires_approval(parent_mode, child_mode) {
+        let mut reason = if child_mode == parent_mode {
+            format!("execution mode {} (same as parent)", child_mode.label())
+        } else {
+            format!(
+                "execution mode {} → {}",
+                parent_mode.label(),
+                child_mode.label()
+            )
+        };
+        if child_mode == ApprovalMode::Unrestricted {
+            reason.push_str(": runs without the harness sandbox");
+        }
+        reasons.push(reason);
+    }
+    reasons.extend(
+        args.permissions
+            .iter()
+            .filter(|(task, p)| rank(**p) > rank(effective.permissions[task]))
+            .map(|(task, p)| {
+                format!(
+                    "{} {} (parent: {})",
+                    task.label().to_lowercase(),
+                    p.label().to_lowercase(),
+                    effective.permissions[task].label().to_lowercase()
+                )
+            }),
+    );
+    // An Ask implementation grant needs approval for this first turn as normal launches do.
+    if permissions[&Task::Implement] == Permission::Ask {
+        reasons.push("implementation for its first turn".to_string());
+    }
+    if !reasons.is_empty() {
         approval(
             workspace,
             caller,
             run,
             "mcp__relay__spawn_agent",
-            &format!("Spawn {} with: {}", args.title, widened.join(", ")),
+            &format!("Spawn {} with:\n{}", args.title, reasons.join("\n")),
             stop,
         )
         .await?;
     }
-    permissions.extend(args.permissions.clone());
     let id = uuid::Uuid::new_v4().to_string();
     let source = parent.clone();
     let fork_id = id.clone();
@@ -829,11 +862,12 @@ async fn spawn(
     child.compactions.clear();
     child.selection = selection;
     child.spawn = Some(SpawnGrant {
-        task: args.task.clone(),
-        context: args.context.clone(),
+        task: args.task,
+        context: args.context,
         permissions: args.permissions,
         requested_by_run: Some(run.into()),
         selection_rationale: rationale.map(str::to_owned),
+        execution_approval: requested_mode,
     });
     let worker = child.worker.as_mut().unwrap();
     worker.harness = harness;
@@ -841,29 +875,14 @@ async fn spawn(
     worker.context_tokens = None;
     worker.context_window = None;
     worker.status = WorkerStatus::Queued;
-    let prompt = match args.context {
-        Some(context) => format!("{}\n\nContext:\n{}", args.task, context),
-        None => args.task,
-    };
-    validate_prompt(&prompt)?;
+    // A named mode becomes the child's own execution setting, which every
+    // launch and resume of either harness reads. Omitted, the forked child
+    // keeps its parent's setting and so runs in the parent's mode.
+    if let Some(mode) = requested_mode {
+        worker.execution = Some(ExecutionSettings { approval: mode });
+    }
     let child_run = uuid::Uuid::new_v4().to_string();
     let parts = vec![Part::text(&prompt)];
-    // An Ask implementation grant needs approval for this first turn as normal launches do.
-    let implement = permissions[&Task::Implement];
-    if implement == Permission::Ask {
-        approval(
-            workspace,
-            caller,
-            run,
-            "mcp__relay__spawn_agent",
-            &format!(
-                "Spawn {}: approve implementation for its first turn",
-                child.title
-            ),
-            stop,
-        )
-        .await?;
-    }
     let (sender, receiver) = watch::channel(false);
     {
         let mut store = workspace.store.lock().map_err(Error::internal)?;
@@ -879,6 +898,20 @@ async fn spawn(
         }
         if latest.worker_models != policy {
             return Err(Error::invalid("Worker model policy changed; retry spawn"));
+        }
+        // An approval covers the modes and policy it was asked under.
+        if crate::harness::mode(&current, caller)? != parent_mode {
+            return Err(Error::invalid("Parent execution mode changed; retry spawn"));
+        }
+        if current
+            .project(&parent.project_id)
+            .map_err(Error::invalid)?
+            .spawn_execution_approval
+            != execution_policy
+        {
+            return Err(Error::invalid(
+                "Spawn execution approval policy changed; retry spawn",
+            ));
         }
         authorize_session(&current, &child, true, &workspace.config)?;
         // Enrich the harness's calling tool when it has already been observed.
@@ -907,6 +940,10 @@ async fn spawn(
             session_id: caller.into(),
         };
         current.sessions.push(child);
+        // The persisted child runs in exactly the mode that was decided.
+        if crate::harness::mode(&current, &id)? != child_mode {
+            return Err(Error::invalid("Child execution mode changed; retry spawn"));
+        }
         current.submissions.push(Submission {
             id: child_run.clone(),
             session_id: id.clone(),
@@ -1172,8 +1209,12 @@ pub(super) fn mark_read(snapshot: &mut Snapshot, run: &str) {
 }
 
 /// The spawn_agent description, properties and required properties allowed by
-/// a worker model policy.
-fn spawn_spec(policy: &WorkerModelPolicy) -> (String, Value, Vec<&'static str>) {
+/// a worker model policy. `execution` is the caller's execution mode and its
+/// project's spawn execution approval policy, when known.
+fn spawn_spec(
+    policy: &WorkerModelPolicy,
+    execution: Option<(ApprovalMode, SpawnExecutionApproval)>,
+) -> (String, Value, Vec<&'static str>) {
     let string = json!({"type":"string"});
     let permissions = json!({"type":"object","propertyNames":{"enum":["plan","delegate","implement","verify","review","merge","deploy"]},"additionalProperties":{"enum":["allow","ask","deny"]}});
     let harnesses = policy.harnesses();
@@ -1190,6 +1231,7 @@ fn spawn_spec(policy: &WorkerModelPolicy) -> (String, Value, Vec<&'static str>) 
         "harness": {"enum": harnesses},
         "model": if models.is_empty() { string.clone() } else { json!({"type":"string","enum":models}) },
         "permissions": permissions,
+        "execution_approval": {"type":"string","enum":["ask","automatic","unrestricted"]},
     });
     match policy.efforts() {
         None => properties["effort"] = string,
@@ -1208,9 +1250,17 @@ fn spawn_spec(policy: &WorkerModelPolicy) -> (String, Value, Vec<&'static str>) 
             policy.rationale_hint()
         )
     };
+    let execution = match execution {
+        Some((mode, approval)) => format!(
+            "execution_approval sets the child's execution mode (ask < automatic < unrestricted); omit it to run the child in yours ({}). {}",
+            mode.label(),
+            approval.describe()
+        ),
+        None => "execution_approval sets the child's execution mode (ask < automatic < unrestricted); omit it to run the child in yours. The project decides which modes need human approval.".to_string(),
+    };
     (
         format!(
-            "Start a child Relay session. Relay enforces delegation and human approval for wider permissions. {rule} {}",
+            "Start a child Relay session. Relay enforces delegation and human approval for wider permissions. {rule} {} {execution}",
             policy.allowed_summary()
         ),
         properties,
@@ -1235,9 +1285,13 @@ fn worker_models(snapshot: &Snapshot, policy: &WorkerModelPolicy) -> Value {
 }
 
 /// This run's tools. run_nix is listed only when the agent may run Nix commands.
-fn tools(policy: &WorkerModelPolicy, nix: Permission) -> Value {
+fn tools(
+    policy: &WorkerModelPolicy,
+    nix: Permission,
+    execution: Option<(ApprovalMode, SpawnExecutionApproval)>,
+) -> Value {
     let string = json!({"type":"string"});
-    let (spawn_description, spawn_properties, spawn_required) = spawn_spec(policy);
+    let (spawn_description, spawn_properties, spawn_required) = spawn_spec(policy, execution);
     let specs = [
         (
             "spawn_agent",
@@ -1337,9 +1391,9 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
                             .ok()
                             .filter(|v| v["tools"].is_array())
                             .unwrap_or_else(|| {
-                                tools(&WorkerModelPolicy::default(), Permission::Deny)
+                                tools(&WorkerModelPolicy::default(), Permission::Deny, None)
                             }),
-                        _ => tools(&WorkerModelPolicy::default(), Permission::Deny),
+                        _ => tools(&WorkerModelPolicy::default(), Permission::Deny, None),
                     },
                 ),
                 Some("tools/call") => {
@@ -1834,7 +1888,7 @@ mod tests {
 
     #[test]
     fn archive_tool_schema_is_discoverable() {
-        let tools = tools(&WorkerModelPolicy::default(), Permission::Deny);
+        let tools = tools(&WorkerModelPolicy::default(), Permission::Deny, None);
         let tool = tools["tools"]
             .as_array()
             .unwrap()
@@ -2189,7 +2243,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 24);
+        assert_eq!(schema, 25);
         f.finish().await;
     }
     #[tokio::test]
@@ -2837,6 +2891,542 @@ mod tests {
             }
             f.finish().await;
         }
+    }
+    /// Gives the calling session its own execution setting.
+    fn parent_mode(f: &Fixture, mode: ApprovalMode) {
+        f.change(|s| {
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .worker
+                .as_mut()
+                .unwrap()
+                .execution = Some(ExecutionSettings { approval: mode });
+        });
+    }
+    fn execution_policy(f: &Fixture, policy: SpawnExecutionApproval) {
+        f.change(|s| {
+            s.projects
+                .iter_mut()
+                .for_each(|p| p.spawn_execution_approval = policy)
+        });
+    }
+    /// The execution mode a spawned child's launches and resumes use.
+    fn child_mode(f: &Fixture, value: &Value) -> ApprovalMode {
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        crate::harness::mode(&snapshot, value["agent"].as_str().unwrap()).unwrap()
+    }
+    /// Spawns a child that needs no approval: a request would hold the call.
+    async fn spawn_unasked(f: &Fixture, args: Value) -> Value {
+        let before = permission_requests(f);
+        let value = tokio::time::timeout(Duration::from_secs(10), f.call("spawn_agent", args))
+            .await
+            .expect("spawn asked for approval")
+            .unwrap();
+        assert_eq!(permission_requests(f), before);
+        value
+    }
+    async fn await_pending(f: &Fixture) -> ToolPermission {
+        let mut events = f.workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let pending = events
+                    .borrow()
+                    .tool_permissions
+                    .iter()
+                    .find(|p| p.decision.is_none() && !p.expired)
+                    .cloned();
+                if let Some(pending) = pending {
+                    return pending;
+                }
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap()
+    }
+    #[tokio::test]
+    async fn unrestricted_children_need_approval_even_under_an_unrestricted_parent() {
+        for explicit in [false, true] {
+            for allow in [false, true] {
+                let f = Fixture::new(Permission::Allow);
+                parent_mode(&f, ApprovalMode::Unrestricted);
+                let args = if explicit {
+                    json!({"title":"Free","task":"Test","execution_approval":"unrestricted"})
+                } else {
+                    json!({"title":"Free","task":"Test"})
+                };
+                let (result, ()) = tokio::join!(
+                    f.call("spawn_agent", args),
+                    decide(
+                        &f.workspace,
+                        &f.caller,
+                        &f.run,
+                        allow,
+                        "execution mode Unrestricted Access (same as parent): runs without the harness sandbox"
+                    )
+                );
+                assert_eq!(result.is_ok(), allow);
+                match result {
+                    Ok(value) => {
+                        assert_eq!(child_mode(&f, &value), ApprovalMode::Unrestricted);
+                        assert_eq!(
+                            spawn_grant(&f, &value).execution_approval,
+                            explicit.then_some(ApprovalMode::Unrestricted)
+                        );
+                    }
+                    // A denial creates no child and no fork.
+                    Err(_) => assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1),
+                }
+                f.finish().await;
+            }
+        }
+    }
+    #[tokio::test]
+    async fn raised_child_modes_need_approval_and_inherited_or_lower_modes_do_not() {
+        for allow in [false, true] {
+            let f = Fixture::new(Permission::Allow);
+            parent_mode(&f, ApprovalMode::Ask);
+            let (result, ()) = tokio::join!(
+                f.call(
+                    "spawn_agent",
+                    json!({"title":"Raised","task":"Test","execution_approval":"automatic"})
+                ),
+                decide(
+                    &f.workspace,
+                    &f.caller,
+                    &f.run,
+                    allow,
+                    "execution mode Ask → Automatic"
+                )
+            );
+            assert_eq!(result.is_ok(), allow);
+            match result {
+                Ok(value) => {
+                    assert_eq!(child_mode(&f, &value), ApprovalMode::Automatic);
+                    assert_eq!(
+                        spawn_grant(&f, &value).execution_approval,
+                        Some(ApprovalMode::Automatic)
+                    );
+                    let snapshot = f.workspace.snapshots.borrow().clone();
+                    let child = snapshot
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == value["agent"])
+                        .unwrap();
+                    assert_eq!(
+                        child.worker.as_ref().unwrap().execution,
+                        Some(ExecutionSettings {
+                            approval: ApprovalMode::Automatic
+                        })
+                    );
+                }
+                Err(error) => {
+                    assert!(error.message.contains("denied"), "{}", error.message);
+                    assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
+                }
+            }
+            f.finish().await;
+        }
+
+        // Omitted, the child runs in its parent's mode without asking, and
+        // naming that same mode is not a raise.
+        let f = Fixture::new(Permission::Allow);
+        parent_mode(&f, ApprovalMode::Ask);
+        let inherited = spawn_unasked(&f, json!({"title":"Inherited","task":"Test"})).await;
+        assert_eq!(child_mode(&f, &inherited), ApprovalMode::Ask);
+        assert_eq!(spawn_grant(&f, &inherited).execution_approval, None);
+        let same = spawn_unasked(
+            &f,
+            json!({"title":"Same","task":"Test","execution_approval":"ask"}),
+        )
+        .await;
+        assert_eq!(child_mode(&f, &same), ApprovalMode::Ask);
+        f.finish().await;
+
+        // The profile's own mode is inherited the same way.
+        let f = Fixture::new(Permission::Allow);
+        let parent_profile_mode = {
+            let snapshot = f.workspace.snapshots.borrow().clone();
+            crate::harness::mode(&snapshot, &f.caller).unwrap()
+        };
+        assert_eq!(parent_profile_mode, ApprovalMode::Automatic);
+        let inherited = spawn_unasked(&f, json!({"title":"Profile","task":"Test"})).await;
+        assert_eq!(child_mode(&f, &inherited), ApprovalMode::Automatic);
+        f.finish().await;
+
+        // A lower mode needs no approval, even below Unrestricted Access.
+        let f = Fixture::new(Permission::Allow);
+        parent_mode(&f, ApprovalMode::Unrestricted);
+        for (mode, name) in [
+            (ApprovalMode::Automatic, "automatic"),
+            (ApprovalMode::Ask, "ask"),
+        ] {
+            let value = spawn_unasked(
+                &f,
+                json!({"title":name,"task":"Test","execution_approval":name}),
+            )
+            .await;
+            assert_eq!(child_mode(&f, &value), mode);
+            assert_eq!(spawn_grant(&f, &value).execution_approval, Some(mode));
+        }
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn the_project_owner_chooses_which_child_modes_need_approval() {
+        // Strict: every child above Ask, even in its parent's mode.
+        let f = Fixture::new(Permission::Allow);
+        execution_policy(&f, SpawnExecutionApproval::Strict);
+        let (result, ()) = tokio::join!(
+            f.call("spawn_agent", json!({"title":"Strict","task":"Test"})),
+            decide(
+                &f.workspace,
+                &f.caller,
+                &f.run,
+                true,
+                "execution mode Automatic (same as parent)"
+            )
+        );
+        assert_eq!(child_mode(&f, &result.unwrap()), ApprovalMode::Automatic);
+        let asking = spawn_unasked(
+            &f,
+            json!({"title":"Asking","task":"Test","execution_approval":"ask"}),
+        )
+        .await;
+        assert_eq!(child_mode(&f, &asking), ApprovalMode::Ask);
+        f.finish().await;
+
+        // Relaxed: an Unrestricted Access parent starts Unrestricted Access
+        // children without asking, but a raise still needs approval.
+        let f = Fixture::new(Permission::Allow);
+        execution_policy(&f, SpawnExecutionApproval::Relaxed);
+        parent_mode(&f, ApprovalMode::Unrestricted);
+        let free = spawn_unasked(&f, json!({"title":"Free","task":"Test"})).await;
+        assert_eq!(child_mode(&f, &free), ApprovalMode::Unrestricted);
+        parent_mode(&f, ApprovalMode::Ask);
+        let (result, ()) = tokio::join!(
+            f.call(
+                "spawn_agent",
+                json!({"title":"Raised","task":"Test","execution_approval":"unrestricted"})
+            ),
+            decide(
+                &f.workspace,
+                &f.caller,
+                &f.run,
+                false,
+                "execution mode Ask → Unrestricted Access: runs without the harness sandbox"
+            )
+        );
+        assert!(result.is_err());
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 2);
+
+        // Agents cannot change the policy: there is no tool for it, and spawn
+        // rejects unknown fields and modes.
+        let error = f
+            .call("set_spawn_execution_approval", json!({"policy":"relaxed"}))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("Unknown Relay tool"), "{}", error.message);
+        rejected(
+            &f,
+            json!({"title":"Bad","task":"Test","execution_approval":"never"}),
+        )
+        .await;
+        rejected(
+            &f,
+            json!({"title":"Bad","task":"Test","spawn_execution_approval":"relaxed"}),
+        )
+        .await;
+        rejected(
+            &f,
+            json!({"title":"Bad","task":"Test","execution":{"approval":"unrestricted"}}),
+        )
+        .await;
+        let tools = f.call("tools", json!({})).await.unwrap();
+        assert!(
+            tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|t| !t["name"].as_str().unwrap().contains("approval"))
+        );
+        // The owner sets it with a workspace command; unknown projects fail.
+        {
+            let mut store = f.workspace.store.lock().unwrap();
+            let revision = store.snapshot().unwrap().revision;
+            assert!(
+                store
+                    .apply(
+                        crate::tests::env(
+                            revision,
+                            Command::SetSpawnExecutionApproval {
+                                project_id: "missing".into(),
+                                policy: SpawnExecutionApproval::Strict,
+                            },
+                        ),
+                        &f.workspace.config,
+                    )
+                    .is_err()
+            );
+            let (snapshot, _) = store
+                .apply(
+                    crate::tests::env(
+                        revision,
+                        Command::SetSpawnExecutionApproval {
+                            project_id: "live".into(),
+                            policy: SpawnExecutionApproval::Strict,
+                        },
+                    ),
+                    &f.workspace.config,
+                )
+                .unwrap();
+            assert_eq!(
+                snapshot.projects[0].spawn_execution_approval,
+                SpawnExecutionApproval::Strict
+            );
+            f.workspace.snapshots.send_replace(snapshot);
+        }
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn spawn_tool_describes_the_execution_mode_and_rule() {
+        let f = Fixture::new(Permission::Allow);
+        parent_mode(&f, ApprovalMode::Ask);
+        let spec = spawn_schema(&f.call("tools", json!({})).await.unwrap());
+        assert_eq!(
+            spec["inputSchema"]["properties"]["execution_approval"],
+            json!({"type":"string","enum":["ask","automatic","unrestricted"]})
+        );
+        assert_eq!(spec["inputSchema"]["additionalProperties"], false);
+        let description = spec["description"].as_str().unwrap();
+        assert!(
+            description.contains("omit it to run the child in yours (Ask)"),
+            "{description}"
+        );
+        assert!(
+            description.contains(SpawnExecutionApproval::Standard.describe()),
+            "{description}"
+        );
+        execution_policy(&f, SpawnExecutionApproval::Relaxed);
+        let spec = spawn_schema(&f.call("tools", json!({})).await.unwrap());
+        assert!(
+            spec["description"]
+                .as_str()
+                .unwrap()
+                .contains(SpawnExecutionApproval::Relaxed.describe())
+        );
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn one_request_covers_delegation_permissions_execution_and_the_first_turn() {
+        let f = Fixture::new(Permission::Ask);
+        f.change(|s| {
+            let permissions = &mut s.projects[0].defaults.permissions;
+            permissions.insert(Task::Merge, Permission::Deny);
+            permissions.insert(Task::Implement, Permission::Ask);
+        });
+        let before = permission_requests(&f);
+        let (result, ()) = tokio::join!(
+            f.call(
+                "spawn_agent",
+                json!({"title":"Combined","task":"Test","permissions":{"merge":"allow"},"execution_approval":"unrestricted"})
+            ),
+            decide(
+                &f.workspace,
+                &f.caller,
+                &f.run,
+                true,
+                "delegation requires approval"
+            )
+        );
+        let value = result.unwrap();
+        assert_eq!(permission_requests(&f), before + 1);
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let request = snapshot.tool_permissions.last().unwrap();
+        assert_eq!(request.tool, "mcp__relay__spawn_agent");
+        for line in [
+            "Spawn Combined with:",
+            "delegation requires approval",
+            "execution mode Automatic → Unrestricted Access: runs without the harness sandbox",
+            "merge allow (parent: deny)",
+            "implementation for its first turn",
+        ] {
+            assert!(request.description.contains(line), "{}", request.description);
+        }
+        assert_eq!(child_mode(&f, &value), ApprovalMode::Unrestricted);
+        let child = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == value["agent"])
+            .unwrap();
+        // Merge stays a task permission; the execution mode does not grant it.
+        assert_eq!(
+            profile(&snapshot, child).unwrap().permissions[&Task::Merge],
+            Permission::Allow
+        );
+        f.finish().await;
+
+        // An execution mode never lifts a Deny: a child that may not
+        // implement is refused in Unrestricted Access too.
+        let f = Fixture::new(Permission::Allow);
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Implement, Permission::Deny);
+        });
+        let (result, ()) = tokio::join!(
+            f.call(
+                "spawn_agent",
+                json!({"title":"Denied","task":"Test","execution_approval":"unrestricted"})
+            ),
+            decide(
+                &f.workspace,
+                &f.caller,
+                &f.run,
+                true,
+                "execution mode Automatic → Unrestricted Access"
+            )
+        );
+        assert!(result.is_err());
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
+        f.finish().await;
+    }
+    #[tokio::test]
+    async fn approvals_are_rechecked_against_the_current_mode_policy_and_run() {
+        for change in ["mode", "policy", "stop"] {
+            let f = Fixture::new(Permission::Allow);
+            parent_mode(&f, ApprovalMode::Ask);
+            let respond = async {
+                await_pending(&f).await;
+                match change {
+                    "mode" => parent_mode(&f, ApprovalMode::Automatic),
+                    "policy" => execution_policy(&f, SpawnExecutionApproval::Strict),
+                    _ => {
+                        let store = f.workspace.store.lock().unwrap();
+                        store.controls[&f.caller].send_replace(true);
+                    }
+                }
+                if change != "stop" {
+                    decide(
+                        &f.workspace,
+                        &f.caller,
+                        &f.run,
+                        true,
+                        "execution mode Ask → Automatic",
+                    )
+                    .await;
+                }
+            };
+            let (result, ()) = tokio::join!(
+                f.call(
+                    "spawn_agent",
+                    json!({"title":"Stale","task":"Test","execution_approval":"automatic"})
+                ),
+                respond
+            );
+            let error = result.unwrap_err();
+            match change {
+                "mode" => assert!(
+                    error.message.contains("Parent execution mode changed"),
+                    "{}",
+                    error.message
+                ),
+                "policy" => assert!(
+                    error.message.contains("approval policy changed"),
+                    "{}",
+                    error.message
+                ),
+                _ => {}
+            }
+            assert_eq!(
+                f.workspace.snapshots.borrow().sessions.len(),
+                1,
+                "{change}"
+            );
+            f.finish().await;
+        }
+    }
+    #[tokio::test]
+    async fn spawned_execution_modes_reach_both_harnesses() {
+        // Codex: the approved Unrestricted Access mode selects full access.
+        let f = Fixture::new(Permission::Allow);
+        let capture = f._directory.path().join("codex-capture");
+        let codex = crate::tests::command_tests::CODEX
+            .replace("@CAPTURE@", capture.to_str().unwrap())
+            .replace("test-model", "fixture-model");
+        std::fs::write(&f.workspace.config.codex, format!("#!/bin/sh\n{codex}")).unwrap();
+        let (result, ()) = tokio::join!(
+            f.call(
+                "spawn_agent",
+                json!({"title":"Codex","task":"Test","execution_approval":"unrestricted"})
+            ),
+            decide(
+                &f.workspace,
+                &f.caller,
+                &f.run,
+                true,
+                "execution mode Automatic → Unrestricted Access"
+            )
+        );
+        let child = result.unwrap()["agent"].as_str().unwrap().to_owned();
+        await_ended(&f, &[&child]).await;
+        let turn = std::fs::read_to_string(&capture)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|v| v["method"] == "turn/start")
+            .unwrap();
+        assert_eq!(turn["params"]["approvalPolicy"], "never");
+        assert_eq!(turn["params"]["sandboxPolicy"]["type"], "dangerFullAccess");
+        f.finish().await;
+
+        // Claude Code: a lower Ask mode needs no approval and selects the
+        // default permission mode with the sandbox.
+        let f = Fixture::new(Permission::Allow);
+        let claude = f._directory.path().join("fake-claude");
+        // Launch discovery must list the child's model.
+        crate::tests::script(
+            &claude,
+            &crate::tests::harness_tests::CLAUDE_FAKE.replace("workspace-model", "fixture-model"),
+        );
+        f.change(|s| {
+            s.installations.push(HarnessInstallation {
+                harness: Harness::ClaudeCode,
+                executable: claude.display().to_string(),
+            });
+            s.projects[0].defaults.worker_models = WorkerModelPolicy::Fixed {
+                harness: Harness::ClaudeCode,
+                model: "fixture-model".into(),
+                effort: None,
+            };
+        });
+        let value = spawn_unasked(
+            &f,
+            json!({"title":"Claude","task":"Test","execution_approval":"ask"}),
+        )
+        .await;
+        let child = value["agent"].as_str().unwrap().to_owned();
+        await_ended(&f, &[&child]).await;
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let worker = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == child)
+            .unwrap()
+            .worker
+            .clone()
+            .unwrap();
+        assert_eq!(worker.harness, Harness::ClaudeCode);
+        let argv =
+            std::fs::read_to_string(Path::new(worker.worktree.as_ref().unwrap()).join("claude-argv"))
+                .unwrap();
+        // Discovery passes no permission mode; this is the turn's.
+        assert!(argv.contains("\n--permission-mode\ndefault\n"), "{argv}");
+        assert!(!argv.contains("bypassPermissions"), "{argv}");
+        assert!(argv.contains("\n--settings\n"), "{argv}");
+        f.finish().await;
     }
     #[tokio::test]
     async fn deep_tree_and_tree_wide_limit() {

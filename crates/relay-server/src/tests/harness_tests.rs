@@ -2,7 +2,7 @@ use super::*;
 use serde_json::Value;
 
 const CLAUDE_THREAD: &str = "11111111-2222-4333-8444-555555555555";
-const CLAUDE_FAKE: &str = r#"
+pub(crate) const CLAUDE_FAKE: &str = r#"
 printf '%s\n' "$@" >> claude-argv
 while IFS= read -r line; do
   printf '%s\n' "$line" >> claude-input.jsonl
@@ -1533,7 +1533,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        24
+        25
     );
     let worker = snapshot.sessions[0].worker.as_mut().unwrap();
     worker.model = Some("reported-model".into());

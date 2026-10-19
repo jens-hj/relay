@@ -14,6 +14,7 @@ pub(super) fn handles(command: &Command) -> bool {
         Command::CreateProject { .. }
             | Command::RenameProject { .. }
             | Command::SetNixCommands { .. }
+            | Command::SetSpawnExecutionApproval { .. }
             | Command::SetClaudeWindowStart { .. }
             | Command::AddConnection { .. }
             | Command::UpdateConnection { .. }
@@ -387,6 +388,7 @@ pub(super) fn apply(
                 defaults,
                 github: None,
                 nix_commands: NixCommands::Off,
+                spawn_execution_approval: SpawnExecutionApproval::Standard,
             });
             snapshot.agent_configs.push(AgentConfig {
                 automatic_name: false,
@@ -436,6 +438,14 @@ pub(super) fn apply(
                 .find(|p| p.id == project_id && !p.fixture)
                 .ok_or_else(|| Error::invalid("Project not found"))?
                 .nix_commands = mode;
+        }
+        Command::SetSpawnExecutionApproval { project_id, policy } => {
+            snapshot
+                .projects
+                .iter_mut()
+                .find(|p| p.id == project_id && !p.fixture)
+                .ok_or_else(|| Error::invalid("Project not found"))?
+                .spawn_execution_approval = policy;
         }
         Command::SetClaudeWindowStart { enabled } => {
             snapshot

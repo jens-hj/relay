@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::{path::PathBuf, time::Duration};
 
 pub(crate) mod command_tests;
-mod harness_tests;
+pub(crate) mod harness_tests;
 pub(super) fn live() -> Snapshot {
     let mut defaults = AgentProfile::default();
     defaults
@@ -1261,7 +1261,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            24
+            25
         );
         drop(store);
         let mut reopened = Store::open(&db, AgentProfile::default()).unwrap();
@@ -1355,7 +1355,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 25)
+        .pragma_update(None, "user_version", 26)
         .unwrap();
     drop(store);
     let error = Store::open(&db, AgentProfile::default()).err().unwrap();
@@ -1365,7 +1365,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        25
+        26
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -3585,7 +3585,7 @@ fn schema_twenty_one_adds_default_worker_model_policies_and_persists_changes() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 24);
+    assert_eq!(schema, 25);
     let stored: String = store
         .connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -3663,6 +3663,7 @@ fn schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off() {
         permissions: Default::default(),
         requested_by_run: None,
         selection_rationale: Some("Mechanical port; a light model suffices".into()),
+        execution_approval: None,
     });
     let json = serde_json::to_string(&original).unwrap();
     assert!(!json.contains("nix_commands"));
@@ -3680,7 +3681,7 @@ fn schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 24);
+    assert_eq!(schema, 25);
     let upgraded = store.snapshot().unwrap();
     assert_eq!(upgraded, original);
     assert!(upgraded.projects.iter().all(|p| p.nix_commands.is_off()));
@@ -3721,9 +3722,15 @@ fn schema_twenty_one_upgrades_to_twenty_four_with_every_new_setting_off() {
         permissions: Default::default(),
         requested_by_run: None,
         selection_rationale: None,
+        execution_approval: None,
     });
     let json = serde_json::to_string(&original).unwrap();
-    for field in ["selection_rationale", "nix_commands", "claude_window_start"] {
+    for field in [
+        "selection_rationale",
+        "nix_commands",
+        "claude_window_start",
+        "execution_approval",
+    ] {
         assert!(!json.contains(field), "{field}");
     }
     store
@@ -3746,7 +3753,7 @@ fn schema_twenty_one_upgrades_to_twenty_four_with_every_new_setting_off() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 24);
+    assert_eq!(schema, 25);
     let upgraded = store.snapshot().unwrap();
     assert_eq!(upgraded, original);
     assert!(upgraded.projects.iter().all(|p| p.nix_commands.is_off()));
@@ -3763,7 +3770,12 @@ fn schema_twenty_one_upgrades_to_twenty_four_with_every_new_setting_off() {
         .connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| r.get(0))
         .unwrap();
-    for field in ["selection_rationale", "nix_commands", "claude_window_start"] {
+    for field in [
+        "selection_rationale",
+        "nix_commands",
+        "claude_window_start",
+        "execution_approval",
+    ] {
         assert!(!stored.contains(field), "{field}");
     }
     for (table, column, key) in [
@@ -3808,7 +3820,7 @@ fn schema_twenty_three_upgrades_with_claude_window_start_off_and_an_empty_claim_
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 24);
+    assert_eq!(schema, 25);
     let upgraded = store.snapshot().unwrap();
     assert_eq!(upgraded, original);
     assert!(!upgraded.claude_window_start.enabled);
@@ -3825,6 +3837,64 @@ fn schema_twenty_three_upgrades_with_claude_window_start_off_and_an_empty_claim_
     let reopened = Store::open(&path, defaults).unwrap().snapshot().unwrap();
     assert!(reopened.claude_window_start.enabled);
     assert_eq!(reopened.claude_window_start.enabled_at, Some(5));
+}
+
+#[test]
+fn schema_twenty_four_upgrades_with_standard_spawn_execution_approval() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("spawn-execution.sqlite");
+    let defaults = AgentProfile::default();
+    let store = Store::open(&path, defaults.clone()).unwrap();
+    // Schema 24 stored neither the project policy nor a spawn's requested mode.
+    let mut original = store.snapshot().unwrap();
+    original.sessions[0].spawn = Some(SpawnGrant {
+        task: "Port the change".into(),
+        context: None,
+        permissions: Default::default(),
+        requested_by_run: None,
+        selection_rationale: Some("Mechanical port".into()),
+        execution_approval: None,
+    });
+    let json = serde_json::to_string(&original).unwrap();
+    assert!(!json.contains("execution_approval"));
+    store
+        .connection
+        .execute("UPDATE workspace SET snapshot=?1 WHERE id=1", [&json])
+        .unwrap();
+    store
+        .connection
+        .pragma_update(None, "user_version", 24)
+        .unwrap();
+    drop(store);
+    let store = Store::open(&path, defaults.clone()).unwrap();
+    let schema: u32 = store
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema, 25);
+    let upgraded = store.snapshot().unwrap();
+    assert_eq!(upgraded, original);
+    assert!(
+        upgraded
+            .projects
+            .iter()
+            .all(|p| p.spawn_execution_approval == SpawnExecutionApproval::Standard)
+    );
+    // A stored policy and requested mode survive reopening at schema 25.
+    let mut stored = upgraded.clone();
+    stored.projects[0].spawn_execution_approval = SpawnExecutionApproval::Strict;
+    stored.sessions[0].spawn.as_mut().unwrap().execution_approval =
+        Some(ApprovalMode::Unrestricted);
+    store
+        .connection
+        .execute(
+            "UPDATE workspace SET snapshot=?1 WHERE id=1",
+            [serde_json::to_string(&stored).unwrap()],
+        )
+        .unwrap();
+    drop(store);
+    let reopened = Store::open(&path, defaults).unwrap().snapshot().unwrap();
+    assert_eq!(reopened, stored);
 }
 
 #[test]
@@ -3894,7 +3964,7 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 24);
+    assert_eq!(schema, 25);
 }
 
 #[test]
@@ -3945,7 +4015,7 @@ fn schema_nineteen_snapshots_load_prompt_senders_as_the_user() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 24);
+    assert_eq!(schema, 25);
 }
 
 #[test]

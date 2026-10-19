@@ -527,6 +527,9 @@ fn Connections(model: Model) -> Element {
             Module title:"Nix Commands" icon:(Some(relay_ui::icons::call.run)) {
                 NixCommandsSetting model:(model)
             }
+            Module title:"Worker Execution Approval" icon:(Some(relay_ui::icons::call.spawn)) {
+                SpawnExecutionApprovalSetting model:(model)
+            }
             Operations model:(model)
         }
     }
@@ -566,6 +569,47 @@ fn NixCommandsSetting(model: Model) -> Element {
             }
             Caption rule:false
                 text:"Agents can run nix develop --command in their assigned workspaces on the server, outside their sandbox and with the server user's access. Ask needs your approval for each command. Agents also need Verify and Implement permission."
+        }
+    }
+}
+
+/// When agents need your approval for the execution mode of a worker they
+/// start with spawn_agent.
+#[component]
+fn SpawnExecutionApprovalSetting(model: Model) -> Element {
+    let selected = Derived::new(move || {
+        let project = model.project.get();
+        let policy = model
+            .snapshot
+            .get()
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .map(|p| p.spawn_execution_approval)
+            .unwrap_or_default();
+        SpawnExecutionApproval::ALL
+            .iter()
+            .position(|p| *p == policy)
+            .unwrap_or(0)
+    });
+    let choose: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot: usize| {
+        model.action(Command::SetSpawnExecutionApproval {
+            project_id: model.project.get_untracked(),
+            policy: SpawnExecutionApproval::ALL[slot],
+        })
+    });
+    let blocked = Derived::new(move || model.busy.get() || !model.connected.get());
+    view! {
+        col height:min-content gap:0px {
+            row height:{px(40.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                Segments name:("Worker execution approval".to_string())
+                    options:(SpawnExecutionApproval::ALL.iter().map(|p| p.label().to_string()).collect::<Vec<_>>())
+                    tones:(vec![ground.ink, ground.ink, relay_ui::tokens::Signal::Failed.token()])
+                    selected:(relay_ui::Live::from(selected)) on-select:(choose)
+                    disabled:(relay_ui::Live::from(blocked))
+            }
+            Caption rule:false
+                text:"Workers that agents start run in their parent's execution mode unless the agent asks for another. Every choice needs your approval for a mode above the parent's. Standard also needs it for every Unrestricted Access worker. Strict needs it for every worker above Ask. Relaxed lets an Unrestricted Access agent start Unrestricted Access workers without asking. Task permissions apply in every mode."
         }
     }
 }

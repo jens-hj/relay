@@ -4609,6 +4609,25 @@ fn nix_commands_setting_sends_the_chosen_mode_for_the_project() {
 }
 
 #[test]
+fn worker_execution_approval_setting_sends_the_chosen_policy_for_the_project() {
+    let mut mounted = mount(false, 1380.0);
+    mounted.model.snapshot.set(local_project_snapshot());
+    mounted.model.page.set(Page::Connections);
+    mounted.settle();
+    let project = mounted.model.project.get_untracked();
+    for option in ["Standard", "Strict", "Relaxed"] {
+        mounted.rect(&format!("Worker execution approval: {option}"));
+    }
+    // Relaxing is an explicit owner choice sent like any other.
+    mounted.click("Worker execution approval: Relaxed");
+    let command = mounted.commands.try_recv().unwrap().command;
+    assert!(
+        matches!(command, Command::SetSpawnExecutionApproval { ref project_id, policy: SpawnExecutionApproval::Relaxed } if *project_id == project),
+        "{command:?}"
+    );
+}
+
+#[test]
 fn claude_window_start_is_off_until_chosen_and_sends_the_setting() {
     let mut mounted = mount(false, 1380.0);
     mounted.model.snapshot.set(local_project_snapshot());

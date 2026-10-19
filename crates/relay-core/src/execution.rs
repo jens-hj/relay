@@ -18,6 +18,68 @@ impl ApprovalMode {
             Self::Unrestricted => "Unrestricted Access",
         }
     }
+    /// How much the harness may do without asking a human, from least to
+    /// most: Ask, Automatic, Unrestricted Access. Spawn approval compares
+    /// modes by this rank, not by declaration order.
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Ask => 0,
+            Self::Automatic => 1,
+            Self::Unrestricted => 2,
+        }
+    }
+}
+/// When the execution mode of a `spawn_agent` child needs human approval.
+/// A child runs in its parent's current mode unless the spawn names another.
+/// Every choice asks for a mode above the parent's; they differ only in
+/// which other children also need approval. The project owner sets this
+/// from a workspace client; agents cannot change it. It is separate from
+/// task permissions: a child's Deny still refuses its actions in any mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnExecutionApproval {
+    /// A mode above the parent's, and every Unrestricted Access child, even
+    /// one whose parent already runs with Unrestricted Access.
+    #[default]
+    Standard,
+    /// Every child that runs above Ask, including in its parent's mode.
+    Strict,
+    /// Only a mode above the parent's, so an Unrestricted Access parent may
+    /// start Unrestricted Access children without asking.
+    Relaxed,
+}
+impl SpawnExecutionApproval {
+    pub const ALL: [Self; 3] = [Self::Standard, Self::Strict, Self::Relaxed];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "Standard",
+            Self::Strict => "Strict",
+            Self::Relaxed => "Relaxed",
+        }
+    }
+    pub fn is_standard(&self) -> bool {
+        *self == Self::Standard
+    }
+    /// Whether a child that would run in `child` mode, spawned by a parent
+    /// running in `parent` mode, needs human approval first.
+    pub fn requires_approval(self, parent: ApprovalMode, child: ApprovalMode) -> bool {
+        child.rank() > parent.rank()
+            || match self {
+                Self::Standard => child == ApprovalMode::Unrestricted,
+                Self::Strict => child != ApprovalMode::Ask,
+                Self::Relaxed => false,
+            }
+    }
+    /// The rule as the spawning agent reads it in the spawn_agent description.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Standard => {
+                "Human approval is required for a mode above yours and for every Unrestricted Access child."
+            }
+            Self::Strict => "Human approval is required for every child that runs above Ask.",
+            Self::Relaxed => "Human approval is required for a mode above yours.",
+        }
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,6 +213,81 @@ mod tests {
         assert_eq!(
             NixCommands::Allow.permission(&std::collections::BTreeMap::new()),
             Deny
+        );
+    }
+
+    #[test]
+    fn spawn_execution_approval_rules() {
+        use ApprovalMode::{Ask, Automatic, Unrestricted};
+        let needs = |policy: SpawnExecutionApproval| {
+            let mut pairs = vec![];
+            for parent in [Ask, Automatic, Unrestricted] {
+                for child in [Ask, Automatic, Unrestricted] {
+                    if policy.requires_approval(parent, child) {
+                        pairs.push((parent, child));
+                    }
+                }
+            }
+            pairs
+        };
+        // Standard: a raised mode, and Unrestricted Access even under an
+        // Unrestricted Access parent.
+        assert_eq!(
+            needs(SpawnExecutionApproval::Standard),
+            vec![
+                (Ask, Automatic),
+                (Ask, Unrestricted),
+                (Automatic, Unrestricted),
+                (Unrestricted, Unrestricted),
+            ]
+        );
+        // Strict: anything above Ask.
+        assert_eq!(
+            needs(SpawnExecutionApproval::Strict),
+            vec![
+                (Ask, Automatic),
+                (Ask, Unrestricted),
+                (Automatic, Automatic),
+                (Automatic, Unrestricted),
+                (Unrestricted, Automatic),
+                (Unrestricted, Unrestricted),
+            ]
+        );
+        // Relaxed: only a raised mode; no choice lets a mode rise unasked.
+        assert_eq!(
+            needs(SpawnExecutionApproval::Relaxed),
+            vec![
+                (Ask, Automatic),
+                (Ask, Unrestricted),
+                (Automatic, Unrestricted)
+            ]
+        );
+        assert_eq!(
+            SpawnExecutionApproval::default(),
+            SpawnExecutionApproval::Standard
+        );
+    }
+
+    #[test]
+    fn projects_without_the_approval_policy_load_standard_and_serialize_unchanged() {
+        let project = crate::demo_snapshot(crate::AgentProfile::default()).projects[0].clone();
+        let json = serde_json::to_value(&project).unwrap();
+        assert!(json.get("spawn_execution_approval").is_none());
+        let loaded: Project = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            loaded.spawn_execution_approval,
+            SpawnExecutionApproval::Standard
+        );
+        let strict = Project {
+            spawn_execution_approval: SpawnExecutionApproval::Strict,
+            ..project
+        };
+        let json = serde_json::to_value(&strict).unwrap();
+        assert_eq!(json["spawn_execution_approval"], "strict");
+        let loaded: Project = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded, strict);
+        assert!(
+            serde_json::from_value::<SpawnExecutionApproval>(serde_json::json!("never")).is_err()
         );
     }
 

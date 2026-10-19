@@ -159,7 +159,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 24 {
+        if version > 25 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -180,7 +180,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS window_start_claims(window_key TEXT PRIMARY KEY, owner TEXT NOT NULL, claimed_at INTEGER NOT NULL, lease_until INTEGER NOT NULL, retry_at INTEGER NOT NULL, attempts INTEGER NOT NULL, settled INTEGER NOT NULL, dispatched INTEGER NOT NULL DEFAULT 0);
-             PRAGMA user_version = 24;"
+             PRAGMA user_version = 25;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -250,7 +250,7 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
-        if version < 24 {
+        if version < 25 {
             // Normalize legacy snapshots with defaults for naming, waiting state,
             // prompt senders and worker model policies. Schema 18 protects explicit
             // profile models, schema 19 keeps older servers from cascading a
@@ -258,11 +258,15 @@ impl Store {
             // schema 21 stores each profile's worker model policy, which older
             // servers would reject, schema 22 keeps older servers from dropping
             // spawn selection rationales, schema 23 stores each project's
-            // Nix command setting, which older servers would silently drop, and
+            // Nix command setting, which older servers would silently drop,
             // schema 24 stores the Claude window-start setting and its attempt
-            // table, which older servers would also drop. Missing policies take
-            // the default, older spawns have no rationale and missing Nix and
-            // window-start settings load as Off.
+            // table, which older servers would also drop, and schema 25 stores
+            // each project's spawn execution approval policy and each spawn's
+            // requested execution mode, which older servers would drop and so
+            // relax a Strict policy. Missing policies take the default, older
+            // spawns have no rationale or requested mode, missing Nix and
+            // window-start settings load as Off and missing spawn execution
+            // approval policies load as Standard.
             let json: String = connection
                 .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
                     r.get(0)
@@ -470,6 +474,7 @@ impl Store {
                     permissions: Default::default(),
                     requested_by_run: None,
                     selection_rationale: None,
+                    execution_approval: None,
                 });
                 child.compactions.clear();
                 child.selection = profile.model_selection();
@@ -1518,6 +1523,7 @@ pub fn router_with_browser(
                 }],
                 defaults,
                 nix_commands: NixCommands::Off,
+                spawn_execution_approval: SpawnExecutionApproval::Standard,
                 github: Some(GitHubProject {
                     owner: remote.owner.clone(),
                     number: remote.number,

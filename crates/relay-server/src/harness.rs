@@ -174,6 +174,7 @@ pub(super) fn add_project(
             }],
             defaults,
             nix_commands: NixCommands::Off,
+            spawn_execution_approval: SpawnExecutionApproval::Standard,
             github: Some(GitHubProject {
                 owner: binding.owner.clone(),
                 number: binding.number,
