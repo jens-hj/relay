@@ -1543,7 +1543,14 @@ mod tests {
         let project = s.projects.iter().find(|p| p.id == id).unwrap();
         assert_eq!(
             project.root.as_deref(),
-            Some(custom.canonicalize().unwrap().display().to_string().as_str())
+            Some(
+                custom
+                    .canonicalize()
+                    .unwrap()
+                    .display()
+                    .to_string()
+                    .as_str()
+            )
         );
         assert_eq!(
             std::fs::read_to_string(custom.join("keep.txt")).unwrap(),

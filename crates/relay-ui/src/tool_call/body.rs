@@ -188,8 +188,7 @@ pub(super) fn body(vm: &ToolCallView, actions: ToolActions) -> Element {
             full,
             ..
         } => {
-            if let Some((lines, more)) =
-                command.as_deref().and_then(|c| command_lines(c, expanded))
+            if let Some((lines, more)) = command.as_deref().and_then(|c| command_lines(c, expanded))
             {
                 body.adopt(&view! {
                     CodeBlock lines:(lines) more:(more)
@@ -361,8 +360,7 @@ pub(super) fn body(vm: &ToolCallView, actions: ToolActions) -> Element {
             touches,
             blocks,
         } => {
-            if let Some((lines, more)) =
-                command.as_deref().and_then(|c| command_lines(c, expanded))
+            if let Some((lines, more)) = command.as_deref().and_then(|c| command_lines(c, expanded))
             {
                 body.adopt(&view! {
                     CodeBlock lines:(lines) more:(more)
@@ -540,7 +538,10 @@ mod tests {
         let (lines, more) = command_lines("\n  python3 - <<PY\n  print(1)\nPY\n\n", true).unwrap();
         assert_eq!(texts(&lines), ["  python3 - <<PY", "  print(1)", "PY"]);
         assert_eq!(more, 0);
-        let script = (0..10).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        let script = (0..10)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let (lines, more) = command_lines(&script, false).unwrap();
         assert_eq!((lines.len(), more), (COMMAND_SUMMARY_LINES, 4));
         let (lines, more) = command_lines(&script, true).unwrap();

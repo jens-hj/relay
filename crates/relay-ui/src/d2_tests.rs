@@ -1255,7 +1255,10 @@ fn outer(mounted: &crate::testing::Mounted, label: &str) -> Rect {
 
 #[test]
 fn multiline_and_overlong_commands_stay_inside_their_header_and_body() {
-    let long_line = format!("cargo test {}", "--features some-very-long-name ".repeat(30));
+    let long_line = format!(
+        "cargo test {}",
+        "--features some-very-long-name ".repeat(30)
+    );
     let stderr = ["bash: python3: command not found", long_line.as_str()];
     for command in [HEREDOC.to_owned(), long_line.clone()] {
         for width in [280.0, 480.0, 720.0] {

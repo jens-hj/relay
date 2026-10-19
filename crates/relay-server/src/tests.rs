@@ -399,7 +399,11 @@ fn stale_project_creation_survives_agent_output_but_not_resource_conflicts() {
     );
     let duplicate_board = add(ConnectionInput::Board { source: board });
     assert_eq!(
-        store.apply(duplicate_board, &config()).err().unwrap().message,
+        store
+            .apply(duplicate_board, &config())
+            .err()
+            .unwrap()
+            .message,
         "Board is already connected"
     );
     let docs = add(ConnectionInput::Repository {
@@ -520,7 +524,11 @@ fn stale_syncs_and_retries_queue_once_and_keep_real_conflicts() {
     // The first sync and clone failed, and so did both connections. A failed
     // provider write is also waiting for a retry.
     let mut failed = created.clone();
-    for o in failed.operations.iter_mut().filter(|o| o.project_id == project) {
+    for o in failed
+        .operations
+        .iter_mut()
+        .filter(|o| o.project_id == project)
+    {
         o.state = OperationState::Failed;
         o.error = Some("GitLab issue URL does not match board host".into());
     }
@@ -606,7 +614,10 @@ fn stale_syncs_and_retries_queue_once_and_keep_real_conflicts() {
     };
     assert_eq!(
         code(&mut store, manual.clone()).unwrap(),
-        ("invalid", "Resolve the pending board operation first".to_string())
+        (
+            "invalid",
+            "Resolve the pending board operation first".to_string()
+        )
     );
     let board_retry = Command::RetryConnection {
         connection_id: board_connection.id.clone(),
@@ -653,7 +664,10 @@ fn stale_syncs_and_retries_queue_once_and_keep_real_conflicts() {
         operation_id: clone.clone(),
     };
     assert_eq!(code(&mut store, old_clone).unwrap().0, "conflict");
-    assert_eq!(state(&store.snapshot().unwrap(), &clone), OperationState::Failed);
+    assert_eq!(
+        state(&store.snapshot().unwrap(), &clone),
+        OperationState::Failed
+    );
     // A connection removed meanwhile is never restored from a stale view, and
     // its failed sync is not retried; the exact revision can still restore it.
     let mut removed = store.snapshot().unwrap();
@@ -675,7 +689,12 @@ fn stale_syncs_and_retries_queue_once_and_keep_real_conflicts() {
         operation_id: sync.clone(),
     };
     assert_eq!(code(&mut store, stale_sync).unwrap().0, "conflict");
-    assert_eq!(code(&mut store, Command::SyncBoard { board_id: board }).unwrap().0, "invalid");
+    assert_eq!(
+        code(&mut store, Command::SyncBoard { board_id: board })
+            .unwrap()
+            .0,
+        "invalid"
+    );
     assert_eq!(store.snapshot().unwrap(), removed);
     let (restored, _) = store
         .apply(env(removed.revision, board_retry), &config())
@@ -695,7 +714,10 @@ async fn stale_board_retry_over_http_runs_once_while_other_writes_continue() {
     // still running while the next requests arrive.
     let log = dir.path().join("glab.log");
     let glab = dir.path().join("glab");
-    script(&glab, &format!("echo run >> '{}'\nsleep 2\nexit 1", log.display()));
+    script(
+        &glab,
+        &format!("echo run >> '{}'\nsleep 2\nexit 1", log.display()),
+    );
     let mut c = config();
     c.glab = glab;
     let token = "retry-integration-token";
@@ -748,8 +770,7 @@ async fn stale_board_retry_over_http_runs_once_while_other_writes_continue() {
                     group: true,
                     path: "unincorporated/mosaic".into(),
                     number: 11427455,
-                    url: "https://gitlab.com/groups/unincorporated/mosaic/-/boards/11427455"
-                        .into(),
+                    url: "https://gitlab.com/groups/unincorporated/mosaic/-/boards/11427455".into(),
                 },
             }],
         },
@@ -4311,7 +4332,9 @@ fn schema_twenty_one_upgrades_to_twenty_five_with_every_new_setting_off() {
     // The rewritten snapshot still omits every new field while it is off.
     let stored: String = store
         .connection
-        .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| r.get(0))
+        .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     for field in [
         "selection_rationale",
@@ -4427,8 +4450,11 @@ fn schema_twenty_four_upgrades_with_standard_spawn_execution_approval() {
     // A stored policy and requested mode survive reopening at schema 25.
     let mut stored = upgraded.clone();
     stored.projects[0].spawn_execution_approval = SpawnExecutionApproval::Strict;
-    stored.sessions[0].spawn.as_mut().unwrap().execution_approval =
-        Some(ApprovalMode::Unrestricted);
+    stored.sessions[0]
+        .spawn
+        .as_mut()
+        .unwrap()
+        .execution_approval = Some(ApprovalMode::Unrestricted);
     store
         .connection
         .execute(

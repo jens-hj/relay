@@ -199,9 +199,8 @@ pub(crate) fn window_start_status(start: &WindowStart, now: u64) -> String {
 /// subscription usage, so the cost is stated beside the control.
 #[component]
 fn WindowStartSetting(model: Model) -> Element {
-    let selected = Derived::new(move || {
-        usize::from(model.snapshot.get().claude_window_start.enabled)
-    });
+    let selected =
+        Derived::new(move || usize::from(model.snapshot.get().claude_window_start.enabled));
     let choose: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot: usize| {
         model.action(Command::SetClaudeWindowStart { enabled: slot == 1 })
     });
@@ -221,7 +220,8 @@ fn WindowStartSetting(model: Model) -> Element {
                     selected:(relay_ui::Live::from(selected)) on-select:(choose)
                     disabled:(relay_ui::Live::from(blocked))
             }
-            Caption text:"When Claude reports that a five-hour window has ended, the server sends one tiny message (Reply OK.) through its Claude Code subscription sign-in, using a canonical Haiku model, unless other Claude work has already started a window. Nothing is sent until Claude has reported a window end. It refuses to send unless Claude Code is verifiably signed in with a subscription, not an API key, and where administrator-managed hooks could run. Each message uses a little of your Claude usage. This reduces idle gaps; it does not add usage or change weekly limits, and Anthropic does not guarantee when a window starts. Use it on one Relay server per Claude account: servers do not coordinate with each other."
+            Caption
+                text:"When Claude reports that a five-hour window has ended, the server sends one tiny message (Reply OK.) through its Claude Code subscription sign-in, using a canonical Haiku model, unless other Claude work has already started a window. Nothing is sent until Claude has reported a window end. It refuses to send unless Claude Code is verifiably signed in with a subscription, not an API key, and where administrator-managed hooks could run. Each message uses a little of your Claude usage. This reduces idle gaps; it does not add usage or change weekly limits, and Anthropic does not guarantee when a window starts. Use it on one Relay server per Claude account: servers do not coordinate with each other."
             { parent.adopt(&caption(status, false)); }
         }
     }
@@ -421,19 +421,31 @@ mod tests {
         });
         start.next_due_at = None;
         let text = window_start_status(&start, now);
-        assert!(text.contains("Claude Code is signed out (attempt 1)"), "{text}");
-        assert!(text.contains("Sign in to Claude Code on the server"), "{text}");
+        assert!(
+            text.contains("Claude Code is signed out (attempt 1)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Sign in to Claude Code on the server"),
+            "{text}"
+        );
         // Turned off, the last outcome stays and nothing is scheduled.
         start.set_enabled(false, now);
         let text = window_start_status(&start, now);
-        assert!(!text.contains("Next message") && !text.contains("scheduled"), "{text}");
+        assert!(
+            !text.contains("Next message") && !text.contains("scheduled"),
+            "{text}"
+        );
         // A message that may have been delivered says so and is not retried.
         start.last_outcome = Some(WindowStartOutcome::Unconfirmed {
             reason: WindowStartFailure::TimedOut,
         });
         let text = window_start_status(&start, now);
         assert!(text.contains("may have been delivered"), "{text}");
-        assert!(text.contains("Nothing more is sent for this window"), "{text}");
+        assert!(
+            text.contains("Nothing more is sent for this window"),
+            "{text}"
+        );
         start.last_outcome = Some(WindowStartOutcome::Failed {
             reason: WindowStartFailure::NotSubscription,
             attempts: 1,

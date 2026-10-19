@@ -191,12 +191,7 @@ impl Store {
     /// the check and the record: it is either seen here or happens after the
     /// message is already recorded as dispatched. A crash from here on leaves
     /// the claim dispatched and unsettled, which blocks any resend for the key.
-    fn dispatch_window_start(
-        &mut self,
-        key: &str,
-        owner: &str,
-        now: u64,
-    ) -> Result<bool, Error> {
+    fn dispatch_window_start(&mut self, key: &str, owner: &str, now: u64) -> Result<bool, Error> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -326,9 +321,10 @@ impl Workspace {
                         s.claude_window_start.last_outcome,
                         Some(WindowStartOutcome::Unconfirmed { .. })
                     ) {
-                        s.claude_window_start.last_outcome = Some(WindowStartOutcome::Unconfirmed {
-                            reason: WindowStartFailure::Interrupted,
-                        });
+                        s.claude_window_start.last_outcome =
+                            Some(WindowStartOutcome::Unconfirmed {
+                                reason: WindowStartFailure::Interrupted,
+                            });
                     }
                 });
                 None
@@ -606,7 +602,10 @@ fn subscription_status(success: bool, bytes: &[u8]) -> Result<String, WindowStar
     };
     let key_method = lower("authMethod").is_none_or(|m| m.contains("key") || m.contains("api"));
     if value["loggedIn"] == true && first_party && subscription && !stored_key && !key_method {
-        Ok(value["subscriptionType"].as_str().unwrap_or_default().to_owned())
+        Ok(value["subscriptionType"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned())
     } else {
         Err(WindowStartFailure::NotSubscription)
     }
@@ -697,10 +696,7 @@ async fn verify_subscription(
             .read_to_end(&mut bytes)
             .await
             .map_err(|_| WindowStartFailure::Failed)?;
-        let status = child
-            .wait()
-            .await
-            .map_err(|_| WindowStartFailure::Failed)?;
+        let status = child.wait().await.map_err(|_| WindowStartFailure::Failed)?;
         Ok::<(bool, Vec<u8>), WindowStartFailure>((status.success(), bytes))
     };
     let result = tokio::time::timeout(limit, read).await;
@@ -815,7 +811,13 @@ async fn message(
     limit: Duration,
 ) -> Attempt {
     let mut turn = claude_command(binary, directory);
-    turn.args(["--print", "--model", model, "--system-prompt", SYSTEM_PROMPT]);
+    turn.args([
+        "--print",
+        "--model",
+        model,
+        "--system-prompt",
+        SYSTEM_PROMPT,
+    ]);
     harden(&mut turn);
     turn.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", MAX_OUTPUT_TOKENS)
         .stdin(Stdio::piped())
@@ -1372,11 +1374,9 @@ echo "prompt $prompt" >> '{log}'
         // follows the five-hour reset, and the outcome is visible.
         assert!(wake.is_some());
         let saved = workspace.store.lock().unwrap().snapshot().unwrap();
-        assert!(
-            saved.usage_limits.iter().any(|l| {
-                l.window == UsageWindow::Weekly && l.resets_at == Some(next + 6 * 86_400)
-            })
-        );
+        assert!(saved.usage_limits.iter().any(|l| {
+            l.window == UsageWindow::Weekly && l.resets_at == Some(next + 6 * 86_400)
+        }));
         assert!(matches!(
             status(&workspace).last_outcome,
             Some(WindowStartOutcome::Sent { ref model }) if model == "Haiku 4.5"
@@ -1908,7 +1908,10 @@ echo "prompt $prompt" >> '{log}'
         other.save(&snapshot).unwrap();
         let mut holder = Store::open(&path, AgentProfile::default()).unwrap();
         let key = window_start_key(&snapshot, 2_000).unwrap();
-        assert_eq!(holder.claim_window_start(&key, "a", 2_000).unwrap(), Some(1));
+        assert_eq!(
+            holder.claim_window_start(&key, "a", 2_000).unwrap(),
+            Some(1)
+        );
         // Another process opens a write transaction that turns the setting off
         // and has not committed it yet.
         let mut off = snapshot.clone();
@@ -2034,7 +2037,11 @@ echo "prompt $prompt" >> '{log}'
             })
         );
         // With the administrator's switch-off in place, it proceeds.
-        std::fs::write(&file, r#"{"hooks":{"SessionStart":[]},"disableAllHooks":true}"#).unwrap();
+        std::fs::write(
+            &file,
+            r#"{"hooks":{"SessionStart":[]},"disableAllHooks":true}"#,
+        )
+        .unwrap();
         let dir = tempfile::tempdir().unwrap();
         let fake = fake(MODELS, &reply(Some(now() + 3600)));
         let workspace = open(dir.path(), &expired(Some(now() - 30)), &fake);
@@ -2044,7 +2051,10 @@ echo "prompt $prompt" >> '{log}'
 
     #[tokio::test]
     async fn policy_that_cannot_be_checked_stops_the_attempt() {
-        assert_eq!(Limits::default().managed.is_some(), cfg!(target_os = "linux"));
+        assert_eq!(
+            Limits::default().managed.is_some(),
+            cfg!(target_os = "linux")
+        );
         // Off Linux, Claude Code's policy lives elsewhere; it is refused, not
         // assumed absent.
         let limits = Limits {

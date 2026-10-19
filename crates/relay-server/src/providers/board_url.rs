@@ -114,7 +114,9 @@ fn github(segments: &[&str]) -> Result<BoardSource, Error> {
         ));
     };
     let number = positive(number).ok_or_else(|| {
-        Error::invalid("Open the GitHub project and copy its address, which ends in the project number")
+        Error::invalid(
+            "Open the GitHub project and copy its address, which ends in the project number",
+        )
     })?;
     let view = match rest {
         [] => true,

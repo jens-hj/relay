@@ -2669,9 +2669,18 @@ fn live_initial_selection_and_dynamic_columns_metadata_remain_reactive() {
     let readout = mounted.rect("Last sync");
     let sync = mounted.rect("Sync board");
     assert!((sync.size.width - 40.0).abs() < 0.5, "{sync:?}");
-    assert!((sync.origin.y - readout.origin.y).abs() < 0.5, "{sync:?} {readout:?}");
-    assert!((sync.size.height - readout.size.height).abs() < 0.5, "{sync:?} {readout:?}");
-    assert!(sync.origin.x >= readout.max_x() - 0.5, "{sync:?} {readout:?}");
+    assert!(
+        (sync.origin.y - readout.origin.y).abs() < 0.5,
+        "{sync:?} {readout:?}"
+    );
+    assert!(
+        (sync.size.height - readout.size.height).abs() < 0.5,
+        "{sync:?} {readout:?}"
+    );
+    assert!(
+        sync.origin.x >= readout.max_x() - 0.5,
+        "{sync:?} {readout:?}"
+    );
     assert!(!has_label(&mounted, "Sync"));
     mounted.rect("Column new-column");
     let snapshot = mounted.model.snapshot.get_untracked();
@@ -4252,11 +4261,7 @@ fn new_project_notice_names_only_the_failing_field() {
         "Enter a project name."
     );
     click_and_type(&mounted, "Project name", "Playground");
-    type_in(
-        &mounted,
-        "Project root on server",
-        "repos/playground",
-    );
+    type_in(&mounted, "Project root on server", "repos/playground");
     mounted.click("Create project");
     assert_eq!(
         mounted.model.notice.get_untracked(),
@@ -4396,7 +4401,14 @@ fn connection_forms_describe_each_kind_or_name_the_problem() {
         gitlab,
     };
     assert_eq!(
-        form_connection(&form(0, " git@example.com:team/a.git ", "", "", false, false)),
+        form_connection(&form(
+            0,
+            " git@example.com:team/a.git ",
+            "",
+            "",
+            false,
+            false
+        )),
         Ok(ConnectionInput::Repository {
             remote: "git@example.com:team/a.git".into()
         })
@@ -4545,9 +4557,7 @@ const PASTED_BOARD: &str = "https://gitlab.com/groups/unincorporated/mosaic/-/bo
 
 /// A New Project form on the Board URL tab with a lookup channel, and the
 /// request the server would receive after the address is submitted.
-fn submit_pasted_board(
-    mounted: &Mounted,
-) -> crate::project_network::LookupRequest {
+fn submit_pasted_board(mounted: &Mounted) -> crate::project_network::LookupRequest {
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     mounted.model.lookup_requests.set(Some(sender));
     open_project_menu(mounted);
@@ -4564,10 +4574,13 @@ fn answer_lookup(
     request: crate::project_network::LookupRequest,
     result: Result<Vec<BoardChoice>, String>,
 ) {
-    mounted.model.lookup.set(crate::project_network::LookupUpdate {
-        request: Some(request),
-        result: Some(result),
-    });
+    mounted
+        .model
+        .lookup
+        .set(crate::project_network::LookupUpdate {
+            request: Some(request),
+            result: Some(result),
+        });
     mounted.settle();
 }
 
@@ -4650,7 +4663,12 @@ fn a_pasted_board_address_that_finds_nothing_adds_nothing_and_says_why() {
     );
     // The address stays for correction and the form can look again.
     assert_eq!(
-        mounted.model.project_draft.get_untracked().connection_form.url,
+        mounted
+            .model
+            .project_draft
+            .get_untracked()
+            .connection_form
+            .url,
         PASTED_BOARD
     );
     mounted.click("Add board");
@@ -5140,8 +5158,18 @@ fn operation_details_describe_the_target_and_the_error_is_shown_once() {
         &format!(" {message} ")
     ));
     assert!(!operation_shows_error(&snapshot, "other", None, message));
-    assert!(!operation_shows_error(&snapshot, "demo", Some("other-board"), message));
-    assert!(!operation_shows_error(&snapshot, "demo", None, "Another error"));
+    assert!(!operation_shows_error(
+        &snapshot,
+        "demo",
+        Some("other-board"),
+        message
+    ));
+    assert!(!operation_shows_error(
+        &snapshot,
+        "demo",
+        None,
+        "Another error"
+    ));
     assert!(!operation_shows_error(&snapshot, "demo", None, ""));
 
     mounted.model.snapshot.set(snapshot);
@@ -5330,7 +5358,11 @@ fn operation_rows_show_status_marks_full_cell_details_and_keep_server_order() {
                 .filter(|n| n.role == Role::Image && n.label.as_deref() == Some("Working"))
                 .filter(|n| n.rect.origin.y >= card.origin.y && n.rect.max_y() <= card.max_y())
                 .count();
-            assert_eq!(working, usize::from(*state == OperationState::Running), "{id}");
+            assert_eq!(
+                working,
+                usize::from(*state == OperationState::Running),
+                "{id}"
+            );
             let mark = crate::projects::operation_status(state).label();
             assert!(
                 nodes.iter().any(|n| n.role == Role::Image
@@ -5344,7 +5376,10 @@ fn operation_rows_show_status_marks_full_cell_details_and_keep_server_order() {
             }
         }
         // The list sits above the board, never inside it.
-        assert!(column.origin.y >= header.max_y(), "board below list at {width}");
+        assert!(
+            column.origin.y >= header.max_y(),
+            "board below list at {width}"
+        );
     }
 }
 
@@ -5544,7 +5579,14 @@ fn claude_window_start_is_off_until_chosen_and_sends_the_setting() {
     mounted.model.snapshot.set(local_project_snapshot());
     mounted.model.page.set(Page::Settings);
     mounted.settle();
-    assert!(!mounted.model.snapshot.get_untracked().claude_window_start.enabled);
+    assert!(
+        !mounted
+            .model
+            .snapshot
+            .get_untracked()
+            .claude_window_start
+            .enabled
+    );
     for option in ["Off", "On"] {
         mounted.rect(&format!("Claude window start: {option}"));
     }
@@ -6987,7 +7029,8 @@ fn provenance_shows_the_stored_model_choice_only_for_spawned_sessions() {
     child.parent_session_id = Some(snapshot.sessions[0].id.clone());
     child.selection.model = Some("claude-sonnet-5-5".into());
     child.selection.effort = Some("medium".into());
-    let reason = "Mostly wiring.\nSonnet at medium is enough; Opus is for\nsecurity work.".to_string();
+    let reason =
+        "Mostly wiring.\nSonnet at medium is enough; Opus is for\nsecurity work.".to_string();
     child.spawn = Some(SpawnGrant {
         task: "wire it".into(),
         context: None,
@@ -7004,8 +7047,16 @@ fn provenance_shows_the_stored_model_choice_only_for_spawned_sessions() {
         Some(format!("Parent's reason at spawn:\n{reason}").as_str())
     );
     assert!(group.rows.contains(&("Spawned By", parent)));
-    assert!(group.rows.contains(&("Current Model", "Sonnet 5.5".to_string())));
-    assert!(group.rows.contains(&("Current Effort", "medium".to_string())));
+    assert!(
+        group
+            .rows
+            .contains(&("Current Model", "Sonnet 5.5".to_string()))
+    );
+    assert!(
+        group
+            .rows
+            .contains(&("Current Effort", "medium".to_string()))
+    );
 
     // The grant stores no copy of the choice, so editing the session after
     // the spawn changes the labelled current values but never the reason.
@@ -7013,9 +7064,18 @@ fn provenance_shows_the_stored_model_choice_only_for_spawned_sessions() {
     edited.selection.model = Some("claude-opus-5-5".into());
     edited.selection.effort = Some("max".into());
     let after = &crate::conversation::provenance(&snapshot, &edited, false)[0];
-    assert!(after.rows.contains(&("Current Model", "Opus 5.5".to_string())));
+    assert!(
+        after
+            .rows
+            .contains(&("Current Model", "Opus 5.5".to_string()))
+    );
     assert!(after.rows.contains(&("Current Effort", "max".to_string())));
-    assert!(after.rows.iter().all(|(key, _)| !key.eq_ignore_ascii_case("model")));
+    assert!(
+        after
+            .rows
+            .iter()
+            .all(|(key, _)| !key.eq_ignore_ascii_case("model"))
+    );
     assert_eq!(after.note, group.note);
 
     // A grant without a rationale is reported as absent, not invented.

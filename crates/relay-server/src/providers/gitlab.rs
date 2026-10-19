@@ -308,7 +308,9 @@ fn issue_project(source: &BoardSource, issue: &Value, iid: u64) -> Result<String
     if let Some(full) = issue["references"]["full"].as_str()
         && full != format!("{repo}#{iid}")
     {
-        return Err(Error::invalid("GitLab issue reference does not match its URL"));
+        return Err(Error::invalid(
+            "GitLab issue reference does not match its URL",
+        ));
     }
     // GitLab paths are case-insensitive; the board path is as the owner typed it.
     let lower = repo.to_ascii_lowercase();

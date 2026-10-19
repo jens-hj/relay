@@ -37,8 +37,12 @@ fn workflow_guidance(profile: &AgentProfile) -> String {
 fn nix_guidance(permission: Permission) -> &'static str {
     match permission {
         Permission::Deny => "",
-        Permission::Ask => " Relay MCP run_nix runs `nix develop --command` in one of your assigned workspaces on the server, outside your sandbox, for builds, tests and screenshots the sandbox blocks. It can execute any code in the workspace, so use it only for the user's task. Relay asks a human to approve each command.",
-        Permission::Allow => " Relay MCP run_nix runs `nix develop --command` in one of your assigned workspaces on the server, outside your sandbox, for builds, tests and screenshots the sandbox blocks. It can execute any code in the workspace, so use it only for the user's task.",
+        Permission::Ask => {
+            " Relay MCP run_nix runs `nix develop --command` in one of your assigned workspaces on the server, outside your sandbox, for builds, tests and screenshots the sandbox blocks. It can execute any code in the workspace, so use it only for the user's task. Relay asks a human to approve each command."
+        }
+        Permission::Allow => {
+            " Relay MCP run_nix runs `nix develop --command` in one of your assigned workspaces on the server, outside your sandbox, for builds, tests and screenshots the sandbox blocks. It can execute any code in the workspace, so use it only for the user's task."
+        }
     }
 }
 

@@ -2178,7 +2178,10 @@ fn gitlab_work_item_urls_in_nested_group_projects_keep_canonical_issue_identity(
         "https://gitlab.com/unincorporated/mosaic/mosaic/-/issues/150",
         "https://gitlab.com/unincorporated/mosaic/mosaic/-/work_items/150",
     ] {
-        assert_eq!(issue_reference_from_url(&source, url).unwrap(), tasks[0].reference);
+        assert_eq!(
+            issue_reference_from_url(&source, url).unwrap(),
+            tasks[0].reference
+        );
     }
     let elsewhere = "https://gitlab.example/unincorporated/mosaic/mosaic/-/work_items/150";
     assert!(issue_reference_from_url(&source, elsewhere).is_err());
@@ -2187,11 +2190,26 @@ fn gitlab_work_item_urls_in_nested_group_projects_keep_canonical_issue_identity(
 fn gitlab_issue_urls_must_name_the_board_host_issue_and_scope() {
     let host = "GitLab issue URL does not match board host";
     let cases = [
-        ("https://gitlab.example/unincorporated/mosaic/mosaic/-/work_items/8", host),
-        ("https://gitlab.com.evil.example/unincorporated/mosaic/mosaic/-/work_items/8", host),
-        ("https://gitlab.com@evil.example/unincorporated/mosaic/mosaic/-/work_items/8", host),
-        ("http://gitlab.com/unincorporated/mosaic/mosaic/-/work_items/8", host),
-        ("https://gitlab.com/unincorporated/mosaic/mosaic/-/merge_requests/8", host),
+        (
+            "https://gitlab.example/unincorporated/mosaic/mosaic/-/work_items/8",
+            host,
+        ),
+        (
+            "https://gitlab.com.evil.example/unincorporated/mosaic/mosaic/-/work_items/8",
+            host,
+        ),
+        (
+            "https://gitlab.com@evil.example/unincorporated/mosaic/mosaic/-/work_items/8",
+            host,
+        ),
+        (
+            "http://gitlab.com/unincorporated/mosaic/mosaic/-/work_items/8",
+            host,
+        ),
+        (
+            "https://gitlab.com/unincorporated/mosaic/mosaic/-/merge_requests/8",
+            host,
+        ),
         ("https://gitlab.com/-/work_items/8", host),
         (
             "https://gitlab.com/unincorporated/mosaic/mosaic/-/work_items/9",
@@ -2232,7 +2250,10 @@ fn gitlab_issue_urls_must_name_the_board_host_issue_and_scope() {
     issue["web_url"] = json!("https://gitlab.com/Unincorporated/Mosaic/mosaic/-/work_items/8");
     issue["references"]["full"] = json!("Unincorporated/Mosaic/mosaic#8");
     let tasks = mosaic_tasks(json!([issue])).unwrap();
-    assert_eq!(tasks[0].reference.repository, "Unincorporated/Mosaic/mosaic");
+    assert_eq!(
+        tasks[0].reference.repository,
+        "Unincorporated/Mosaic/mosaic"
+    );
     assert_eq!(
         tasks[0].reference.url,
         "https://gitlab.com/Unincorporated/Mosaic/mosaic/-/issues/8"
@@ -2519,7 +2540,10 @@ fn a_scope_without_boards_is_an_error_and_creates_nothing() {
     let error = resolve_board_url(&fake.config(), GROUP_ADDRESS)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("No boards found in unincorporated/mosaic"), "{error}");
+    assert!(
+        error.contains("No boards found in unincorporated/mosaic"),
+        "{error}"
+    );
     assert!(!fake.calls().contains("POST"));
 }
 
@@ -2550,9 +2574,11 @@ fn a_numbered_gitlab_address_checks_that_board_and_returns_its_name() {
 #[test]
 fn a_numbered_github_address_checks_that_project_and_returns_its_title() {
     let fake = Fake::new(gh_metadata());
-    let choices =
-        resolve_board_url(&fake.config(), "https://github.com/users/owner/projects/1/views/2")
-            .unwrap();
+    let choices = resolve_board_url(
+        &fake.config(),
+        "https://github.com/users/owner/projects/1/views/2",
+    )
+    .unwrap();
     assert_eq!(choices.len(), 1);
     assert_eq!(choices[0].name, "Remote");
     assert!(matches!(
@@ -2564,7 +2590,13 @@ fn a_numbered_github_address_checks_that_project_and_returns_its_title() {
 #[test]
 fn an_unparseable_address_never_starts_a_provider_process() {
     let fake = Fake::new(vec![]);
-    assert!(resolve_board_url(&fake.config(), "https://user:pw@gitlab.com/groups/t/-/boards").is_err());
+    assert!(
+        resolve_board_url(
+            &fake.config(),
+            "https://user:pw@gitlab.com/groups/t/-/boards"
+        )
+        .is_err()
+    );
     assert!(fake.calls().is_empty());
 }
 
@@ -2630,9 +2662,11 @@ fn a_gitlab_id_query_selects_the_board_like_the_path_number() {
 #[test]
 fn an_id_query_address_checks_that_board_instead_of_listing_the_scope() {
     let fake = Fake::new(gl_metadata());
-    let choices =
-        resolve_board_url(&fake.config(), "https://gitlab.example/groups/group/-/boards?id=2")
-            .unwrap();
+    let choices = resolve_board_url(
+        &fake.config(),
+        "https://gitlab.example/groups/group/-/boards?id=2",
+    )
+    .unwrap();
     assert_eq!(choices.len(), 1);
     assert_eq!(source_number(&choices[0].source), 2);
     assert!(fake.calls().contains("boards/2"));

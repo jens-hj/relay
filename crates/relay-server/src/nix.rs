@@ -456,7 +456,11 @@ impl Drop for Audit {
             duration_ms: None,
             finished_ms: crate::tool_activity::now_ms(),
         });
-        if finalize(&self.workspace, &self.session, &self.id, |m| record.apply(m)).is_ok() {
+        if finalize(&self.workspace, &self.session, &self.id, |m| {
+            record.apply(m)
+        })
+        .is_ok()
+        {
             return;
         }
         let (workspace, session, id) = (
@@ -559,7 +563,9 @@ pub(crate) async fn run(
         None => root.clone(),
     };
     if !directory.is_dir() {
-        return Err(Error::invalid("directory must be a directory in the workspace"));
+        return Err(Error::invalid(
+            "directory must be a directory in the workspace",
+        ));
     }
     let installable = installable(&root, input.shell.as_deref())?;
     let line = command_line(&installable, &input.command);
@@ -574,15 +580,9 @@ pub(crate) async fn run(
         ));
     }
     if allowed == Permission::Ask {
-        let approved = crate::harness::permission(
-            workspace,
-            caller,
-            run,
-            RECORD_NAME,
-            &description,
-            stop,
-        )
-        .await?;
+        let approved =
+            crate::harness::permission(workspace, caller, run, RECORD_NAME, &description, stop)
+                .await?;
         if *stop.borrow() {
             return Err(agent_tools::unauthorized());
         }

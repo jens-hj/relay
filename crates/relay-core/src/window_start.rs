@@ -160,23 +160,31 @@ pub enum WindowStartEligibility {
     Off,
     /// Nothing to send yet. Look again at `until`, or when the snapshot
     /// changes if there is no time.
-    Wait { until: Option<u64> },
+    Wait {
+        until: Option<u64>,
+    },
     /// Real Claude work started a window after the reported one ended.
     NotNeeded,
     /// The reported window ended and nothing else started one; `key` names it.
-    Due { key: String },
+    Due {
+        key: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WindowStartPlan {
     Off,
-    Wait { until: Option<u64> },
+    Wait {
+        until: Option<u64>,
+    },
     NotNeeded,
     /// An earlier message for this window may have been delivered; none is
     /// sent until Claude reports a different window.
     Unconfirmed,
     /// Send one message for this attempt key.
-    Send { key: String },
+    Send {
+        key: String,
+    },
 }
 
 fn claude_limit(snapshot: &Snapshot, window: UsageWindow) -> Option<&UsageLimit> {
@@ -346,7 +354,10 @@ mod tests {
         let snapshot = Snapshot::default();
         assert!(!snapshot.claude_window_start.enabled);
         assert!(snapshot.claude_window_start.is_default());
-        assert_eq!(plan_window_start(&snapshot, NOW, None), WindowStartPlan::Off);
+        assert_eq!(
+            plan_window_start(&snapshot, NOW, None),
+            WindowStartPlan::Off
+        );
         let json = serde_json::to_value(&snapshot).unwrap();
         assert!(json.get("claude_window_start").is_none());
         // Snapshots stored before the setting existed load with it off.
@@ -373,7 +384,11 @@ mod tests {
                 key: format!("reset:{}:10", NOW + 600)
             }
         );
-        assert!(window_start_due(&snapshot, due, &format!("reset:{}:10", NOW + 600)));
+        assert!(window_start_due(
+            &snapshot,
+            due,
+            &format!("reset:{}:10", NOW + 600)
+        ));
     }
 
     #[test]
@@ -382,7 +397,12 @@ mod tests {
         let old = window_start_key(&snapshot, NOW).unwrap();
         assert!(window_start_due(&snapshot, NOW, &old));
         // Real work reported a new window after the expiry.
-        limit(&mut snapshot, UsageWindow::FiveHour, 2.0, Some(NOW + 5 * 3600));
+        limit(
+            &mut snapshot,
+            UsageWindow::FiveHour,
+            2.0,
+            Some(NOW + 5 * 3600),
+        );
         assert_eq!(window_start_key(&snapshot, NOW), None);
         assert!(!window_start_due(&snapshot, NOW, &old));
         assert!(matches!(
@@ -536,7 +556,12 @@ mod tests {
             WindowStartPlan::Unconfirmed
         );
         // A fresh reported reset reconciles it: the old key is no longer due.
-        limit(&mut snapshot, UsageWindow::FiveHour, 1.0, Some(NOW + 99_999 + 600));
+        limit(
+            &mut snapshot,
+            UsageWindow::FiveHour,
+            1.0,
+            Some(NOW + 99_999 + 600),
+        );
         assert!(matches!(
             plan_window_start(&snapshot, NOW + 99_999, ambiguous),
             WindowStartPlan::Wait { until: Some(_) }
@@ -547,7 +572,12 @@ mod tests {
     fn an_exhausted_weekly_limit_waits_for_its_reset_without_a_message() {
         let mut snapshot = enabled(10);
         limit(&mut snapshot, UsageWindow::FiveHour, 100.0, Some(NOW - 100));
-        limit(&mut snapshot, UsageWindow::Weekly, 100.0, Some(NOW + 86_400));
+        limit(
+            &mut snapshot,
+            UsageWindow::Weekly,
+            100.0,
+            Some(NOW + 86_400),
+        );
         assert_eq!(
             plan_window_start(&snapshot, NOW, None),
             WindowStartPlan::Wait {
@@ -571,7 +601,10 @@ mod tests {
         });
         snapshot.claude_window_start.set_enabled(false, NOW);
         assert_eq!(window_start_key(&snapshot, NOW), None);
-        assert_eq!(plan_window_start(&snapshot, NOW, None), WindowStartPlan::Off);
+        assert_eq!(
+            plan_window_start(&snapshot, NOW, None),
+            WindowStartPlan::Off
+        );
         assert_eq!(snapshot.claude_window_start.next_due_at, None);
         assert!(snapshot.claude_window_start.last_outcome.is_some());
     }

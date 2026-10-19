@@ -200,13 +200,25 @@ mod tests {
                 .collect::<std::collections::BTreeMap<_, _>>()
         };
         // Off denies whatever the profile allows.
-        assert_eq!(NixCommands::Off.permission(&permissions(Allow, Allow)), Deny);
+        assert_eq!(
+            NixCommands::Off.permission(&permissions(Allow, Allow)),
+            Deny
+        );
         // Allow needs the owner's Allow and both profile permissions.
-        assert_eq!(NixCommands::Allow.permission(&permissions(Allow, Allow)), Allow);
+        assert_eq!(
+            NixCommands::Allow.permission(&permissions(Allow, Allow)),
+            Allow
+        );
         assert_eq!(NixCommands::Allow.permission(&permissions(Ask, Allow)), Ask);
         assert_eq!(NixCommands::Allow.permission(&permissions(Allow, Ask)), Ask);
-        assert_eq!(NixCommands::Allow.permission(&permissions(Deny, Allow)), Deny);
-        assert_eq!(NixCommands::Allow.permission(&permissions(Allow, Deny)), Deny);
+        assert_eq!(
+            NixCommands::Allow.permission(&permissions(Deny, Allow)),
+            Deny
+        );
+        assert_eq!(
+            NixCommands::Allow.permission(&permissions(Allow, Deny)),
+            Deny
+        );
         assert_eq!(NixCommands::Ask.permission(&permissions(Allow, Allow)), Ask);
         assert_eq!(NixCommands::Ask.permission(&permissions(Allow, Deny)), Deny);
         // A missing permission counts as Deny.

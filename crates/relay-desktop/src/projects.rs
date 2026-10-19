@@ -161,9 +161,8 @@ fn ProjectSetup(model: Model) -> Element {
     let name = State::new(model.project_draft.get_untracked().name);
     let root = State::new(model.project_draft.get_untracked().root);
     let form = model.project_draft.get_untracked().connection_form;
-    let connections_open = State::new(
-        !form.address.is_empty() || !form.number.is_empty() || !form.url.is_empty(),
-    );
+    let connections_open =
+        State::new(!form.address.is_empty() || !form.number.is_empty() || !form.url.is_empty());
     Effect::new(move || {
         model.project_draft.update(|d| {
             d.name = name.get();
@@ -285,7 +284,8 @@ fn ProjectSetup(model: Model) -> Element {
                 if connections_open.get() {
                     ConnectionForm model:(model) initial:true
                 } else if model.project_draft.get().connections.is_empty() {
-                    Caption text:"Optional. Connections can also be added after creating the project."
+                    Caption
+                        text:"Optional. Connections can also be added after creating the project."
                         rule:false
                 }
             }
@@ -752,17 +752,20 @@ fn ConnectionForm(model: Model, initial: bool) -> Element {
                     placeholder:"https://gitlab.com/groups/team/-/boards"
             }
             if kind.get() == MANUAL_BOARD {
-                row height:{px(40.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                row height:{px(40.0)}px
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                     Segments name:("Board provider".to_string())
                         options:(vec!["GitHub".to_string(), "GitLab".to_string()])
-                        selected:(relay_ui::Live::from(provider)) on-select:(choose_provider.clone())
+                        selected:(relay_ui::Live::from(provider))
+                        on-select:(choose_provider.clone())
                 }
                 if gitlab.get() {
                     Field label:"Host" name:(Some("GitLab host".to_string())) value:(host)
                         placeholder:"gitlab.com"
                     Field label:"Path" name:(Some("GitLab project or group path".to_string()))
                         value:(address) placeholder:"group/project"
-                    row height:{px(40.0)}px stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                    row height:{px(40.0)}px
+                        stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                         Segments name:("GitLab board scope".to_string())
                             options:(vec!["Project board".to_string(), "Group board".to_string()])
                             selected:(relay_ui::Live::from(scope))
@@ -995,7 +998,10 @@ fn NixCommandsSetting(model: Model) -> Element {
             .find(|p| p.id == project)
             .map(|p| p.nix_commands)
             .unwrap_or_default();
-        NixCommands::ALL.iter().position(|m| *m == mode).unwrap_or(0)
+        NixCommands::ALL
+            .iter()
+            .position(|m| *m == mode)
+            .unwrap_or(0)
     });
     let choose: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot: usize| {
         model.action(Command::SetNixCommands {
@@ -1234,8 +1240,7 @@ pub fn Operations(
             if !active.get().is_empty() {
                 row height:{px(28.0)}px shrink:0 gap:{px(12.0)}px align:center
                     pad:(left:{px(18.0)}px right:{px(18.0)}px top:0px bottom:0px)
-                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom)
-                    label:"Operations" {
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) label:"Operations" {
                     Label text:"Operations" role:(TextRole::Caption) tone:(Tone::Muted) weight:500
                         caps:true
                     row width:1fr min-width:0px height:min-content justify:end {
@@ -1616,9 +1621,7 @@ fn OperationCard(model: Model, operation: ProjectOperation, history: bool) -> El
             .get()
             .operations
             .iter()
-            .find(|o| {
-                o.project_id == project && (o.state == OperationState::Completed) == history
-            })
+            .find(|o| o.project_id == project && (o.state == OperationState::Completed) == history)
             .is_some_and(|o| o.id == id.get())
     });
     let key = Derived::new(move || {
@@ -1751,7 +1754,8 @@ fn OperationCard(model: Model, operation: ProjectOperation, history: bool) -> El
                             Label text:(title) role:(TextRole::Body) weight:500
                             { parent.adopt(&state_label); }
                         }
-                        row height:min-content pad:(left:{px(18.0)}px right:0px top:0px bottom:0px) {
+                        row height:min-content
+                            pad:(left:{px(18.0)}px right:0px top:0px bottom:0px) {
                             Label
                                 text:(Derived::new(move || operation_subject(&model.snapshot.get(), &operation.get())))
                                 role:(TextRole::Caption) tone:(Tone::Muted)

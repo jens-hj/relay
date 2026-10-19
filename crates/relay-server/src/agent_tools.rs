@@ -3185,7 +3185,11 @@ mod tests {
             .call("set_spawn_execution_approval", json!({"policy":"relaxed"}))
             .await
             .unwrap_err();
-        assert!(error.message.contains("Unknown Relay tool"), "{}", error.message);
+        assert!(
+            error.message.contains("Unknown Relay tool"),
+            "{}",
+            error.message
+        );
         rejected(
             &f,
             json!({"title":"Bad","task":"Test","execution_approval":"never"}),
@@ -3310,7 +3314,11 @@ mod tests {
             "merge allow (parent: deny)",
             "implementation for its first turn",
         ] {
-            assert!(request.description.contains(line), "{}", request.description);
+            assert!(
+                request.description.contains(line),
+                "{}",
+                request.description
+            );
         }
         assert_eq!(child_mode(&f, &value), ApprovalMode::Unrestricted);
         let child = snapshot
@@ -3419,11 +3427,7 @@ mod tests {
                 ),
                 _ => assert!(error.message.contains("denied"), "{}", error.message),
             }
-            assert_eq!(
-                f.workspace.snapshots.borrow().sessions.len(),
-                1,
-                "{change}"
-            );
+            assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1, "{change}");
             assert!(!missing.exists(), "{change}");
             point(original);
             f.finish().await;
@@ -3605,9 +3609,10 @@ mod tests {
             .clone()
             .unwrap();
         assert_eq!(worker.harness, Harness::ClaudeCode);
-        let argv =
-            std::fs::read_to_string(Path::new(worker.worktree.as_ref().unwrap()).join("claude-argv"))
-                .unwrap();
+        let argv = std::fs::read_to_string(
+            Path::new(worker.worktree.as_ref().unwrap()).join("claude-argv"),
+        )
+        .unwrap();
         // Discovery passes no permission mode; this is the turn's.
         assert!(argv.contains("\n--permission-mode\ndefault\n"), "{argv}");
         assert!(!argv.contains("bypassPermissions"), "{argv}");
@@ -4817,7 +4822,10 @@ mod tests {
             .call("run_nix", json!({"command":["true"]}))
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("off for this project"), "{error}");
+        assert!(
+            error.to_string().contains("off for this project"),
+            "{error}"
+        );
         assert!(!marker.exists());
         assert_eq!(permission_requests(&f), requests);
         assert!(nix_records(&f).is_empty());
@@ -5049,24 +5057,58 @@ mod tests {
         });
         std::os::unix::fs::symlink(&other, root.join("link")).unwrap();
         for (args, error) in [
-            (json!({"command":["true"],"workspace":other.display().to_string()}), "not assigned"),
-            (json!({"command":["true"],"workspace":"repo"}), "not assigned"),
+            (
+                json!({"command":["true"],"workspace":other.display().to_string()}),
+                "not assigned",
+            ),
+            (
+                json!({"command":["true"],"workspace":"repo"}),
+                "not assigned",
+            ),
             (json!({"command":["true"],"workspace":"/"}), "not assigned"),
-            (json!({"command":["true"],"directory":"../other"}), "without .."),
-            (json!({"command":["true"],"directory":"crates/../../other"}), "without .."),
-            (json!({"command":["true"],"directory":other.display().to_string()}), "without .."),
-            (json!({"command":["true"],"directory":"link"}), "leaves the workspace"),
-            (json!({"command":["true"],"artifacts":["../other/secret"]}), "without .."),
+            (
+                json!({"command":["true"],"directory":"../other"}),
+                "without ..",
+            ),
+            (
+                json!({"command":["true"],"directory":"crates/../../other"}),
+                "without ..",
+            ),
+            (
+                json!({"command":["true"],"directory":other.display().to_string()}),
+                "without ..",
+            ),
+            (
+                json!({"command":["true"],"directory":"link"}),
+                "leaves the workspace",
+            ),
+            (
+                json!({"command":["true"],"artifacts":["../other/secret"]}),
+                "without ..",
+            ),
             (json!({"command":[]}), "1–256 arguments"),
             (json!({"command":[""]}), "1–256 arguments"),
-            (json!({"command":["true"],"shell":"ui-test#evil"}), "development shell name"),
-            (json!({"command":["true"],"shell":"../other"}), "development shell name"),
+            (
+                json!({"command":["true"],"shell":"ui-test#evil"}),
+                "development shell name",
+            ),
+            (
+                json!({"command":["true"],"shell":"../other"}),
+                "development shell name",
+            ),
             (json!({"command":["true"],"timeout_s":0}), "timeout_s"),
             (json!({"command":["true"],"timeout_s":601}), "timeout_s"),
             (json!({"command":"true"}), "Invalid tool arguments"),
-            (json!({"command":["true"],"env":{"A":"B"}}), "Invalid tool arguments"),
+            (
+                json!({"command":["true"],"env":{"A":"B"}}),
+                "Invalid tool arguments",
+            ),
         ] {
-            let message = f.call("run_nix", args.clone()).await.unwrap_err().to_string();
+            let message = f
+                .call("run_nix", args.clone())
+                .await
+                .unwrap_err()
+                .to_string();
             assert!(message.contains(error), "{args}: {message}");
         }
         assert!(!marker.exists());
@@ -5114,7 +5156,11 @@ mod tests {
         })
         .await
         .unwrap();
-        std::fs::read_to_string(pidfile).unwrap().trim().parse().unwrap()
+        std::fs::read_to_string(pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
     }
     /// Waits until `pid` has exited (gone, or a zombie awaiting its reaper).
     #[cfg(target_os = "linux")]
@@ -5175,7 +5221,10 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_ended(background_pid(&pidfile).await).await;
         let records = nix_records(&f);
-        assert_eq!(records[0].tool.as_ref().unwrap().state, ToolState::Completed);
+        assert_eq!(
+            records[0].tool.as_ref().unwrap().state,
+            ToolState::Completed
+        );
         assert!(f.workspace.store.lock().unwrap().nix_runs.is_empty());
         f.finish().await;
     }
@@ -5200,7 +5249,9 @@ mod tests {
             .await
             .unwrap();
             let stored: String = database
-                .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| r.get(0))
+                .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+                    r.get(0)
+                })
                 .unwrap();
             database
                 .execute("UPDATE workspace SET snapshot='unreadable' WHERE id=1", [])
@@ -5208,10 +5259,8 @@ mod tests {
             std::fs::write(&go, "").unwrap();
             stored
         };
-        let (result, stored) = tokio::join!(
-            f.call("run_nix", json!({"command":["true"]})),
-            breaker
-        );
+        let (result, stored) =
+            tokio::join!(f.call("run_nix", json!({"command":["true"]})), breaker);
         // The command ran, but the call does not report plain success.
         let error = result.unwrap_err().to_string();
         assert!(
@@ -5257,7 +5306,9 @@ mod tests {
         assert_eq!(tool.state, ToolState::Interrupted);
         assert!(tool.finished_ms.is_some());
         assert!(
-            records[0].body.contains("tool call ended before the command finished"),
+            records[0]
+                .body
+                .contains("tool call ended before the command finished"),
             "{}",
             records[0].body
         );
@@ -5291,10 +5342,8 @@ mod tests {
             });
             pid
         };
-        let (result, pid) = tokio::join!(
-            f.call("run_nix", json!({"command":["sleep","30"]})),
-            ender
-        );
+        let (result, pid) =
+            tokio::join!(f.call("run_nix", json!({"command":["sleep","30"]})), ender);
         assert!(result.is_err());
         assert_ended(pid).await;
         // The record still gets its outcome, in place.
@@ -5354,7 +5403,9 @@ mod tests {
                             }
                             for session in &mut s.sessions {
                                 if let Some(profile) = &mut session.profile {
-                                    profile.permissions.insert(Task::Implement, Permission::Deny);
+                                    profile
+                                        .permissions
+                                        .insert(Task::Implement, Permission::Deny);
                                 }
                             }
                             Ok(())
@@ -5410,7 +5461,13 @@ mod tests {
                 let shown = format!("echo {}; touch after-limit", "a".repeat(15 * 1024));
                 let (result, ()) = tokio::join!(
                     f.call("run_nix", json!({"command":["sh","-c",shown]})),
-                    decide(&f.workspace, &f.caller, &f.run, true, "; touch after-limit'")
+                    decide(
+                        &f.workspace,
+                        &f.caller,
+                        &f.run,
+                        true,
+                        "; touch after-limit'"
+                    )
                 );
                 assert_eq!(result.unwrap()["exit_code"], 0);
                 assert!(marker.exists());
@@ -5449,7 +5506,10 @@ mod tests {
         let records = nix_records(&f);
         assert_eq!(records.len(), 2);
         assert!(records[1].body.len() < 34 * 1024);
-        assert_eq!(records[1].tool.as_ref().unwrap().state, ToolState::Completed);
+        assert_eq!(
+            records[1].tool.as_ref().unwrap().state,
+            ToolState::Completed
+        );
         f.finish().await;
     }
 }

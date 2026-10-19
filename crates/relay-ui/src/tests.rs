@@ -962,7 +962,10 @@ fn ellipsis_keeps_multiline_text_on_one_line() {
         .weight(400);
     // Later lines are hidden, and the cut is marked even when the first fits.
     assert_eq!(fit_text(&mut fonts, "one\ntwo", &style, 400.0), "one…");
-    assert_eq!(fit_text(&mut fonts, "\n  \nfirst\r\nsecond", &style, 400.0), "first…");
+    assert_eq!(
+        fit_text(&mut fonts, "\n  \nfirst\r\nsecond", &style, 400.0),
+        "first…"
+    );
     assert_eq!(fit_text(&mut fonts, "only\n\n", &style, 400.0), "only");
     let narrow = fit_text(&mut fonts, "a long first line here\nsecond", &style, 60.0);
     assert!(narrow.ends_with('…') && !narrow.contains('\n'), "{narrow}");

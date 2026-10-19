@@ -329,7 +329,9 @@ async fn lookup(
         .json(&BoardLookup { url: url.into() })
         .send()
         .await
-        .map_err(|_| "Cannot look up the board. Check the server connection and retry.".to_owned())?;
+        .map_err(|_| {
+            "Cannot look up the board. Check the server connection and retry.".to_owned()
+        })?;
     let status = response.status();
     if status.is_success() {
         let choices: BoardChoices = response
@@ -428,16 +430,24 @@ mod lookup_tests {
         .unwrap();
         let (config, server) = serve("422 Unprocessable Entity", body);
         assert_eq!(
-            lookup(&reqwest::Client::new(), &config, "https://gitlab.com/groups/team/-/boards")
-                .await
-                .unwrap_err(),
+            lookup(
+                &reqwest::Client::new(),
+                &config,
+                "https://gitlab.com/groups/team/-/boards"
+            )
+            .await
+            .unwrap_err(),
             "No boards found in team. Create a board in GitLab, then paste its address."
         );
         server.join().unwrap();
         let (config, server) = serve("404 Not Found", String::new());
-        let error = lookup(&reqwest::Client::new(), &config, "https://gitlab.com/groups/team/-/boards")
-            .await
-            .unwrap_err();
+        let error = lookup(
+            &reqwest::Client::new(),
+            &config,
+            "https://gitlab.com/groups/team/-/boards",
+        )
+        .await
+        .unwrap_err();
         assert!(error.contains("cannot look up board addresses"), "{error}");
         server.join().unwrap();
     }

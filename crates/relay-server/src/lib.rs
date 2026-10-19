@@ -103,7 +103,10 @@ fn accepts_stale_workspace_revision(command: &Command, snapshot: &Snapshot) -> b
             };
             c.id == *connection_id
                 && c.enabled
-                && matches!(c.state, ConnectionState::Failed | ConnectionState::Interrupted)
+                && matches!(
+                    c.state,
+                    ConnectionState::Failed | ConnectionState::Interrupted
+                )
                 && !busy("", &key)
         }),
         // Only reads and clones are retried stale. Retrying a provider write

@@ -618,11 +618,13 @@ fn caret(line: &AgentLine, on_toggle: Option<OnToggle>) -> Element {
         let stroke = |scene: &mut mosaic::render::Scene, points: &[(f32, f32)]| {
             let points: Vec<Vector2> = points.iter().map(|&(x, y)| local(x, y)).collect();
             scene.shape(
-                mosaic::render::Shape::new(bounds).path(points, false).stroke(
-                    mosaic::render::Stroke::new(unit, color(ground.muted))
-                        .cap(mosaic::render::LineCap::Square)
-                        .join(mosaic::render::LineJoin::Miter),
-                ),
+                mosaic::render::Shape::new(bounds)
+                    .path(points, false)
+                    .stroke(
+                        mosaic::render::Stroke::new(unit, color(ground.muted))
+                            .cap(mosaic::render::LineCap::Square)
+                            .join(mosaic::render::LineJoin::Miter),
+                    ),
             );
         };
         if expanded {
