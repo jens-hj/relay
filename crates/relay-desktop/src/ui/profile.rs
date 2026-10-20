@@ -790,7 +790,8 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
             }
         },
     );
-    let network_index = Derived::new(move || usize::from(model.editor_profile.get().network_access));
+    let network_index =
+        Derived::new(move || usize::from(model.editor_profile.get().network_access));
     let choose_network: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot| {
         model.modify_profile("network_access", |p| p.network_access = slot == 1);
     });
@@ -807,7 +808,8 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
                         selected:(relay_ui::Live::from(network_index)) on-select:(choose_network)
                 }
                 row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px) {
-                    Label text:"Codex uses this setting with the workspace filesystem sandbox. Unrestricted Access always allows network. Claude Code does not support this setting. Changes apply to the next turn."
+                    Label
+                        text:"Codex uses this setting with the workspace filesystem sandbox. Unrestricted Access always allows network. Claude Code does not support this setting. Changes apply to the next turn."
                         role:(TextRole::Caption) tone:(Tone::Muted)
                 }
             }

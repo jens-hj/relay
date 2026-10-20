@@ -7038,9 +7038,8 @@ fn session_details_distinguish_launched_network_policy_from_preferences_and_unkn
                     let mut run = worker_run(WorkerStatus::Running);
                     run.harness = harness;
                     run.execution = Some(ExecutionSettings { approval: mode });
-                    run.launched_network_policy = recorded.then(|| {
-                        LaunchedNetworkPolicy::new(harness, mode, network_access)
-                    });
+                    run.launched_network_policy =
+                        recorded.then(|| LaunchedNetworkPolicy::new(harness, mode, network_access));
                     session.worker = Some(run);
                     let groups = crate::conversation::provenance(&snapshot, &session, false);
                     let worker = groups.iter().find(|g| g.key == "worker").unwrap();
@@ -7052,24 +7051,28 @@ fn session_details_distinguish_launched_network_policy_from_preferences_and_unkn
                         (Harness::Codex, _, true) => "Allowed",
                         (Harness::Codex, _, false) => "Blocked",
                     };
-                    assert!(worker.rows.contains(&(
-                        "Network Access",
-                        if recorded {
-                            expected
-                        } else {
-                            "Unknown (no launch recorded)"
-                        }
-                        .into()
-                    )));
-                    assert!(worker.rows.contains(&(
-                        "Network Setting",
-                        if recorded {
-                            if network_access { "On" } else { "Off" }
-                        } else {
-                            "Unknown (no launch recorded)"
-                        }
-                        .into()
-                    )));
+                    assert!(
+                        worker.rows.contains(&(
+                            "Network Access",
+                            if recorded {
+                                expected
+                            } else {
+                                "Unknown (no launch recorded)"
+                            }
+                            .into()
+                        ))
+                    );
+                    assert!(
+                        worker.rows.contains(&(
+                            "Network Setting",
+                            if recorded {
+                                if network_access { "On" } else { "Off" }
+                            } else {
+                                "Unknown (no launch recorded)"
+                            }
+                            .into()
+                        ))
+                    );
                     assert_eq!(
                         worker
                             .rows
@@ -7079,7 +7082,9 @@ fn session_details_distinguish_launched_network_policy_from_preferences_and_unkn
                     );
                     if !recorded {
                         assert!(
-                            worker.rows.contains(&("Next Turn Network Access", expected.into()))
+                            worker
+                                .rows
+                                .contains(&("Next Turn Network Access", expected.into()))
                         );
                     }
                 }
@@ -7090,11 +7095,10 @@ fn session_details_distinguish_launched_network_policy_from_preferences_and_unkn
     session.worker = None;
     session.network_access = Some(false);
     let groups = crate::conversation::provenance(&snapshot, &session, false);
-    assert!(
-        groups
-            .iter()
-            .any(|g| g.rows.contains(&("Next Turn Network Access", "Blocked".into())))
-    );
+    assert!(groups.iter().any(|g| {
+        g.rows
+            .contains(&("Next Turn Network Access", "Blocked".into()))
+    }));
 }
 
 #[test]
@@ -7145,7 +7149,11 @@ fn active_session_details_keep_launched_policy_after_network_approval_and_profil
         ApprovalMode::Ask,
         false,
     ));
-    snapshot.sessions[0].worker.as_mut().unwrap().launched_network_policy = relaunched;
+    snapshot.sessions[0]
+        .worker
+        .as_mut()
+        .unwrap()
+        .launched_network_policy = relaunched;
     let current = details(&snapshot);
     assert!(current.rows.contains(&("Network Access", "Blocked".into())));
     assert!(
@@ -7223,7 +7231,11 @@ fn profile_network_override_can_be_inherited_without_resetting_approval() {
         .model
         .modify_profile("network_access", |p| p.network_access = false);
     assert_eq!(
-        mounted.model.editor_overrides.get_untracked().network_access,
+        mounted
+            .model
+            .editor_overrides
+            .get_untracked()
+            .network_access,
         Some(false)
     );
     assert_eq!(mounted.model.origin("network_access"), "Agent override");
@@ -7235,10 +7247,17 @@ fn profile_network_override_can_be_inherited_without_resetting_approval() {
     mounted.model.inherit("network_access");
     assert!(mounted.model.editor_profile.get_untracked().network_access);
     assert_eq!(
-        mounted.model.editor_profile.get_untracked().execution.approval,
+        mounted
+            .model
+            .editor_profile
+            .get_untracked()
+            .execution
+            .approval,
         ApprovalMode::Ask
     );
-    let parent_id = mounted.model.snapshot.get_untracked().sessions[0].id.clone();
+    let parent_id = mounted.model.snapshot.get_untracked().sessions[0]
+        .id
+        .clone();
     mounted.model.snapshot.update(|snapshot| {
         snapshot.sessions[0].fixture = false;
         snapshot.sessions[0].network_access = Some(false);
@@ -8163,6 +8182,7 @@ fn bounded_session_disclosures_keep_controls_reachable_and_draft_mounted() {
     mounted.key(Key::Enter, false);
     for label in [
         "Stop worker",
+        "Session network access: Network: Off",
         "Inherit worker execution settings",
         "Load shared draft",
         "Restore local draft",
@@ -8662,21 +8682,17 @@ fn assert_session_source_geometry(mounted: &Mounted, role: &str, name: &str, mes
         "{label}"
     );
     assert!(name_line.rect.size.width >= 40.0 && name_line.rect.max_x() <= button.rect.max_x());
-    let subtle = format!(
-        "{:?}",
-        mosaic::core::theme::color(relay_ui::tokens::ground.faint)
-    );
+    // Text reports its colour as the theme token it paints with.
+    let subtle = format!("{:?}", relay_ui::tokens::ground.faint);
     for line in [role_line, name_line] {
         let details = mounted.ui.inspection_details(line.children[0]).unwrap();
-        assert_eq!(
-            details
-                .attributes
-                .iter()
-                .find(|a| a.name == "text-color")
-                .unwrap()
-                .value,
-            subtle
-        );
+        let color = &details
+            .attributes
+            .iter()
+            .find(|a| a.name == "text-color")
+            .unwrap()
+            .value;
+        assert!(color.contains(&subtle), "{label}: {color} is not {subtle}");
     }
     if name.chars().count() > 30 {
         let shown = tree
@@ -10838,9 +10854,18 @@ fn the_header_pause_cell_and_p_hold_and_resume_the_queue() {
     mounted.settle();
     assert!(!has_label(&mounted, "Pause"));
     mounted.click("Resume");
+    // The resume names the queue as shown, so the server can tell unrelated
+    // workspace changes from changes to this queue.
+    let shown = mounted
+        .model
+        .snapshot
+        .get_untracked()
+        .queued_turns(&session);
+    assert!(shown.iter().any(|t| t.state == SubmissionState::Paused));
     assert!(matches!(
         mounted.commands.try_recv().unwrap().command,
-        Command::ResumeQueue { ref session_id } if *session_id == session
+        Command::ResumeQueue { ref session_id, queue: Some(ref queue) }
+            if *session_id == session && *queue == shown
     ));
     mounted.model.busy.set(false);
     // P toggles outside text fields, and types into the draft inside one.

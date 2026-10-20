@@ -30,6 +30,10 @@ done
 "#;
 
 async fn setup(dir: &Path) -> (Workspace, String, PathBuf) {
+    setup_script(dir, CODEX).await
+}
+
+async fn setup_script(dir: &Path, code: &str) -> (Workspace, String, PathBuf) {
     let repo = review_repo(dir);
     std::fs::write(repo.join("README"), "base").unwrap();
     git(&repo, &["add", "README"]);
@@ -49,7 +53,7 @@ async fn setup(dir: &Path) -> (Workspace, String, PathBuf) {
     let binary = dir.join("command-codex");
     script(
         &binary,
-        &CODEX.replace("@CAPTURE@", capture.to_str().unwrap()),
+        &code.replace("@CAPTURE@", capture.to_str().unwrap()),
     );
     let mut config = config();
     config.repository = Some(repo);
@@ -328,7 +332,10 @@ async fn clear_resume_and_fork_keep_exact_history_and_independent_files() {
         false,
     ));
     assert_eq!(source_worker.launched_network_policy, launched);
-    assert_eq!(fork.worker.as_ref().unwrap().launched_network_policy, launched);
+    assert_eq!(
+        fork.worker.as_ref().unwrap().launched_network_policy,
+        launched
+    );
     let target = PathBuf::from(fork.worker.as_ref().unwrap().worktree.as_ref().unwrap());
     assert_ne!(target, path);
     let index = std::process::Command::new("git")
@@ -1957,4 +1964,183 @@ async fn stale_creates_and_first_turn_use_current_selection_and_run_once() {
             .draft_selection,
         selected
     );
+}
+
+fn rpc_count(capture: &Path, method: &str) -> usize {
+    std::fs::read_to_string(capture)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| serde_json::from_str::<Value>(l).is_ok_and(|v| v["method"] == method))
+        .count()
+}
+
+#[tokio::test]
+async fn codex_discovery_keeps_its_catalog_when_mcp_status_never_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let silent = CODEX.replace(
+        r#"mcpServerStatus/list) printf '{"id":%s,"result":{"data":[{"name":"test-mcp","authStatus":"oAuth"}]}}\n' "$id";;"#,
+        "mcpServerStatus/list) ;;",
+    );
+    assert_ne!(silent, CODEX);
+    let (w, id, _) = setup_script(dir.path(), &silent).await;
+    let started = std::time::Instant::now();
+    let catalog = commands::discover(&w, &id, true).await.unwrap();
+    // The optional request's own deadline ends well before discovery's.
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert_eq!(catalog.models[0].id, "test-model");
+    assert_eq!(catalog.skills[0].name, "test-skill");
+    assert!(catalog.mcp.is_empty());
+    assert!(catalog.warnings.iter().any(|w| w == "MCP status timed out"));
+}
+
+#[tokio::test]
+async fn catalog_discovery_runs_concurrently_across_keys_and_once_per_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let slow = CODEX.replace("model/list) printf", "model/list) sleep 2; printf");
+    assert_ne!(slow, CODEX);
+    let (w, id, capture) = setup_script(dir.path(), &slow).await;
+    let project = w
+        .snapshots
+        .borrow()
+        .sessions
+        .iter()
+        .find(|s| s.id == id)
+        .unwrap()
+        .project_id
+        .clone();
+    // A session's and a project's discovery do not wait for each other.
+    let started = std::time::Instant::now();
+    let (session, profile) = tokio::join!(
+        commands::discover(&w, &id, true),
+        commands::discover_profile(&w, &project, Harness::Codex),
+    );
+    session.unwrap();
+    profile.unwrap();
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_millis(3500), "{elapsed:?}");
+    // A cached catalog is returned while another key's probe runs.
+    let (fresh, cached) = tokio::join!(commands::discover(&w, &id, true), async {
+        let started = std::time::Instant::now();
+        let catalog = commands::discover_profile(&w, &project, Harness::Codex).await;
+        (catalog, started.elapsed())
+    });
+    fresh.unwrap();
+    cached.0.unwrap();
+    assert!(cached.1 < Duration::from_secs(1), "{:?}", cached.1);
+    // Requests for one key share a single probe.
+    w.catalogs.lock().unwrap().clear();
+    let before = rpc_count(&capture, "model/list");
+    let (a, b) = tokio::join!(
+        commands::discover(&w, &id, false),
+        commands::discover(&w, &id, false),
+    );
+    assert_eq!(a.unwrap(), b.unwrap());
+    assert_eq!(rpc_count(&capture, "model/list"), before + 1);
+    // Unused per-key locks are dropped.
+    commands::discover(&w, &id, true).await.unwrap();
+    assert!(w.catalog_probes.lock().unwrap().len() <= 1);
+}
+
+#[tokio::test]
+async fn selected_model_turns_reuse_a_recent_catalog_and_skills_still_rediscover() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, id, capture) = setup(dir.path()).await;
+    apply(
+        &w,
+        Command::SetHarnessSelection {
+            session_id: id.clone(),
+            selection: HarnessSelection {
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+        },
+    );
+    // The client loaded the session's catalog.
+    commands::discover(&w, &id, false).await.unwrap();
+    let discovered = rpc_count(&capture, "model/list");
+    let age = |seconds: u64| {
+        for (saved_at, _) in w.catalogs.lock().unwrap().values_mut() {
+            *saved_at -= seconds;
+        }
+    };
+    turn(&w, &id, "Plain").await;
+    assert_eq!(rpc_count(&capture, "model/list"), discovered);
+    // Older than ordinary reuse, but recent enough to check a selection.
+    age(120);
+    turn(&w, &id, "Plain again").await;
+    assert_eq!(rpc_count(&capture, "model/list"), discovered);
+    // Skills are authorized against a fresh catalog.
+    turn(&w, &id, "Use $test-skill").await;
+    assert_eq!(rpc_count(&capture, "model/list"), discovered + 1);
+    // An old catalog is not trusted for the selection either.
+    age(700);
+    turn(&w, &id, "Plain once more").await;
+    assert_eq!(rpc_count(&capture, "model/list"), discovered + 2);
+    let turns: Vec<Value> = std::fs::read_to_string(&capture)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .filter(|v: &Value| v["method"] == "turn/start")
+        .collect();
+    assert!(
+        turns
+            .iter()
+            .rev()
+            .take(4)
+            .all(|t| t["params"]["collaborationMode"]["settings"]["model"] == "test-model")
+    );
+}
+
+#[test]
+fn codex_versions_that_accept_exclude_turns_are_recognized() {
+    let accepts =
+        |agent: &str| crate::app_server::excludes_turns(&serde_json::json!({ "userAgent": agent }));
+    assert!(accepts(
+        "relay/0.163.0 (NixOS 26.11.0; x86_64) dumb (relay; 0)"
+    ));
+    assert!(accepts("relay/0.155.1"));
+    assert!(accepts("codex_cli_rs/1.0.0-alpha.1 (Linux)"));
+    assert!(!accepts("relay/0.155.0"));
+    assert!(!accepts("relay/0.142.2 (Linux; x86_64)"));
+    assert!(!accepts("relay/0.0.0.1"));
+    assert!(!accepts("relay/dev"));
+    assert!(!accepts("relay"));
+    assert!(!crate::app_server::excludes_turns(&serde_json::json!({})));
+}
+
+#[tokio::test]
+async fn codex_resume_skips_turn_history_only_when_the_version_supports_it() {
+    let initialize = r#"initialize) printf '{"id":%s,"result":{}}\n' "$id";;"#;
+    for (agent, excluded) in [
+        (
+            "relay/0.163.0 (NixOS 26.11.0; x86_64) dumb (relay; 0)",
+            true,
+        ),
+        ("relay/0.142.2 (Linux; x86_64)", false),
+        ("", false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let reply = if agent.is_empty() {
+            initialize.to_owned()
+        } else {
+            r#"initialize) printf '{"id":%s,"result":{"userAgent":"AGENT"}}\n' "$id";;"#
+                .replace("AGENT", agent)
+        };
+        let code = CODEX.replace(initialize, &reply);
+        assert!(code.contains(initialize) == agent.is_empty());
+        let (w, id, capture) = setup_script(dir.path(), &code).await;
+        turn(&w, &id, "Continue").await;
+        let resume = std::fs::read_to_string(&capture)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .rfind(|v| v["method"] == "thread/resume")
+            .unwrap();
+        assert_eq!(resume["params"]["threadId"], "original-thread");
+        assert_eq!(
+            resume["params"]["excludeTurns"].as_bool(),
+            excluded.then_some(true),
+            "{agent}"
+        );
+    }
 }

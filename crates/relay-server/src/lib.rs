@@ -92,6 +92,13 @@ fn accepts_stale_workspace_revision(command: &Command, snapshot: &Snapshot) -> b
         // The handler refuses while the board's connection is removed or any
         // operation on the board is queued or running, so it queues one sync.
         Command::SyncBoard { .. } => true,
+        // Other sessions' activity does not block resuming a queue that is
+        // still exactly as the client saw it; any change to it (an edit,
+        // cancellation, launch or new pause) still conflicts.
+        Command::ResumeQueue {
+            session_id,
+            queue: Some(queue),
+        } => !queue.is_empty() && *queue == snapshot.queued_turns(session_id),
         // A removed connection is restored only from the exact revision.
         Command::RetryConnection { connection_id } => snapshot.connections.iter().any(|c| {
             let key = match &c.kind {
@@ -476,7 +483,7 @@ impl Store {
         let continuation = match &envelope.command {
             Command::SendWorker { session_id, .. }
             | Command::SubmitTurn { session_id, .. }
-            | Command::ResumeQueue { session_id }
+            | Command::ResumeQueue { session_id, .. }
             | Command::ConversationCommand { session_id, .. } => Some(session_id.as_str()),
             Command::StartChildAgent {
                 parent_session_id, ..
@@ -1084,7 +1091,9 @@ struct Workspace {
     browser: Arc<browser::BrowserAuth>,
     harness_status: Arc<Mutex<Vec<HarnessStatus>>>,
     harness_probe: Arc<tokio::sync::Mutex<()>>,
-    catalog_probe: Arc<tokio::sync::Mutex<()>>,
+    /// One discovery at a time per catalog key; different sessions and
+    /// projects discover concurrently.
+    catalog_probes: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     catalogs: Arc<Mutex<HashMap<String, (u64, HarnessCatalog)>>>,
     drafts: watch::Sender<Vec<Draft>>,
     transport_shutdown: watch::Sender<bool>,
@@ -1749,7 +1758,7 @@ pub fn router_with_browser(
         browser,
         harness_status: Arc::new(Mutex::new(vec![])),
         harness_probe: Arc::new(tokio::sync::Mutex::new(())),
-        catalog_probe: Arc::new(tokio::sync::Mutex::new(())),
+        catalog_probes: Arc::new(Mutex::new(HashMap::new())),
         catalogs: Arc::new(Mutex::new(HashMap::new())),
         drafts: watch::channel(conversation::read_drafts(&store.connection)?).0,
         transport_shutdown: watch::channel(false).0,

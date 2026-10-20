@@ -1606,14 +1606,27 @@ impl Model {
             .submissions
             .iter()
             .any(|s| s.session_id == session_id && s.state == SubmissionState::Queued);
-        let command = if held {
-            Command::ResumeQueue { session_id }
+        if held {
+            self.resume_queue();
         } else if queued {
-            Command::PauseQueue { session_id }
-        } else {
-            return;
-        };
-        self.submit(command, snapshot.revision, Saved::Action);
+            self.submit(
+                Command::PauseQueue { session_id },
+                snapshot.revision,
+                Saved::Action,
+            );
+        }
+    }
+    /// Resumes the open session's held turns. It names the queue as shown, so
+    /// other sessions' activity does not refuse it but a change to it does.
+    pub fn resume_queue(&self) {
+        let snapshot = self.snapshot.get_untracked();
+        let session_id = self.session.get_untracked();
+        let queue = Some(snapshot.queued_turns(&session_id));
+        self.submit(
+            Command::ResumeQueue { session_id, queue },
+            snapshot.revision,
+            Saved::Action,
+        );
     }
     pub fn stop_worker(&self) {
         if !self.snapshot.get_untracked().sessions.iter().any(|s| {

@@ -1535,14 +1535,19 @@ async fn execute(
         .as_ref()
         .map(|s| s.parts.clone())
         .unwrap_or_else(|| vec![Part::text(prompt)]);
-    let needs_catalog = fork.is_none()
-        && (session.selection.model.is_some()
-            || session.selection.effort.is_some()
-            || has_skill_references(&parts)
-            || plain_text(&parts).trim_start().starts_with('/'));
-    let catalog = if needs_catalog {
+    // Skills and commands are authorized against a freshly discovered catalog;
+    // a model or effort selection alone is checked against a recent one.
+    let invokes = has_skill_references(&parts) || plain_text(&parts).trim_start().starts_with('/');
+    let selects = session.selection.model.is_some() || session.selection.effort.is_some();
+    let catalog = if fork.is_none() && (invokes || selects) {
         tokio::select! {
-            result = crate::commands::discover(workspace, session_id, true) => Some(result?),
+            result = async {
+                if invokes {
+                    crate::commands::discover(workspace, session_id, true).await
+                } else {
+                    crate::commands::discover_selection(workspace, session_id).await
+                }
+            } => Some(result?),
             _ = stop.wait_for(|stopped| *stopped) => return Ok(()),
         }
     } else {
@@ -1845,7 +1850,8 @@ async fn execute(
             ));
         }
         crate::agent_tools::authorize_session(&current, session, approved, &workspace.config)?;
-        let launched_network_policy = LaunchedNetworkPolicy::new(worker.harness, mode, network_access);
+        let launched_network_policy =
+            LaunchedNetworkPolicy::new(worker.harness, mode, network_access);
         let mut child = cmd.spawn().map_err(|_| {
             Error::invalid(
                 "Cannot launch agent harness; check its executable and authentication in Settings",

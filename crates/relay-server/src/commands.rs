@@ -175,12 +175,41 @@ async fn write(child: &mut tokio::process::Child, value: Value) -> Result<(), Er
         .map_err(|_| Error::invalid("Harness discovery disconnected"))
 }
 
+/// How long a discovered catalog is reused before the harness is asked again.
+const CATALOG_AGE: u64 = 30;
+/// How long a catalog may be reused to check a turn's model and effort.
+/// Skills and commands are always rediscovered before they are authorized.
+const SELECTION_CATALOG_AGE: u64 = 600;
+/// The optional MCP status request has its own deadline, so a slow MCP server
+/// cannot discard the models and skills already discovered.
+const MCP_STATUS_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(super) async fn discover(
     workspace: &Workspace,
     id: &str,
     force: bool,
 ) -> Result<HarnessCatalog, Error> {
-    discover_context(workspace, id, force, None).await
+    discover_context(workspace, id, (!force).then_some(CATALOG_AGE), None).await
+}
+
+/// A session's catalog for checking a turn's model and effort, reusing a
+/// recently discovered one.
+pub(super) async fn discover_selection(
+    workspace: &Workspace,
+    id: &str,
+) -> Result<HarnessCatalog, Error> {
+    discover_context(workspace, id, Some(SELECTION_CATALOG_AGE), None).await
+}
+
+/// The catalog saved for `key` less than `max_age` seconds ago.
+fn fresh(workspace: &Workspace, key: &str, max_age: u64) -> Result<Option<HarnessCatalog>, Error> {
+    Ok(workspace
+        .catalogs
+        .lock()
+        .map_err(Error::internal)?
+        .get(key)
+        .filter(|(saved_at, _)| now().saturating_sub(*saved_at) < max_age)
+        .map(|(_, catalog)| catalog.clone()))
 }
 
 pub(super) async fn profile_catalog(
@@ -198,16 +227,17 @@ pub(super) async fn discover_profile(
     harness: Harness,
 ) -> Result<HarnessCatalog, Error> {
     let key = format!("profile:{project}:{harness:?}");
-    discover_context(workspace, &key, false, Some((project, harness))).await
+    discover_context(workspace, &key, Some(CATALOG_AGE), Some((project, harness))).await
 }
 
+/// Discovers a catalog, reusing one saved less than `max_age` seconds ago;
+/// without a `max_age` the harness is always asked.
 async fn discover_context(
     workspace: &Workspace,
     id: &str,
-    force: bool,
+    max_age: Option<u64>,
     profile_context: Option<(&str, Harness)>,
 ) -> Result<HarnessCatalog, Error> {
-    let _probe = workspace.catalog_probe.lock().await;
     let snapshot = workspace.snapshots.borrow().clone();
     // Example sessions never run a harness; they describe the demo catalog.
     if let Some(worker) = snapshot
@@ -269,15 +299,23 @@ async fn discover_context(
         "{id}:{harness:?}:{}:{connections:?}:{workspaces:?}:{worktree:?}",
         binary.display()
     );
-    if !force
-        && let Some((saved_at, catalog)) = workspace
-            .catalogs
-            .lock()
-            .map_err(Error::internal)?
-            .get(&cache_key)
-        && now().saturating_sub(*saved_at) < 30
+    if let Some(max_age) = max_age
+        && let Some(catalog) = fresh(workspace, &cache_key, max_age)?
     {
-        return Ok(catalog.clone());
+        return Ok(catalog);
+    }
+    // One probe per key at a time: a request waiting on a running probe reuses
+    // the catalog it saves, and other sessions and projects are not held up.
+    let probe = {
+        let mut probes = workspace.catalog_probes.lock().map_err(Error::internal)?;
+        probes.retain(|_, probe| Arc::strong_count(probe) > 1);
+        probes.entry(cache_key.clone()).or_default().clone()
+    };
+    let _probe = probe.lock().await;
+    if let Some(max_age) = max_age
+        && let Some(catalog) = fresh(workspace, &cache_key, max_age)?
+    {
+        return Ok(catalog);
     }
     let path = worktree
         .or_else(|| {
@@ -345,6 +383,7 @@ async fn discover_context(
         .take()
         .ok_or_else(|| Error::invalid("Harness output unavailable"))?;
     let mut output = BufReader::new(output);
+    let phases = Phases::new();
     let probe = async {
         let mut catalog = HarnessCatalog {
             session_id: id.into(),
@@ -355,6 +394,7 @@ async fn discover_context(
             Harness::Codex => {
                 write(&mut child,json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"relay","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":false}}})).await?;
                 read_response(&mut output, 1).await?;
+                phases.mark("initialize");
                 write(&mut child, json!({"method":"initialized"})).await?;
                 write(
                     &mut child,
@@ -375,12 +415,14 @@ async fn discover_context(
                     .await?;
                     models = read_response(&mut output, 2).await?;
                 }
+                phases.mark("models");
                 let mut cwds: Vec<_> = workspaces.iter().map(|s| s.path.clone()).collect();
                 if !cwds.contains(&path) {
                     cwds.push(path.clone());
                 }
                 write(&mut child,json!({"id":3,"method":"skills/list","params":{"cwds":cwds,"forceReload":true}})).await?;
                 let skills = read_response(&mut output, 3).await?;
+                phases.mark("skills");
                 for cwd in skills["data"].as_array().into_iter().flatten() {
                     for skill in cwd["skills"].as_array().into_iter().flatten() {
                         let Some(name) = skill["name"].as_str() else {
@@ -414,8 +456,11 @@ async fn discover_context(
                     json!({"id":4,"method":"mcpServerStatus/list","params":{}}),
                 )
                 .await?;
-                match read_response(&mut output, 4).await {
-                    Ok(data) => {
+                let status =
+                    tokio::time::timeout(MCP_STATUS_DEADLINE, read_response(&mut output, 4)).await;
+                phases.mark("mcp");
+                match status {
+                    Ok(Ok(data)) => {
                         for server in data["data"].as_array().into_iter().flatten() {
                             if let Some(name) = server["name"].as_str() {
                                 catalog.mcp.push(format!(
@@ -428,9 +473,10 @@ async fn discover_context(
                             }
                         }
                     }
-                    Err(_) => catalog
+                    Ok(Err(_)) => catalog
                         .warnings
                         .push("MCP status is unavailable in this harness version".into()),
+                    Err(_) => catalog.warnings.push("MCP status timed out".into()),
                 }
             }
             Harness::ClaudeCode => {
@@ -450,6 +496,7 @@ async fn discover_context(
                         break v["response"]["response"].clone();
                     }
                 };
+                phases.mark("initialize");
                 add_models(&mut catalog, &data, Harness::ClaudeCode);
                 for value in data["commands"].as_array().into_iter().flatten() {
                     let Some(name) = value["name"].as_str() else {
@@ -489,7 +536,7 @@ async fn discover_context(
                     }
                 }
                 write(&mut child,json!({"type":"control_request","request_id":"relay-mcp","request":{"subtype":"mcp_status"}})).await?;
-                let status = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let status = tokio::time::timeout(MCP_STATUS_DEADLINE, async {
                     loop {
                         let bytes = runtime::line(&mut output)
                             .await?
@@ -505,6 +552,7 @@ async fn discover_context(
                     }
                 })
                 .await;
+                phases.mark("mcp");
                 if let Ok(Ok(data)) = status {
                     for server in data["mcpServers"]
                         .as_array()
@@ -520,6 +568,8 @@ async fn discover_context(
                             ));
                         }
                     }
+                } else if status.is_err() {
+                    catalog.warnings.push("MCP status timed out".into());
                 } else {
                     catalog
                         .warnings
@@ -536,6 +586,14 @@ async fn discover_context(
         .await
         .map_err(|_| Error::invalid("Harness discovery timed out"));
     runtime::terminate(&mut child).await;
+    phases.report(
+        &format!("{} discovery", harness.label()),
+        match &result {
+            Ok(Ok(_)) => "finished",
+            Ok(Err(_)) => "failed",
+            Err(_) => "timed out",
+        },
+    );
     let mut catalog = result??;
     if session.is_none() {
         for command in &mut catalog.commands {
@@ -553,6 +611,63 @@ async fn discover_context(
         .map_err(Error::internal)?
         .insert(cache_key, (now(), catalog.clone()));
     Ok(catalog)
+}
+
+/// Durations of the phases of one harness exchange. Reports name only the
+/// phases and their times, never paths, prompts or harness output.
+pub(super) struct Phases {
+    started: std::time::Instant,
+    marks: Mutex<Vec<(&'static str, std::time::Instant)>>,
+}
+
+impl Phases {
+    /// Exchanges at least this slow are reported even when they finish.
+    const SLOW: std::time::Duration = std::time::Duration::from_secs(5);
+
+    pub(super) fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            marks: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Records that `phase` ended now.
+    pub(super) fn mark(&self, phase: &'static str) {
+        if let Ok(mut marks) = self.marks.lock() {
+            marks.push((phase, std::time::Instant::now()));
+        }
+    }
+
+    /// Each finished phase and its duration, in order.
+    pub(super) fn summary(&self) -> String {
+        let marks = self.marks.lock().map(|m| m.clone()).unwrap_or_default();
+        let mut previous = self.started;
+        let mut parts = Vec::new();
+        for (phase, at) in marks {
+            parts.push(format!(
+                "{phase} {:.1}s",
+                at.duration_since(previous).as_secs_f32()
+            ));
+            previous = at;
+        }
+        if parts.is_empty() {
+            "no phase finished".into()
+        } else {
+            parts.join(", ")
+        }
+    }
+
+    /// Logs an exchange that did not finish or was slow.
+    pub(super) fn report(&self, exchange: &str, outcome: &str) {
+        let elapsed = self.started.elapsed();
+        if outcome != "finished" || elapsed >= Self::SLOW {
+            eprintln!(
+                "{exchange} {outcome} after {:.1}s: {}",
+                elapsed.as_secs_f32(),
+                self.summary()
+            );
+        }
+    }
 }
 
 async fn read_response(

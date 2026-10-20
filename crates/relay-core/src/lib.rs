@@ -523,6 +523,11 @@ pub enum Command {
     },
     ResumeQueue {
         session_id: String,
+        /// The session's unfinished turns as the client last saw them. While
+        /// they still match exactly, the resume applies after unrelated
+        /// workspace changes; without them it needs the current revision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue: Option<Vec<QueuedTurn>>,
     },
     /// Holds a session's queued turns: they become paused, nothing launches
     /// after the current turn, and `ResumeQueue` continues them.

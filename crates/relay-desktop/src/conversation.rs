@@ -2099,6 +2099,36 @@ pub fn Conversation(model: Model) -> Element {
                                     role:(TextRole::Label)
                             }
                         }
+                        if session.get().is_some_and(|s| !s.fixture) {
+                            let network_session = session.get().unwrap().id;
+                            let selected_session = network_session.clone();
+                            let network_index = Derived::new(move || {
+                                let snapshot = model.snapshot.get();
+                                let session = snapshot.sessions.iter().find(|s| s.id == selected_session);
+                                match session.and_then(|s| s.network_access) {
+                                    None => 0,
+                                    Some(false) => 1,
+                                    Some(true) => 2,
+                                }
+                            });
+                            let choose_network: Rc<dyn Fn(usize)> = Rc::new(move |slot| {
+                                model.submit(Command::SetSessionNetworkAccess {
+                                    session_id: network_session.clone(),
+                                    network_access: match slot { 1 => Some(false), 2 => Some(true), _ => None },
+                                }, model.snapshot.get_untracked().revision, crate::model::Saved::Action);
+                            });
+                            Tooltip width:(Dimension::Fill)
+                                text:"Applies to the next turn. Codex preserves its filesystem sandbox and approval mode. Unrestricted Access always allows network; Claude Code does not support this setting." {
+                                row height:{px(40.0)}px
+                                    stroke:(width:{px(1.0)} color:ground.hairline edges:top) {
+                                    Segments name:("Session network access".to_string())
+                                        options:(vec!["Network: Inherit".to_string(), "Network: Off".to_string(), "Network: On".to_string()])
+                                        selected:(relay_ui::Live::from(network_index))
+                                        on-select:(choose_network)
+                                        disabled:(relay_ui::Live::from(Derived::new(move || !model.connected.get() || model.busy.get())))
+                                }
+                            }
+                        }
                         if session.get().is_some_and(|s| !s.fixture && s.worker.is_some()) {
                             let current = session.get_untracked().unwrap();
                             let session_id = current.id.clone();
@@ -2144,33 +2174,6 @@ pub fn Conversation(model: Model) -> Element {
                                 }
                             }
                         }
-                    }
-                }
-            }
-            if menu.get() && session.get().is_some_and(|s| !s.fixture) {
-                let network_session = session.get().unwrap().id;
-                let selected_session = network_session.clone();
-                let network_index = Derived::new(move || {
-                    let snapshot = model.snapshot.get();
-                    let session = snapshot.sessions.iter().find(|s| s.id == selected_session);
-                    match session.and_then(|s| s.network_access) {
-                        None => 0,
-                        Some(false) => 1,
-                        Some(true) => 2,
-                    }
-                });
-                let choose_network: Rc<dyn Fn(usize)> = Rc::new(move |slot| {
-                    model.submit(Command::SetSessionNetworkAccess {
-                        session_id: network_session.clone(),
-                        network_access: match slot { 1 => Some(false), 2 => Some(true), _ => None },
-                    }, model.snapshot.get_untracked().revision, crate::model::Saved::Action);
-                });
-                Tooltip text:"Applies to the next turn. Codex preserves its filesystem sandbox and approval mode. Unrestricted Access always allows network; Claude Code does not support this setting." {
-                    row height:{px(40.0)}px {
-                        Segments name:("Session network access".to_string())
-                            options:(vec!["Network: Inherit".to_string(), "Network: Off".to_string(), "Network: On".to_string()])
-                            selected:(relay_ui::Live::from(network_index)) on-select:(choose_network)
-                            disabled:(relay_ui::Live::from(Derived::new(move || !model.connected.get() || model.busy.get())))
                     }
                 }
             }
@@ -2410,7 +2413,7 @@ pub fn Conversation(model: Model) -> Element {
                                 if model.snapshot.get().submissions.iter().any(|s|s.session_id==model.session.get() && s.state==SubmissionState::Paused) && session.get().and_then(|s|s.worker).is_some_and(|w|!matches!(w.status,WorkerStatus::Queued|WorkerStatus::Running)) {
                                     row height:min-content pad:(left:{px(128.0)}px) {
                                         row width:{px(160.0)}px height:min-content {
-                                            { parent.adopt(&action_cell("Resume paused queue", "Resume queue", || false, move || model.submit(Command::ResumeQueue { session_id: model.session.get_untracked() }, model.snapshot.get_untracked().revision, crate::model::Saved::Action))); }
+                                            { parent.adopt(&action_cell("Resume paused queue", "Resume queue", || false, move || model.resume_queue())); }
                                         }
                                     }
                                 }

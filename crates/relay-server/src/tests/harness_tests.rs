@@ -1032,7 +1032,10 @@ done
         };
         let w = workspace(&dir.path().join("db"), &s, c);
         let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
-        assert_eq!(worker(&w.snapshots.borrow(), &id).launched_network_policy, None);
+        assert_eq!(
+            worker(&w.snapshots.borrow(), &id).launched_network_policy,
+            None
+        );
         let launched = LaunchedNetworkPolicy::new(Harness::Codex, mode, network_access);
         let task = tokio::spawn(runtime::run(w.clone(), id.clone(), run.clone(), prompt, rx));
         let worktree = tokio::time::timeout(Duration::from_secs(5), async {
@@ -1041,8 +1044,8 @@ done
                 let worker = worker(&current, &id);
                 if let Some(path) = &worker.worktree {
                     let path = PathBuf::from(path);
-                    let input = std::fs::read_to_string(path.join("codex-input.jsonl"))
-                        .unwrap_or_default();
+                    let input =
+                        std::fs::read_to_string(path.join("codex-input.jsonl")).unwrap_or_default();
                     if input.lines().any(|line| {
                         serde_json::from_str::<Value>(line)
                             .is_ok_and(|v| v["method"] == "turn/start")
@@ -1145,7 +1148,10 @@ done
             .map(|s| serde_json::from_str(s).unwrap())
             .collect();
         let turn = values.iter().find(|v| v["method"] == "turn/start").unwrap();
-        let thread = values.iter().find(|v| v["method"] == "thread/start").unwrap();
+        let thread = values
+            .iter()
+            .find(|v| v["method"] == "thread/start")
+            .unwrap();
         let sandbox = if mode == ApprovalMode::Unrestricted {
             "danger-full-access"
         } else {
@@ -1163,10 +1169,15 @@ done
         let worktree = Path::new(worker(&s, &id).worktree.as_ref().unwrap());
         assert_eq!(
             std::fs::read_to_string(worktree.join("codex-launch")).unwrap(),
-            format!("app-server\n--stdio\n-c\nsandbox_mode=\"{sandbox}\"\n-c\nsandbox_workspace_write.network_access={network_access}\n")
+            format!(
+                "app-server\n--stdio\n-c\nsandbox_mode=\"{sandbox}\"\n-c\nsandbox_workspace_write.network_access={network_access}\n"
+            )
         );
         if mode != ApprovalMode::Unrestricted {
-            assert_eq!(turn["params"]["sandboxPolicy"]["networkAccess"], network_access);
+            assert_eq!(
+                turn["params"]["sandboxPolicy"]["networkAccess"],
+                network_access
+            );
             assert!(
                 turn["params"]["sandboxPolicy"]["writableRoots"]
                     .as_array()
@@ -1232,7 +1243,12 @@ done
             },
         );
         assert_eq!(
-            inherited.sessions.iter().find(|s| s.id == id).unwrap().network_access,
+            inherited
+                .sessions
+                .iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .network_access,
             Some(!network_access)
         );
         let next = w.snapshots.borrow().clone();
@@ -1285,7 +1301,10 @@ done
             thread["params"]["approvalPolicy"],
             turn["params"]["approvalPolicy"]
         );
-        let resumed_turn = values.iter().rfind(|v| v["method"] == "turn/start").unwrap();
+        let resumed_turn = values
+            .iter()
+            .rfind(|v| v["method"] == "turn/start")
+            .unwrap();
         assert_eq!(
             resumed_turn["params"]["approvalPolicy"],
             turn["params"]["approvalPolicy"]

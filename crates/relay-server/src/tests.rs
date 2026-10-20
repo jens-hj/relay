@@ -73,7 +73,7 @@ pub(super) fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig)
         browser,
         harness_status: Arc::new(Mutex::new(vec![])),
         harness_probe: Arc::new(tokio::sync::Mutex::new(())),
-        catalog_probe: Arc::new(tokio::sync::Mutex::new(())),
+        catalog_probes: Arc::new(Mutex::new(HashMap::new())),
         catalogs: Arc::new(Mutex::new(HashMap::new())),
         drafts: watch::channel(vec![]).0,
         transport_shutdown: watch::channel(false).0,
@@ -3694,6 +3694,7 @@ async fn edited_queue_uses_fresh_approval_at_actual_process_launch() {
                     s.revision,
                     Command::ResumeQueue {
                         session_id: id.clone(),
+                        queue: None,
                     },
                 ),
                 &w.config,
@@ -4111,6 +4112,7 @@ async fn paused_queue_holds_turns_after_the_current_one_until_resumed() {
         revision(&w),
         Command::ResumeQueue {
             session_id: id.clone(),
+            queue: None,
         },
     ))
     .unwrap();
@@ -4157,11 +4159,124 @@ async fn paused_queue_holds_turns_after_the_current_one_until_resumed() {
         s.revision,
         Command::ResumeQueue {
             session_id: id.clone(),
+            queue: None,
         },
     ))
     .unwrap();
     assert!(launched);
     assert_eq!(state(&w), SubmissionState::Launching);
+}
+
+#[tokio::test]
+async fn stale_queue_resume_applies_only_while_the_shown_queue_is_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, id, _repo) = completed_app_workspace(dir.path(), APP_FAKE);
+    let first = saved_turn(&w, &id, vec![Part::text("First")]).await;
+    let (_, first_run, _rx, _) = reserve(&w, first);
+    let queued = saved_turn(&w, &id, vec![Part::text("Second")]).await;
+    let queued_id = queued.request_id.clone();
+    let apply = |envelope: CommandEnvelope| {
+        let mut store = w.store.lock().unwrap();
+        let result = store.apply(envelope, &w.config);
+        if let Ok((s, _)) = &result {
+            w.snapshots.send_replace(s.clone());
+        }
+        result.map(|(s, action)| (s, action.is_some()))
+    };
+    apply(queued).unwrap();
+    apply(env(
+        revision(&w),
+        Command::PauseQueue {
+            session_id: id.clone(),
+        },
+    ))
+    .unwrap();
+    // Change the stored workspace as the runtime or another client would.
+    let change = |edit: &dyn Fn(&mut Snapshot)| {
+        let mut store = w.store.lock().unwrap();
+        let mut s = store.snapshot().unwrap();
+        edit(&mut s);
+        s.revision += 1;
+        store.save(&s).unwrap();
+        w.snapshots.send_replace(s);
+    };
+    // The first turn completes; the held turn stays paused.
+    change(&|s| {
+        s.sessions
+            .iter_mut()
+            .find(|s| s.id == id)
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .status = WorkerStatus::Completed;
+    });
+    conversation::advance(&w, &id, &first_run).unwrap();
+    let s = w.store.lock().unwrap().snapshot().unwrap();
+    w.snapshots.send_replace(s.clone());
+    // The client shows the paused queue; other sessions then move on.
+    let seen = s.revision;
+    let shown = s.queued_turns(&id);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].state, SubmissionState::Paused);
+    let unrelated = |s: &mut Snapshot| {
+        s.sessions
+            .iter_mut()
+            .find(|s| s.id != id)
+            .unwrap()
+            .title
+            .push_str(" (busy)");
+    };
+    change(&unrelated);
+    change(&unrelated);
+    let resume = |revision: u64, queue: Option<Vec<QueuedTurn>>| {
+        env(
+            revision,
+            Command::ResumeQueue {
+                session_id: id.clone(),
+                queue,
+            },
+        )
+    };
+    let code = |envelope: CommandEnvelope| apply(envelope).map(|_| ()).unwrap_err().code;
+    // Without the shown queue a stale resume still conflicts.
+    assert_eq!(code(resume(seen, None)), "conflict");
+    // So does a revision the server has not reached.
+    assert_eq!(
+        code(resume(revision(&w) + 1, Some(shown.clone()))),
+        "conflict"
+    );
+    // A competing edit changed the queue since it was shown.
+    change(&|s| {
+        s.submissions
+            .iter_mut()
+            .find(|s| s.id == queued_id)
+            .unwrap()
+            .last_edit_request = Some("competing-edit".into());
+    });
+    assert_eq!(code(resume(seen, Some(shown.clone()))), "conflict");
+    // A client that shows the edited queue resumes it despite later activity.
+    let seen = revision(&w);
+    let shown = w.snapshots.borrow().queued_turns(&id);
+    change(&unrelated);
+    let envelope = resume(seen, Some(shown.clone()));
+    let (resumed, launched) = apply(envelope.clone()).unwrap();
+    assert!(launched);
+    let state = |s: &Snapshot| {
+        s.submissions
+            .iter()
+            .find(|s| s.id == queued_id)
+            .unwrap()
+            .state
+            .clone()
+    };
+    assert_eq!(state(&resumed), SubmissionState::Launching);
+    // The same request is answered from its receipt and launches nothing more.
+    let (again, launched) = apply(envelope).unwrap();
+    assert!(!launched);
+    assert_eq!(again.revision, resumed.revision);
+    // Another resume from the same view now conflicts: the turn launched.
+    assert_eq!(code(resume(seen, Some(shown))), "conflict");
 }
 
 fn revision(w: &Workspace) -> u64 {

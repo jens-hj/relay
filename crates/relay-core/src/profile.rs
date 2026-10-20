@@ -383,7 +383,10 @@ mod tests {
         assert!(snapshot.session_profile(&child).unwrap().network_access);
         child.network_access = Some(false);
         let json = serde_json::to_string(&child).unwrap();
-        assert_eq!(serde_json::from_str::<crate::Session>(&json).unwrap(), child);
+        assert_eq!(
+            serde_json::from_str::<crate::Session>(&json).unwrap(),
+            child
+        );
     }
     #[test]
     fn model_choice_round_trips_in_profiles_and_harness_changes_require_a_new_choice() {

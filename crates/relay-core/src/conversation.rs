@@ -230,6 +230,44 @@ pub enum SubmissionState {
     Paused,
 }
 
+/// One unfinished turn of a session's queue as a client saw it. A queue
+/// resume that names these still applies after unrelated workspace changes,
+/// but not after this queue changed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedTurn {
+    pub submission_id: String,
+    pub state: SubmissionState,
+    /// The request that last edited the turn, which changes with each edit.
+    pub last_edit_request: Option<String>,
+    /// The reason the turn was paused, which changes when it is paused again.
+    pub error: Option<String>,
+}
+
+impl crate::Snapshot {
+    /// A session's unfinished turns, in queue order.
+    pub fn queued_turns(&self, session_id: &str) -> Vec<QueuedTurn> {
+        self.submissions
+            .iter()
+            .filter(|s| {
+                s.session_id == session_id
+                    && matches!(
+                        s.state,
+                        SubmissionState::Queued
+                            | SubmissionState::Paused
+                            | SubmissionState::Launching
+                            | SubmissionState::Running
+                    )
+            })
+            .map(|s| QueuedTurn {
+                submission_id: s.id.clone(),
+                state: s.state.clone(),
+                last_edit_request: s.last_edit_request.clone(),
+                error: s.error.clone(),
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Submission {
     pub id: String,

@@ -3,6 +3,40 @@ use super::*;
 use serde_json::{Value, json};
 use tokio::io::{AsyncWriteExt, BufReader};
 
+const REQUEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+/// Resuming without `excludeTurns` returns the thread's whole history, which
+/// takes longer to load and send for long threads.
+const FULL_RESUME_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+/// The oldest Codex verified to accept `excludeTurns` on `thread/resume`.
+const EXCLUDE_TURNS_SINCE: (u64, u64, u64) = (0, 155, 1);
+
+/// Whether the app-server that sent this `initialize` result accepts
+/// `excludeTurns`, judged by the version in its user agent, such as
+/// `relay/0.163.0 (Linux; x86_64) ...`. An unknown version is not assumed to.
+pub(super) fn excludes_turns(initialized: &Value) -> bool {
+    let Some(version) = initialized["userAgent"]
+        .as_str()
+        .and_then(|agent| agent.split_whitespace().next())
+        .and_then(|product| product.rsplit_once('/'))
+        .map(|(_, version)| version)
+    else {
+        return false;
+    };
+    let release = version.split(['-', '+']).next().unwrap_or_default();
+    let mut numbers = release.split('.').map(str::parse::<u64>);
+    match (
+        numbers.next(),
+        numbers.next(),
+        numbers.next(),
+        numbers.next(),
+    ) {
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => {
+            (major, minor, patch) >= EXCLUDE_TURNS_SINCE
+        }
+        _ => false,
+    }
+}
+
 pub(super) struct Rpc {
     pub(super) stdin: tokio::process::ChildStdin,
     pub(super) stdout: BufReader<tokio::process::ChildStdout>,
@@ -29,11 +63,19 @@ impl Rpc {
             .map_err(|_| Error::invalid("Invalid Codex app-server response"))
     }
     pub(super) async fn request(&mut self, method: &str, params: Value) -> Result<Value, Error> {
+        self.request_within(method, params, REQUEST_DEADLINE).await
+    }
+    async fn request_within(
+        &mut self,
+        method: &str,
+        params: Value,
+        deadline: std::time::Duration,
+    ) -> Result<Value, Error> {
         self.serial += 1;
         let id = self.serial;
         self.send(json!({"id":id,"method":method,"params":params}))
             .await?;
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::time::timeout(deadline, async {
             loop {
                 let value = self.read().await?;
                 if value["id"].as_u64() == Some(id) {
@@ -643,8 +685,10 @@ pub(super) async fn execute(
     } else {
         json!({"type":"workspaceWrite","writableRoots":roots,"networkAccess":network_access})
     };
+    let phases = crate::commands::Phases::new();
     let setup = async {
-        rpc.request("initialize", json!({"clientInfo":{"name":"relay","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
+        let initialized = rpc.request("initialize", json!({"clientInfo":{"name":"relay","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
+        phases.mark("initialize");
         rpc.send(json!({"method":"initialized"})).await?;
         let method = if fork.is_some() {
             "thread/fork"
@@ -654,13 +698,24 @@ pub(super) async fn execute(
             "thread/start"
         };
         let mut params = json!({"cwd":path,"sandbox":sandbox,"approvalPolicy":policy,"config":{"sandbox_workspace_write.network_access":network_access}});
+        // Relay reads only the thread's ID and model, so a resume skips the
+        // turn history when this Codex can; otherwise it waits longer for it.
+        let mut deadline = REQUEST_DEADLINE;
         if let Some(id) = previous_thread {
             params["threadId"] = json!(id);
+            if fork.is_none() {
+                if excludes_turns(&initialized) {
+                    params["excludeTurns"] = json!(true);
+                } else {
+                    deadline = FULL_RESUME_DEADLINE;
+                }
+            }
         }
         if let Some(model) = &selection.model {
             params["model"] = json!(model);
         }
-        let response = rpc.request(method, params).await?;
+        let response = rpc.request_within(method, params, deadline).await?;
+        phases.mark(method);
         let thread = response["thread"]["id"]
             .as_str()
             .ok_or_else(|| Error::invalid("Codex thread ID missing"))?
@@ -746,8 +801,12 @@ pub(super) async fn execute(
             .await?;
         Ok::<_, Error>((thread, request_id))
     };
-    let (thread, request_id) =
-        tokio::select! { result = setup => result?, _ = stop.changed() => return Ok(()) };
+    let result = tokio::select! { result = setup => result, _ = stop.changed() => return Ok(()) };
+    phases.report(
+        "Codex turn setup",
+        if result.is_ok() { "finished" } else { "failed" },
+    );
+    let (thread, request_id) = result?;
     if fork.is_some() {
         return Ok(());
     }

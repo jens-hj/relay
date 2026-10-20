@@ -646,7 +646,7 @@ pub(super) fn apply(
             }
             pause(snapshot, &session_id, "Queue paused; resume to continue");
         }
-        Command::ResumeQueue { session_id } => {
+        Command::ResumeQueue { session_id, .. } => {
             // While a turn runs, resuming only releases the held turns; they
             // follow the current turn as queued turns do.
             let running = snapshot
