@@ -391,6 +391,15 @@ async fn claude_first_turn_resume_modes_and_bound_harness() {
     assert_eq!(work.thread_id.as_deref(), Some(CLAUDE_THREAD));
     assert_eq!(work.last_usage, work.usage);
     assert_eq!(work.harness, Harness::ClaudeCode);
+    assert_eq!(
+        work.launched_network_policy,
+        Some(LaunchedNetworkPolicy {
+            harness: Harness::ClaudeCode,
+            approval: ApprovalMode::Automatic,
+            network_access: true,
+            effective: EffectiveNetworkAccess::Unsupported,
+        })
+    );
     assert_eq!(work.model.as_deref(), Some("reported-claude-model"));
     assert_eq!(work.context_tokens, None);
     assert_eq!(work.context_window, None);
@@ -455,6 +464,15 @@ async fn claude_first_turn_resume_modes_and_bound_harness() {
         worker(&s, &id).error
     );
     assert_eq!(worker(&s, &id).harness, Harness::ClaudeCode);
+    assert_eq!(
+        worker(&s, &id).launched_network_policy,
+        Some(LaunchedNetworkPolicy {
+            harness: Harness::ClaudeCode,
+            approval: ApprovalMode::Unrestricted,
+            network_access: true,
+            effective: EffectiveNetworkAccess::Unsupported,
+        })
+    );
     let argv = std::fs::read_to_string(path.join("claude-argv")).unwrap();
     assert!(argv.contains(&format!("--resume\n{CLAUDE_THREAD}\n")));
     assert!(argv.contains("\nbypassPermissions\n"));
@@ -765,6 +783,7 @@ fn schema_four_updates_only_inherited_bundled_defaults_and_keeps_old_threads() {
     let db = dir.path().join("db");
     let mut s = demo_snapshot(AgentProfile::default());
     s.sessions[0].worker = Some(WorkerRun {
+        launched_network_policy: None,
         model: None,
         context_tokens: None,
         context_window: None,
@@ -965,23 +984,29 @@ async fn harness_probes_are_read_only_cached_independent_and_credential_safe() {
 #[tokio::test]
 async fn codex_policy_modes_and_native_permission_response_use_exact_request() {
     const FAKE: &str = r#"
+printf '%s\n' "$1" "$2" "$3" "$4" "$5" "$6" > codex-launch
 while IFS= read -r line; do
   echo "$line" >> codex-input.jsonl
   method=$(printf '%s' "$line" | jq -r '.method // "response"')
   id=$(printf '%s' "$line" | jq -c '.id')
   case "$method" in
     initialize) printf '{"id":%s,"result":{}}\n' "$id" ;;
-    thread/start) printf '{"id":%s,"result":{"thread":{"id":"codex-thread"}}}\n' "$id" ;;
+    thread/start|thread/resume) printf '{"id":%s,"result":{"thread":{"id":"codex-thread"}}}\n' "$id" ;;
     turn/start)
       printf '{"id":%s,"result":{"turn":{"id":"turn-1"}}}\n' "$id"
+      while [ ! -f release-first-turn ]; do sleep 0.01; done
       if [ -f ask ]; then
+        rm ask
         echo '{"id":"permission-91","method":"item/commandExecution/requestApproval","params":{"threadId":"codex-thread","turnId":"turn-1","command":"printf hello"}}'
       else echo '{"method":"turn/completed","params":{"threadId":"codex-thread","turn":{"id":"turn-1","status":"completed"}}}'; fi ;;
     response) echo '{"method":"turn/completed","params":{"threadId":"codex-thread","turn":{"id":"turn-1","status":"completed"}}}' ;;
   esac
 done
 "#;
-    for mode in ApprovalMode::ALL {
+    for (mode, network_access) in ApprovalMode::ALL
+        .into_iter()
+        .flat_map(|mode| [true, false].map(|network| (mode, network)))
+    {
         let dir = tempfile::tempdir().unwrap();
         let repo = review_repo(dir.path());
         let bin = dir.path().join("fake-codex");
@@ -990,7 +1015,7 @@ done
             &format!(
                 "{}\n{FAKE}",
                 if mode == ApprovalMode::Ask {
-                    "touch ask"
+                    "if [ ! -f asked ]; then touch ask asked; fi"
                 } else {
                     "true"
                 }
@@ -999,6 +1024,7 @@ done
         let mut s = live();
         s.projects[0].defaults = AgentProfile::default();
         s.projects[0].defaults.execution.approval = mode;
+        s.projects[0].defaults.network_access = network_access;
         let c = RuntimeConfig {
             repository: Some(repo),
             codex: bin,
@@ -1006,7 +1032,81 @@ done
         };
         let w = workspace(&dir.path().join("db"), &s, c);
         let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
+        assert_eq!(worker(&w.snapshots.borrow(), &id).launched_network_policy, None);
+        let launched = LaunchedNetworkPolicy::new(Harness::Codex, mode, network_access);
         let task = tokio::spawn(runtime::run(w.clone(), id.clone(), run.clone(), prompt, rx));
+        let worktree = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let current = w.snapshots.borrow().clone();
+                let worker = worker(&current, &id);
+                if let Some(path) = &worker.worktree {
+                    let path = PathBuf::from(path);
+                    let input = std::fs::read_to_string(path.join("codex-input.jsonl"))
+                        .unwrap_or_default();
+                    if input.lines().any(|line| {
+                        serde_json::from_str::<Value>(line)
+                            .is_ok_and(|v| v["method"] == "turn/start")
+                    }) {
+                        assert_eq!(worker.status, WorkerStatus::Running);
+                        assert_eq!(worker.launched_network_policy, Some(launched));
+                        break path;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Saved edits while the real harness process is held cannot rewrite
+        // the current policy. The next process must receive the changed value.
+        apply(
+            &w,
+            Command::SetSessionNetworkAccess {
+                session_id: id.clone(),
+                network_access: Some(!network_access),
+            },
+        );
+        apply(
+            &w,
+            Command::SetWorkerExecution {
+                session_id: id.clone(),
+                execution: Some(ExecutionSettings {
+                    approval: ApprovalMode::Unrestricted,
+                }),
+            },
+        );
+        let mut edited_profile = w.snapshots.borrow().projects[0].defaults.clone();
+        edited_profile.harness = Harness::ClaudeCode;
+        let project_id = w.snapshots.borrow().projects[0].id.clone();
+        let edited = apply(
+            &w,
+            Command::UpdateProjectDefaults {
+                project_id: project_id.clone(),
+                profile: edited_profile,
+            },
+        );
+        assert_eq!(worker(&edited, &id).launched_network_policy, Some(launched));
+        assert_eq!(worker(&edited, &id).harness, Harness::Codex);
+        // Check the durable snapshot as well as publication.
+        assert_eq!(
+            worker(&w.store.lock().unwrap().snapshot().unwrap(), &id).launched_network_policy,
+            Some(launched)
+        );
+        apply(
+            &w,
+            Command::UpdateProjectDefaults {
+                project_id,
+                profile: s.projects[0].defaults.clone(),
+            },
+        );
+        apply(
+            &w,
+            Command::SetWorkerExecution {
+                session_id: id.clone(),
+                execution: None,
+            },
+        );
+        std::fs::write(worktree.join("release-first-turn"), "").unwrap();
         if mode == ApprovalMode::Ask {
             let permission = tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
@@ -1022,13 +1122,14 @@ done
                 &w,
                 Command::RespondPermission {
                     permission_id: permission.id,
-                    run_id: run,
+                    run_id: run.clone(),
                     allow: false,
                 },
             );
         }
         task.await.unwrap();
         let s = finished(&w, &id).await;
+        assert_eq!(worker(&s, &id).launched_network_policy, Some(launched));
         assert_eq!(
             worker(&s, &id).status,
             WorkerStatus::Completed,
@@ -1044,6 +1145,34 @@ done
             .map(|s| serde_json::from_str(s).unwrap())
             .collect();
         let turn = values.iter().find(|v| v["method"] == "turn/start").unwrap();
+        let thread = values.iter().find(|v| v["method"] == "thread/start").unwrap();
+        let sandbox = if mode == ApprovalMode::Unrestricted {
+            "danger-full-access"
+        } else {
+            "workspace-write"
+        };
+        assert_eq!(thread["params"]["sandbox"], sandbox);
+        assert_eq!(
+            thread["params"]["config"]["sandbox_workspace_write.network_access"],
+            network_access
+        );
+        assert_eq!(
+            thread["params"]["approvalPolicy"],
+            turn["params"]["approvalPolicy"]
+        );
+        let worktree = Path::new(worker(&s, &id).worktree.as_ref().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("codex-launch")).unwrap(),
+            format!("app-server\n--stdio\n-c\nsandbox_mode=\"{sandbox}\"\n-c\nsandbox_workspace_write.network_access={network_access}\n")
+        );
+        if mode != ApprovalMode::Unrestricted {
+            assert_eq!(turn["params"]["sandboxPolicy"]["networkAccess"], network_access);
+            assert!(
+                turn["params"]["sandboxPolicy"]["writableRoots"]
+                    .as_array()
+                    .is_some_and(|roots| !roots.is_empty())
+            );
+        }
         assert_eq!(
             turn["params"]["approvalPolicy"],
             if mode == ApprovalMode::Ask {
@@ -1066,6 +1195,150 @@ done
                     .iter()
                     .any(|v| v["id"] == "permission-91" && v["result"]["decision"] == "decline")
             );
+        }
+        // A session override is independent of the saved execution mode and
+        // must replace both defaults and a resumed thread's previous policy.
+        apply(
+            &w,
+            Command::SetSessionNetworkAccess {
+                session_id: id.clone(),
+                network_access: Some(!network_access),
+            },
+        );
+        let override_snapshot = apply(
+            &w,
+            Command::SetWorkerExecution {
+                session_id: id.clone(),
+                execution: Some(ExecutionSettings { approval: mode }),
+            },
+        );
+        let override_session = override_snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap();
+        assert_eq!(
+            override_snapshot
+                .session_profile(override_session)
+                .unwrap()
+                .network_access,
+            !network_access
+        );
+        let inherited = apply(
+            &w,
+            Command::SetWorkerExecution {
+                session_id: id.clone(),
+                execution: None,
+            },
+        );
+        assert_eq!(
+            inherited.sessions.iter().find(|s| s.id == id).unwrap().network_access,
+            Some(!network_access)
+        );
+        let next = w.snapshots.borrow().clone();
+        let (_, next_run, rx, prompt) = reserve(
+            &w,
+            env(
+                next.revision,
+                Command::SendWorker {
+                    session_id: id.clone(),
+                    prompt: "Continue".into(),
+                    approve_implementation: true,
+                },
+            ),
+        );
+        assert_eq!(
+            worker(&w.snapshots.borrow(), &id).launched_network_policy,
+            Some(launched)
+        );
+        runtime::run(w.clone(), id.clone(), next_run, prompt, rx).await;
+        let resumed = finished(&w, &id).await;
+        assert_eq!(
+            worker(&resumed, &id).launched_network_policy,
+            Some(LaunchedNetworkPolicy::new(
+                Harness::Codex,
+                mode,
+                !network_access,
+            ))
+        );
+        assert_eq!(
+            worker(&resumed, &id).status,
+            WorkerStatus::Completed,
+            "{:?}",
+            worker(&resumed, &id).error
+        );
+        let lines = std::fs::read_to_string(worktree.join("codex-input.jsonl")).unwrap();
+        let values: Vec<Value> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let thread = values
+            .iter()
+            .find(|v| v["method"] == "thread/resume")
+            .unwrap();
+        assert_eq!(
+            thread["params"]["config"]["sandbox_workspace_write.network_access"],
+            !network_access
+        );
+        assert_eq!(thread["params"]["sandbox"], sandbox);
+        assert_eq!(
+            thread["params"]["approvalPolicy"],
+            turn["params"]["approvalPolicy"]
+        );
+        let resumed_turn = values.iter().rfind(|v| v["method"] == "turn/start").unwrap();
+        assert_eq!(
+            resumed_turn["params"]["approvalPolicy"],
+            turn["params"]["approvalPolicy"]
+        );
+        if mode != ApprovalMode::Unrestricted {
+            assert_eq!(
+                resumed_turn["params"]["sandboxPolicy"]["networkAccess"],
+                !network_access
+            );
+            assert_eq!(
+                resumed_turn["params"]["sandboxPolicy"]["writableRoots"],
+                turn["params"]["sandboxPolicy"]["writableRoots"]
+            );
+        }
+        if mode == ApprovalMode::Automatic && network_access {
+            // A subsequent queued turn and an actual exec failure retain the
+            // last successful launch; neither may claim the edited preference.
+            let previous = worker(&resumed, &id).launched_network_policy;
+            apply(
+                &w,
+                Command::SetSessionNetworkAccess {
+                    session_id: id.clone(),
+                    network_access: Some(network_access),
+                },
+            );
+            std::fs::remove_file(&w.config.codex).unwrap();
+            let revision = w.snapshots.borrow().revision;
+            let (_, failed_run, rx, prompt) = reserve(
+                &w,
+                env(
+                    revision,
+                    Command::SendWorker {
+                        session_id: id.clone(),
+                        prompt: "Fail to launch".into(),
+                        approve_implementation: true,
+                    },
+                ),
+            );
+            assert_eq!(
+                worker(&w.snapshots.borrow(), &id).launched_network_policy,
+                previous
+            );
+            runtime::run(w.clone(), id.clone(), failed_run, prompt, rx).await;
+            let failed = finished(&w, &id).await;
+            assert_eq!(worker(&failed, &id).status, WorkerStatus::Failed);
+            assert!(
+                worker(&failed, &id)
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("Cannot launch agent harness")
+            );
+            assert_eq!(worker(&failed, &id).launched_network_policy, previous);
         }
     }
 }
@@ -1496,6 +1769,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
     let db = dir.path().join("db");
     let mut snapshot = demo_snapshot(AgentProfile::default());
     snapshot.sessions[0].worker = Some(WorkerRun {
+        launched_network_policy: None,
         model: None,
         context_tokens: None,
         context_window: None,
@@ -1533,7 +1807,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        25
+        27
     );
     let worker = snapshot.sessions[0].worker.as_mut().unwrap();
     worker.model = Some("reported-model".into());

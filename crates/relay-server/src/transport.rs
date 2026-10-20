@@ -774,6 +774,150 @@ mod tests {
             .unwrap();
     }
 
+    /// Publish the server's current view to a connected client as the stream does.
+    fn publish(
+        projection: &Projection,
+        delivered: &mut Snapshot,
+        client: &mut Snapshot,
+        server: &Snapshot,
+    ) -> Delta {
+        let (view, history) = projection.view(server);
+        let delta = Delta::between(
+            &serde_json::to_value(&*delivered).unwrap(),
+            &serde_json::to_value(&view).unwrap(),
+        );
+        let event = StreamEvent::Update {
+            base_revision: delivered.revision,
+            revision: view.revision,
+            delta: delta.clone(),
+            history,
+        };
+        let event: StreamEvent =
+            serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        event.apply(client).unwrap();
+        assert_eq!(*client, view);
+        assert_eq!(client.session_peers, server.session_peers);
+        *delivered = view;
+        delta
+    }
+
+    fn peer_delta(delta: &Delta) -> Option<&Delta> {
+        match delta {
+            Delta::Object { fields, .. } => fields.get("session_peers"),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn peer_grants_and_prunes_reach_connected_and_reconnecting_clients() {
+        let mut server = archive();
+        server.protocol_version = PROTOCOL_VERSION;
+        for session in &mut server.sessions {
+            session.fixture = false;
+            session.archived = false;
+            session.parent_session_id = None;
+            if let Some(worker) = &mut session.worker {
+                worker.status = WorkerStatus::Completed;
+            }
+        }
+        let [plan, worker, review] = ["session-plan", "session-worker", "session-review"];
+        let mut projection = Projection::default();
+        subscribe(&mut projection, &server, 1);
+        let (mut delivered, _) = projection.view(&server);
+        assert!(
+            serde_json::to_value(&delivered)
+                .unwrap()
+                .get("session_peers")
+                .is_none()
+        );
+        let mut client = delivered.clone();
+        // Empty to non-empty: the omitted field arrives whole.
+        server.grant_peer(plan, worker, "grant-1", 1);
+        server.revision += 1;
+        let delta = publish(&projection, &mut delivered, &mut client, &server);
+        assert!(matches!(peer_delta(&delta), Some(Delta::Replace { .. })));
+        assert!(client.is_peer(plan, worker));
+        // Later grants and prunes are keyed record changes.
+        server.grant_peer(review, plan, "grant-2", 2);
+        server.revision += 1;
+        let delta = publish(&projection, &mut delivered, &mut client, &server);
+        let Some(Delta::Records {
+            upsert, removed, ..
+        }) = peer_delta(&delta)
+        else {
+            panic!("expected a record update")
+        };
+        assert_eq!(
+            upsert.keys().collect::<Vec<_>>(),
+            ["peer:session-plan:session-review"]
+        );
+        assert!(removed.is_empty());
+        // A client reconnecting now receives the grants in its reset.
+        let reconnect = Projection::default();
+        let (view, history) = reconnect.view(&server);
+        let mut stale = Snapshot::default();
+        StreamEvent::Reset {
+            protocol_version: PROTOCOL_VERSION,
+            snapshot: Box::new(view.clone()),
+            history,
+        }
+        .apply(&mut stale)
+        .unwrap();
+        assert_eq!(stale.session_peers, server.session_peers);
+        // Archiving prunes one grant.
+        server
+            .apply(
+                Command::SetSessionArchived {
+                    session_id: worker.into(),
+                    archived: true,
+                },
+                "archive",
+                3,
+            )
+            .unwrap();
+        server.revision += 1;
+        let delta = publish(&projection, &mut delivered, &mut client, &server);
+        let Some(Delta::Records {
+            upsert, removed, ..
+        }) = peer_delta(&delta)
+        else {
+            panic!("expected a record removal")
+        };
+        assert!(upsert.is_empty());
+        assert_eq!(removed, &["peer:session-plan:session-worker"]);
+        assert!(!client.is_peer(plan, worker) && client.is_peer(plan, review));
+        // Deleting the other branch prunes the last grant; the field goes away.
+        for command in [
+            Command::SetSessionArchived {
+                session_id: review.into(),
+                archived: true,
+            },
+            Command::DeleteSessionBranch {
+                session_id: review.into(),
+            },
+        ] {
+            server.apply(command, "delete", 4).unwrap();
+        }
+        server.revision += 1;
+        let delta = publish(&projection, &mut delivered, &mut client, &server);
+        let Delta::Object { removed, .. } = &delta else {
+            panic!("expected an object update")
+        };
+        assert!(removed.contains(&"session_peers".to_owned()));
+        assert!(client.session_peers.is_empty());
+        // A reconnect after the prunes resets a client that still holds grants.
+        let (view, history) = Projection::default().view(&server);
+        StreamEvent::Reset {
+            protocol_version: PROTOCOL_VERSION,
+            snapshot: Box::new(view.clone()),
+            history,
+        }
+        .apply(&mut stale)
+        .unwrap();
+        assert!(stale.session_peers.is_empty());
+        assert_eq!(stale, view);
+    }
+
     #[test]
     fn page_bounds_order_unicode_and_cursor_validation() {
         let mut snapshot = archive();
@@ -901,6 +1045,7 @@ mod tests {
     fn active_run_identity_survives_paging_the_prompt_out_of_view() {
         let mut snapshot = archive();
         snapshot.sessions[0].worker = Some(WorkerRun {
+            launched_network_policy: None,
             model: None,
             context_tokens: None,
             context_window: None,
@@ -935,6 +1080,7 @@ mod tests {
     fn progress_archive() -> Snapshot {
         let mut snapshot = archive();
         snapshot.sessions[0].worker = Some(WorkerRun {
+            launched_network_policy: None,
             model: None,
             context_tokens: None,
             context_window: None,
@@ -1341,7 +1487,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            25
+            27
         );
     }
 
@@ -1414,7 +1560,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            25
+            27
         );
     }
 

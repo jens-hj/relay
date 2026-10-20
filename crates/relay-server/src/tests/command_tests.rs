@@ -268,6 +268,18 @@ async fn clear_resume_and_fork_keep_exact_history_and_independent_files() {
     std::fs::write(&file, "staged edit").unwrap();
     git(&path, &["add", "README"]);
     std::fs::write(&file, "tracked edit").unwrap();
+    let original_policy = source.worker.as_ref().unwrap().launched_network_policy;
+    assert_eq!(
+        original_policy.unwrap().effective,
+        EffectiveNetworkAccess::Allowed
+    );
+    apply(
+        &w,
+        Command::SetSessionNetworkAccess {
+            session_id: id.clone(),
+            network_access: Some(false),
+        },
+    );
     let revision = w.snapshots.borrow().revision;
     let (session, run, stop, prompt) = reserve(
         &w,
@@ -279,6 +291,19 @@ async fn clear_resume_and_fork_keep_exact_history_and_independent_files() {
                 argument: String::new(),
             },
         ),
+    );
+    assert_eq!(
+        w.snapshots
+            .borrow()
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .launched_network_policy,
+        original_policy
     );
     runtime::run(w.clone(), session, run.clone(), prompt, stop).await;
     let snapshot = finished(&w, &id).await;
@@ -297,6 +322,13 @@ async fn clear_resume_and_fork_keep_exact_history_and_independent_files() {
         source_worker.error
     );
     let fork = snapshot.sessions.iter().find(|s| s.id == run).unwrap();
+    let launched = Some(LaunchedNetworkPolicy::new(
+        Harness::Codex,
+        ApprovalMode::Automatic,
+        false,
+    ));
+    assert_eq!(source_worker.launched_network_policy, launched);
+    assert_eq!(fork.worker.as_ref().unwrap().launched_network_policy, launched);
     let target = PathBuf::from(fork.worker.as_ref().unwrap().worktree.as_ref().unwrap());
     assert_ne!(target, path);
     let index = std::process::Command::new("git")
@@ -344,6 +376,10 @@ async fn clear_resume_and_fork_keep_exact_history_and_independent_files() {
     );
     let session = cleared.sessions.iter().find(|s| s.id == id).unwrap();
     assert!(session.worker.as_ref().unwrap().thread_id.is_none());
+    assert_eq!(
+        session.worker.as_ref().unwrap().launched_network_policy,
+        launched
+    );
     assert_eq!(session.conversations.len(), 1);
     let restored = apply(
         &w,
@@ -366,6 +402,18 @@ async fn clear_resume_and_fork_keep_exact_history_and_independent_files() {
             .as_deref(),
         Some("original-thread")
     );
+    assert_eq!(
+        restored
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .launched_network_policy,
+        launched
+    );
     assert!(restored.messages.len() > source.conversations.len());
 }
 
@@ -383,6 +431,7 @@ fn shared_workspaces_block_overlapping_execution() {
             changes: None,
         }];
         session.worker = Some(WorkerRun {
+            launched_network_policy: None,
             model: None,
             context_tokens: None,
             context_window: None,
@@ -1157,6 +1206,53 @@ async fn branch_archive_and_confirmed_deletion_remove_owned_files_and_persist_ov
         .filter(|s| s.id != id && s.id != child_id)
         .map(|s| s.id.clone())
         .collect();
+    // Another session's accepted message and draft mention the deleted child.
+    let mentioning = vec![Part {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: PartKind::SessionMention {
+            mention: SessionMention {
+                session_id: child_id.into(),
+                label: "Relay • Deleted child".into(),
+            },
+        },
+    }];
+    let mention_receipt = env(
+        snapshot.revision,
+        Command::SubmitTurn {
+            session_id: unaffected[0].clone(),
+            draft_revision: 0,
+            parts: mentioning.clone(),
+            approve_implementation: false,
+        },
+    );
+    let mention_draft = Draft {
+        session_id: unaffected[0].clone(),
+        revision: 1,
+        parts: mentioning,
+    };
+    {
+        let store = w.store.lock().unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO receipts(request_id,request) VALUES(?1,?2)",
+                params![
+                    mention_receipt.request_id,
+                    serde_json::to_string(&mention_receipt).unwrap()
+                ],
+            )
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO drafts(session_id,draft) VALUES(?1,?2)",
+                params![
+                    unaffected[0],
+                    serde_json::to_string(&mention_draft).unwrap()
+                ],
+            )
+            .unwrap();
+    }
     let token = uuid::Uuid::new_v4().to_string();
     let (app, shutdown) = router_with_shutdown(
         dir.path().join("db"),
@@ -1317,6 +1413,24 @@ async fn branch_archive_and_confirmed_deletion_remove_owned_files_and_persist_ov
         initial_receipt.starts_with("deleted:"),
         "Deleted initial prompts must not remain in command receipts"
     );
+    let mention_receipt: String = store
+        .connection
+        .query_row(
+            "SELECT request FROM receipts WHERE request_id=?1",
+            [&mention_receipt.request_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        mention_receipt.starts_with("deleted:"),
+        "Receipts mentioning a deleted session are redacted"
+    );
+    // A stale mention in another session's draft stays readable but grants nothing.
+    assert!(
+        conversation::read_drafts(&store.connection)
+            .unwrap()
+            .contains(&mention_draft)
+    );
 }
 
 #[tokio::test]
@@ -1446,7 +1560,7 @@ async fn profile_models_are_discovered_before_creation_and_passed_to_new_agents(
     let child = env(
         completed.revision,
         Command::StartChildAgent {
-            parent_session_id: session_id,
+            parent_session_id: session_id.clone(),
             name: String::new(),
             profile: AgentProfile::worker(&profile),
             prompt: String::new(),
@@ -1456,6 +1570,32 @@ async fn profile_models_are_discovered_before_creation_and_passed_to_new_agents(
     let child_id = format!("session-{}", child.request_id);
     assert!(send(child).send().await.unwrap().status().is_success());
     let children: Snapshot = read().send().await.unwrap().json().await.unwrap();
+    // A child with prepared workspaces but no first turn did not launch its
+    // parent's process and must not inherit the parent's effective policy.
+    assert!(
+        completed
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .launched_network_policy
+            .is_some()
+    );
+    assert_eq!(
+        children
+            .sessions
+            .iter()
+            .find(|s| s.id == child_id)
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .launched_network_policy,
+        None
+    );
     assert_eq!(
         children
             .sessions

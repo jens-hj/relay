@@ -2519,6 +2519,7 @@ fn worker_running_stop_completed_review_and_continue_use_recorded_session() {
     session.issue_id = Some("issue-2".into());
     session.agent_config_id = snapshot.agent_configs[0].id.clone();
     session.worker = Some(WorkerRun {
+        launched_network_policy: None,
         model: None,
         context_tokens: None,
         context_window: None,
@@ -2711,6 +2712,7 @@ fn removed_board_items_keep_history_but_block_new_turns_until_restored() {
     session.agent_config_id = agent_config_id;
     session.fixture = false;
     session.worker = Some(WorkerRun {
+        launched_network_policy: None,
         model: None,
         context_tokens: None,
         context_window: None,
@@ -3108,6 +3110,7 @@ fn failed_launch_without_thread_offers_new_linked_worker_instead_of_continue() {
     session.issue_id = Some("issue-2".into());
     session.agent_config_id = snapshot.agent_configs[0].id.clone();
     session.worker = Some(WorkerRun {
+        launched_network_policy: None,
         model: None,
         context_tokens: None,
         context_window: None,
@@ -3255,6 +3258,7 @@ fn buffer_worker(mounted: &Mounted) {
     s.fixture = false;
     s.role = SessionRole::Worker;
     s.worker = Some(WorkerRun {
+        launched_network_policy: None,
         model: None,
         context_tokens: None,
         context_window: None,
@@ -6184,6 +6188,7 @@ fn director_execution_does_not_consume_worker_capacity_or_block_director_continu
     session.issue_id = Some("issue-2".into());
     session.role = SessionRole::Root;
     session.worker = Some(WorkerRun {
+        launched_network_policy: None,
         model: None,
         context_tokens: None,
         context_window: None,
@@ -6755,6 +6760,7 @@ fn issue_status_prefers_waiting_and_active_work_then_the_latest_outcome() {
 
 fn worker_run(status: WorkerStatus) -> WorkerRun {
     WorkerRun {
+        launched_network_policy: None,
         model: None,
         context_tokens: None,
         context_window: None,
@@ -7018,6 +7024,227 @@ fn provenance_names_connections_and_omits_unrecorded_values() {
     assert_eq!(keys(&groups), ["workspace-project-1", "worker"]);
     assert_eq!(keys(&changed), keys(&groups));
     assert_ne!(changed, groups);
+}
+
+#[test]
+fn session_details_distinguish_launched_network_policy_from_preferences_and_unknown_runs() {
+    let snapshot = live_snapshot();
+    for harness in [Harness::Codex, Harness::ClaudeCode] {
+        for mode in ApprovalMode::ALL {
+            for network_access in [true, false] {
+                for recorded in [true, false] {
+                    let mut session = snapshot.sessions[0].clone();
+                    session.network_access = Some(network_access);
+                    let mut run = worker_run(WorkerStatus::Running);
+                    run.harness = harness;
+                    run.execution = Some(ExecutionSettings { approval: mode });
+                    run.launched_network_policy = recorded.then(|| {
+                        LaunchedNetworkPolicy::new(harness, mode, network_access)
+                    });
+                    session.worker = Some(run);
+                    let groups = crate::conversation::provenance(&snapshot, &session, false);
+                    let worker = groups.iter().find(|g| g.key == "worker").unwrap();
+                    let expected = match (harness, mode, network_access) {
+                        (Harness::ClaudeCode, _, _) => "Unsupported by Claude Code",
+                        (Harness::Codex, ApprovalMode::Unrestricted, _) => {
+                            "Allowed (Unrestricted Access)"
+                        }
+                        (Harness::Codex, _, true) => "Allowed",
+                        (Harness::Codex, _, false) => "Blocked",
+                    };
+                    assert!(worker.rows.contains(&(
+                        "Network Access",
+                        if recorded {
+                            expected
+                        } else {
+                            "Unknown (no launch recorded)"
+                        }
+                        .into()
+                    )));
+                    assert!(worker.rows.contains(&(
+                        "Network Setting",
+                        if recorded {
+                            if network_access { "On" } else { "Off" }
+                        } else {
+                            "Unknown (no launch recorded)"
+                        }
+                        .into()
+                    )));
+                    assert_eq!(
+                        worker
+                            .rows
+                            .iter()
+                            .any(|(key, _)| *key == "Next Turn Network Access"),
+                        !recorded
+                    );
+                    if !recorded {
+                        assert!(
+                            worker.rows.contains(&("Next Turn Network Access", expected.into()))
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let mut session = snapshot.sessions[0].clone();
+    session.worker = None;
+    session.network_access = Some(false);
+    let groups = crate::conversation::provenance(&snapshot, &session, false);
+    assert!(
+        groups
+            .iter()
+            .any(|g| g.rows.contains(&("Next Turn Network Access", "Blocked".into())))
+    );
+}
+
+#[test]
+fn active_session_details_keep_launched_policy_after_network_approval_and_profile_edits() {
+    let mut snapshot = live_snapshot();
+    let session = &mut snapshot.sessions[0];
+    session.network_access = Some(true);
+    let mut run = worker_run(WorkerStatus::Running);
+    run.execution = Some(ExecutionSettings {
+        approval: ApprovalMode::Ask,
+    });
+    run.launched_network_policy = Some(LaunchedNetworkPolicy::new(
+        Harness::Codex,
+        ApprovalMode::Ask,
+        true,
+    ));
+    session.worker = Some(run.clone());
+    let details = |snapshot: &Snapshot| {
+        crate::conversation::provenance(snapshot, &snapshot.sessions[0], false)
+            .into_iter()
+            .find(|g| g.key == "worker")
+            .unwrap()
+    };
+    assert!(
+        details(&snapshot)
+            .rows
+            .contains(&("Network Access", "Allowed".into()))
+    );
+
+    snapshot.sessions[0].network_access = Some(false);
+    let pending = details(&snapshot);
+    assert!(pending.rows.contains(&("Network Access", "Allowed".into())));
+    assert!(pending.rows.contains(&("Network Setting", "On".into())));
+    assert!(
+        pending
+            .rows
+            .contains(&("Next Turn Network Setting", "Off".into()))
+    );
+    assert!(
+        pending
+            .rows
+            .contains(&("Next Turn Network Access", "Blocked".into()))
+    );
+    assert_eq!(snapshot.sessions[0].worker.as_ref(), Some(&run));
+
+    let relaunched = Some(LaunchedNetworkPolicy::new(
+        Harness::Codex,
+        ApprovalMode::Ask,
+        false,
+    ));
+    snapshot.sessions[0].worker.as_mut().unwrap().launched_network_policy = relaunched;
+    let current = details(&snapshot);
+    assert!(current.rows.contains(&("Network Access", "Blocked".into())));
+    assert!(
+        !current
+            .rows
+            .iter()
+            .any(|(key, _)| *key == "Next Turn Network Access")
+    );
+
+    snapshot.sessions[0].worker.as_mut().unwrap().execution = Some(ExecutionSettings {
+        approval: ApprovalMode::Unrestricted,
+    });
+    snapshot.projects[0].defaults.harness = Harness::ClaudeCode;
+    snapshot.projects[0].defaults.network_access = false;
+    let pending_execution = details(&snapshot);
+    assert!(
+        pending_execution
+            .rows
+            .contains(&("Network Access", "Blocked".into()))
+    );
+    assert!(pending_execution.rows.contains(&(
+        "Next Turn Network Access",
+        "Allowed (Unrestricted Access)".into()
+    )));
+    assert_eq!(
+        snapshot.sessions[0]
+            .worker
+            .as_ref()
+            .unwrap()
+            .launched_network_policy,
+        relaunched
+    );
+    // The current launch remains known even when the editable profile cannot resolve.
+    snapshot.agent_configs.clear();
+    assert!(
+        details(&snapshot)
+            .rows
+            .contains(&("Network Access", "Blocked".into()))
+    );
+}
+
+#[test]
+fn session_network_control_sends_an_independent_false_override() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = live_snapshot();
+    snapshot.sessions[0].fixture = false;
+    snapshot.sessions[0].worker = Some(worker_run(WorkerStatus::Completed));
+    let id = snapshot.sessions[0].id.clone();
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.open_session(id.clone());
+    mounted.settle();
+    mounted.click("Session actions");
+    mounted.click("Session network access: Network: Off");
+    let command = mounted.commands.try_recv().unwrap().command;
+    assert!(
+        matches!(command, Command::SetSessionNetworkAccess { session_id, network_access: Some(false) } if session_id == id)
+    );
+}
+
+#[test]
+fn profile_network_override_can_be_inherited_without_resetting_approval() {
+    let mounted = mount(false, 1380.0);
+    let id = mounted.model.snapshot.get_untracked().agent_configs[0]
+        .id
+        .clone();
+    mounted.model.open_profile(EditTarget::Config(id));
+    mounted
+        .model
+        .modify_profile("execution", |p| p.execution.approval = ApprovalMode::Ask);
+    mounted
+        .model
+        .modify_profile("network_access", |p| p.network_access = false);
+    assert_eq!(
+        mounted.model.editor_overrides.get_untracked().network_access,
+        Some(false)
+    );
+    assert_eq!(mounted.model.origin("network_access"), "Agent override");
+    mounted.model.inherit("execution");
+    assert!(!mounted.model.editor_profile.get_untracked().network_access);
+    mounted
+        .model
+        .modify_profile("execution", |p| p.execution.approval = ApprovalMode::Ask);
+    mounted.model.inherit("network_access");
+    assert!(mounted.model.editor_profile.get_untracked().network_access);
+    assert_eq!(
+        mounted.model.editor_profile.get_untracked().execution.approval,
+        ApprovalMode::Ask
+    );
+    let parent_id = mounted.model.snapshot.get_untracked().sessions[0].id.clone();
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot.sessions[0].fixture = false;
+        snapshot.sessions[0].network_access = Some(false);
+    });
+    mounted.model.open_new_worker(parent_id);
+    assert!(!mounted.model.editor_profile.get_untracked().network_access);
 }
 
 #[test]
@@ -8398,13 +8625,93 @@ fn direct_project_connections_and_header_actions_use_full_cells() {
     );
 }
 
+// Check rendered descendants, so the accessible label cannot satisfy the
+// assertions about the two visible lines.
+fn assert_session_source_geometry(mounted: &Mounted, role: &str, name: &str, message: &str) {
+    let tree = mounted.ui.inspection_snapshot();
+    let label = format!("{role} · {name}");
+    let button = tree
+        .nodes
+        .iter()
+        .find(|n| n.label.as_deref() == Some(&label))
+        .unwrap();
+    let mut descendants = button.children.clone();
+    let mut lines = Vec::new();
+    while let Some(id) = descendants.pop() {
+        let node = tree.node(id).unwrap();
+        descendants.extend(&node.children);
+        if node.label.as_deref() == Some(role) || node.label.as_deref() == Some(name) {
+            lines.push(node);
+        }
+    }
+    let role_line = lines
+        .iter()
+        .find(|n| n.label.as_deref() == Some(role))
+        .unwrap();
+    let name_line = lines
+        .iter()
+        .find(|n| n.label.as_deref() == Some(name))
+        .unwrap();
+    assert!(
+        name_line.rect.origin.y >= role_line.rect.max_y() + 1.0,
+        "{label}"
+    );
+    assert_eq!(role_line.rect.origin.x, name_line.rect.origin.x);
+    assert!(
+        role_line.rect.size.height < name_line.rect.size.height,
+        "{label}"
+    );
+    assert!(name_line.rect.size.width >= 40.0 && name_line.rect.max_x() <= button.rect.max_x());
+    let subtle = format!(
+        "{:?}",
+        mosaic::core::theme::color(relay_ui::tokens::ground.faint)
+    );
+    for line in [role_line, name_line] {
+        let details = mounted.ui.inspection_details(line.children[0]).unwrap();
+        assert_eq!(
+            details
+                .attributes
+                .iter()
+                .find(|a| a.name == "text-color")
+                .unwrap()
+                .value,
+            subtle
+        );
+    }
+    if name.chars().count() > 30 {
+        let shown = tree
+            .node(name_line.children[0])
+            .unwrap()
+            .label
+            .as_deref()
+            .unwrap();
+        assert!(
+            shown.ends_with('…') && shown.chars().count() < name.chars().count(),
+            "{shown}"
+        );
+    }
+    let body = mounted.rect(&format!("Message {message}"));
+    assert!(
+        body.origin.x - button.rect.max_x() >= 16.0,
+        "{label}: {:?} {body:?}",
+        button.rect
+    );
+    assert!(
+        body.size.width >= 100.0 && body.max_x() <= mounted.size.width,
+        "{body:?}"
+    );
+}
+
 #[test]
 fn agent_sent_prompts_name_their_sender_by_tree_relationship_and_link_to_it() {
-    let mounted = mount(false, 1380.0);
+    let mut mounted = mount(false, 1380.0);
     let mut snapshot = mounted.model.snapshot.get_untracked();
+    // A title may contain the same delimiter as the accessible label.
+    let parent_name = "Small F · full session name λ that needs truncation";
+    let unrelated_name = "Independent session with a long name";
     for session in &mut snapshot.sessions {
         match session.id.as_str() {
-            "session-plan" => session.title = "hi".into(),
+            "session-plan" => session.title = parent_name.into(),
             "session-worker" => {
                 session.title = "Markdown crate".into();
                 session.parent_session_id = Some("session-plan".into());
@@ -8416,6 +8723,16 @@ fn agent_sent_prompts_name_their_sender_by_tree_relationship_and_link_to_it() {
             _ => {}
         }
     }
+    let mut unrelated = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == "session-plan")
+        .unwrap()
+        .clone();
+    unrelated.id = "session-unrelated".into();
+    unrelated.title = unrelated_name.into();
+    unrelated.parent_session_id = None;
+    snapshot.sessions.push(unrelated);
     let prompt = |id: &str, session: &str, sender: Sender| Message {
         id: id.into(),
         session_id: session.into(),
@@ -8433,41 +8750,90 @@ fn agent_sent_prompts_name_their_sender_by_tree_relationship_and_link_to_it() {
         prompt("from-user", "session-worker", Sender::User),
         prompt("from-parent", "session-worker", agent("session-plan")),
         prompt("from-sibling", "session-worker", agent("session-review")),
+        prompt(
+            "from-unrelated",
+            "session-worker",
+            agent("session-unrelated"),
+        ),
         prompt("from-deleted", "session-worker", agent("session-deleted")),
         prompt("from-child", "session-plan", agent("session-worker")),
     ];
     mounted.model.snapshot.set(snapshot);
     mounted.model.open_session("session-worker".into());
-    mounted.settle();
-    for label in ["You", "Parent · hi", "Sibling · Disk usage", "Agent"] {
-        assert!(has_label(&mounted, label), "{label}");
+    for width in [1380.0, 600.0, 390.0] {
+        mounted.size.width = width;
+        mounted.settle();
+        for (role, name, message) in [
+            ("Parent", parent_name, "from-parent"),
+            ("Sibling", "Disk usage", "from-sibling"),
+            ("Agent", unrelated_name, "from-unrelated"),
+        ] {
+            assert_session_source_geometry(&mounted, role, name, message);
+        }
+        assert!(has_label(&mounted, "You"));
+        mounted.click(&format!("Parent · {parent_name}"));
+        assert_eq!(mounted.model.session.get_untracked(), "session-plan");
+        assert_session_source_geometry(&mounted, "Child", "Markdown crate", "from-child");
+        mounted.click("Child · Markdown crate");
+        assert_eq!(mounted.model.session.get_untracked(), "session-worker");
+        mounted.focus("Sibling · Disk usage");
+        mounted.key(Key::Enter, false);
+        assert_eq!(mounted.model.session.get_untracked(), "session-review");
+        mounted.model.open_session("session-worker".into());
+        mounted.settle();
+        mounted.click(&format!("Agent · {unrelated_name}"));
+        assert_eq!(mounted.model.session.get_untracked(), "session-unrelated");
+        mounted.model.open_session("session-worker".into());
+        mounted.settle();
+        // A deleted sender has no navigation button.
+        assert!(
+            !mounted
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .iter()
+                .any(|n| { n.role == Role::Button && n.label.as_deref() == Some("Agent") })
+        );
     }
-    // The linked name keeps the plain label's place and size in the gutter.
-    let text = |label: &str| {
-        mounted
-            .ui
-            .inspection_snapshot()
-            .nodes
-            .iter()
-            .rfind(|n| n.label.as_deref() == Some(label))
+    // Update existing rows without replacing messages or switching sessions.
+    mounted.model.snapshot.update(|s| {
+        s.sessions
+            .iter_mut()
+            .find(|s| s.id == "session-plan")
             .unwrap()
-            .rect
-    };
-    let (user, parent) = (text("You"), text("Parent · hi"));
-    assert_eq!(user.origin.x, parent.origin.x);
-    assert!(parent.size.width > 0.0);
-    assert_eq!(user.size.height, parent.size.height);
-    mounted.click("Parent · hi");
+            .title = "Renamed · parent".into();
+        s.sessions
+            .iter_mut()
+            .find(|s| s.id == "session-worker")
+            .unwrap()
+            .parent_session_id = Some("session-unrelated".into());
+    });
     mounted.settle();
+    assert!(!has_label(&mounted, &format!("Parent · {parent_name}")));
+    assert_session_source_geometry(&mounted, "Agent", "Renamed · parent", "from-parent");
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.sessions.retain(|s| s.id != "session-plan"));
+    mounted.settle();
+    assert!(!has_label(&mounted, "Agent · Renamed · parent"));
+    assert!(has_label(&mounted, "Message from-parent"));
+    // A sender arriving in a later snapshot restores its navigation link.
+    mounted.model.snapshot.update(|s| {
+        let mut sender = s
+            .sessions
+            .iter()
+            .find(|s| s.id == "session-unrelated")
+            .unwrap()
+            .clone();
+        sender.id = "session-plan".into();
+        sender.title = "Restored sender".into();
+        s.sessions.push(sender);
+    });
+    mounted.settle();
+    mounted.focus("Agent · Restored sender");
+    mounted.key(Key::Space, false);
     assert_eq!(mounted.model.session.get_untracked(), "session-plan");
-    assert!(has_label(&mounted, "Child · Markdown crate"));
-    mounted.click("Child · Markdown crate");
-    mounted.settle();
-    assert_eq!(mounted.model.session.get_untracked(), "session-worker");
-    // A deleted sender has no session to open.
-    mounted.click("Agent");
-    mounted.settle();
-    assert_eq!(mounted.model.session.get_untracked(), "session-worker");
 }
 
 #[test]
@@ -11095,6 +11461,7 @@ fn project_menu_summarizes_running_agents_and_updates_without_reopening() {
         snapshot.sessions.truncate(2);
         for session in &mut snapshot.sessions {
             session.worker = Some(WorkerRun {
+                launched_network_policy: None,
                 model: None,
                 context_tokens: None,
                 context_window: None,
@@ -13497,4 +13864,578 @@ fn composer_keeps_keyboard_focus_after_sending() {
             "{case}: completion must not steal focus"
         );
     }
+}
+
+fn mention_session(id: &str, project: &str, title: &str) -> Session {
+    let mut session = demo_snapshot(AgentProfile::default()).sessions[0].clone();
+    session.id = id.into();
+    session.project_id = project.into();
+    session.title = title.into();
+    session.fixture = false;
+    session.archived = false;
+    session.parent_session_id = None;
+    session.issue_id = None;
+    session.role = SessionRole::Worker;
+    session
+}
+
+/// Live targets in two projects, with titles shared across and within
+/// projects, plus archived and fixture sessions that must not be offered.
+fn add_mention_targets(snapshot: &mut Snapshot) {
+    snapshot.projects[0].fixture = false;
+    let demo = snapshot.projects[0].id.clone();
+    let mut ops = snapshot.projects[0].clone();
+    ops.id = "ops".into();
+    ops.name = "Øps λ".into();
+    snapshot.projects.push(ops);
+    let mut archived = mention_session("mention-archived", "ops", "Rollout archive");
+    archived.archived = true;
+    let mut fixture = mention_session("mention-fixture", "ops", "Rollout fixture");
+    fixture.fixture = true;
+    snapshot.sessions.extend([
+        mention_session("mention-a", &demo, "Rollout plan"),
+        mention_session("mention-b", "ops", "Rollout plan"),
+        mention_session("mention-c", "ops", "Rollout plan"),
+        mention_session("mention-uni", "ops", "Ünïcødé 日本"),
+        archived,
+        fixture,
+    ]);
+}
+
+fn mention_part(id: &str, label: &str) -> Part {
+    Part {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: PartKind::SessionMention {
+            mention: SessionMention {
+                session_id: id.into(),
+                label: label.into(),
+            },
+        },
+    }
+}
+
+fn mention_ids(mounted: &Mounted) -> Vec<String> {
+    session_mentions(&crate::buffer::parts(mounted.model, "session-plan"))
+        .iter()
+        .map(|m| m.session_id.clone())
+        .collect()
+}
+
+fn completion_ids(mounted: &Mounted) -> Vec<String> {
+    mounted
+        .model
+        .completion
+        .get_untracked()
+        .map(|c| c.choices.iter().map(|c| c.key.clone()).collect())
+        .unwrap_or_default()
+}
+
+fn mention_composer() -> Mounted {
+    let mounted = mount(false, 1380.0);
+    mounted.model.snapshot.update(add_mention_targets);
+    mounted.model.open_session("session-plan".into());
+    mounted.settle();
+    focus_draft(&mounted);
+    mounted
+}
+
+fn focus_draft(mounted: &Mounted) {
+    let draft = mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .rev()
+        .find_map(|n| n.label.filter(|s| s.starts_with("Draft text")))
+        .unwrap();
+    mounted.focus(&draft);
+}
+
+#[test]
+fn mention_choices_rank_fuzzy_matches_across_projects_with_stable_ties() {
+    let mut snapshot = demo_snapshot(AgentProfile::default());
+    add_mention_targets(&mut snapshot);
+    let demo = snapshot.projects[0].id.clone();
+    snapshot.sessions.extend([
+        mention_session("mention-d", &demo, "Notes on rollout"),
+        mention_session("mention-e", &demo, "Review overall output"),
+    ]);
+    let ids = |query: &str| {
+        crate::command_ui::mention_choices(&snapshot, "session-plan", query)
+            .into_iter()
+            .map(|c| c.key)
+            .collect::<Vec<_>>()
+    };
+    // Prefix, then contiguous, then scattered; ties by label, then ID.
+    assert_eq!(
+        ids("ROLLOUT"),
+        [
+            "mention-a",
+            "mention-b",
+            "mention-c",
+            "mention-d",
+            "mention-e"
+        ]
+    );
+    // A subsequence may span the project name and the title.
+    assert_eq!(ids("øpsrpl"), ["mention-b", "mention-c"]);
+    assert_eq!(ids("ünï"), ["mention-uni"]);
+    assert_eq!(ids("日本"), ["mention-uni"]);
+    assert!(ids("zzz").is_empty());
+    let all = ids("");
+    assert!(!all.iter().any(|id| matches!(
+        id.as_str(),
+        "mention-archived" | "mention-fixture" | "session-plan"
+    )));
+    assert!(
+        all.iter()
+            .all(|id| snapshot.sessions.iter().any(|s| &s.id == id && !s.fixture))
+    );
+    // The current session is never offered.
+    assert!(
+        !crate::command_ui::mention_choices(&snapshot, "mention-a", "rollout plan")
+            .iter()
+            .any(|c| c.key == "mention-a")
+    );
+    let choice = &crate::command_ui::mention_choices(&snapshot, "session-plan", "ünï")[0];
+    assert_eq!(choice.label, "@Øps λ • Ünïcødé 日本");
+    assert_eq!(
+        choice.mention.as_ref().unwrap().label,
+        mention_label("Øps λ", "Ünïcødé 日本")
+    );
+    let json = serde_json::to_string(&mention_part("mention-a", "Relay • Plan")).unwrap();
+    assert!(json.contains(r#""type":"session_mention""#));
+    assert!(json.contains(r#""mention":{"session_id":"mention-a","label":"Relay • Plan"}"#));
+}
+
+#[test]
+fn at_mentions_complete_without_a_catalog_and_only_at_word_starts() {
+    let mounted = mention_composer();
+    assert!(mounted.model.catalogs.get_untracked().is_empty());
+    mounted.key(Key::Character("user@relay".into()), false);
+    assert!(mounted.model.completion.get_untracked().is_none());
+    mounted.key(Key::Character(" @".into()), false);
+    assert_eq!(
+        completion_ids(&mounted),
+        ["mention-a", "mention-b", "mention-c", "mention-uni"]
+    );
+    let completion = mounted.model.completion.get_untracked().unwrap();
+    assert_eq!(completion.start, "user@relay ".len());
+    assert_eq!(completion.choices[0].label, "@Relay · demo • Rollout plan");
+    mounted.rect("@Relay · demo • Rollout plan");
+    mounted.key(Key::Character("ünï".into()), false);
+    assert_eq!(completion_ids(&mounted), ["mention-uni"]);
+    mounted.key(Key::Escape, false);
+    assert!(mounted.model.completion.get_untracked().is_none());
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "user@relay @ünï"
+    );
+    assert!(mention_ids(&mounted).is_empty());
+    // A failed catalog does not block mentions.
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([(
+            "session-plan".into(),
+            Err("Harness discovery timed out".into()),
+        )]));
+    mounted.settle();
+    mounted.key(Key::Character(" @r".into()), false);
+    assert_eq!(
+        completion_ids(&mounted),
+        ["mention-a", "mention-b", "mention-c"]
+    );
+    mounted.key(Key::ArrowDown, false);
+    mounted.key(Key::ArrowDown, false);
+    mounted.key(Key::ArrowUp, false);
+    // The highlight follows the session while typing re-filters the list.
+    mounted.key(Key::Character("o".into()), false);
+    let completion = mounted.model.completion.get_untracked().unwrap();
+    assert_eq!(completion.choices[completion.index].key, "mention-b");
+    mounted.key(Key::Enter, false);
+    assert!(mounted.model.completion.get_untracked().is_none());
+    assert_eq!(mention_ids(&mounted), ["mention-b"]);
+    let parts = crate::buffer::parts(mounted.model, "session-plan");
+    assert_eq!(
+        plain_text(&parts),
+        "user@relay @ünï @Øps λ • Rollout plan [Relay session mention-b] "
+    );
+    // Typing continues after the chip.
+    mounted.key(Key::Character("next".into()), false);
+    assert!(plain_text(&crate::buffer::parts(mounted.model, "session-plan")).ends_with("] next"));
+    mounted.key(Key::Character(" @日本".into()), false);
+    mounted.key(Key::Tab, false);
+    assert_eq!(mention_ids(&mounted), ["mention-b", "mention-uni"]);
+    assert_eq!(mounted.rects("Session mention").len(), 2);
+}
+
+#[test]
+fn clicking_a_mention_picks_that_session_among_duplicate_labels() {
+    let mounted = mention_composer();
+    mounted.key(Key::Character("@rollout".into()), false);
+    assert_eq!(
+        completion_ids(&mounted),
+        ["mention-a", "mention-b", "mention-c"]
+    );
+    let label = "@Øps λ • Rollout plan";
+    assert_eq!(suggestion_buttons(&mounted, label).len(), 2);
+    click_suggestion(&mounted, label, 1);
+    assert!(mounted.model.completion.get_untracked().is_none());
+    assert_eq!(mention_ids(&mounted), ["mention-c"]);
+    // Removing the chip leaves the surrounding text.
+    mounted.click("Remove mention");
+    assert!(mention_ids(&mounted).is_empty());
+    focus_draft(&mounted);
+    mounted.key(Key::Character("Hi @rollout".into()), false);
+    click_suggestion(&mounted, label, 0);
+    assert_eq!(mention_ids(&mounted), ["mention-b"]);
+    // Backspace joins the trailing space, deletes it, then removes the chip.
+    for _ in 0..3 {
+        mounted.key(Key::Backspace, false);
+    }
+    assert!(mention_ids(&mounted).is_empty());
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        " Hi ",
+        "the space left by the removed chip stays as text"
+    );
+}
+
+#[test]
+fn mention_picker_leaves_ime_enter_paste_and_skills_unchanged() {
+    let mounted = mention_composer();
+    mounted.ui.dispatch_ime(ImeEvent::Preedit {
+        text: "@".into(),
+        cursor: Some((1, 1)),
+    });
+    mounted.settle();
+    assert!(mounted.model.completion.get_untracked().is_none());
+    mounted.ui.dispatch_ime(ImeEvent::Preedit {
+        text: String::new(),
+        cursor: None,
+    });
+    mounted.settle();
+    mounted.key(Key::Character("@".into()), false);
+    assert!(mounted.model.completion.get_untracked().is_some());
+    mounted.ui.dispatch_ime(ImeEvent::Preedit {
+        text: "ろ".into(),
+        cursor: Some((0, 3)),
+    });
+    mounted.settle();
+    for key in [Key::ArrowDown, Key::Enter] {
+        mounted.key(key, false);
+    }
+    assert!(mention_ids(&mounted).is_empty());
+    mounted.ui.dispatch_ime(ImeEvent::Commit("ろ".into()));
+    mounted.settle();
+    assert!(mounted.model.completion.get_untracked().is_none());
+    mounted.key(Key::Enter, false);
+    mounted.ui.dispatch_key(KeyEvent {
+        kind: KeyEventKind::Down { repeat: false },
+        key: Key::Enter,
+        modifiers: Modifiers {
+            shift: true,
+            ..Default::default()
+        },
+    });
+    mounted.settle();
+    assert_eq!(
+        plain_text(&crate::buffer::parts(mounted.model, "session-plan")),
+        "@ろ\n\n"
+    );
+    // Pasted mention text stays text, even when it matches a label exactly.
+    mounted.ui.set_clipboard_text("@Øps λ • Rollout plan");
+    mounted.key(Key::Character("v".into()), true);
+    assert!(mention_ids(&mounted).is_empty());
+    assert!(
+        crate::buffer::parts(mounted.model, "session-plan")
+            .iter()
+            .all(|p| matches!(p.kind, PartKind::Text { .. }))
+    );
+    // Skills and commands still complete from the catalog.
+    mounted
+        .model
+        .catalogs
+        .set(std::collections::BTreeMap::from([(
+            "session-plan".into(),
+            Ok(HarnessCatalog {
+                skills: vec![HarnessSkill {
+                    id: "native-review".into(),
+                    name: "review".into(),
+                    description: "Review changes".into(),
+                    argument_hint: String::new(),
+                    enabled: true,
+                    path: None,
+                }],
+                ..Default::default()
+            }),
+        )]));
+    mounted.settle();
+    mounted.key(Key::Character(" $rev".into()), false);
+    assert_eq!(completion_ids(&mounted), ["skill:native-review:review"]);
+    mounted.key(Key::Tab, false);
+    let parts = crate::buffer::parts(mounted.model, "session-plan");
+    assert_eq!(selected_skills(&parts)[0].id, "native-review");
+    assert!(session_mentions(&parts).is_empty());
+}
+
+#[test]
+fn stale_mentions_render_muted_in_drafts_and_history() {
+    let mounted = mention_composer();
+    let reply = Part {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: PartKind::Reply {
+            anchor: relay_core::Anchor {
+                message_id: "missing".into(),
+                start: 0,
+                end: 1,
+                quote: "x".into(),
+            },
+            parts: vec![
+                Part::text("See "),
+                mention_part("mention-uni", "Øps λ • Ünïcødé 日本"),
+            ],
+        },
+    };
+    crate::buffer::edit(
+        mounted.model,
+        "session-plan",
+        vec![
+            mention_part("mention-a", "Relay · demo • Rollout plan"),
+            mention_part("mention-archived", "Øps λ • Rollout archive"),
+            mention_part("deleted-session", "Gone • Old title"),
+            reply,
+            Part::text(""),
+        ],
+    );
+    mounted.settle();
+    assert_eq!(mounted.rects("Session mention").len(), 2);
+    assert_eq!(mounted.rects("Unavailable session mention").len(), 2);
+    assert_eq!(mention_ids(&mounted).len(), 4);
+    // Archiving a target mutes its existing chip.
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == "mention-a")
+            .unwrap()
+            .archived = true;
+    });
+    mounted.settle();
+    assert_eq!(mounted.rects("Session mention").len(), 1);
+    assert_eq!(mounted.rects("Unavailable session mention").len(), 3);
+    crate::buffer::edit(mounted.model, "session-plan", vec![]);
+    let parts = vec![
+        Part::text("Ask "),
+        mention_part("mention-archived", "Øps λ • Rollout archive"),
+    ];
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot.messages.push(Message {
+            id: "mention-history".into(),
+            session_id: "session-plan".into(),
+            author: "You".into(),
+            sender: Sender::User,
+            kind: "prompt".into(),
+            body: plain_text(&parts),
+            parts,
+            tool: None,
+        });
+    });
+    mounted.settle();
+    assert_eq!(mounted.rects("Unavailable session mention").len(), 1);
+    assert!(mounted.rects("Session mention").is_empty());
+}
+
+#[test]
+fn mentions_survive_save_reload_conflict_and_are_sent_as_structured_parts() {
+    use crate::{
+        buffer,
+        buffer_network::{Request, Update},
+    };
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    mounted.model.snapshot.update(add_mention_targets);
+    let parts = vec![
+        Part::text("Ask "),
+        mention_part("mention-a", "Relay · demo • Rollout plan"),
+        Part::text(" now"),
+        Part {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: PartKind::Reply {
+                anchor: relay_core::Anchor {
+                    message_id: "prompt-active-run".into(),
+                    start: 0,
+                    end: 8,
+                    quote: "Original".into(),
+                },
+                parts: vec![
+                    Part::text("See "),
+                    mention_part("mention-uni", "Øps λ • Ünïcødé 日本"),
+                    Part::text("."),
+                ],
+            },
+        },
+    ];
+    // Local journal reload.
+    let directory =
+        std::env::temp_dir().join(format!("relay-mention-journal-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let settings = directory.join("settings.toml");
+    let config = crate::network::Config {
+        endpoint: "http://127.0.0.1:7331/".parse().unwrap(),
+        token: "mention-journal-test".into(),
+    };
+    buffer::load_journal(mounted.model, &settings, &config);
+    buffer::edit(mounted.model, "session-plan", parts.clone());
+    mounted.model.buffer.set(Default::default());
+    buffer::load_journal(mounted.model, &settings, &config);
+    let state = mounted.model.buffer.get_untracked();
+    let doc = &state.documents["session-plan"];
+    assert!(doc.parts == parts || doc.recovery.contains(&parts));
+    std::fs::remove_dir_all(directory).unwrap();
+    mounted.model.buffer.set(Default::default());
+    mounted.model.buffer.update(|b| {
+        b.initialized = true;
+        b.connected = true;
+    });
+    // Saves carry the structured part; a conflicting remote keeps it in recovery.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    mounted.model.buffer_requests.set(Some(tx));
+    buffer::edit(mounted.model, "session-plan", parts.clone());
+    mounted.model.buffer.update(|s| {
+        s.documents.get_mut("session-plan").unwrap().changed =
+            std::time::Instant::now() - Duration::from_secs(1)
+    });
+    buffer::flush(mounted.model);
+    let Request::Save { session, request } = rx.try_recv().unwrap() else {
+        panic!()
+    };
+    assert_eq!(request.parts, parts);
+    buffer::receive(
+        mounted.model,
+        Update {
+            serial: 1,
+            initialized: true,
+            connected: true,
+            drafts: vec![Draft {
+                session_id: session.clone(),
+                revision: 2,
+                parts: vec![Part::text("Other client")],
+            }],
+            ..Default::default()
+        },
+    );
+    let state = mounted.model.buffer.get_untracked();
+    assert!(state.documents[&session].conflict);
+    assert_eq!(state.documents[&session].parts, parts);
+    buffer::resolve(mounted.model, false);
+    let state = mounted.model.buffer.get_untracked();
+    assert_eq!(state.documents[&session].recovery[0], parts);
+    // Sending submits the same structured parts.
+    buffer::edit(mounted.model, "session-plan", parts.clone());
+    mounted.model.buffer.update(|state| {
+        let doc = state.documents.get_mut("session-plan").unwrap();
+        doc.conflict = false;
+        doc.remote.parts = doc.parts.clone();
+    });
+    while mounted.commands.try_recv().is_ok() {}
+    // A target archived since it was picked is refused before sending.
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == "mention-uni")
+            .unwrap()
+            .archived = true;
+    });
+    buffer::send(mounted.model);
+    assert!(mounted.commands.try_recv().is_err());
+    assert_eq!(
+        mounted.model.notice.get_untracked(),
+        "Remove the mention of an archived or missing session"
+    );
+    assert_eq!(buffer::parts(mounted.model, "session-plan"), parts);
+    mounted.model.snapshot.update(|snapshot| {
+        snapshot
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == "mention-uni")
+            .unwrap()
+            .archived = false;
+    });
+    buffer::send(mounted.model);
+    let request = mounted.commands.try_recv().unwrap();
+    let Command::SubmitTurn { parts: sent, .. } = request.command else {
+        panic!("{:?}", request.command)
+    };
+    assert_eq!(sent, parts);
+    assert_eq!(
+        session_mentions(&sent)
+            .iter()
+            .map(|m| m.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["mention-a", "mention-uni"]
+    );
+}
+
+#[test]
+fn first_root_message_sends_picked_mentions() {
+    let mut mounted = mount(false, 1380.0);
+    let mut snapshot = local_project_snapshot();
+    snapshot.sessions.clear();
+    add_mention_targets(&mut snapshot);
+    mounted.model.snapshot.set(snapshot);
+    mounted.model.open_root_agent("director-main".into());
+    mounted.model.buffer.update(|s| {
+        s.initialized = true;
+        s.connected = true;
+    });
+    mounted.settle();
+    focus_draft(&mounted);
+    mounted.key(Key::Character("Coordinate with @ünï".into()), false);
+    mounted.key(Key::Enter, false);
+    let session = mounted.model.session.get_untracked();
+    let parts = crate::buffer::parts(mounted.model, &session);
+    assert_eq!(session_mentions(&parts)[0].session_id, "mention-uni");
+    mounted.key(Key::Enter, true);
+    let command = mounted.commands.try_recv().unwrap();
+    let Command::StartRootAgent {
+        parts: sent,
+        prompt,
+        ..
+    } = command.command
+    else {
+        panic!("{:?}", command.command)
+    };
+    assert_eq!(session_mentions(&sent)[0].session_id, "mention-uni");
+    assert!(prompt.contains("@Øps λ • Ünïcødé 日本 [Relay session mention-uni]"));
+}
+
+fn suggestion_buttons(mounted: &Mounted, label: &str) -> Vec<Rect> {
+    mounted
+        .ui
+        .inspection_snapshot()
+        .nodes
+        .into_iter()
+        .filter(|n| n.role == Role::Button && n.label.as_deref() == Some(label))
+        .map(|n| n.rect)
+        .collect()
+}
+
+fn click_suggestion(mounted: &Mounted, label: &str, index: usize) {
+    let position = suggestion_buttons(mounted, label)[index].center();
+    for kind in [
+        PointerEventKind::Down(PointerButton::Primary),
+        PointerEventKind::Up(PointerButton::Primary),
+    ] {
+        mounted.ui.dispatch_pointer(PointerEvent {
+            kind,
+            position,
+            pointer_type: PointerType::Mouse,
+            modifiers: Modifiers::default(),
+            timestamp: Duration::ZERO,
+        });
+    }
+    mounted.settle();
 }

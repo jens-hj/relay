@@ -231,7 +231,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 25 {
+        if version > 27 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -252,7 +252,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS window_start_claims(window_key TEXT PRIMARY KEY, owner TEXT NOT NULL, claimed_at INTEGER NOT NULL, lease_until INTEGER NOT NULL, retry_at INTEGER NOT NULL, attempts INTEGER NOT NULL, settled INTEGER NOT NULL, dispatched INTEGER NOT NULL DEFAULT 0);
-             PRAGMA user_version = 25;"
+             PRAGMA user_version = 27;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -322,7 +322,11 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
-        if version < 25 {
+        if version < 26 {
+            // Schema 26 protects explicit network access, including false, from
+            // older servers that reject profile fields or drop session overrides.
+            // Optional launched network metadata stays unknown for legacy runs.
+            // Legacy profiles enable network access; filesystem/approval stay unchanged.
             // Normalize legacy snapshots with defaults for naming, waiting state,
             // prompt senders and worker model policies. Schema 18 protects explicit
             // profile models, schema 19 keeps older servers from cascading a
@@ -339,6 +343,26 @@ impl Store {
             // spawns have no rationale or requested mode, missing Nix and
             // window-start settings load as Off and missing spawn execution
             // approval policies load as Standard.
+            let json: String = connection
+                .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+                    r.get(0)
+                })
+                .map_err(Error::internal)?;
+            let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
+            snapshot.protocol_version = PROTOCOL_VERSION;
+            connection
+                .execute(
+                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                    [serde_json::to_string(&snapshot).map_err(Error::internal)?],
+                )
+                .map_err(Error::internal)?;
+        }
+        if version < 27 {
+            // After schema 26's network normalization, schema 27 stores peer
+            // grants minted by human mentions (`session_peers`, omitted while
+            // empty) and moves the snapshot to protocol 16. Older servers would drop the
+            // grants, so the version bump keeps them from opening the
+            // database. Older data loads without grants.
             let json: String = connection
                 .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
                     r.get(0)
@@ -540,6 +564,7 @@ impl Store {
                 child.role = SessionRole::Worker;
                 child.parent_session_id = Some(parent_session_id);
                 child.profile = Some(profile.clone());
+                child.network_access = None;
                 child.spawn = Some(SpawnGrant {
                     task: prompt.clone(),
                     context: None,
@@ -558,6 +583,7 @@ impl Store {
                     .as_mut()
                     .ok_or_else(|| Error::invalid("Parent has no execution workspace"))?;
                 worker.harness = profile.harness;
+                worker.launched_network_policy = None;
                 worker.execution = None;
                 worker.model = None;
                 worker.context_tokens = None;
@@ -628,6 +654,13 @@ impl Store {
                 if !parts.is_empty() {
                     let session_id = format!("session-{}", envelope.request_id);
                     conversation::validate(&transaction, &snapshot, &session_id, &parts)?;
+                    conversation::grant_mentions(
+                        &mut snapshot,
+                        &session_id,
+                        &envelope.request_id,
+                        &parts,
+                        &Sender::User,
+                    )?;
                     snapshot
                         .messages
                         .iter_mut()
@@ -735,6 +768,18 @@ impl Store {
                 worker.execution = execution;
                 snapshot.revision += 1;
             }
+            Command::SetSessionNetworkAccess {
+                session_id,
+                network_access,
+            } => {
+                let session = snapshot
+                    .sessions
+                    .iter_mut()
+                    .find(|s| s.id == session_id && !s.fixture)
+                    .ok_or_else(|| Error::invalid("Live session not found"))?;
+                session.network_access = network_access;
+                snapshot.revision += 1;
+            }
             Command::RespondPermission {
                 permission_id,
                 run_id,
@@ -828,6 +873,7 @@ impl Store {
                     .harness;
                 let session_id = format!("session-{}", envelope.request_id);
                 snapshot.sessions.push(Session {
+                    network_access: None,
                     automatic_name: false,
                     awaiting_first_message: false,
                     archived: false,
@@ -857,6 +903,7 @@ impl Store {
                     role: SessionRole::Worker,
                     fixture: false,
                     worker: Some(WorkerRun {
+                        launched_network_policy: None,
                         model: None,
                         context_tokens: None,
                         context_window: None,

@@ -1140,6 +1140,7 @@ fn start(
             .clone()
     };
     snapshot.sessions.push(Session {
+        network_access: None,
         automatic_name: role == SessionRole::Root && director.automatic_name,
         awaiting_first_message: false,
         archived: false,
@@ -1159,6 +1160,7 @@ fn start(
         selection: profile.model_selection(),
         conversations: vec![],
         worker: Some(WorkerRun {
+            launched_network_policy: None,
             model: None,
             context_tokens: None,
             context_window: None,

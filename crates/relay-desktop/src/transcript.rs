@@ -1,7 +1,7 @@
 //! The conversation's relay-ui parts: the session header, tool calls, spawn
 //! and approval blocks, queued turns, and the ledger's settings.
 
-use crate::conversation::{InlineAsset, InlineAssetProps};
+use crate::conversation::{InlineAsset, InlineAssetProps, MentionChip, MentionChipProps};
 use crate::ui::press;
 use crate::ui::{NavigationButton, NavigationButtonProps};
 use crate::window_chrome::{WindowControlsSpace, WindowControlsSpaceProps};
@@ -396,6 +396,11 @@ fn QueuedPart(model: Model, part: Part) -> Element {
         PartKind::Skill { skill } => view! {
             col height:min-content {
                 Label text:(format!("${}", skill.name)) role:(TextRole::Body)
+            }
+        },
+        PartKind::SessionMention { mention } => view! {
+            col height:min-content {
+                MentionChip model:(model) mention:(mention)
             }
         },
         PartKind::Reply { anchor, parts } => view! {

@@ -1,7 +1,7 @@
 //! Named workspaces, independent resources, and board membership.
 use crate::*;
 
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// The most letters and digits in an automatically placed project's directory.
 const PROJECT_DIRECTORY_LIMIT: usize = 64;

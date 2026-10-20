@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub const ASSET_LIMIT: usize = 20 * 1024 * 1024;
 pub const DRAFT_ASSET_LIMIT: u64 = 64 * 1024 * 1024;
 pub const TEXT_LIMIT: usize = 64 * 1024;
+pub const MENTION_LABEL_LIMIT: usize = 256;
+pub const MENTION_ID_LIMIT: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Anchor {
@@ -21,6 +23,34 @@ pub struct Asset {
     pub size: u64,
 }
 
+/// A human-selected reference to another agent session. The ID is authoritative; the
+/// label is the "<project name> • <session title>" captured when it was selected.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMention {
+    pub session_id: String,
+    pub label: String,
+}
+
+impl SessionMention {
+    /// Harness-facing text, shared by every harness: the label plus the stable ID.
+    pub fn reference(&self) -> String {
+        format!("@{} [Relay session {}]", self.label, self.session_id)
+    }
+}
+
+/// "<project> • <title>", truncated on a char boundary to MENTION_LABEL_LIMIT bytes.
+pub fn mention_label(project: &str, title: &str) -> String {
+    let mut label = format!("{project} • {title}");
+    if label.len() > MENTION_LABEL_LIMIT {
+        let mut end = MENTION_LABEL_LIMIT;
+        while !label.is_char_boundary(end) {
+            end -= 1;
+        }
+        label.truncate(end);
+    }
+    label
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Part {
     pub id: String,
@@ -33,6 +63,7 @@ pub struct Part {
 pub enum PartKind {
     Text { text: String },
     Skill { skill: crate::SkillReference },
+    SessionMention { mention: SessionMention },
     Asset { asset: Asset },
     Reply { anchor: Anchor, parts: Vec<Part> },
 }
@@ -49,7 +80,7 @@ impl Part {
 pub fn has_content(parts: &[Part]) -> bool {
     parts.iter().any(|part| match &part.kind {
         PartKind::Text { text } => !text.trim().is_empty(),
-        PartKind::Asset { .. } | PartKind::Skill { .. } => true,
+        PartKind::Asset { .. } | PartKind::Skill { .. } | PartKind::SessionMention { .. } => true,
         PartKind::Reply { parts, .. } => has_content(parts),
     })
 }
@@ -60,6 +91,7 @@ pub fn plain_text(parts: &[Part]) -> String {
         .map(|p| match &p.kind {
             PartKind::Text { text } => text.clone(),
             PartKind::Skill { skill } => format!("${}", skill.name),
+            PartKind::SessionMention { mention } => mention.reference(),
             PartKind::Asset { asset } => format!("[{}]", asset.name),
             PartKind::Reply { anchor, parts } => {
                 format!("Reply to “{}”:\n{}", anchor.quote, plain_text(parts))
@@ -75,6 +107,19 @@ pub fn assets(parts: &[Part]) -> Vec<&Asset> {
         match &part.kind {
             PartKind::Asset { asset } => found.push(asset),
             PartKind::Reply { parts, .. } => found.extend(assets(parts)),
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Every mention in order, recursing into Reply.parts but never into Anchor.quote text.
+pub fn session_mentions(parts: &[Part]) -> Vec<&SessionMention> {
+    let mut found = Vec::new();
+    for part in parts {
+        match &part.kind {
+            PartKind::SessionMention { mention } => found.push(mention),
+            PartKind::Reply { parts, .. } => found.extend(session_mentions(parts)),
             _ => {}
         }
     }
@@ -106,6 +151,20 @@ pub fn validate_parts(snapshot: &Snapshot, session: &str, parts: &[Part]) -> Res
                         return Err("Invalid skill reference".into());
                     }
                     *text += skill.name.len() + 1;
+                }
+                // The target is checked when a message is accepted, so stale
+                // drafts stay loadable.
+                PartKind::SessionMention { mention } => {
+                    if mention.session_id.is_empty()
+                        || mention.session_id.len() > MENTION_ID_LIMIT
+                        || mention.session_id.chars().any(char::is_control)
+                        || mention.label.is_empty()
+                        || mention.label.len() > MENTION_LABEL_LIMIT
+                        || mention.label.chars().any(char::is_control)
+                    {
+                        return Err("Invalid session mention".into());
+                    }
+                    *text += mention.label.len() + mention.session_id.len();
                 }
                 PartKind::Asset { asset } => {
                     uuid::Uuid::parse_str(&asset.id).map_err(|_| "Asset ID must be a UUID")?;
@@ -264,5 +323,88 @@ mod tests {
         let json = serde_json::to_string(&sent).unwrap();
         assert_eq!(json, r#"{"kind":"agent","session_id":"parent"}"#);
         assert_eq!(serde_json::from_str::<crate::Sender>(&json).unwrap(), sent);
+    }
+
+    fn mention(session_id: &str, label: &str) -> Part {
+        Part {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: PartKind::SessionMention {
+                mention: SessionMention {
+                    session_id: session_id.into(),
+                    label: label.into(),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn session_mentions_serialize_render_and_validate_bounds() {
+        let snapshot = demo_snapshot(AgentProfile::default());
+        let part = mention("session-other", "Relay • Review");
+        let json = serde_json::to_value(&part).unwrap();
+        assert_eq!(json["type"], "session_mention");
+        assert_eq!(json["mention"]["session_id"], "session-other");
+        assert_eq!(json["mention"]["label"], "Relay • Review");
+        assert_eq!(serde_json::from_value::<Part>(json).unwrap(), part);
+        let legacy: Vec<Part> = serde_json::from_str(
+            r#"[{"id":"a","type":"text","text":"Hi"},{"id":"b","type":"skill","skill":{"id":"s","name":"review"}}]"#,
+        )
+        .unwrap();
+        assert!(session_mentions(&legacy).is_empty());
+        let parts = vec![Part::text("Ask "), part.clone(), Part::text(" first")];
+        assert_eq!(
+            plain_text(&parts),
+            "Ask @Relay • Review [Relay session session-other] first"
+        );
+        assert!(has_content(std::slice::from_ref(&part)));
+        // A mention of a missing session is still a loadable draft.
+        assert!(validate_parts(&snapshot, "session-plan", &parts).is_ok());
+        for invalid in [
+            mention("", "Label"),
+            mention("session-x", ""),
+            mention(&"x".repeat(MENTION_ID_LIMIT + 1), "Label"),
+            mention("session-x", &"x".repeat(MENTION_LABEL_LIMIT + 1)),
+            mention("session\nx", "Label"),
+            mention("session-x", "Label\u{7}"),
+        ] {
+            assert!(validate_parts(&snapshot, "session-plan", &[invalid]).is_err());
+        }
+        let label = "x".repeat(MENTION_LABEL_LIMIT);
+        let budget = TEXT_LIMIT - label.len() - "session-x".len();
+        let full = vec![Part::text("y".repeat(budget)), mention("session-x", &label)];
+        assert!(validate_parts(&snapshot, "session-plan", &full).is_ok());
+        let over = vec![
+            Part::text("y".repeat(budget + 1)),
+            mention("session-x", &label),
+        ];
+        assert!(validate_parts(&snapshot, "session-plan", &over).is_err());
+        let label = mention_label("Project", &"é".repeat(200));
+        assert!(label.len() <= MENTION_LABEL_LIMIT && label.starts_with("Project • é"));
+        assert_eq!(mention_label("Relay", "Review"), "Relay • Review");
+    }
+
+    #[test]
+    fn session_mentions_recurse_into_replies_but_not_quotes() {
+        let parts = vec![
+            mention("session-a", "A"),
+            Part {
+                id: uuid::Uuid::new_v4().to_string(),
+                kind: PartKind::Reply {
+                    anchor: Anchor {
+                        message_id: "m".into(),
+                        start: 0,
+                        end: 35,
+                        quote: "@B [Relay session session-quoted]".into(),
+                    },
+                    parts: vec![Part::text("See "), mention("session-b", "B")],
+                },
+            },
+            Part::text("@C [Relay session session-c]"),
+        ];
+        let ids: Vec<_> = session_mentions(&parts)
+            .into_iter()
+            .map(|m| m.session_id.as_str())
+            .collect();
+        assert_eq!(ids, ["session-a", "session-b"]);
     }
 }

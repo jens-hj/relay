@@ -1811,7 +1811,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            25
+            27
         );
         drop(store);
         let mut reopened = Store::open(&db, AgentProfile::default()).unwrap();
@@ -1905,7 +1905,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 26)
+        .pragma_update(None, "user_version", 28)
         .unwrap();
     drop(store);
     let error = Store::open(&db, AgentProfile::default()).err().unwrap();
@@ -1915,7 +1915,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        26
+        28
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -1923,6 +1923,72 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         })
         .unwrap();
     assert_eq!(serde_json::from_str::<Snapshot>(&json).unwrap(), before);
+}
+
+#[test]
+fn schema_twenty_five_defaults_network_on_and_preserves_explicit_false_on_reopen() {
+    fn remove_network(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                fields.remove("network_access");
+                for value in fields.values_mut() {
+                    remove_network(value);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    remove_network(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("network.sqlite");
+    let defaults = AgentProfile::default();
+    let store = Store::open(&path, defaults.clone()).unwrap();
+    let original = store.snapshot().unwrap();
+    let mut legacy = serde_json::to_value(&original).unwrap();
+    remove_network(&mut legacy);
+    legacy["protocol_version"] = serde_json::json!(14);
+    store
+        .connection
+        .execute(
+            "UPDATE workspace SET snapshot=?1 WHERE id=1",
+            [serde_json::to_string(&legacy).unwrap()],
+        )
+        .unwrap();
+    store
+        .connection
+        .pragma_update(None, "user_version", 25)
+        .unwrap();
+    drop(store);
+    let mut store = Store::open(&path, defaults.clone()).unwrap();
+    let schema: u32 = store
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema, 27);
+    assert_eq!(store.snapshot().unwrap(), original);
+
+    let mut disabled = original;
+    disabled.projects[0].defaults.network_access = false;
+    disabled.agent_configs[0].overrides.network_access = Some(false);
+    disabled.sessions[0].network_access = Some(false);
+    disabled.sessions[0].profile = Some(AgentProfile {
+        network_access: false,
+        ..defaults.clone()
+    });
+    store.save(&disabled).unwrap();
+    drop(store);
+    let reopened = Store::open(&path, defaults).unwrap().snapshot().unwrap();
+    assert_eq!(reopened, disabled);
+    assert!(
+        !reopened
+            .session_profile(&reopened.sessions[0])
+            .unwrap()
+            .network_access
+    );
 }
 #[test]
 fn sync_receipts_are_idempotent_and_obsolete_results_do_not_publish() {
@@ -4135,7 +4201,7 @@ fn schema_twenty_one_adds_default_worker_model_policies_and_persists_changes() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 25);
+    assert_eq!(schema, 27);
     let stored: String = store
         .connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -4231,7 +4297,7 @@ fn schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 25);
+    assert_eq!(schema, 27);
     let upgraded = store.snapshot().unwrap();
     assert_eq!(upgraded, original);
     assert!(upgraded.projects.iter().all(|p| p.nix_commands.is_off()));
@@ -4304,7 +4370,7 @@ fn schema_twenty_one_upgrades_to_twenty_five_with_every_new_setting_off() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 25);
+    assert_eq!(schema, 27);
     let upgraded = store.snapshot().unwrap();
     assert_eq!(upgraded, original);
     assert!(upgraded.projects.iter().all(|p| p.nix_commands.is_off()));
@@ -4387,7 +4453,7 @@ fn schema_twenty_three_upgrades_with_claude_window_start_off_and_an_empty_claim_
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 25);
+    assert_eq!(schema, 27);
     let upgraded = store.snapshot().unwrap();
     assert_eq!(upgraded, original);
     assert!(!upgraded.claude_window_start.enabled);
@@ -4438,7 +4504,7 @@ fn schema_twenty_four_upgrades_with_standard_spawn_execution_approval() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 25);
+    assert_eq!(schema, 27);
     let upgraded = store.snapshot().unwrap();
     assert_eq!(upgraded, original);
     assert!(
@@ -4447,7 +4513,7 @@ fn schema_twenty_four_upgrades_with_standard_spawn_execution_approval() {
             .iter()
             .all(|p| p.spawn_execution_approval == SpawnExecutionApproval::Standard)
     );
-    // A stored policy and requested mode survive reopening at schema 25.
+    // A stored policy and requested mode survive reopening at the current schema.
     let mut stored = upgraded.clone();
     stored.projects[0].spawn_execution_approval = SpawnExecutionApproval::Strict;
     stored.sessions[0]
@@ -4534,7 +4600,7 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 25);
+    assert_eq!(schema, 27);
 }
 
 #[test]
@@ -4585,7 +4651,281 @@ fn schema_nineteen_snapshots_load_prompt_senders_as_the_user() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 25);
+    assert_eq!(schema, 27);
+}
+
+#[test]
+fn schema_twenty_five_databases_load_without_peer_grants_and_keep_their_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("peers.sqlite");
+    let defaults = AgentProfile::default();
+    let store = Store::open(&path, defaults.clone()).unwrap();
+    let mut original = store.snapshot().unwrap();
+    let session_id = original.messages[0].session_id.clone();
+    original.sessions[0].spawn = Some(SpawnGrant {
+        task: "Port the change".into(),
+        context: None,
+        permissions: Default::default(),
+        requested_by_run: None,
+        selection_rationale: Some("Fits the task".into()),
+        execution_approval: None,
+    });
+    original.submissions.push(Submission {
+        id: "queued".into(),
+        session_id: session_id.clone(),
+        parts: vec![Part::text("Older queued turn")],
+        state: SubmissionState::Paused,
+        approve_implementation: false,
+        error: None,
+        interrupts_run: None,
+        last_edit_request: None,
+        sender: Sender::User,
+    });
+    let mut json = serde_json::to_value(&original).unwrap();
+    assert!(json.get("session_peers").is_none());
+    json["protocol_version"] = 14.into();
+    let draft = Draft {
+        session_id: session_id.clone(),
+        revision: 3,
+        parts: vec![Part::text("Legacy draft")],
+    };
+    store
+        .connection
+        .execute(
+            "UPDATE workspace SET snapshot=?1 WHERE id=1",
+            [serde_json::to_string(&json).unwrap()],
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT INTO drafts(session_id,draft) VALUES(?1,?2)",
+            params![session_id, serde_json::to_string(&draft).unwrap()],
+        )
+        .unwrap();
+    store
+        .connection
+        .execute_batch(
+            "INSERT INTO receipts VALUES('kept-receipt','request');
+             PRAGMA user_version=25;",
+        )
+        .unwrap();
+    drop(store);
+    let mut store = Store::open(&path, defaults.clone()).unwrap();
+    let schema: u32 = store
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema, 27);
+    let mut upgraded = store.snapshot().unwrap();
+    assert_eq!(upgraded.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(upgraded, original);
+    assert!(upgraded.session_peers.is_empty());
+    assert_eq!(
+        conversation::read_drafts(&store.connection).unwrap(),
+        vec![draft]
+    );
+    assert_eq!(
+        store
+            .connection
+            .query_row(
+                "SELECT request FROM receipts WHERE request_id='kept-receipt'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap(),
+        "request"
+    );
+    // Grants persist across restarts once stored.
+    let other = upgraded.sessions[1].id.clone();
+    assert!(upgraded.grant_peer(&session_id, &other, "request", 1));
+    store.save(&upgraded).unwrap();
+    drop(store);
+    let store = Store::open(&path, defaults).unwrap();
+    assert_eq!(
+        store.snapshot().unwrap().session_peers,
+        upgraded.session_peers
+    );
+}
+
+#[test]
+fn schema_twenty_six_network_data_upgrades_and_accepts_human_peer_grants() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("network-peers.sqlite");
+    let defaults = AgentProfile::default();
+    let store = Store::open(&path, defaults.clone()).unwrap();
+    let mut original = store.snapshot().unwrap();
+    for session in &mut original.sessions {
+        session.fixture = false;
+    }
+    original.projects[0].defaults.network_access = false;
+    original.agent_configs[0].overrides.network_access = Some(false);
+    original.sessions[0].network_access = Some(false);
+    original.sessions[0].profile = Some(AgentProfile {
+        network_access: false,
+        ..defaults.clone()
+    });
+    // The saved next-turn setting is Off, but the last process launched On.
+    let launched = LaunchedNetworkPolicy::new(Harness::Codex, ApprovalMode::Ask, true);
+    original.sessions[0].worker = Some(WorkerRun {
+        model: Some("test-model".into()),
+        context_tokens: None,
+        context_window: None,
+        last_usage: None,
+        harness: Harness::Codex,
+        execution: None,
+        launched_network_policy: Some(launched),
+        status: WorkerStatus::Completed,
+        thread_id: Some("network-thread".into()),
+        worktree: Some("/preserved/worktree".into()),
+        branch: Some("preserved-branch".into()),
+        base_commit: None,
+        error: None,
+        usage: None,
+        changes: None,
+    });
+    let session_id = original.sessions[0].id.clone();
+    let other = original.sessions[1].id.clone();
+    original.submissions.push(Submission {
+        id: "network-queued".into(),
+        session_id: session_id.clone(),
+        parts: vec![Part::text("Preserved queued message")],
+        state: SubmissionState::Paused,
+        approve_implementation: false,
+        error: None,
+        interrupts_run: None,
+        last_edit_request: None,
+        sender: Sender::User,
+    });
+    let draft = Draft {
+        session_id: session_id.clone(),
+        revision: 3,
+        parts: vec![Part::text("Preserved network draft")],
+    };
+    // A network-only writer used protocol 15 and did not know about peers.
+    let mut network_json = serde_json::to_value(&original).unwrap();
+    assert!(network_json.get("session_peers").is_none());
+    network_json["protocol_version"] = 15.into();
+    store
+        .connection
+        .execute(
+            "UPDATE workspace SET snapshot=?1 WHERE id=1",
+            [serde_json::to_string(&network_json).unwrap()],
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT INTO drafts(session_id,draft) VALUES(?1,?2)",
+            params![session_id, serde_json::to_string(&draft).unwrap()],
+        )
+        .unwrap();
+    store
+        .connection
+        .execute_batch(
+            "INSERT INTO receipts VALUES('network-receipt','preserved request');
+             INSERT INTO draft_receipts VALUES('network-draft','draft request','draft response');
+             PRAGMA user_version=26;",
+        )
+        .unwrap();
+    drop(store);
+
+    let mut store = Store::open(&path, defaults.clone()).unwrap();
+    let schema: u32 = store
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(schema, 27);
+    let upgraded = store.snapshot().unwrap();
+    assert_eq!(upgraded.protocol_version, 16);
+    assert_eq!(upgraded, original);
+    assert!(upgraded.session_peers.is_empty());
+    assert!(
+        !upgraded
+            .session_profile(&upgraded.sessions[0])
+            .unwrap()
+            .network_access
+    );
+    assert_eq!(
+        upgraded.sessions[0]
+            .worker
+            .as_ref()
+            .unwrap()
+            .launched_network_policy,
+        Some(launched)
+    );
+    assert_eq!(
+        conversation::read_drafts(&store.connection).unwrap(),
+        vec![draft]
+    );
+    let receipt: String = store
+        .connection
+        .query_row(
+            "SELECT request FROM receipts WHERE request_id='network-receipt'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipt, "preserved request");
+    let draft_receipt: (String, String) = store
+        .connection
+        .query_row(
+            "SELECT request,response FROM draft_receipts WHERE request_id='network-draft'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        draft_receipt,
+        ("draft request".into(), "draft response".into())
+    );
+
+    // Exercise an atomic human entrypoint after upgrading, rather than saving
+    // grants directly. Editing the queue must preserve the network fields too.
+    let parts = vec![Part {
+        id: "upgraded-mention".into(),
+        kind: PartKind::SessionMention {
+            mention: SessionMention {
+                session_id: other.clone(),
+                label: "Relay • Peer".into(),
+            },
+        },
+    }];
+    let mention_draft = Draft {
+        session_id: session_id.clone(),
+        revision: 4,
+        parts: parts.clone(),
+    };
+    store
+        .connection
+        .execute(
+            "UPDATE drafts SET draft=?1 WHERE session_id=?2",
+            params![serde_json::to_string(&mention_draft).unwrap(), session_id],
+        )
+        .unwrap();
+    let request = env(
+        upgraded.revision,
+        Command::EditQueuedTurn {
+            submission_id: "network-queued".into(),
+            draft_revision: 4,
+            parts,
+            approve_implementation: false,
+        },
+    );
+    let (granted, action) = store.apply(request.clone(), &config()).unwrap();
+    assert!(action.is_none());
+    assert!(granted.is_peer(&session_id, &other));
+    assert_eq!(granted.session_peers.len(), 1);
+    assert_eq!(granted.session_peers[0].request_id, request.request_id);
+    assert_eq!(granted.sessions, original.sessions);
+    assert_eq!(granted.projects, original.projects);
+    assert_eq!(granted.agent_configs, original.agent_configs);
+    assert_eq!(granted.messages, original.messages);
+    assert_eq!(store.apply(request, &config()).unwrap().0, granted);
+    drop(store);
+    let reopened = Store::open(&path, defaults).unwrap();
+    assert_eq!(reopened.snapshot().unwrap(), granted);
+    assert!(reopened.snapshot().unwrap().is_peer(&other, &session_id));
 }
 
 #[test]

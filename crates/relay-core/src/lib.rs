@@ -124,6 +124,9 @@ pub enum SessionRole {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
+    /// Overrides inherited network access for this session and its descendants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_access: Option<bool>,
     #[serde(default)]
     pub automatic_name: bool,
     #[serde(default)]
@@ -233,6 +236,9 @@ pub struct WorkerRun {
     pub harness: Harness,
     #[serde(default)]
     pub execution: Option<ExecutionSettings>,
+    /// Last successfully launched policy; saved settings only affect a later launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_network_policy: Option<LaunchedNetworkPolicy>,
     pub status: WorkerStatus,
     pub thread_id: Option<String>,
     pub worktree: Option<String>,
@@ -324,6 +330,26 @@ pub struct Snapshot {
     /// owner touches it, so existing snapshots keep their shape.
     #[serde(default, skip_serializing_if = "WindowStart::is_default")]
     pub claude_window_start: WindowStart,
+    /// Direct messaging grants minted by accepted human messages that
+    /// mentioned another session; omitted while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_peers: Vec<SessionPeer>,
+}
+
+/// A symmetric grant letting two live sessions message each other. It gives
+/// no other rights and is not inherited or transitive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPeer {
+    /// Derived from the sorted pair, so streamed updates add and remove
+    /// grants as records.
+    pub id: String,
+    /// The two session IDs in sorted order.
+    pub sessions: [String; 2],
+    /// The accepted human request that mentioned the other session.
+    pub request_id: String,
+    /// The session that request was sent to.
+    pub source_session_id: String,
+    pub granted_at: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -465,6 +491,10 @@ pub enum Command {
     SetWorkerExecution {
         session_id: String,
         execution: Option<ExecutionSettings>,
+    },
+    SetSessionNetworkAccess {
+        session_id: String,
+        network_access: Option<bool>,
     },
     RespondPermission {
         permission_id: String,
@@ -630,6 +660,9 @@ impl Snapshot {
             if let Some(settings) = &session.profile {
                 profile = settings.clone();
             }
+            if let Some(network_access) = session.network_access {
+                profile.network_access = network_access;
+            }
             if let Some(grant) = &session.spawn {
                 profile.permissions.extend(grant.permissions.clone());
             }
@@ -713,6 +746,8 @@ impl Snapshot {
                     }
                 }
                 if archived {
+                    // Unarchiving never restores these grants.
+                    self.prune_peers(&branch);
                     for turn in self.submissions.iter_mut().filter(|s| {
                         branch.contains(&s.session_id) && s.state == SubmissionState::Queued
                     }) {
@@ -756,6 +791,7 @@ impl Snapshot {
                     .retain(|entry| !branch.contains(&entry.session_id));
                 self.tool_permissions
                     .retain(|p| !branch.contains(&p.session_id));
+                self.prune_peers(&branch);
                 self.agent_configs.retain(|c| {
                     !configs.contains(&c.id)
                         || self.sessions.iter().any(|s| s.agent_config_id == c.id)
@@ -786,6 +822,7 @@ impl Snapshot {
             | Command::ConfigureHarness { .. }
             | Command::RespondPermission { .. }
             | Command::SetWorkerExecution { .. }
+            | Command::SetSessionNetworkAccess { .. }
             | Command::SetHarnessSelection { .. }
             | Command::ConversationCommand { .. }
             | Command::SyncProject { .. }
@@ -1054,6 +1091,7 @@ mod archive_tests {
         child.id = "archive-child".into();
         child.parent_session_id = Some(parent.id.clone());
         child.worker = Some(WorkerRun {
+            launched_network_policy: None,
             model: None,
             context_tokens: None,
             context_window: None,
@@ -1182,6 +1220,63 @@ mod archive_tests {
     }
 
     #[test]
+    fn archive_and_delete_prune_peer_grants_and_unarchive_does_not_restore_them() {
+        let mut snapshot = demo_snapshot(AgentProfile::default());
+        let mut ancestor = snapshot.sessions[0].clone();
+        ancestor.id = "ancestor".into();
+        ancestor.parent_session_id = None;
+        ancestor.worker = None;
+        ancestor.fixture = false;
+        let mut branch = ancestor.clone();
+        branch.id = "branch".into();
+        branch.parent_session_id = Some(ancestor.id.clone());
+        let mut child = branch.clone();
+        child.id = "child".into();
+        child.parent_session_id = Some(branch.id.clone());
+        let mut other = ancestor.clone();
+        other.id = "other".into();
+        snapshot.sessions = vec![ancestor, branch, child, other];
+        assert!(snapshot.grant_peer("child", "other", "r1", 1));
+        assert!(snapshot.grant_peer("branch", "ancestor", "r2", 1));
+        assert!(snapshot.grant_peer("other", "ancestor", "r3", 1));
+        let archive = |archived| Command::SetSessionArchived {
+            session_id: "branch".into(),
+            archived,
+        };
+        snapshot.apply(archive(true), "archive", 2).unwrap();
+        let kept = |s: &Snapshot| {
+            s.session_peers
+                .iter()
+                .map(|p| p.request_id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kept(&snapshot), ["r3"]);
+        snapshot.apply(archive(false), "unarchive", 3).unwrap();
+        assert_eq!(kept(&snapshot), ["r3"]);
+        assert!(!snapshot.is_peer("child", "other"));
+        assert!(snapshot.grant_peer("child", "other", "r4", 4));
+        snapshot.apply(archive(true), "archive", 5).unwrap();
+        snapshot.session_peers.push(SessionPeer {
+            id: "peer:child:other".into(),
+            sessions: ["child".into(), "other".into()],
+            request_id: "r5".into(),
+            source_session_id: "child".into(),
+            granted_at: 5,
+        });
+        snapshot
+            .apply(
+                Command::DeleteSessionBranch {
+                    session_id: "branch".into(),
+                },
+                "delete",
+                6,
+            )
+            .unwrap();
+        assert_eq!(kept(&snapshot), ["r3"]);
+        assert!(snapshot.is_peer("ancestor", "other"));
+    }
+
+    #[test]
     fn archived_chats_keep_transcripts_and_can_be_unarchived() {
         let mut snapshot = demo_snapshot(AgentProfile::default());
         let id = snapshot.sessions[0].id.clone();
@@ -1214,5 +1309,35 @@ mod archive_tests {
             )
             .unwrap();
         assert!(!snapshot.sessions[0].archived);
+    }
+}
+
+#[cfg(test)]
+mod launched_network_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_worker_without_launched_network_policy_deserializes_as_unknown() {
+        let mut worker: WorkerRun = serde_json::from_value(serde_json::json!({
+            "status": "completed", "thread_id": "legacy-thread", "worktree": "/repo",
+            "branch": null, "base_commit": null, "error": null, "usage": null, "changes": null
+        }))
+        .unwrap();
+        assert_eq!(worker.launched_network_policy, None);
+        assert!(
+            serde_json::to_value(&worker)
+                .unwrap()
+                .get("launched_network_policy")
+                .is_none()
+        );
+        worker.launched_network_policy = Some(LaunchedNetworkPolicy::new(
+            Harness::Codex,
+            ApprovalMode::Unrestricted,
+            false,
+        ));
+        assert_eq!(
+            serde_json::from_value::<WorkerRun>(serde_json::to_value(&worker).unwrap()).unwrap(),
+            worker
+        );
     }
 }

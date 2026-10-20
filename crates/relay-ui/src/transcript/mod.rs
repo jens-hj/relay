@@ -16,6 +16,9 @@ pub fn TranscriptColumn(#[prop(optional)] children: Children) -> Element {
 #[component]
 pub fn MessageRow(
     speaker: UiText,
+    /// Relationship or role, shown above the speaker's name when present.
+    #[prop(default = Live::fixed(String::new()))]
+    speaker_role: UiText,
     /// The speaking agent's harness glyph.
     #[prop(optional)]
     harness: Option<Harness>,
@@ -26,28 +29,48 @@ pub fn MessageRow(
     /// Opens the speaker, such as the agent session that sent a message.
     #[prop(optional)]
     on_speaker: Option<OnPress>,
+    /// Whether the speaker still has a navigation target.
+    #[prop(default = Live::fixed(true))]
+    speaker_link_enabled: Live<bool>,
     #[prop(optional)] children: Children,
 ) -> Element {
-    let name = match on_speaker {
-        Some(press) => {
-            let label = speaker.clone();
-            view! {
-                button @click:{press()} width:1fr min-width:0px height:min-content radius:0px
-                    pad:0px fill:(Color::TRANSPARENT) label:{label.get()}
+    let name = view! {
+        col width:1fr min-width:0px height:min-content {}
+    };
+    let has_link = on_speaker.is_some();
+    name.switch(move || has_link && speaker_link_enabled.get(), move |parent, linked| {
+        let speaker = speaker.clone();
+        let role = speaker_role.clone();
+        let role_text = role.clone();
+        let show_role = role.clone();
+        let show_role = Derived::new(move || !show_role.get().is_empty());
+        let content = view! {
+            col width:1fr min-width:0px height:min-content gap:{px(2.0)}px {
+                if show_role.get() {
+                    Ellipsis text:(role_text.clone()) role:(TextRole::Caption) tone:(Tone::Faint)
+                }
+                Ellipsis text:(speaker.clone()) role:(TextRole::Label) tone:(Tone::Faint)
+            }
+        };
+        if *linked {
+            let press = on_speaker.clone();
+            parent.adopt(&view! {
+                button @click:{if let Some(press) = &press { press(); }} width:1fr min-width:0px
+                    height:min-content radius:0px pad:0px fill:(Color::TRANSPARENT)
+                    label:{let role = role.get(); if role.is_empty() { speaker.get() } else { format!("{role} · {}", speaker.get()) }}
                     hover { fill:ground.hover } pressed { fill:ground.pressed }
                     focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(2.0)}) } {
-                    Ellipsis text:(speaker) role:(TextRole::Label) tone:(Tone::Muted) weight:500
+                    { parent.adopt(&content); }
                 }
-            }
+            });
+        } else {
+            parent.adopt(&content);
         }
-        None => view! {
-            Ellipsis text:(speaker) role:(TextRole::Label) tone:(Tone::Muted) weight:500
-        },
-    };
+    });
     view! {
         row height:min-content align:start min-width:0px {
             row width:{px(128.0)}px shrink:0 height:min-content gap:{px(7.0)}px align:center
-                pad:(top:{px(3.0)}px) font-color:ground.muted {
+                pad:(top:{px(3.0)}px right:{px(16.0)}px) font-color:ground.muted {
                 if harness.is_some() {
                     HarnessGlyph harness:(harness.unwrap()) size:12.0
                 } else if icon.is_some() {

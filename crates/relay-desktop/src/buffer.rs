@@ -448,6 +448,18 @@ pub fn promote(model: Model, id: &str) {
     );
 }
 
+/// Mirror the server's acceptance check so the draft stays put with a clear
+/// notice; the server still decides.
+fn live_mentions(snapshot: &Snapshot, session: &str, parts: &[Part]) -> Result<(), String> {
+    if session_mentions(parts)
+        .iter()
+        .any(|m| m.session_id == session || crate::command_ui::mention_stale(snapshot, m))
+    {
+        return Err("Remove the mention of an archived or missing session".into());
+    }
+    Ok(())
+}
+
 // Trim only the edges of a message, preserving spacing between inline parts.
 fn trim_message(parts: &mut Vec<Part>) {
     for part in parts.iter_mut() {
@@ -542,7 +554,9 @@ fn send_first(model: Model) {
             .set("Wait for inline files to finish uploading before sending".into());
         return;
     }
-    if let Err(error) = validate_parts(&model.snapshot.get_untracked(), &session_id, &parts) {
+    if let Err(error) = validate_parts(&model.snapshot.get_untracked(), &session_id, &parts)
+        .and_then(|()| live_mentions(&model.snapshot.get_untracked(), &session_id, &parts))
+    {
         model.notice.set(error);
         return;
     }
@@ -691,7 +705,9 @@ pub fn send(model: Model) {
         }
         _ => {}
     }
-    if let Err(error) = validate_parts(&snapshot, &session_id, &doc.parts) {
+    if let Err(error) = validate_parts(&snapshot, &session_id, &doc.parts)
+        .and_then(|()| live_mentions(&snapshot, &session_id, &doc.parts))
+    {
         model.notice.set(error);
         return;
     }

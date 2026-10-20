@@ -152,6 +152,7 @@ pub(crate) fn overridden_fields(overrides: &ProfileOverrides) -> Vec<&'static st
         ("Harness", overrides.harness.is_some()),
         ("Model", overrides.model.is_some()),
         ("Execution", overrides.execution.is_some()),
+        ("Network", overrides.network_access.is_some()),
         ("Scope", overrides.scope.is_some()),
         ("Responsibilities", overrides.responsibilities.is_some()),
         ("Completion", overrides.completion.is_some()),
@@ -789,6 +790,29 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
             }
         },
     );
+    let network_index = Derived::new(move || usize::from(model.editor_profile.get().network_access));
+    let choose_network: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot| {
+        model.modify_profile("network_access", |p| p.network_access = slot == 1);
+    });
+    let network = field_module(
+        model,
+        "Network Access",
+        "network_access",
+        None,
+        view! {
+            col height:min-content gap:0px {
+                row height:{px(48.0)}px {
+                    Segments name:("Network Access".to_string())
+                        options:(vec!["Off".to_string(), "On".to_string()])
+                        selected:(relay_ui::Live::from(network_index)) on-select:(choose_network)
+                }
+                row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px) {
+                    Label text:"Codex uses this setting with the workspace filesystem sandbox. Unrestricted Access always allows network. Claude Code does not support this setting. Changes apply to the next turn."
+                        role:(TextRole::Caption) tone:(Tone::Muted)
+                }
+            }
+        },
+    );
     let whole = view! {
         CellButton label:"Scope: Whole project" selected:(whole_project)
             on-press:(press(move || model.modify_profile("scope", |p| p.scope = AgentScope::Project))) {
@@ -861,7 +885,7 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
     );
     view! {
         col height:min-content gap:0px {
-            { for module in [&harness, &model_selection, &approval, &scope, &workers, &worker_model] { parent.adopt(module); } }
+            { for module in [&harness, &model_selection, &approval, &network, &scope, &workers, &worker_model] { parent.adopt(module); } }
         }
     }
 }

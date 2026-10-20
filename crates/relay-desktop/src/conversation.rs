@@ -347,11 +347,17 @@ struct TranscriptIndex {
 struct TranscriptEntry {
     message: Message,
     comments: Vec<Comment>,
-    speaker: String,
-    /// The agent session that sent a prompt, when it still exists.
-    speaker_session: Option<String>,
+    speaker: TranscriptSpeaker,
     continues: bool,
     spacing: f32,
+}
+
+#[derive(Clone, Default, PartialEq)]
+struct TranscriptSpeaker {
+    name: String,
+    role: Option<&'static str>,
+    /// The agent session that sent a prompt, when it still exists.
+    session: Option<String>,
 }
 
 fn transcript_index(model: Model) -> Derived<Rc<TranscriptIndex>> {
@@ -366,12 +372,15 @@ fn transcript_index(model: Model) -> Derived<Rc<TranscriptIndex>> {
                     .or_default()
                     .push(comment.clone());
             }
-            let mut previous: Option<(String, bool)> = None;
+            let mut previous: Option<(TranscriptSpeaker, bool)> = None;
             for message in crate::adapt::transcript_messages(&snapshot.messages, &session) {
-                let (speaker, speaker_session) = if message.kind == "prompt" {
+                let speaker = if message.kind == "prompt" {
                     prompt_speaker(snapshot, message)
                 } else {
-                    (message.author.clone(), None)
+                    TranscriptSpeaker {
+                        name: message.author.clone(),
+                        ..Default::default()
+                    }
                 };
                 let tool = message.tool.is_some()
                     || matches!(message.kind.as_str(), "command_execution" | "file_change");
@@ -380,11 +389,10 @@ fn transcript_index(model: Model) -> Derived<Rc<TranscriptIndex>> {
                     message: crate::tool_activity::with_legacy_tool(message.clone()),
                     comments: comments.remove(message.id.as_str()).unwrap_or_default(),
                     speaker: if continues {
-                        String::new()
+                        TranscriptSpeaker::default()
                     } else {
                         speaker.clone()
                     },
-                    speaker_session: speaker_session.filter(|_| !continues),
                     continues,
                     spacing: match previous.as_ref() {
                         None => 0.0,
@@ -404,16 +412,25 @@ fn transcript_index(model: Model) -> Derived<Rc<TranscriptIndex>> {
 /// A prompt's speaker: the user, or the sending agent named by its place in
 /// the session tree relative to the receiving session. A deleted sender is
 /// shown as "Agent" without a link.
-fn prompt_speaker(snapshot: &Snapshot, message: &Message) -> (String, Option<String>) {
+fn prompt_speaker(snapshot: &Snapshot, message: &Message) -> TranscriptSpeaker {
     // Relay notices are prompts Relay queues for itself, never the user or an agent.
     if message.author == "Relay" {
-        return ("Relay".into(), None);
+        return TranscriptSpeaker {
+            name: "Relay".into(),
+            ..Default::default()
+        };
     }
     let Sender::Agent { session_id } = &message.sender else {
-        return ("You".into(), None);
+        return TranscriptSpeaker {
+            name: "You".into(),
+            ..Default::default()
+        };
     };
     let Some(sender) = snapshot.sessions.iter().find(|s| &s.id == session_id) else {
-        return ("Agent".into(), None);
+        return TranscriptSpeaker {
+            name: "Agent".into(),
+            ..Default::default()
+        };
     };
     let receiver_parent = snapshot
         .sessions
@@ -422,19 +439,19 @@ fn prompt_speaker(snapshot: &Snapshot, message: &Message) -> (String, Option<Str
         .and_then(|s| s.parent_session_id.as_deref());
     let sender_parent = sender.parent_session_id.as_deref();
     let relationship = if receiver_parent == Some(sender.id.as_str()) {
-        Some("Parent")
+        "Parent"
     } else if sender_parent == Some(message.session_id.as_str()) {
-        Some("Child")
+        "Child"
     } else if sender_parent.is_some() && sender_parent == receiver_parent {
-        Some("Sibling")
+        "Sibling"
     } else {
-        None
+        "Agent"
     };
-    let label = match relationship {
-        Some(relationship) => format!("{relationship} · {}", sender.title),
-        None => sender.title.clone(),
-    };
-    (label, Some(sender.id.clone()))
+    TranscriptSpeaker {
+        name: sender.title.clone(),
+        role: Some(relationship),
+        session: Some(sender.id.clone()),
+    }
 }
 
 fn text_part(parts: &[Part], id: &str) -> Option<String> {
@@ -606,6 +623,23 @@ fn accept_completion(model: Model, controller: &Shared, index: usize, mirror: bo
                 Part {
                     id: uuid::Uuid::new_v4().to_string(),
                     kind: PartKind::Skill { skill },
+                },
+                Part::text(" "),
+            ],
+            mirror,
+        );
+    } else if let Some(mention) = choice.mention {
+        // Only a picked choice becomes a structured mention; typed or pasted
+        // "@text" stays plain text.
+        insert_parts(
+            model,
+            controller,
+            &completion.part,
+            (completion.start, completion.end),
+            vec![
+                Part {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    kind: PartKind::SessionMention { mention },
                 },
                 Part::text(" "),
             ],
@@ -1969,20 +2003,21 @@ pub fn Conversation(model: Model) -> Element {
                             BoundedPanel limit:(auxiliary_limit) {
                                 col height:min-content shrink:0 gap:0px
                                     label:"Inline suggestions" {
-                                    // Key by content, not position: filtering must replace the displayed row.
-                                    for (key, choice) in {model.completion.get().map(|c|c.choices.into_iter().map(|choice|((choice.label.clone(),choice.description.clone()),choice)).collect::<Vec<_>>()).unwrap_or_default()} {
-                                        let picked_label=key.0.clone();
+                                    // Key by identity and content, not position: filtering must replace
+                                    // the displayed row, and duplicate labels stay distinct.
+                                    for (key, choice) in {model.completion.get().map(|c|c.choices.into_iter().map(|choice|((choice.key.clone(),choice.label.clone(),choice.description.clone()),choice)).collect::<Vec<_>>()).unwrap_or_default()} {
+                                        let picked_key=key.0.clone();
                                         let choice=State::new(choice.clone());
                                         row height:{px(32.0)}px min-width:0px shrink:0
                                             stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                                             {
-                                                let picked = picked_label.clone();
-                                                let current = Derived::new(move || model.completion.get().is_some_and(|c| c.choices.get(c.index).is_some_and(|c| c.label == choice.get().label)));
+                                                let picked = picked_key.clone();
+                                                let current = Derived::new(move || model.completion.get().is_some_and(|c| c.choices.get(c.index).is_some_and(|c| c.key == choice.get().key)));
                                                 parent.adopt(&view! {
                                                     CellButton label:(Derived::new(move || choice.get().label)) start:true selected:(current)
                                                         horizontal-inset:(12.0)
-                                                        on-press:(press(move || if let Some(index) = model.completion.get_untracked().and_then(|c| c.choices.iter().position(|c| c.label == picked)) { accept_completion(model, &controller.get_untracked(), index, false); })) {
-                                                        Ellipsis text:(Derived::new(move || format!("{} · {}", choice.get().label, choice.get().description.split_whitespace().collect::<Vec<_>>().join(" "))))
+                                                        on-press:(press(move || if let Some(index) = model.completion.get_untracked().and_then(|c| c.choices.iter().position(|c| c.key == picked)) { accept_completion(model, &controller.get_untracked(), index, false); })) {
+                                                        Ellipsis text:(Derived::new(move || { let choice = choice.get(); let description = choice.description.split_whitespace().collect::<Vec<_>>().join(" "); if description.is_empty() { choice.label } else { format!("{} · {description}", choice.label) } }))
                                                             role:(TextRole::Label)
                                                     }
                                                 });
@@ -2109,6 +2144,33 @@ pub fn Conversation(model: Model) -> Element {
                                 }
                             }
                         }
+                    }
+                }
+            }
+            if menu.get() && session.get().is_some_and(|s| !s.fixture) {
+                let network_session = session.get().unwrap().id;
+                let selected_session = network_session.clone();
+                let network_index = Derived::new(move || {
+                    let snapshot = model.snapshot.get();
+                    let session = snapshot.sessions.iter().find(|s| s.id == selected_session);
+                    match session.and_then(|s| s.network_access) {
+                        None => 0,
+                        Some(false) => 1,
+                        Some(true) => 2,
+                    }
+                });
+                let choose_network: Rc<dyn Fn(usize)> = Rc::new(move |slot| {
+                    model.submit(Command::SetSessionNetworkAccess {
+                        session_id: network_session.clone(),
+                        network_access: match slot { 1 => Some(false), 2 => Some(true), _ => None },
+                    }, model.snapshot.get_untracked().revision, crate::model::Saved::Action);
+                });
+                Tooltip text:"Applies to the next turn. Codex preserves its filesystem sandbox and approval mode. Unrestricted Access always allows network; Claude Code does not support this setting." {
+                    row height:{px(40.0)}px {
+                        Segments name:("Session network access".to_string())
+                            options:(vec!["Network: Inherit".to_string(), "Network: Off".to_string(), "Network: On".to_string()])
+                            selected:(relay_ui::Live::from(network_index)) on-select:(choose_network)
+                            disabled:(relay_ui::Live::from(Derived::new(move || !model.connected.get() || model.busy.get())))
                     }
                 }
             }
@@ -2650,28 +2712,36 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
         entry.with(|entry| {
             entry
                 .as_ref()
-                .map(|entry| entry.speaker.clone())
+                .map(|entry| entry.speaker.name.clone())
                 .unwrap_or_default()
         })
     });
-    // Agent-sent prompts link to their sender's session.
-    let on_speaker = entry
-        .with_untracked(|entry| {
+    let speaker_role = Derived::new(move || {
+        entry.with(|entry| {
             entry
                 .as_ref()
-                .and_then(|entry| entry.speaker_session.clone())
+                .and_then(|entry| entry.speaker.role)
+                .unwrap_or_default()
+                .to_owned()
         })
-        .map(|_| -> relay_ui::prelude::OnPress {
-            Rc::new(move || {
-                if let Some(id) = entry.with_untracked(|entry| {
-                    entry
-                        .as_ref()
-                        .and_then(|entry| entry.speaker_session.clone())
-                }) {
-                    model.open_session(id);
-                }
-            })
-        });
+    });
+    // Keep both the link and its target current as senders appear or disappear.
+    let speaker_link_enabled = Derived::new(move || {
+        entry.with(|entry| {
+            entry
+                .as_ref()
+                .is_some_and(|entry| entry.speaker.session.is_some())
+        })
+    });
+    let on_speaker = press(move || {
+        if let Some(id) = entry.with_untracked(|entry| {
+            entry
+                .as_ref()
+                .and_then(|entry| entry.speaker.session.clone())
+        }) {
+            model.open_session(id);
+        }
+    });
     // Relay's own messages (the context it sends with each turn) carry the
     // Relay mark rather than the session's harness glyph.
     let from_relay = initial.as_ref().is_some_and(|m| m.author == "Relay");
@@ -2764,7 +2834,9 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
         }
     } else if prompt {
         view! {
-            MessageRow speaker:(relay_ui::Live::from(speaker)) on-speaker:(on_speaker) {
+            MessageRow speaker:(relay_ui::Live::from(speaker))
+                speaker-role:(relay_ui::Live::from(speaker_role)) on-speaker:(Some(on_speaker))
+                speaker-link-enabled:(relay_ui::Live::from(speaker_link_enabled)) {
                 UserMessage {
                     { parent.adopt(&body); }
                 }
@@ -2879,6 +2951,13 @@ fn RecordedPart(
                 }
             }
         }
+        PartKind::SessionMention { mention } => {
+            view! {
+                row height:min-content {
+                    MentionChip model:(model) mention:(mention)
+                }
+            }
+        }
         PartKind::Asset { asset } => {
             view! {
                 col height:min-content {
@@ -2933,6 +3012,18 @@ fn DraftPart(model: Model, controller: ControllerState, part: Part, mirror: bool
                 }
             }
         }
+        PartKind::SessionMention { mention } => {
+            let id = State::new(part.id.clone());
+            view! {
+                row height:min-content align:center gap:{px(6.0)}px {
+                    MentionChip model:(model) mention:(mention)
+                    IconCell label:"Remove mention"
+                        on-press:(press(move || remove_draft_part(model, &controller.get_untracked(), &id.get_untracked(), mirror))) {
+                        Label text:"×" role:(TextRole::Label)
+                    }
+                }
+            }
+        }
         PartKind::Asset { asset } => {
             view! {
                 col height:min-content {
@@ -2972,6 +3063,31 @@ fn DraftPart(model: Model, controller: ControllerState, part: Part, mirror: bool
                                 mirror:(mirror)
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// A session mention's captured label. Archived or missing targets stay
+/// readable but muted, since sending them is rejected.
+#[component]
+pub(crate) fn MentionChip(model: Model, mention: SessionMention) -> Element {
+    let text = State::new(format!("@{}", mention.label));
+    let stale = Derived::new(move || {
+        model
+            .snapshot
+            .with(|s| crate::command_ui::mention_stale(s, &mention))
+    });
+    view! {
+        row height:min-content align:center {
+            if stale.get() {
+                row height:min-content label:"Unavailable session mention" {
+                    text font-color:{color(ground.muted)} {text.get()}
+                }
+            } else {
+                row height:min-content label:"Session mention" {
+                    text font-color:{color(ground.ink)} {text.get()}
                 }
             }
         }
@@ -4269,6 +4385,38 @@ pub(crate) fn provenance(
     if let Some(group) = model_choice(snapshot, session) {
         groups.insert(0, group);
     }
+    let network_rows = if let Ok(profile) = snapshot.session_profile(session) {
+        let worker = session.worker.as_ref();
+        let mode = worker
+            .and_then(|w| w.execution.as_ref())
+            .unwrap_or(&profile.execution)
+            .approval;
+        let harness = worker.map(|w| w.harness).unwrap_or(profile.harness);
+        let next = LaunchedNetworkPolicy::new(harness, mode, profile.network_access);
+        if worker
+            .and_then(|w| w.launched_network_policy)
+            .is_some_and(|launched| {
+                launched.harness == next.harness
+                    && launched.network_access == next.network_access
+                    && launched.effective == next.effective
+            })
+        {
+            vec![]
+        } else {
+            vec![
+                (
+                    "Next Turn Network Setting",
+                    if next.network_access { "On" } else { "Off" }.to_string(),
+                ),
+                (
+                    "Next Turn Network Access",
+                    network_access_label(next.effective).to_string(),
+                ),
+            ]
+        }
+    } else {
+        vec![]
+    };
     if let Some(worker) = &session.worker {
         let mut rows = vec![(
             "Harness",
@@ -4278,6 +4426,24 @@ pub(crate) fn provenance(
             }
             .to_string(),
         )];
+        // Current behavior comes only from the immutable launch record, even
+        // if the profile is missing or settings have since been edited.
+        let launched = worker.launched_network_policy;
+        rows.push((
+            "Network Setting",
+            launched
+                .map(|p| if p.network_access { "On" } else { "Off" })
+                .unwrap_or("Unknown (no launch recorded)")
+                .to_string(),
+        ));
+        rows.push((
+            "Network Access",
+            launched
+                .map(|p| network_access_label(p.effective))
+                .unwrap_or("Unknown (no launch recorded)")
+                .to_string(),
+        ));
+        rows.extend(network_rows);
         for (key, value) in [
             ("Thread", &worker.thread_id),
             ("Worktree", &worker.worktree),
@@ -4294,10 +4460,30 @@ pub(crate) fn provenance(
             rows,
             changes: (changes && session.workspaces.is_empty())
                 .then(|| change_text(worker.changes.as_ref())),
-            note: None,
+            note: Some(
+                "Network access reflects the last launched turn. Setting changes apply to the next launch."
+                    .into(),
+            ),
+        });
+    } else if !network_rows.is_empty() {
+        groups.push(ProvenanceGroup {
+            key: "network".into(),
+            title: "Session Settings".into(),
+            rows: network_rows,
+            changes: None,
+            note: Some("Network settings apply to the next launch.".into()),
         });
     }
     groups
+}
+
+fn network_access_label(access: EffectiveNetworkAccess) -> &'static str {
+    match access {
+        EffectiveNetworkAccess::Allowed => "Allowed",
+        EffectiveNetworkAccess::Blocked => "Blocked",
+        EffectiveNetworkAccess::Unrestricted => "Allowed (Unrestricted Access)",
+        EffectiveNetworkAccess::Unsupported => "Unsupported by Claude Code",
+    }
 }
 
 #[cfg(test)]
@@ -4348,8 +4534,10 @@ mod tests {
             TranscriptEntry {
                 message: projected_message("keep", "Agent", "assistant"),
                 comments: vec![],
-                speaker: "Agent".into(),
-                speaker_session: None,
+                speaker: TranscriptSpeaker {
+                    name: "Agent".into(),
+                    ..Default::default()
+                },
                 continues: false,
                 spacing: 0.0,
             },
@@ -4473,7 +4661,7 @@ mod tests {
         for &(id, speaker, continues, spacing) in expected {
             let row = &actual.rows[id];
             assert_eq!(
-                (&*row.speaker, row.continues, row.spacing),
+                (&*row.speaker.name, row.continues, row.spacing),
                 (speaker, continues, spacing),
                 "row {id}"
             );
@@ -4526,7 +4714,7 @@ mod tests {
                 .update(|snapshot| snapshot.messages[2].author.clear());
             mosaic::core::reactive::flush();
             assert!(empty.get().continues);
-            assert_eq!(empty.get().speaker, "");
+            assert_eq!(empty.get().speaker.name, "");
             assert_eq!(
                 changes.get(),
                 2,

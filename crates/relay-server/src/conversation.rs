@@ -362,6 +362,49 @@ pub(super) fn authorize(
     crate::agent_tools::authorize_session(snapshot, &session, approved, config)
 }
 
+/// Mint the peer grants of an accepted message sent to `session`. Only a
+/// human's message grants: every mentioned session must be live and differ
+/// from the recipient, otherwise nothing is granted and the send is rejected.
+/// The caller commits the grants with the submission and its receipt.
+pub(super) fn grant_mentions(
+    snapshot: &mut Snapshot,
+    session: &str,
+    request: &str,
+    parts: &[Part],
+    sender: &Sender,
+) -> Result<(), Error> {
+    let targets: Vec<String> = session_mentions(parts)
+        .into_iter()
+        .map(|m| m.session_id.clone())
+        .collect();
+    if targets.is_empty() {
+        return Ok(());
+    }
+    if *sender != Sender::User {
+        return Err(Error::invalid("Only people can mention sessions"));
+    }
+    // A queued turn of an archived chat can still be edited; a grant made
+    // then would return on unarchive.
+    if !snapshot.is_live(session) {
+        return Err(Error::invalid("Unarchive this chat before continuing"));
+    }
+    for target in &targets {
+        if target == session {
+            return Err(Error::invalid("Remove the mention of this session"));
+        }
+        if !snapshot.is_live(target) {
+            return Err(Error::invalid(
+                "Remove the mention of an archived or missing session",
+            ));
+        }
+    }
+    let granted_at = now();
+    for target in &targets {
+        snapshot.grant_peer(session, target, request, granted_at);
+    }
+    Ok(())
+}
+
 pub(super) fn apply(
     transaction: &Transaction<'_>,
     snapshot: &mut Snapshot,
@@ -423,6 +466,7 @@ pub(super) fn apply(
                     s.session_id == session_id
                         && matches!(s.state, SubmissionState::Queued | SubmissionState::Paused)
                 });
+            grant_mentions(snapshot, &session_id, request, &parts, &sender)?;
             let submission = Submission {
                 id: request.into(),
                 session_id: session_id.clone(),
@@ -572,10 +616,13 @@ pub(super) fn apply(
             if !has_content(&parts) {
                 return Err(Error::invalid("Queued message cannot be empty"));
             }
+            let session_id = submission.session_id.clone();
+            // An edit may add grants; removed mentions keep theirs.
+            grant_mentions(snapshot, &session_id, request, &parts, &sender)?;
             store_draft(
                 transaction,
                 &Draft {
-                    session_id: submission.session_id.clone(),
+                    session_id,
                     revision: previous.revision + 1,
                     parts: vec![],
                 },

@@ -1059,6 +1059,7 @@ pub(super) fn fork_workspaces(session: &Session, id: &str) -> Result<Session, Er
         worker.branch = primary.branch.clone();
         worker.base_commit = primary.base_commit.clone();
         worker.thread_id = None;
+        worker.launched_network_policy = None;
         worker.status = WorkerStatus::Completed;
         worker.error = None;
         worker.usage = None;
@@ -1305,6 +1306,14 @@ pub(super) fn publish_fork(
             return Err(Error::invalid("Fork already exists"));
         }
         let mut fork = fork.clone();
+        // Workspace cloning is not a launch. Only publishing the native fork
+        // may copy the policy of the process that actually created its thread.
+        fork.worker.as_mut().unwrap().launched_network_policy = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == source)
+            .and_then(|s| s.worker.as_ref())
+            .and_then(|w| w.launched_network_policy);
         fork.worker.as_mut().unwrap().thread_id = Some(thread.into());
         let messages: Vec<_> = snapshot
             .messages

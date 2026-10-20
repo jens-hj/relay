@@ -16,10 +16,14 @@ use relay_ui::tokens::{ground, px};
 
 #[derive(Clone, Debug)]
 pub struct Choice {
+    /// Stable identity, so highlight and pointer picks survive re-filtering
+    /// and duplicate labels resolve to the intended target.
+    pub key: String,
     pub label: String,
     pub description: String,
     pub skill: Option<SkillReference>,
     pub command: Option<HarnessCommand>,
+    pub mention: Option<SessionMention>,
 }
 #[derive(Clone, Debug)]
 pub struct Completion {
@@ -105,12 +109,93 @@ pub fn bind_discovery(model: Model) {
     });
 }
 
-pub fn complete(model: Model, part: &str, text: &str, caret: usize) {
-    let catalog = model.catalogs.get_untracked();
-    let Some(Ok(catalog)) = catalog.get(&model.session.get_untracked()) else {
-        model.completion.set(None);
-        return;
+/// Whether a mention no longer names a live session it could be sent to.
+pub fn mention_stale(snapshot: &Snapshot, mention: &SessionMention) -> bool {
+    !snapshot
+        .sessions
+        .iter()
+        .any(|s| s.id == mention.session_id && !s.archived && !s.fixture)
+}
+
+/// Rank a case-insensitive subsequence match: exact, then prefix, then
+/// contiguous, then scattered by span. `None` when the query does not match.
+fn fuzzy_rank(query: &[char], project: &str, title: &str, label: &str) -> Option<(u8, usize)> {
+    let lower = |text: &str| {
+        text.chars()
+            .flat_map(char::to_lowercase)
+            .collect::<Vec<_>>()
     };
+    let (project, title, label) = (lower(project), lower(title), lower(label));
+    if query.is_empty() {
+        return Some((0, 0));
+    }
+    if [&project, &title, &label]
+        .iter()
+        .any(|v| v[..] == query[..])
+    {
+        return Some((0, 0));
+    }
+    if [&project, &title, &label]
+        .iter()
+        .any(|v| v.starts_with(query))
+    {
+        return Some((1, 0));
+    }
+    if [&project, &title, &label]
+        .iter()
+        .any(|v| v.windows(query.len()).any(|w| w == query))
+    {
+        return Some((2, 0));
+    }
+    let (mut next, mut first) = (0, None);
+    for (index, c) in label.iter().enumerate() {
+        if *c == query[next] {
+            first.get_or_insert(index);
+            next += 1;
+            if next == query.len() {
+                return Some((3, index - first.unwrap_or(index)));
+            }
+        }
+    }
+    None
+}
+
+/// Live sessions across every project the owner can see, matched against
+/// "<project> • <title>". Archived, fixture and the open session are omitted.
+pub fn mention_choices(snapshot: &Snapshot, current: &str, query: &str) -> Vec<Choice> {
+    let query = query
+        .chars()
+        .flat_map(char::to_lowercase)
+        .collect::<Vec<_>>();
+    let mut ranked = snapshot
+        .sessions
+        .iter()
+        .filter(|s| !s.archived && !s.fixture && s.id != current)
+        .filter_map(|s| {
+            let project = snapshot
+                .projects
+                .iter()
+                .find(|p| p.id == s.project_id && !p.fixture)?;
+            let label = mention_label(&project.name, &s.title);
+            let rank = fuzzy_rank(&query, &project.name, &s.title, &label)?;
+            Some((rank, label, s.id.clone()))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort();
+    ranked
+        .into_iter()
+        .map(|(_, label, session_id)| Choice {
+            key: session_id.clone(),
+            label: format!("@{label}"),
+            description: String::new(),
+            skill: None,
+            command: None,
+            mention: Some(SessionMention { session_id, label }),
+        })
+        .collect()
+}
+
+pub fn complete(model: Model, part: &str, text: &str, caret: usize) {
     let Some(prefix) = text.get(..caret) else {
         return;
     };
@@ -121,6 +206,20 @@ pub fn complete(model: Model, part: &str, text: &str, caret: usize) {
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
     let token = &prefix[start..];
+    // Session mentions come from the owner's snapshot, not the harness
+    // catalog, so they work while discovery is loading or failed.
+    if let Some(query) = token.strip_prefix('@') {
+        let choices = model.snapshot.with_untracked(|snapshot| {
+            mention_choices(snapshot, &model.session.get_untracked(), query)
+        });
+        show(model, part, start, caret, choices);
+        return;
+    }
+    let catalog = model.catalogs.get_untracked();
+    let Some(Ok(catalog)) = catalog.get(&model.session.get_untracked()) else {
+        model.completion.set(None);
+        return;
+    };
     let mut choices = vec![];
     if let Some(query) = token.strip_prefix('$') {
         // Reuse the prose parser so code, escaped and quoted references do not open completion.
@@ -138,6 +237,7 @@ pub fn complete(model: Model, part: &str, text: &str, caret: usize) {
                 .filter(|s| s.enabled && s.name.to_lowercase().contains(&query.to_lowercase()))
             {
                 choices.push(Choice {
+                    key: format!("skill:{}:{}", skill.id, skill.name),
                     label: format!("${}", skill.name),
                     description: skill.description.clone(),
                     skill: Some(SkillReference {
@@ -145,6 +245,7 @@ pub fn complete(model: Model, part: &str, text: &str, caret: usize) {
                         name: skill.name.clone(),
                     }),
                     command: None,
+                    mention: None,
                 });
             }
         }
@@ -160,27 +261,41 @@ pub fn complete(model: Model, part: &str, text: &str, caret: usize) {
             .filter(|c| c.name.to_lowercase().contains(&query.to_lowercase()))
         {
             choices.push(Choice {
+                key: format!("command:{}", command.name),
                 label: format!("/{}", command.name),
                 description: command.reason.clone().unwrap_or_else(|| {
                     format!("{} {}", command.description, command.argument_hint)
                 }),
                 skill: None,
                 command: Some(command.clone()),
+                mention: None,
             });
         }
     }
+    show(model, part, start, caret, choices);
+}
+
+fn show(model: Model, part: &str, start: usize, caret: usize, mut choices: Vec<Choice>) {
     choices.truncate(4);
     if choices.is_empty() {
         model.completion.set(None);
-    } else {
-        model.completion.set(Some(Completion {
-            part: part.into(),
-            start,
-            end: caret,
-            choices,
-            index: 0,
-        }));
+        return;
     }
+    // Keep the highlighted choice while further typing re-filters the list.
+    let index = model
+        .completion
+        .get_untracked()
+        .filter(|c| c.part == part && c.start == start)
+        .and_then(|c| c.choices.get(c.index).map(|c| c.key.clone()))
+        .and_then(|key| choices.iter().position(|c| c.key == key))
+        .unwrap_or(0);
+    model.completion.set(Some(Completion {
+        part: part.into(),
+        start,
+        end: caret,
+        choices,
+        index,
+    }));
 }
 
 pub fn discovery_feedback(model: Model) -> Option<String> {

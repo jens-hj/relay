@@ -178,6 +178,7 @@ pub fn demo_snapshot(defaults: AgentProfile) -> Snapshot {
         usage_limits: vec![],
         usage_ledger: vec![],
         claude_window_start: WindowStart::default(),
+        session_peers: vec![],
     }
 }
 
@@ -346,6 +347,7 @@ fn session(
     worker: Option<WorkerRun>,
 ) -> Session {
     Session {
+        network_access: None,
         automatic_name: false,
         awaiting_first_message: false,
         archived: false,
@@ -370,6 +372,7 @@ fn session(
 
 fn run(harness: Harness, model: &str, status: WorkerStatus) -> WorkerRun {
     WorkerRun {
+        launched_network_policy: None,
         model: Some(model.into()),
         context_tokens: None,
         context_window: None,

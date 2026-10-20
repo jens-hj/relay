@@ -28,7 +28,7 @@ fn workflow_guidance(profile: &AgentProfile) -> String {
         }
     }
     if profile.permissions[&Task::Delegate] != Permission::Deny {
-        guidance.push_str(" Use Relay MCP spawn_agent to start child sessions, stop_agent to stop your own descendants, archive_agent to archive inactive descendants and their subtrees while retaining history and workspaces, message_agent to queue turns within your tree, wait_for_agents to block until agents are terminal when you are not acting as a director, list_agents to inspect your subtree and parent, and report_result to report to your parent with your worktree path. Relay enforces delegation approval and explicit human approval for wider child permissions. Do not start workers outside Relay. Child repository edits use their assigned isolated worktrees; connected directories remain shared. Do not bypass workspace isolation or worker limits.");
+        guidance.push_str(" Use Relay MCP spawn_agent to start child sessions, stop_agent to stop your own descendants, archive_agent to archive inactive descendants and their subtrees while retaining history and workspaces, message_agent to queue turns within your tree or for sessions a human mentioned with you, wait_for_agents to block until agents are terminal when you are not acting as a director, list_agents to inspect your subtree, parent and mentioned peers, and report_result to report to your parent with your worktree path. Relay enforces delegation approval and explicit human approval for wider child permissions. Do not start workers outside Relay. Child repository edits use their assigned isolated worktrees; connected directories remain shared. Do not bypass workspace isolation or worker limits.");
     }
     guidance
 }
@@ -1486,6 +1486,7 @@ async fn execute(
         "effective_profile": {
             "harness": worker.harness,
             "execution": {"approval": crate::harness::mode(&snapshot, session_id)?},
+            "network_access": profile.network_access,
             "scope": match profile.scope { AgentScope::Issues { .. } => "selected issues", _ => "project" },
             "responsibilities": profile.responsibilities.iter().take(16).collect::<Vec<_>>(),
             "completion": profile.completion.iter().take(16).collect::<Vec<_>>(),
@@ -1639,6 +1640,10 @@ async fn execute(
         }
     }
     let mode = crate::harness::mode(&snapshot, session_id)?;
+    let network_access = snapshot
+        .session_profile(session)
+        .map_err(Error::invalid)?
+        .network_access;
     let binary = crate::harness::selected_binary(&snapshot, worker.harness, &workspace.config);
     let mut cmd = crate::process::worker_command(&binary, &workspace.config.worker);
     let project_root = snapshot
@@ -1656,6 +1661,18 @@ async fn execute(
     match worker.harness {
         Harness::Codex => {
             cmd.args(["app-server", "--stdio"]);
+            // Set both process defaults and per-thread/turn policies. Network
+            // access must never select danger-full-access or alter approvals.
+            let sandbox = if mode == ApprovalMode::Unrestricted {
+                "danger-full-access"
+            } else {
+                "workspace-write"
+            };
+            cmd.args(["-c", &format!("sandbox_mode=\"{sandbox}\"")]);
+            cmd.args([
+                "-c",
+                &format!("sandbox_workspace_write.network_access={network_access}"),
+            ]);
         }
         Harness::ClaudeCode => crate::claude::arguments(
             &mut cmd,
@@ -1727,7 +1744,7 @@ async fn execute(
     crate::process::background_worker(&mut cmd);
     // Launch and stop reservation are serialized by the same store lock.
     let mut child = {
-        let store = workspace.store.lock().map_err(Error::internal)?;
+        let mut store = workspace.store.lock().map_err(Error::internal)?;
         if *stop.borrow() {
             return Ok(());
         }
@@ -1755,7 +1772,7 @@ async fn execute(
             )
             .optional()
             .map_err(Error::internal)?;
-        let current = store.snapshot()?;
+        let mut current = store.snapshot()?;
         let command = request
             .map(|request| serde_json::from_str::<CommandEnvelope>(&request))
             .transpose()
@@ -1817,18 +1834,62 @@ async fn execute(
             .position(|s| s.id == session_id)
             .unwrap();
         let session = &current.sessions[index];
+        if current
+            .session_profile(session)
+            .map_err(Error::invalid)?
+            .network_access
+            != network_access
+        {
+            return Err(Error::invalid(
+                "Network access changed before launch; review and send again",
+            ));
+        }
         crate::agent_tools::authorize_session(&current, session, approved, &workspace.config)?;
+        let launched_network_policy = LaunchedNetworkPolicy::new(worker.harness, mode, network_access);
         let mut child = cmd.spawn().map_err(|_| {
             Error::invalid(
                 "Cannot launch agent harness; check its executable and authentication in Settings",
             )
         })?;
-        if let Some(pid) = child.id()
-            && let Some(identity) = process_identity(pid)
-            && let Err(error) = store.connection.execute("INSERT OR REPLACE INTO processes(session_id,run_id,pid,identity) VALUES(?1,?2,?3,?4)",rusqlite::params![session_id,run_id,pid,identity]) {
+        let identity = child
+            .id()
+            .and_then(|pid| process_identity(pid).map(|identity| (pid, identity)));
+        // Commit the launched policy with Running and process ownership while
+        // launch, stop, and saved-setting edits are still serialized. A queued
+        // turn or a failed spawn must keep the previous launch record.
+        let publication = (|| -> Result<(), Error> {
+            let worker = current.sessions[index].worker.as_mut().unwrap();
+            worker.launched_network_policy = Some(launched_network_policy);
+            worker.status = WorkerStatus::Running;
+            current.revision = current
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| Error::invalid("Revision exhausted"))?;
+            let transaction = store.connection.transaction().map_err(Error::internal)?;
+            if let Some((pid, identity)) = &identity {
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO processes(session_id,run_id,pid,identity) VALUES(?1,?2,?3,?4)",
+                        rusqlite::params![session_id,run_id,pid,identity],
+                    )
+                    .map_err(Error::internal)?;
+            }
+            transaction
+                .execute(
+                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                    [serde_json::to_string(&current).map_err(Error::internal)?],
+                )
+                .map_err(Error::internal)?;
+            transaction.commit().map_err(Error::internal)?;
+            workspace.snapshots.send_replace(current);
+            Ok(())
+        })();
+        if let Err(error) = publication {
+            if let Some((pid, identity)) = identity {
                 reap_owned(pid, &identity);
-                let _ = child.start_kill();
-                return Err(Error::internal(error));
+            }
+            let _ = child.start_kill();
+            return Err(error);
         }
         child
     };
@@ -1841,21 +1902,6 @@ async fn execute(
         Some(pid) => crate::process::worker_cgroup(pid, &workspace.config.worker).await,
         None => None,
     };
-    let publication = workspace.update_run(session_id, run_id, |s| {
-        s.sessions
-            .iter_mut()
-            .find(|s| s.id == session_id)
-            .unwrap()
-            .worker
-            .as_mut()
-            .unwrap()
-            .status = WorkerStatus::Running;
-        Ok(())
-    });
-    if let Err(error) = publication {
-        terminate(&mut child).await;
-        return Err(error);
-    }
     let result = match worker.harness {
         Harness::Codex => {
             crate::app_server::execute(
@@ -1870,6 +1916,7 @@ async fn execute(
                 &path,
                 &writable,
                 mode,
+                network_access,
                 &mut child,
                 stop,
             )

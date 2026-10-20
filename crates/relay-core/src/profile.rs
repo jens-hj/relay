@@ -92,6 +92,9 @@ impl Permission {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentProfile {
+    /// Network access is independent of filesystem access and approval mode.
+    #[serde(default = "network_access_default")]
+    pub network_access: bool,
     /// Empty only for legacy profiles that have not selected a model yet.
     #[serde(default)]
     pub model: String,
@@ -107,6 +110,10 @@ pub struct AgentProfile {
     /// The harness, model and effort this agent's workers may use.
     #[serde(default)]
     pub worker_models: crate::WorkerModelPolicy,
+}
+
+fn network_access_default() -> bool {
+    true
 }
 
 impl Default for AgentProfile {
@@ -199,6 +206,8 @@ pub struct AgentTemplate {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_access: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -222,6 +231,8 @@ pub struct ProfileOverrides {
 impl ProfileOverrides {
     pub fn between(base: &AgentProfile, profile: &AgentProfile) -> Self {
         Self {
+            network_access: (base.network_access != profile.network_access)
+                .then_some(profile.network_access),
             model: (base.model != profile.model
                 || (base.harness != profile.harness && !profile.model.is_empty()))
             .then(|| profile.model.clone()),
@@ -240,6 +251,7 @@ impl ProfileOverrides {
     }
     pub fn resolve(&self, base: &AgentProfile) -> AgentProfile {
         AgentProfile {
+            network_access: self.network_access.unwrap_or(base.network_access),
             model: self.model.clone().unwrap_or_else(|| {
                 if self.harness.is_some_and(|h| h != base.harness) {
                     String::new()
@@ -283,6 +295,96 @@ impl ProfileOverrides {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn network_defaults_and_false_overrides_are_independent_of_execution() {
+        let base = AgentProfile::default();
+        assert!(base.network_access);
+        let legacy = base.to_toml().replace("network_access = true\n", "");
+        assert!(AgentProfile::from_toml(&legacy).unwrap().network_access);
+        let mut json = serde_json::to_value(&base).unwrap();
+        json.as_object_mut().unwrap().remove("network_access");
+        assert!(
+            serde_json::from_value::<AgentProfile>(json)
+                .unwrap()
+                .network_access
+        );
+
+        let overrides = ProfileOverrides::from_toml("network_access = false").unwrap();
+        assert_eq!(overrides.network_access, Some(false));
+        let resolved = overrides.resolve(&base);
+        assert!(!resolved.network_access);
+        assert_eq!(resolved.execution, base.execution);
+        assert_eq!(ProfileOverrides::between(&base, &resolved), overrides);
+        assert_eq!(
+            ProfileOverrides::from_toml(&overrides.to_toml()).unwrap(),
+            overrides
+        );
+        let encoded = serde_json::to_string(&overrides).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ProfileOverrides>(&encoded).unwrap(),
+            overrides
+        );
+
+        let approval_only = ProfileOverrides {
+            execution: Some(crate::ExecutionSettings {
+                approval: crate::ApprovalMode::Ask,
+            }),
+            ..Default::default()
+        };
+        assert!(!approval_only.resolve(&resolved).network_access);
+        assert_eq!(ProfileOverrides::default().resolve(&resolved), resolved);
+        assert!(!AgentProfile::worker(&resolved).network_access);
+    }
+
+    #[test]
+    fn network_inherits_through_project_agent_and_session_profiles() {
+        let mut snapshot = crate::demo_snapshot(AgentProfile::default());
+        let config_id = snapshot.sessions[0].agent_config_id.clone();
+        let project_id = snapshot.sessions[0].project_id.clone();
+        snapshot
+            .projects
+            .iter_mut()
+            .find(|p| p.id == project_id)
+            .unwrap()
+            .defaults
+            .network_access = false;
+        let session = snapshot.sessions[0].clone();
+        assert!(!snapshot.session_profile(&session).unwrap().network_access);
+        snapshot
+            .agent_configs
+            .iter_mut()
+            .find(|c| c.id == config_id)
+            .unwrap()
+            .overrides
+            .network_access = Some(true);
+        assert!(snapshot.session_profile(&session).unwrap().network_access);
+        snapshot.sessions[0].network_access = Some(false);
+        let parent = snapshot.sessions[0].clone();
+        assert!(!snapshot.session_profile(&parent).unwrap().network_access);
+        let mut child = parent.clone();
+        child.id = "network-child".into();
+        child.parent_session_id = Some(parent.id.clone());
+        child.network_access = None;
+        assert!(!snapshot.session_profile(&child).unwrap().network_access);
+        child.profile = Some(AgentProfile {
+            network_access: true,
+            ..Default::default()
+        });
+        assert!(snapshot.session_profile(&child).unwrap().network_access);
+        child.network_access = Some(false);
+        assert!(!snapshot.session_profile(&child).unwrap().network_access);
+        assert!(
+            snapshot
+                .session_profile(&snapshot.sessions[1])
+                .unwrap()
+                .network_access
+        );
+        child.network_access = None;
+        assert!(snapshot.session_profile(&child).unwrap().network_access);
+        child.network_access = Some(false);
+        let json = serde_json::to_string(&child).unwrap();
+        assert_eq!(serde_json::from_str::<crate::Session>(&json).unwrap(), child);
+    }
     #[test]
     fn model_choice_round_trips_in_profiles_and_harness_changes_require_a_new_choice() {
         let base = AgentProfile {

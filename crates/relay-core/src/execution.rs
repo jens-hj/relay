@@ -1,6 +1,43 @@
 use crate::Harness;
 use serde::{Deserialize, Serialize};
 
+/// Network behavior selected for a harness process, independent of its saved
+/// next-turn preference. Unsupported means Relay cannot enforce this setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectiveNetworkAccess {
+    Allowed,
+    Blocked,
+    Unrestricted,
+    Unsupported,
+}
+
+/// Immutable launch metadata. Only a successfully spawned process replaces it;
+/// legacy workers and sessions that have never launched have no record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchedNetworkPolicy {
+    pub harness: Harness,
+    pub approval: ApprovalMode,
+    pub network_access: bool,
+    pub effective: EffectiveNetworkAccess,
+}
+impl LaunchedNetworkPolicy {
+    pub fn new(harness: Harness, approval: ApprovalMode, network_access: bool) -> Self {
+        let effective = match (harness, approval, network_access) {
+            (Harness::ClaudeCode, _, _) => EffectiveNetworkAccess::Unsupported,
+            (Harness::Codex, ApprovalMode::Unrestricted, _) => EffectiveNetworkAccess::Unrestricted,
+            (Harness::Codex, _, true) => EffectiveNetworkAccess::Allowed,
+            (Harness::Codex, _, false) => EffectiveNetworkAccess::Blocked,
+        };
+        Self {
+            harness,
+            approval,
+            network_access,
+            effective,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {

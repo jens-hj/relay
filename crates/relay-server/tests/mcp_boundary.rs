@@ -43,6 +43,12 @@ while IFS= read -r line; do
       test -z "${RELAY_TOKEN:-}" && test -z "${RELAY_TOKEN_FILE:-}"
       printf '%s' "$RELAY_AGENT_CAPABILITY" > "$RELAY_BOUNDARY_DIR/capability"
       printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' '{"jsonrpc":"2.0","id":3,"method":"ping"}' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}' '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"archive_agent","arguments":{"agent":"missing"}}}' | "$RELAY_BOUNDARY_SERVER" mcp > "$RELAY_BOUNDARY_DIR/receipt"
+      # The first session that lists a mentioned peer messages it once.
+      peer=$(jq -r 'select(.id==4) | .result.content[0].text' "$RELAY_BOUNDARY_DIR/receipt" | jq -r '.agents[]? | select(.relationship=="peer") | .id' | head -n 1 || true)
+      if [ -n "$peer" ] && [ ! -e "$RELAY_BOUNDARY_DIR/peer-list" ]; then
+        cp "$RELAY_BOUNDARY_DIR/receipt" "$RELAY_BOUNDARY_DIR/peer-list"
+        jq -nc --arg peer "$peer" '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"message_agent","arguments":{"agent":$peer,"text":"Hello peer"}}}' | "$RELAY_BOUNDARY_SERVER" mcp > "$RELAY_BOUNDARY_DIR/peer-message"
+      fi
       printf '{"id":%s,"result":{"turn":{"id":"turn"}}}\n' "$id"
       printf '%s\n' '{"method":"turn/started","params":{"threadId":"fake-thread","turn":{"id":"turn"}}}' '{"method":"turn/completed","params":{"threadId":"fake-thread","turn":{"id":"turn","status":"completed"}}}'
       exit ;;
@@ -132,10 +138,14 @@ done
         self.snapshot().await
     }
     async fn launch(&self, harness: Harness) -> String {
-        let root = self.directory.path().join("project");
+        self.start(harness, "MCP boundary", vec![]).await
+    }
+    /// Start a root agent in a new project; structured parts replace the default prompt.
+    async fn start(&self, harness: Harness, name: &str, parts: Vec<Part>) -> String {
+        let root = self.directory.path().join(name.replace(' ', "-"));
         let snapshot = self
             .command(Command::CreateProject {
-                name: "MCP boundary".into(),
+                name: name.into(),
                 root: root.display().to_string(),
                 connections: vec![],
             })
@@ -147,9 +157,10 @@ done
                 snapshot
                     .projects
                     .iter()
-                    .any(|p| p.id == d.project_id && p.name == "MCP boundary")
+                    .any(|p| p.id == d.project_id && p.name == name)
             })
             .unwrap();
+        let project_id = director.project_id.clone();
         let agent_config_id = director.id.clone();
         let route = if harness == Harness::Codex {
             "codex"
@@ -187,11 +198,24 @@ done
             },
         })
         .await;
-        let snapshot = self.command(Command::StartRootAgent { issue_id:None,agent_config_id,prompt:"Call the Relay MCP tool mcp__relay__list_agents once, then reply with only the agent count. Do not use other tools or inspect environment variables.".into(),parts:vec![],approve_implementation:true }).await;
+        let prompt = if parts.is_empty() {
+            "Call the Relay MCP tool mcp__relay__list_agents once, then reply with only the agent count. Do not use other tools or inspect environment variables.".into()
+        } else {
+            plain_text(&parts)
+        };
+        let snapshot = self
+            .command(Command::StartRootAgent {
+                issue_id: None,
+                agent_config_id,
+                prompt,
+                parts,
+                approve_implementation: true,
+            })
+            .await;
         snapshot
             .sessions
             .iter()
-            .find(|s| !s.fixture)
+            .find(|s| !s.fixture && s.project_id == project_id)
             .unwrap()
             .id
             .clone()
@@ -293,6 +317,83 @@ async fn stdio_http_run_capability_boundary() {
     mcp.stdin.take().unwrap().write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_agents\",\"arguments\":{}}}\n").await.unwrap();
     let output = mcp.wait_with_output().await.unwrap();
     assert!(serde_json::from_slice::<Value>(&output.stdout).unwrap()["result"]["isError"] == true);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn mentioned_peer_is_listed_and_messaged_through_stdio_mcp() {
+    let server = Server::new(false).await;
+    let first = server.launch(Harness::Codex).await;
+    let snapshot = server.terminal(&first).await;
+    let title = &snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == first)
+        .unwrap()
+        .title;
+    let mention = Part {
+        id: uuid::Uuid::new_v4().to_string(),
+        kind: PartKind::SessionMention {
+            mention: SessionMention {
+                session_id: first.clone(),
+                label: mention_label("MCP boundary", title),
+            },
+        },
+    };
+    let second = server
+        .start(
+            Harness::Codex,
+            "Peer boundary",
+            vec![Part::text("Message "), mention],
+        )
+        .await;
+    let snapshot = server.terminal(&second).await;
+    assert!(snapshot.is_peer(&first, &second));
+    let list = std::fs::read_to_string(server.directory.path().join("peer-list")).unwrap();
+    let list = list
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|value| value["id"] == 4)
+        .unwrap();
+    let content: Value =
+        serde_json::from_str(list["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(content["agents"][0]["id"], second);
+    let peer = content["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["relationship"] == "peer")
+        .unwrap();
+    assert_eq!(peer["id"], first);
+    assert_eq!(peer["project"], "MCP boundary");
+    assert!(peer.get("worktree").is_none() && peer.get("result").is_none());
+    let sent = std::fs::read_to_string(server.directory.path().join("peer-message")).unwrap();
+    let sent: Value = serde_json::from_str(sent.trim()).unwrap();
+    assert_eq!(sent["result"]["isError"], false, "{sent}");
+    let snapshot = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let snapshot = server.snapshot().await;
+            if snapshot.submissions.iter().any(|s| {
+                s.session_id == first
+                    && s.sender
+                        == Sender::Agent {
+                            session_id: second.clone(),
+                        }
+            }) {
+                return snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("Peer message was not queued");
+    assert!(snapshot.messages.iter().any(|m| {
+        m.session_id == second
+            && m.tool
+                .as_ref()
+                .is_some_and(|t| t.name.ends_with("message_agent"))
+    }));
+    server.terminal(&first).await;
     server.stop().await;
 }
 

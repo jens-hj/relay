@@ -225,6 +225,24 @@ fn related(snapshot: &Snapshot, caller: &str, target: &str) -> Result<(), Error>
     }
     Ok(())
 }
+/// Messaging alone also reaches a live session a human mentioned with the
+/// caller; every other tool stays within the tree.
+fn can_message(snapshot: &Snapshot, caller: &str, target: &str) -> Result<(), Error> {
+    if snapshot.is_peer(caller, target) {
+        return Ok(());
+    }
+    related(snapshot, caller, target)
+        .map_err(|_| Error::invalid("Agent is outside this tree and not a mentioned peer"))
+}
+/// What a peer may learn about another tree: no worktree, result or files.
+fn peer_state(snapshot: &Snapshot, session: &Session) -> Value {
+    let project = snapshot
+        .projects
+        .iter()
+        .find(|p| p.id == session.project_id)
+        .map(|p| p.name.as_str());
+    json!({"id":session.id,"title":session.title,"project":project,"status":session.worker.as_ref().map(|w| &w.status),"relationship":"peer"})
+}
 fn state(snapshot: &Snapshot, id: &str) -> Value {
     let session = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
     let result = snapshot
@@ -415,6 +433,11 @@ async fn call(
                 .and_then(|s| s.parent_session_id.as_ref())
             {
                 agents.push(state(&snapshot, parent));
+            }
+            for peer in snapshot.peers_of(caller) {
+                if !agents.iter().any(|a| a["id"] == peer.id.as_str()) {
+                    agents.push(peer_state(&snapshot, peer));
+                }
             }
             let caller = snapshot
                 .sessions
@@ -928,6 +951,7 @@ async fn spawn(
     child.automatic_name = false;
     child.awaiting_first_message = false;
     child.profile = None;
+    child.network_access = None;
     child.title = args.title;
     child.role = SessionRole::Worker;
     child.parent_session_id = Some(caller.into());
@@ -943,6 +967,7 @@ async fn spawn(
     });
     let worker = child.worker.as_mut().unwrap();
     worker.harness = harness;
+    worker.launched_network_policy = None;
     worker.model = None;
     worker.context_tokens = None;
     worker.context_window = None;
@@ -1078,7 +1103,7 @@ async fn message_agent(
 ) -> Result<Value, Error> {
     validate_prompt(&args.text)?;
     let snapshot = workspace.snapshots.borrow().clone();
-    related(&snapshot, caller, &args.agent)?;
+    can_message(&snapshot, caller, &args.agent)?;
     let target = snapshot
         .sessions
         .iter()
@@ -1113,7 +1138,8 @@ async fn message_agent(
         }
         let mut current = store.snapshot()?;
         active_caller(&store, &current, caller, run)?;
-        related(&current, caller, &args.agent)?;
+        // A peer grant may have been pruned while approval was pending.
+        can_message(&current, caller, &args.agent)?;
         let target = current
             .sessions
             .iter()
@@ -1363,7 +1389,7 @@ fn tools(
         ),
         (
             "message_agent",
-            "Queue a turn for an agent in this tree.",
+            "Queue a turn for an agent in this tree, or for a session a human mentioned in a message with you (a peer from list_agents, possibly in another project). Messaging a peer gives no other access to it.",
             json!({"agent":string,"text":string}),
             vec!["agent", "text"],
         ),
@@ -1381,7 +1407,7 @@ fn tools(
         ),
         (
             "list_agents",
-            "List your subtree and parent with current statuses, and your worker model policy with remaining usage when it applies.",
+            "List your subtree and parent with current statuses, sessions a human mentioned with you (relationship \"peer\": ID, title, project and status only; message them with message_agent), and your worker model policy with remaining usage when it applies.",
             json!({}),
             vec![],
         ),
@@ -2293,7 +2319,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 25);
+        assert_eq!(schema, 27);
         f.finish().await;
     }
     #[tokio::test]
@@ -4092,6 +4118,7 @@ mod tests {
         snapshot.sessions.clear();
         parent.fixture = false;
         parent.worker = Some(WorkerRun {
+            launched_network_policy: None,
             status: WorkerStatus::Running,
             harness: Harness::Codex,
             thread_id: None,
@@ -5510,6 +5537,628 @@ mod tests {
             records[1].tool.as_ref().unwrap().state,
             ToolState::Completed
         );
+        f.finish().await;
+    }
+    fn mention(session_id: &str) -> Part {
+        Part {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: PartKind::SessionMention {
+                mention: SessionMention {
+                    session_id: session_id.into(),
+                    label: mention_label("Other", session_id),
+                },
+            },
+        }
+    }
+    /// A running root session of a second project, able to call agent tools.
+    fn other_project_session(f: &Fixture, id: &str) -> String {
+        let run = format!("{id}-run");
+        f.change(|s| {
+            if !s.projects.iter().any(|p| p.id == "other") {
+                let mut project = s.projects[0].clone();
+                project.id = "other".into();
+                project.name = "Other".into();
+                s.projects.push(project);
+                let mut issue = s.issues[0].clone();
+                issue.id = "other-issue".into();
+                issue.project_id = "other".into();
+                s.issues.push(issue);
+                let mut config = s.agent_configs[0].clone();
+                config.id = "other-config".into();
+                config.project_id = "other".into();
+                s.agent_configs.push(config);
+            }
+            let mut session = s
+                .sessions
+                .iter()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .clone();
+            session.id = id.into();
+            session.title = format!("Session {id}");
+            session.project_id = "other".into();
+            session.issue_id = Some("other-issue".into());
+            session.agent_config_id = "other-config".into();
+            session.parent_session_id = None;
+            // Its own directory, so the two running sessions share no workspace.
+            let directory = f._directory.path().join(id);
+            std::fs::create_dir_all(&directory).unwrap();
+            session.workspaces = vec![SessionWorkspace {
+                connection_id: String::new(),
+                path: directory.display().to_string(),
+                repository: false,
+                branch: None,
+                base_commit: None,
+                changes: None,
+            }];
+            session.worker.as_mut().unwrap().worktree = Some(directory.display().to_string());
+            s.sessions.push(session);
+        });
+        let mut store = f.workspace.store.lock().unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT OR REPLACE INTO runs(session_id,run_id) VALUES(?1,?2)",
+                params![id, run],
+            )
+            .unwrap();
+        store.controls.insert(id.into(), watch::channel(false).0);
+        run
+    }
+    fn set_draft(f: &Fixture, session: &str, parts: &[Part]) -> u64 {
+        let store = f.workspace.store.lock().unwrap();
+        let revision = conversation::read_drafts(&store.connection)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.session_id == session)
+            .map_or(0, |d| d.revision);
+        let draft = Draft {
+            session_id: session.into(),
+            revision,
+            parts: parts.to_vec(),
+        };
+        store
+            .connection
+            .execute(
+                "INSERT OR REPLACE INTO drafts(session_id,draft) VALUES(?1,?2)",
+                params![session, serde_json::to_string(&draft).unwrap()],
+            )
+            .unwrap();
+        revision
+    }
+    /// Apply a workspace client's command through the normal command path.
+    fn human(f: &Fixture, envelope: CommandEnvelope) -> Result<Snapshot, Error> {
+        let mut store = f.workspace.store.lock().unwrap();
+        let (snapshot, _) = store.apply(envelope, &f.workspace.config)?;
+        f.workspace.snapshots.send_replace(snapshot.clone());
+        Ok(snapshot)
+    }
+    fn human_send(f: &Fixture, session: &str, parts: Vec<Part>) -> Result<Snapshot, Error> {
+        let revision = set_draft(f, session, &parts);
+        let current = f.workspace.snapshots.borrow().revision;
+        human(
+            f,
+            crate::tests::env(
+                current,
+                Command::SubmitTurn {
+                    session_id: session.into(),
+                    draft_revision: revision,
+                    parts,
+                    approve_implementation: true,
+                },
+            ),
+        )
+    }
+    fn peers(f: &Fixture) -> Vec<SessionPeer> {
+        f.workspace.snapshots.borrow().session_peers.clone()
+    }
+    async fn message(f: &Fixture, from: &str, run: &str, to: &str) -> Result<Value, Error> {
+        call(
+            &f.workspace,
+            from,
+            run,
+            "message_agent",
+            json!({"agent":to,"text":"Hello"}),
+            &mut f.stop.clone(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn accepted_human_mention_lets_two_projects_message_each_other_only() {
+        let f = Fixture::new(Permission::Allow);
+        let other_run = other_project_session(&f, "other-agent");
+        let target = "other-agent";
+        assert!(message(&f, &f.caller, &f.run, target).await.is_err());
+        assert!(message(&f, target, &other_run, &f.caller).await.is_err());
+        // Drafts never grant.
+        let parts = vec![Part::text("Ask "), mention(target)];
+        let _ = conversation::save_draft(
+            State(f.workspace.clone()),
+            axum::extract::Path(f.caller.clone()),
+            Json(SaveDraft {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                expected_revision: 0,
+                parts: parts.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(peers(&f).is_empty());
+        // A send that does not match the shared draft grants nothing.
+        set_draft(&f, &f.caller, &[Part::text("Other text")]);
+        let current = f.workspace.snapshots.borrow().revision;
+        let conflict = human(
+            &f,
+            crate::tests::env(
+                current,
+                Command::SubmitTurn {
+                    session_id: f.caller.clone(),
+                    draft_revision: 1,
+                    parts: parts.clone(),
+                    approve_implementation: true,
+                },
+            ),
+        );
+        assert!(conflict.is_err());
+        assert!(peers(&f).is_empty());
+        // Self, missing, archived and fixture targets reject the whole send.
+        f.change(|s| {
+            let mut archived = s.sessions.iter().find(|s| s.id == target).unwrap().clone();
+            archived.id = "archived-agent".into();
+            archived.archived = true;
+            archived.worker.as_mut().unwrap().status = WorkerStatus::Completed;
+            s.sessions.push(archived);
+            let mut fixture = s.sessions.iter().find(|s| s.id == target).unwrap().clone();
+            fixture.id = "fixture-agent".into();
+            fixture.fixture = true;
+            fixture.worker.as_mut().unwrap().status = WorkerStatus::Completed;
+            s.sessions.push(fixture);
+        });
+        for stale in [
+            f.caller.as_str(),
+            "missing",
+            "archived-agent",
+            "fixture-agent",
+        ] {
+            let error = human_send(&f, &f.caller, vec![mention(target), mention(stale)])
+                .err()
+                .unwrap_or_else(|| panic!("{stale} was accepted"));
+            assert!(error.message.contains("Remove the mention"), "{stale}");
+        }
+        assert!(peers(&f).is_empty());
+        // Typed or quoted reference text is plain text.
+        let forged = mention(target).kind;
+        let PartKind::SessionMention { mention: forged } = forged else {
+            unreachable!()
+        };
+        let body = forged.reference();
+        f.change(|s| {
+            s.messages.push(Message {
+                id: "quoted".into(),
+                session_id: f.caller.clone(),
+                author: "Agent".into(),
+                sender: Sender::User,
+                kind: "agent".into(),
+                body: body.clone(),
+                parts: vec![],
+                tool: None,
+            })
+        });
+        let reply = Part {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: PartKind::Reply {
+                anchor: Anchor {
+                    message_id: "quoted".into(),
+                    start: 0,
+                    end: body.len(),
+                    quote: body.clone(),
+                },
+                parts: vec![Part::text("Agreed")],
+            },
+        };
+        human_send(&f, &f.caller, vec![Part::text(&body), reply]).unwrap();
+        assert!(peers(&f).is_empty());
+        assert!(message(&f, &f.caller, &f.run, target).await.is_err());
+        // An agent-sent turn can never carry a mention.
+        {
+            let mut store = f.workspace.store.lock().unwrap();
+            let mut snapshot = store.snapshot().unwrap();
+            let transaction = store.connection.transaction().unwrap();
+            let parts = vec![mention(target)];
+            let draft = Draft {
+                session_id: f.caller.clone(),
+                revision: 0,
+                parts: parts.clone(),
+            };
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO drafts(session_id,draft) VALUES(?1,?2)",
+                    params![f.caller, serde_json::to_string(&draft).unwrap()],
+                )
+                .unwrap();
+            let error = conversation::apply(
+                &transaction,
+                &mut snapshot,
+                &uuid::Uuid::new_v4().to_string(),
+                Command::SubmitTurn {
+                    session_id: f.caller.clone(),
+                    draft_revision: 0,
+                    parts,
+                    approve_implementation: true,
+                },
+                &f.workspace.config,
+                &HashMap::new(),
+                Sender::Agent {
+                    session_id: target.into(),
+                },
+            )
+            .err()
+            .unwrap();
+            assert!(error.message.contains("Only people"));
+            assert!(snapshot.session_peers.is_empty());
+        }
+        // An accepted human message grants both directions, once.
+        let revision = set_draft(&f, &f.caller, &parts);
+        let current = f.workspace.snapshots.borrow().revision;
+        let envelope = crate::tests::env(
+            current,
+            Command::SubmitTurn {
+                session_id: f.caller.clone(),
+                draft_revision: revision,
+                parts: parts.clone(),
+                approve_implementation: true,
+            },
+        );
+        human(&f, envelope.clone()).unwrap();
+        human(&f, envelope.clone()).unwrap();
+        human_send(&f, &f.caller, vec![mention(target)]).unwrap();
+        let granted = peers(&f);
+        assert_eq!(granted.len(), 1);
+        assert_eq!(granted[0].request_id, envelope.request_id);
+        assert_eq!(granted[0].source_session_id, f.caller);
+        let mut pair = [f.caller.clone(), target.to_owned()];
+        pair.sort();
+        assert_eq!(granted[0].sessions, pair);
+        assert!(message(&f, &f.caller, &f.run, target).await.is_ok());
+        assert!(message(&f, target, &other_run, &f.caller).await.is_ok());
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        assert!(snapshot.submissions.iter().any(|s| s.session_id == target
+            && s.sender
+                == Sender::Agent {
+                    session_id: f.caller.clone()
+                }));
+        // The peer is listed with its stable ID and nothing about its work.
+        let listed = f.call("list_agents", json!({})).await.unwrap();
+        let peer = listed["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == target)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            peer,
+            json!({"id":target,"title":"Session other-agent","project":"Other","status":"running","relationship":"peer"})
+        );
+        // Messaging is the only right a peer gets.
+        for (tool, args) in [
+            ("wait_for_agents", json!({"agents":[target],"timeout_s":0})),
+            ("stop_agent", json!({"agent":target})),
+            ("archive_agent", json!({"agent":target})),
+        ] {
+            assert!(f.call(tool, args).await.is_err(), "{tool}");
+        }
+        // No transitivity, and a peer's grant is not inherited by children.
+        let third_run = other_project_session(&f, "third-agent");
+        human_send(&f, target, vec![mention("third-agent")]).unwrap();
+        assert!(message(&f, target, &other_run, "third-agent").await.is_ok());
+        assert!(message(&f, &f.caller, &f.run, "third-agent").await.is_err());
+        assert!(
+            message(&f, "third-agent", &third_run, &f.caller)
+                .await
+                .is_err()
+        );
+        let child = f
+            .call("spawn_agent", json!({"title":"Child","task":"Test"}))
+            .await
+            .unwrap()["agent"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let child_run = f
+            .workspace
+            .store
+            .lock()
+            .unwrap()
+            .run_id(&child)
+            .unwrap()
+            .unwrap();
+        assert!(message(&f, &child, &child_run, target).await.is_err());
+        let listed = call(
+            &f.workspace,
+            &child,
+            &child_run,
+            "list_agents",
+            json!({}),
+            &mut f.stop.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !listed["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["relationship"] == "peer")
+        );
+        settle(&f, &[target, "third-agent"]);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn queued_mentions_grant_at_acceptance_and_edits_add_without_revoking() {
+        let f = Fixture::new(Permission::Allow);
+        other_project_session(&f, "first-agent");
+        other_project_session(&f, "second-agent");
+        // The caller is running, so the human message queues.
+        let snapshot = human_send(&f, &f.caller, vec![mention("first-agent")]).unwrap();
+        let queued = snapshot.submissions.last().unwrap().clone();
+        assert_eq!(queued.state, SubmissionState::Queued);
+        assert!(snapshot.is_peer(&f.caller, "first-agent"));
+        let edit = |parts: Vec<Part>| {
+            let revision = set_draft(&f, &f.caller, &parts);
+            let current = f.workspace.snapshots.borrow().revision;
+            human(
+                &f,
+                crate::tests::env(
+                    current,
+                    Command::EditQueuedTurn {
+                        submission_id: queued.id.clone(),
+                        draft_revision: revision,
+                        parts,
+                        approve_implementation: true,
+                    },
+                ),
+            )
+        };
+        f.change(|s| {
+            let session = s
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == "second-agent")
+                .unwrap();
+            session.archived = true;
+        });
+        assert!(edit(vec![mention("second-agent")]).is_err());
+        f.change(|s| {
+            let session = s
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == "second-agent")
+                .unwrap();
+            session.archived = false;
+        });
+        let snapshot = edit(vec![mention("second-agent")]).unwrap();
+        assert!(snapshot.is_peer(&f.caller, "first-agent"));
+        assert!(snapshot.is_peer(&f.caller, "second-agent"));
+        let current = snapshot.revision;
+        let snapshot = human(
+            &f,
+            crate::tests::env(
+                current,
+                Command::CancelTurn {
+                    submission_id: queued.id.clone(),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(snapshot.session_peers.len(), 2);
+        settle(&f, &["first-agent", "second-agent"]);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn peer_messages_keep_target_permissions_and_recheck_the_grant_after_approval() {
+        let f = Fixture::new(Permission::Allow);
+        let target = "other-agent";
+        other_project_session(&f, target);
+        human_send(&f, &f.caller, vec![mention(target)]).unwrap();
+        let set = |permission| {
+            f.change(|s| {
+                s.projects
+                    .iter_mut()
+                    .find(|p| p.id == "other")
+                    .unwrap()
+                    .defaults
+                    .permissions
+                    .insert(Task::Implement, permission);
+            })
+        };
+        set(Permission::Deny);
+        let error = message(&f, &f.caller, &f.run, target).await.unwrap_err();
+        assert!(error.message.contains("denies implementation"));
+        set(Permission::Ask);
+        let (result, ()) = tokio::join!(
+            message(&f, &f.caller, &f.run, target),
+            decide(&f.workspace, &f.caller, &f.run, true, "message turn")
+        );
+        assert!(result.is_ok());
+        // The target is archived while approval is pending: its grant is gone.
+        let (result, ()) = tokio::join!(message(&f, &f.caller, &f.run, target), async {
+            decide(&f.workspace, &f.caller, &f.run, true, "message turn").await;
+            f.change(|s| {
+                let session = s.sessions.iter_mut().find(|s| s.id == target).unwrap();
+                session.worker.as_mut().unwrap().status = WorkerStatus::Completed;
+            });
+            let current = f.workspace.snapshots.borrow().revision;
+            human(
+                &f,
+                crate::tests::env(
+                    current,
+                    Command::SetSessionArchived {
+                        session_id: target.into(),
+                        archived: true,
+                    },
+                ),
+            )
+            .unwrap();
+        });
+        let error = result.unwrap_err();
+        assert!(
+            error.message.contains("not a mentioned peer"),
+            "{}",
+            error.message
+        );
+        assert!(peers(&f).is_empty());
+        // Unarchiving does not restore the grant.
+        let current = f.workspace.snapshots.borrow().revision;
+        human(
+            &f,
+            crate::tests::env(
+                current,
+                Command::SetSessionArchived {
+                    session_id: target.into(),
+                    archived: false,
+                },
+            ),
+        )
+        .unwrap();
+        assert!(peers(&f).is_empty());
+        assert!(message(&f, &f.caller, &f.run, target).await.is_err());
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn first_root_message_grants_the_new_session() {
+        let f = Fixture::new(Permission::Allow);
+        let target = "other-agent";
+        other_project_session(&f, target);
+        let root = f._directory.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        f.change(|s| s.projects[0].root = Some(root.display().to_string()));
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let parts = vec![Part::text("Coordinate with "), mention(target)];
+        let envelope = crate::tests::env(
+            snapshot.revision,
+            Command::StartRootAgent {
+                agent_config_id: snapshot.agent_configs[0].id.clone(),
+                issue_id: None,
+                prompt: plain_text(&parts),
+                parts: parts.clone(),
+                approve_implementation: false,
+            },
+        );
+        let session = format!("session-{}", envelope.request_id);
+        let snapshot = human(&f, envelope.clone()).unwrap();
+        assert!(snapshot.is_peer(&session, target));
+        assert_eq!(snapshot.session_peers[0].source_session_id, session);
+        assert_eq!(snapshot.session_peers[0].request_id, envelope.request_id);
+        // A stale mention rejects the first message and creates nothing.
+        let parts = vec![mention("missing")];
+        let envelope = crate::tests::env(
+            snapshot.revision,
+            Command::StartRootAgent {
+                agent_config_id: snapshot.agent_configs[0].id.clone(),
+                issue_id: None,
+                prompt: plain_text(&parts),
+                parts,
+                approve_implementation: false,
+            },
+        );
+        assert!(human(&f, envelope.clone()).is_err());
+        assert!(
+            !f.workspace
+                .snapshots
+                .borrow()
+                .sessions
+                .iter()
+                .any(|s| s.id == format!("session-{}", envelope.request_id))
+        );
+        settle(&f, &[target, &session]);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn only_the_human_edit_entrypoint_grants_even_on_agent_sent_queued_turns() {
+        let f = Fixture::new(Permission::Allow);
+        let peer_run = other_project_session(&f, "peer-agent");
+        other_project_session(&f, "third-agent");
+        human_send(&f, &f.caller, vec![mention("peer-agent")]).unwrap();
+        // The peer's message queues on the running caller as an agent-sent turn.
+        let queued = message(&f, "peer-agent", &peer_run, &f.caller)
+            .await
+            .unwrap()["submission"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let turn = snapshot
+            .submissions
+            .iter()
+            .find(|s| s.id == queued)
+            .unwrap();
+        assert_eq!(turn.state, SubmissionState::Queued);
+        assert_eq!(
+            turn.sender,
+            Sender::Agent {
+                session_id: "peer-agent".into()
+            }
+        );
+        let parts = vec![Part::text("Also ask "), mention("third-agent")];
+        let edit = |revision| Command::EditQueuedTurn {
+            submission_id: queued.clone(),
+            draft_revision: revision,
+            parts: parts.clone(),
+            approve_implementation: true,
+        };
+        // The same edit applied as an agent is rejected and grants nothing.
+        {
+            let revision = set_draft(&f, &f.caller, &parts);
+            let mut store = f.workspace.store.lock().unwrap();
+            let mut snapshot = store.snapshot().unwrap();
+            let transaction = store.connection.transaction().unwrap();
+            let error = conversation::apply(
+                &transaction,
+                &mut snapshot,
+                &uuid::Uuid::new_v4().to_string(),
+                edit(revision),
+                &f.workspace.config,
+                &HashMap::new(),
+                Sender::Agent {
+                    session_id: "peer-agent".into(),
+                },
+            )
+            .err()
+            .unwrap();
+            assert!(error.message.contains("Only people"));
+            assert!(!snapshot.is_peer(&f.caller, "third-agent"));
+        }
+        assert!(
+            !peers(&f)
+                .iter()
+                .any(|p| p.sessions.contains(&"third-agent".to_owned()))
+        );
+        // The human command endpoint's edit grants, whoever sent the turn.
+        let revision = set_draft(&f, &f.caller, &parts);
+        let current = f.workspace.snapshots.borrow().revision;
+        let envelope = crate::tests::env(current, edit(revision));
+        let snapshot = human(&f, envelope.clone()).unwrap();
+        assert!(snapshot.is_peer(&f.caller, "third-agent"));
+        let grant = snapshot
+            .session_peers
+            .iter()
+            .find(|p| p.sessions.contains(&"third-agent".to_owned()))
+            .unwrap();
+        assert_eq!(grant.request_id, envelope.request_id);
+        assert_eq!(grant.source_session_id, f.caller);
+        let turn = snapshot
+            .submissions
+            .iter()
+            .find(|s| s.id == queued)
+            .unwrap();
+        assert_eq!(turn.parts, parts);
+        settle(&f, &["peer-agent", "third-agent"]);
         f.finish().await;
     }
 }
