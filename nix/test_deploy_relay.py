@@ -284,6 +284,60 @@ class DeploymentTests(unittest.TestCase):
                 self.assertEqual(self.active.resolve(), self.previous)
                 self.assertFalse((self.root / 'database-backup.sqlite3').exists())
 
+    def protocol_migration(self):
+        """A schema 21 to 25 migration whose candidate also moves the protocol from 14 to 16."""
+        patches = self.migration()
+        self.obj.m.update(protocol_version=16, previous_protocol_version=14)
+
+        def ready():
+            return {'protocol_version': 16 if self.active.resolve() == self.candidate else 14,
+                    'sessions': [{'id': 'kept'}]}
+        return patches[:1] + [patch.object(self.obj, 'ready', side_effect=ready)] + patches[2:]
+
+    def test_protocol_versions_default_and_range(self):
+        self.assertEqual(d.protocol_versions({'protocol_version': 14}), (14, 14))
+        self.assertEqual(d.protocol_versions({'protocol_version': 16, 'previous_protocol_version': 14}), (14, 16))
+        for previous in (17, True, '14', None, -1):
+            with self.subTest(previous=previous), self.assertRaises(d.Failure) as result:
+                d.protocol_versions({'protocol_version': 16, 'previous_protocol_version': previous})
+            self.assertEqual(result.exception.args, ('protocol-range',))
+
+    def test_migration_activates_from_previous_protocol_and_verifies_target(self):
+        patches = self.protocol_migration()
+        with patches[0] as run, patches[1], patches[2], patches[3], patch.object(self.obj, 'public'):
+            self.assertEqual(self.obj.activate(), 0)
+        self.assertEqual(self.obj.state['phase'], 'deployed')
+        self.assertEqual(self.active.resolve(), self.candidate)
+        self.assertEqual(sum(call.args[0] == 'restart' for call in run.call_args_list), 1)
+
+    def test_pre_protocol_compares_with_previous_protocol(self):
+        for previous in (15, None):
+            with self.subTest(previous=previous):
+                self.setUp()
+                patches = self.protocol_migration()
+                if previous is None:
+                    # Without a previous protocol, a live protocol 14 server is not the expected 16.
+                    del self.obj.m['previous_protocol_version']
+                else:
+                    self.obj.m['previous_protocol_version'] = previous
+                with patches[0] as run, patches[1], patches[2], patches[3]:
+                    with self.assertRaises(d.Failure) as result:
+                        self.obj.activate()
+                    self.obj.failure(result.exception)
+                    run.assert_not_called()
+                self.assertEqual(self.obj.state['check'], 'pre-protocol')
+                self.assertEqual(self.active.resolve(), self.previous)
+                self.assertFalse((self.root / 'database-backup.sqlite3').exists())
+
+    def test_local_check_requires_target_protocol_after_activation(self):
+        patches = self.protocol_migration()
+        with patches[0], patch.object(self.obj, 'ready', return_value={'protocol_version': 14, 'sessions': [{'id': 'kept'}]}), \
+                patches[2], patches[3], patch.object(self.obj, 'public') as public:
+            with self.assertRaises(d.Failure) as result:
+                self.obj.activate()
+            self.assertEqual(result.exception.args, ('schema-protocol',))
+            public.assert_not_called()
+
     def test_local_check_requires_target_schema_after_activation(self):
         patches = self.migration(migrate=False)
         with patches[0] as run, patches[1], patches[2], patches[3], patch.object(self.obj, 'public') as public:

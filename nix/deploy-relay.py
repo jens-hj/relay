@@ -50,6 +50,18 @@ def schema_versions(manifest):
     return previous, target
 
 
+def protocol_versions(manifest):
+    """Return the (pre-activation, post-activation) protocols; a missing previous version means the release keeps it."""
+    target = manifest['protocol_version']
+    previous = manifest.get('previous_protocol_version', target)
+    for version in (previous, target):
+        if type(version) is not int or version < 0:
+            raise Failure('protocol-range')
+    if previous > target:
+        raise Failure('protocol-range')
+    return previous, target
+
+
 def protected(path, directory=False):
     path = Path(path)
     if not path.is_absolute():
@@ -97,6 +109,7 @@ class Deployment:
         protected(manifest.parent, True)
         self.m = json.loads(manifest.read_text())
         schema_versions(self.m)
+        protocol_versions(self.m)
         self.manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
         self.root = protected(self.m['state_dir'], True)
         protected(self.m['credential_file'])
@@ -316,7 +329,7 @@ class Deployment:
         unit = (Path(self.m['candidate_bundle']) / self.m.get('service', 'relay.service')).read_text()
         self.check_unit(unit, web)
         before = self.ready()
-        if before['protocol_version'] != self.m['protocol_version']:
+        if before['protocol_version'] != protocol_versions(self.m)[0]:
             raise Failure('pre-protocol')
         drafts = self.get_json('local', '/v1/drafts')
         previous_revision = self.get_json('local', '/v1/version')['revision']
@@ -363,7 +376,7 @@ class Deployment:
                  'history', 'drafts', 'local-revision', 'executable', 'login-gate', 'public-revision',
                  'assets-empty', 'public-asset', 'identical-bundles', 'previous-bundle', 'pre-schema',
                  'frontend-revision', 'unit-package', 'wrapper-target', 'pre-protocol', 'concurrent-activation',
-                 'schema-range'}
+                 'schema-range', 'protocol-range'}
         code = error.args[0] if isinstance(error, Failure) and error.args else None
         self.save('failed', category=getattr(error, 'category', 'internal'),
                   check=code if isinstance(code, str) and code in codes else 'internal',
