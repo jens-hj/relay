@@ -5,6 +5,7 @@ use std::{path::PathBuf, time::Duration};
 
 pub(crate) mod command_tests;
 pub(crate) mod harness_tests;
+mod persistence_tests;
 pub(super) fn live() -> Snapshot {
     let mut defaults = AgentProfile::default();
     defaults

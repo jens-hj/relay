@@ -397,7 +397,8 @@ pub(super) async fn route(
     axum::extract::Path(tool): axum::extract::Path<String>,
     Json(input): Json<Value>,
 ) -> Result<Json<Value>, Error> {
-    let (session, run, mut stop) = authenticate(&workspace, &headers)?;
+    // Authentication locks the store and loads the snapshot.
+    let (session, run, mut stop) = blocking(|| authenticate(&workspace, &headers))?;
     call(&workspace, &session, &run, &tool, input, &mut stop)
         .await
         .map(Json)

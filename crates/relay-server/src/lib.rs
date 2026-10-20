@@ -200,6 +200,29 @@ struct Store {
     nix_runs: std::collections::HashSet<String>,
 }
 
+// Fixed phase names and numeric measurements only; never include stored data.
+fn slow_store_phase(phase: &'static str, started: std::time::Instant, bytes: usize) {
+    let elapsed = started.elapsed();
+    if elapsed >= std::time::Duration::from_millis(100) {
+        eprintln!("store {phase} {}ms {bytes}bytes", elapsed.as_millis());
+    }
+}
+
+/// Runs a store critical section, including waiting for the store mutex,
+/// without occupying an async worker. The section stays synchronous, so it
+/// completes or fails as a whole even if the caller's future is dropped.
+fn blocking<T>(section: impl FnOnce() -> T) -> T {
+    if tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(section)
+    } else {
+        // Synchronous users and current-thread test runtimes retain their
+        // existing behavior; the server uses a multi-thread runtime.
+        section()
+    }
+}
+
 impl Store {
     /// Stops one session's turn and revokes its run capability.
     fn stop_control(&mut self, session_id: &str) {
@@ -400,21 +423,29 @@ impl Store {
         })
     }
     fn snapshot(&self) -> Result<Snapshot, Error> {
+        let started = std::time::Instant::now();
         let json: String = self
             .connection
             .query_row("SELECT snapshot FROM workspace WHERE id = 1", [], |r| {
                 r.get(0)
             })
             .map_err(Error::internal)?;
-        serde_json::from_str(&json).map_err(Error::internal)
+        slow_store_phase("load", started, json.len());
+        let started = std::time::Instant::now();
+        let result = serde_json::from_str(&json).map_err(Error::internal);
+        slow_store_phase("deserialize", started, json.len());
+        result
     }
     fn save(&mut self, snapshot: &Snapshot) -> Result<(), Error> {
+        let started = std::time::Instant::now();
+        let json = serde_json::to_string(snapshot).map_err(Error::internal)?;
+        let bytes = json.len();
+        slow_store_phase("serialize", started, bytes);
+        let started = std::time::Instant::now();
         self.connection
-            .execute(
-                "UPDATE workspace SET snapshot = ?1 WHERE id = 1",
-                [serde_json::to_string(snapshot).map_err(Error::internal)?],
-            )
+            .execute("UPDATE workspace SET snapshot = ?1 WHERE id = 1", [json])
             .map_err(Error::internal)?;
+        slow_store_phase("write", started, bytes);
         Ok(())
     }
     fn run_id(&self, session: &str) -> Result<Option<String>, Error> {
@@ -1232,7 +1263,20 @@ impl Workspace {
         run: &str,
         update: impl FnOnce(&mut Snapshot) -> Result<(), Error>,
     ) -> Result<(), Error> {
+        // Include mutex acquisition: waiting for another writer also blocks.
+        // Keep this synchronous through save + publication, with no detached
+        // work or new cancellation point between consecutive harness events.
+        blocking(|| self.update_run_persisted(session, run, update))
+    }
+    fn update_run_persisted(
+        &self,
+        session: &str,
+        run: &str,
+        update: impl FnOnce(&mut Snapshot) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let started = std::time::Instant::now();
         let mut store = self.store.lock().map_err(Error::internal)?;
+        slow_store_phase("lock", started, 0);
         if store.run_id(session)?.as_deref() != Some(run) {
             return Err(Error::invalid("Run superseded"));
         }
@@ -1246,9 +1290,14 @@ impl Workspace {
         {
             return Err(Error::invalid("Run is no longer active"));
         }
+        let started = std::time::Instant::now();
         let previous = snapshot.clone();
+        slow_store_phase("clone", started, 0);
         update(&mut snapshot)?;
-        if snapshot == previous {
+        let started = std::time::Instant::now();
+        let unchanged = snapshot == previous;
+        slow_store_phase("compare", started, 0);
+        if unchanged {
             return Ok(());
         }
         snapshot.revision = snapshot
@@ -1979,21 +2028,23 @@ async fn command(
     workspace.authorize(&headers)?;
     let Json(envelope) =
         body.map_err(|_| Error::invalid("Expected a valid JSON command envelope"))?;
-    let already_applied = {
+    let already_applied = blocking(|| {
         let store = workspace.store.lock().map_err(Error::internal)?;
-        store
-            .connection
-            .query_row(
-                "SELECT request FROM receipts WHERE request_id=?1",
-                [&envelope.request_id],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(Error::internal)?
-            .is_some_and(|request| {
-                serde_json::to_string(&envelope).is_ok_and(|expected| expected == request)
-            })
-    };
+        Ok::<_, Error>(
+            store
+                .connection
+                .query_row(
+                    "SELECT request FROM receipts WHERE request_id=?1",
+                    [&envelope.request_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(Error::internal)?
+                .is_some_and(|request| {
+                    serde_json::to_string(&envelope).is_ok_and(|expected| expected == request)
+                }),
+        )
+    })?;
     if !already_applied {
         if let Command::StartRootAgent {
             agent_config_id,

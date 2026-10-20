@@ -82,6 +82,16 @@ pub(super) async fn save_draft(
     uuid::Uuid::parse_str(&request.request_id)
         .map_err(|_| Error::invalid("Draft request ID must be a UUID"))?;
     let request_json = serde_json::to_string(&(&session, &request)).map_err(Error::internal)?;
+    // Waiting for the store and loading the snapshot must not occupy an async worker.
+    blocking(|| persist_draft(&workspace, session, request, request_json)).map(Json)
+}
+
+fn persist_draft(
+    workspace: &Workspace,
+    session: String,
+    request: SaveDraft,
+    request_json: String,
+) -> Result<Draft, Error> {
     let mut store = workspace.store.lock().map_err(Error::internal)?;
     if store.closing {
         return Err(Error::invalid("Server is shutting down"));
@@ -105,9 +115,7 @@ pub(super) async fn save_draft(
                 "Draft request ID was reused with different content",
             ));
         }
-        return Ok(Json(
-            serde_json::from_str(&response).map_err(Error::internal)?,
-        ));
+        return serde_json::from_str(&response).map_err(Error::internal);
     }
     validate(&transaction, &snapshot, &session, &request.parts)?;
     let previous = draft(&transaction, &session)?;
@@ -141,7 +149,7 @@ pub(super) async fn save_draft(
     workspace
         .drafts
         .send_replace(read_drafts(&store.connection)?);
-    Ok(Json(next))
+    Ok(next)
 }
 
 pub(super) async fn draft_events(

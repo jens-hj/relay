@@ -369,9 +369,11 @@ async fn discover_context(
     {
         command.process_group(0);
     }
+    let phases = Phases::new();
     let mut child = command
         .spawn()
         .map_err(|_| Error::invalid("Cannot start harness discovery"))?;
+    phases.mark("spawn");
     let _guard = runtime::ProcessGuard {
         owned: child
             .id()
@@ -383,7 +385,7 @@ async fn discover_context(
         .take()
         .ok_or_else(|| Error::invalid("Harness output unavailable"))?;
     let mut output = BufReader::new(output);
-    let phases = Phases::new();
+    phases.mark("setup");
     let probe = async {
         let mut catalog = HarnessCatalog {
             session_id: id.into(),
@@ -582,10 +584,18 @@ async fn discover_context(
         catalog.skills.sort_by(|a, b| a.name.cmp(&b.name));
         Ok::<_, Error>(catalog)
     };
-    let result = tokio::time::timeout(std::time::Duration::from_secs(30), probe)
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let result = tokio::time::timeout_at(deadline, probe)
         .await
         .map_err(|_| Error::invalid("Harness discovery timed out"));
+    if result.is_err() {
+        let late = tokio::time::Instant::now().saturating_duration_since(deadline);
+        eprintln!("discovery deadline_late {}ms", late.as_millis());
+    }
+    // Includes time in an unfinished phase, even when the probe fails or times out.
+    phases.mark("probe_end");
     runtime::terminate(&mut child).await;
+    phases.mark("terminate");
     phases.report(
         &format!("{} discovery", harness.label()),
         match &result {
