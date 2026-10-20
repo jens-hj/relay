@@ -4998,7 +4998,7 @@ fn schema_twenty_six_network_data_upgrades_and_accepts_human_peer_grants() {
     // Exercise an atomic human entrypoint after upgrading, rather than saving
     // grants directly. Editing the queue must preserve the network fields too.
     let parts = vec![Part {
-        id: "upgraded-mention".into(),
+        id: "4f3c2a1e-8b7d-4c6e-9a5f-0d1e2f3a4b5c".into(),
         kind: PartKind::SessionMention {
             mention: SessionMention {
                 session_id: other.clone(),
