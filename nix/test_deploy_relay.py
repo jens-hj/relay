@@ -1,5 +1,6 @@
 from contextlib import closing
 import importlib.util
+import http.client
 import json
 import os
 from pathlib import Path
@@ -155,6 +156,63 @@ class DeploymentTests(unittest.TestCase):
         with patch.object(d.urllib.request.OpenerDirector, 'open', side_effect=d.ssl.SSLEOFError('secret')), patch.object(self.obj, 'curl', side_effect=d.Transport()):
             with self.assertRaises(d.Transport):
                 self.obj.request('public', '/app/')
+
+    def truncated_response(self):
+        class Socket:
+            def makefile(self, *args):
+                return io.BytesIO(b'HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\npartial')
+        response = http.client.HTTPResponse(Socket())
+        response.begin()
+        return response
+
+    def test_truncated_public_body_discards_partial_bytes_and_uses_curl(self):
+        self.obj.m['public_url'] = 'https://example.invalid'
+        complete = (b'complete', 'https://example.invalid/app/')
+        with patch.object(d.urllib.request.OpenerDirector, 'open', return_value=self.truncated_response()), patch.object(self.obj, 'curl', return_value=complete) as curl:
+            self.assertEqual(self.obj.request('public', '/app/'), complete)
+            curl.assert_called_once_with('https://example.invalid/app/', {'Accept-Encoding': 'identity'})
+
+    def test_truncated_local_body_fails_without_public_fallback(self):
+        self.obj.m['local_url'] = 'http://127.0.0.1'
+        with patch.object(d.urllib.request.OpenerDirector, 'open', return_value=self.truncated_response()), patch.object(self.obj, 'curl') as curl:
+            with self.assertRaises(d.Failure) as result:
+                self.obj.request('local', '/v1/snapshot')
+            self.assertNotIsInstance(result.exception, d.Transport)
+            self.assertEqual(result.exception.args, ('local-transport',))
+            curl.assert_not_called()
+
+    def test_truncated_public_body_pending_then_full_verification_without_restart(self):
+        self.obj.m['public_url'] = 'https://example.invalid'
+        web = Path(self.obj.m['web_root'])
+        web.mkdir()
+        (web / 'index.html').write_bytes(b'index')
+        (web / 'app_bg.wasm').write_bytes(b'wasm')
+        with patch.object(self.obj, 'local'), patch.object(self.obj, 'run') as run, patch.object(self.obj, 'link') as link:
+            with patch.object(d.urllib.request.OpenerDirector, 'open', side_effect=lambda *a, **k: self.truncated_response()), patch.object(self.obj, 'curl', side_effect=d.Transport('curl-transport')):
+                self.assertEqual(self.obj.verify(), 2)
+            self.assertEqual(self.obj.state['phase'], 'public-verification-pending')
+            self.assertEqual(self.obj.state['check'], 'curl-transport')
+            self.assertEqual(self.active.resolve(), self.candidate)
+
+            def request(endpoint, path, auth=False):
+                self.assertEqual(endpoint, 'public')
+                if path == '/app/':
+                    return b'<form>', 'https://example.invalid/login'
+                self.assertTrue(auth)
+                if path == '/v1/version':
+                    return b'{"revision":"new"}', ''
+                if path == '/v1/snapshot':
+                    return b'{}', ''
+                return (web / path.removeprefix('/app/')).read_bytes(), ''
+
+            with patch.object(self.obj, 'request', side_effect=request) as requests:
+                self.assertEqual(self.obj.verify(), 0)
+                self.assertEqual(requests.call_count, 5)
+            self.assertEqual(self.obj.state['phase'], 'deployed')
+            self.assertNotIn('check', self.obj.state)
+            run.assert_not_called()
+            link.assert_not_called()
+            self.assertEqual(self.active.resolve(), self.candidate)
 
     def test_http_auth_is_not_transport(self):
         self.obj.m['public_url'] = 'https://example.invalid'

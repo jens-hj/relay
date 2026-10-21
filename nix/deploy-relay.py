@@ -4,6 +4,7 @@ import argparse
 from contextlib import closing
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -179,7 +180,8 @@ class Deployment:
             if endpoint == 'public' and error.code in PUBLIC_GATEWAY_STATUS:
                 raise Transport('public-gateway') from None
             raise Failure('http-status') from None
-        except (urllib.error.URLError, TimeoutError, ConnectionError, ssl.SSLError):
+        except (urllib.error.URLError, TimeoutError, ConnectionError, ssl.SSLError,
+                http.client.IncompleteRead):
             if endpoint == 'public':
                 return self.curl(url, headers)
             raise Failure('local-transport') from None

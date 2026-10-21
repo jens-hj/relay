@@ -17,6 +17,8 @@ Public checks retain certificate verification and compare the served browser ass
 
 Public HTTP `408`, `429`, `502`, `503`, and `504` responses are retryable transport or availability failures. Authorization failures and application errors such as `401`, `403`, and `500` remain hard failures. A public failure is never reported as verified deployment success.
 
+A truncated HTTP response body is a transport failure. Discard the partial body and use the same certificate-verified curl fallback for public requests. If that also fails in transport, retain the healthy candidate with public verification pending; never accept partial asset bytes or restart it to retry verification. A truncated local response fails local readiness.
+
 ## Preparation and Recovery
 
 This helper handles releases that preserve the installed protocol and schema, and releases whose candidate migrates the database schema, the stored protocol, or both at startup. A schema- or protocol-changing release needs a separately reviewed migration and recovery plan; the helper refuses mismatched pre-deployment versions. The schema 21 to 25 release, which includes [Claude window start](claude-window-start.md) and [worker execution approval](architecture.md#worker-execution-approval), has a [proposed plan](schema-25-migration.md).
