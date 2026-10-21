@@ -39,17 +39,22 @@ while IFS= read -r line; do
     skills/list|mcpServerStatus/list) printf '{"id":%s,"result":{"data":[]}}\n' "$id" ;;
     thread/start|thread/resume) printf '{"id":%s,"result":{"model":"test-model","thread":{"id":"fake-thread"}}}\n' "$id" ;;
     turn/start)
+      printf '{"id":%s,"result":{"turn":{"id":"turn"}}}\n' "$id"
+      printf '%s\n' '{"method":"turn/started","params":{"threadId":"fake-thread","turn":{"id":"turn"}}}' '{"method":"item/started","params":{"threadId":"fake-thread","item":{"id":"spawn-result","type":"mcpToolCall","server":"relay","tool":"spawn_agent","arguments":{"call_id":"boundary-spawn","title":"","task":"Verify"}}}}'
       # Neither the scoped secret nor the workspace credential is printed.
       test -z "${RELAY_TOKEN:-}" && test -z "${RELAY_TOKEN_FILE:-}"
       printf '%s' "$RELAY_AGENT_CAPABILITY" > "$RELAY_BOUNDARY_DIR/capability"
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' '{"jsonrpc":"2.0","id":3,"method":"ping"}' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}' '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"archive_agent","arguments":{"agent":"missing"}}}' | "$RELAY_BOUNDARY_SERVER" mcp > "$RELAY_BOUNDARY_DIR/receipt"
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' '{"jsonrpc":"2.0","id":3,"method":"ping"}' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_agents","arguments":{}}}' '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"archive_agent","arguments":{"agent":"missing"}}}' '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"spawn_agent","arguments":{"call_id":"boundary-spawn","title":"","task":"Verify"}}}' | "$RELAY_BOUNDARY_SERVER" mcp > "$RELAY_BOUNDARY_DIR/receipt"
       # The first session that lists a mentioned peer messages it once.
       peer=$(jq -r 'select(.id==4) | .result.content[0].text' "$RELAY_BOUNDARY_DIR/receipt" | jq -r '.agents[]? | select(.relationship=="peer") | .id' | head -n 1 || true)
       if [ -n "$peer" ] && [ ! -e "$RELAY_BOUNDARY_DIR/peer-list" ]; then
         cp "$RELAY_BOUNDARY_DIR/receipt" "$RELAY_BOUNDARY_DIR/peer-list"
         jq -nc --arg peer "$peer" '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"message_agent","arguments":{"agent":$peer,"text":"Hello peer"}}}' | "$RELAY_BOUNDARY_SERVER" mcp > "$RELAY_BOUNDARY_DIR/peer-message"
       fi
-      printf '{"id":%s,"result":{"turn":{"id":"turn"}}}\n' "$id"
+      # A terminal harness event proves delivery; flushing the bridge alone does not.
+      # Codex 0.161 transforms the bridge envelope: isError becomes the native
+      # terminal status, not a property of McpToolCallResult.
+      jq -nc --argjson result "$(jq -c 'select(.id==7) | .result' "$RELAY_BOUNDARY_DIR/receipt")" '{"method":"item/completed","params":{"threadId":"fake-thread","item":{"id":"spawn-result","type":"mcpToolCall","server":"relay","tool":"spawn_agent","status":(if $result.isError then "failed" else "completed" end),"arguments":{"call_id":"boundary-spawn","title":"","task":"Verify"},"result":{"content":$result.content,"_meta":{"fixture":true},"structuredContent":null}}}}'
       printf '%s\n' '{"method":"turn/started","params":{"threadId":"fake-thread","turn":{"id":"turn"}}}' '{"method":"turn/completed","params":{"threadId":"fake-thread","turn":{"id":"turn","status":"completed"}}}'
       exit ;;
   esac
@@ -59,6 +64,44 @@ done
             {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+        let fake_claude = directory.path().join("fake-claude");
+        if !real_claude {
+            std::fs::write(&fake_claude, r#"#!/bin/sh
+set -eu
+umask 077
+while IFS= read -r line; do
+  type=$(printf '%s' "$line" | jq -r '.type')
+  case "$type" in
+    control_request)
+      id=$(printf '%s' "$line" | jq -c '.request_id')
+      printf '{"type":"control_response","response":{"request_id":%s,"subtype":"success","response":{"models":[{"value":"test-claude","displayName":"Test Claude"}],"commands":[],"mcpServers":[]}}}\n' "$id" ;;
+    user)
+      printf '%s\n' '{"type":"system","subtype":"init","session_id":"11111111-2222-4333-8444-555555555555","model":"test-claude"}'
+      if [ ! -e "$RELAY_BOUNDARY_DIR/claude-initial" ]; then
+        touch "$RELAY_BOUNDARY_DIR/claude-initial"
+        for call in acknowledged lost; do
+          jq -nc --arg call "$call" '{"type":"assistant","message":{"id":$call,"content":[{"type":"tool_use","id":$call,"name":"mcp__relay__spawn_agent","input":{"call_id":$call,"title":"","task":"Verify"}}]}}'
+          jq -nc --arg call "$call" '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"spawn_agent","arguments":{"call_id":$call,"title":"","task":"Verify"}}}' | "$RELAY_BOUNDARY_SERVER" mcp > "$RELAY_BOUNDARY_DIR/claude-$call"
+          if [ "$call" = acknowledged ]; then
+            jq -nc --argjson result "$(jq -c '.result' "$RELAY_BOUNDARY_DIR/claude-$call")" '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"acknowledged","is_error":$result.isError,"content":$result.content}]}}'
+          fi
+        done
+      else
+        # Actual assistant output after the notice input establishes native
+        # notice consumption, rather than mere reservation/process launch.
+        printf '%s\n' '{"type":"assistant","message":{"id":"notice-read","content":[{"type":"text","text":"Recovery notice received"}]}}'
+      fi
+      printf '%s\n' '{"type":"result","subtype":"success"}' '{"type":"system","subtype":"session_state_changed","state":"idle","sdk_host_only":true}' ;;
+  esac
+done
+"#).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
             }
         }
         let mut command = tokio::process::Command::new(binary);
@@ -79,6 +122,7 @@ done
             .kill_on_drop(true);
         if !real_claude {
             command.env("RELAY_CODEX_BIN", fake);
+            command.env("RELAY_CLAUDE_BIN", fake_claude);
         }
         let child = command.spawn().unwrap();
         let server = Self {
@@ -271,20 +315,47 @@ async fn stdio_http_run_capability_boundary() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(values.len(), 5);
+    assert_eq!(values.len(), 6);
     assert_eq!(values[0]["result"]["capabilities"]["tools"], json!({}));
     let tools = values[1]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 8);
     assert!(tools.iter().any(|tool| tool["name"] == "stop_agent"));
     assert!(tools.iter().any(|tool| tool["name"] == "archive_agent"));
+    assert!(tools.iter().any(|tool| tool["name"] == "delete_agent"));
     assert_eq!(values[3]["result"]["isError"], false);
     let content: Value =
         serde_json::from_str(values[3]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(content["agents"][0]["id"], session);
+    assert_eq!(content["agents"][0]["archived"], false);
     assert_eq!(values[4]["result"]["isError"], true);
     let archive: Value =
         serde_json::from_str(values[4]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(archive["message"], "Agent missing");
+    assert_eq!(values[5]["result"]["isError"], true);
+    let spawn: Value =
+        serde_json::from_str(values[5]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(spawn["phase"], "rejected");
+    assert!(spawn["spawn_attempt"].is_string());
+    assert!(
+        !snapshot
+            .submissions
+            .iter()
+            .any(|s| s.session_id == session && s.id.starts_with("relay-notice-spawn-"))
+    );
+    assert_eq!(
+        snapshot
+            .sessions
+            .iter()
+            .filter(|s| s.parent_session_id.as_deref() == Some(&session))
+            .count(),
+        0
+    );
+    assert!(snapshot.messages.iter().any(|m| {
+        m.session_id == session
+            && m.tool
+                .as_ref()
+                .is_some_and(|t| t.kind == ToolKind::Spawn && t.state == ToolState::Failed)
+    }));
     // Read the protected credential solely to verify revoked authentication; never format it.
     let secret = std::fs::read_to_string(server.directory.path().join("capability")).unwrap();
     let response = server
@@ -317,6 +388,95 @@ async fn stdio_http_run_capability_boundary() {
     mcp.stdin.take().unwrap().write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"list_agents\",\"arguments\":{}}}\n").await.unwrap();
     let output = mcp.wait_with_output().await.unwrap();
     assert!(serde_json::from_slice::<Value>(&output.stdout).unwrap()["result"]["isError"] == true);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn claude_native_receipt_ack_and_lost_result_notice_consumption() {
+    let server = Server::new(false).await;
+    let session = server.launch(Harness::ClaudeCode).await;
+    let snapshot = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let snapshot = server.snapshot().await;
+            if snapshot.submissions.iter().any(|s| {
+                s.session_id == session
+                    && s.id.starts_with("relay-notice-spawn-")
+                    && s.state == SubmissionState::Completed
+            }) {
+                return snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("Fake Claude did not consume the recovery notice");
+    let notices = snapshot
+        .submissions
+        .iter()
+        .filter(|s| s.session_id == session && s.id.starts_with("relay-notice-spawn-"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        notices.len(),
+        1,
+        "The acknowledged receipt must not cause a second notice"
+    );
+    assert!(
+        !snapshot
+            .sessions
+            .iter()
+            .any(|s| s.parent_session_id.as_deref() == Some(&session)),
+        "Rejected attempts created no children"
+    );
+    assert_eq!(snapshot.sessions.iter().filter(|s| !s.fixture).count(), 1);
+    assert!(snapshot.messages.iter().any(|m| {
+        m.session_id == session
+            && m.author == "Claude Code"
+            && m.tool.as_ref().is_some_and(|t| {
+                t.name == "mcp__relay__spawn_agent" && t.state == ToolState::Failed
+            })
+    }));
+    assert!(
+        snapshot
+            .messages
+            .iter()
+            .any(|m| m.session_id == session && m.body == "Recovery notice received")
+    );
+    let connection = rusqlite::Connection::open_with_flags(
+        server.directory.path().join("db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let delivered: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM spawn_attempts WHERE caller=?1 AND delivered=1",
+            [&session],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let undelivered: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM spawn_attempts WHERE caller=?1 AND delivered=0",
+            [&session],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let consumed: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM spawn_notice_consumption WHERE caller=?1",
+            [&session],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!((delivered, undelivered, consumed), (1, 1, 1));
+    assert_eq!(
+        snapshot
+            .messages
+            .iter()
+            .filter(|m| m.id == format!("prompt-{}", notices[0].id))
+            .count(),
+        1
+    );
+    drop(connection);
     server.stop().await;
 }
 

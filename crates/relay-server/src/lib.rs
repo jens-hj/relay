@@ -30,6 +30,7 @@ mod process;
 mod projects;
 mod providers;
 mod runtime;
+mod spawn_attempts;
 mod window_start;
 pub use agent_tools::stdio as mcp_stdio;
 pub use runtime::{RemoteConfig, RuntimeConfig};
@@ -261,7 +262,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 27 {
+        if version > 28 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -282,7 +283,12 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS window_start_claims(window_key TEXT PRIMARY KEY, owner TEXT NOT NULL, claimed_at INTEGER NOT NULL, lease_until INTEGER NOT NULL, retry_at INTEGER NOT NULL, attempts INTEGER NOT NULL, settled INTEGER NOT NULL, dispatched INTEGER NOT NULL DEFAULT 0);
-             PRAGMA user_version = 27;"
+             CREATE TABLE IF NOT EXISTS spawn_attempts(id TEXT PRIMARY KEY, caller TEXT NOT NULL, run TEXT NOT NULL, project TEXT NOT NULL, input_hash TEXT NOT NULL, phase TEXT NOT NULL, child TEXT, response TEXT, delivered INTEGER NOT NULL DEFAULT 0, notice_id TEXT);
+             DROP INDEX IF EXISTS spawn_attempt_input;
+             CREATE TABLE IF NOT EXISTS spawn_native_calls(caller TEXT NOT NULL, run TEXT NOT NULL, native_id TEXT NOT NULL, attempt TEXT NOT NULL, input_hash TEXT NOT NULL, PRIMARY KEY(caller,run,native_id));
+             CREATE TABLE IF NOT EXISTS spawn_notice_consumption(notice_id TEXT PRIMARY KEY, caller TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS spawn_requests(id TEXT PRIMARY KEY, attempt TEXT NOT NULL);
+             PRAGMA user_version = 28;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -1316,7 +1322,15 @@ impl Workspace {
             interrupt_tools(&mut snapshot, session, Some(run));
             harness::expire(&mut snapshot, session, run);
         }
-        store.save(&snapshot)?;
+        let transaction = store.connection.transaction().map_err(Error::internal)?;
+        spawn_attempts::settle(&transaction, &mut snapshot, session, run)?;
+        transaction
+            .execute(
+                "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                [serde_json::to_string(&snapshot).map_err(Error::internal)?],
+            )
+            .map_err(Error::internal)?;
+        transaction.commit().map_err(Error::internal)?;
         self.snapshots.send_replace(snapshot);
         Ok(())
     }
@@ -1594,6 +1608,7 @@ pub fn router_with_browser(
         ));
     }
     let mut store = Store::open(path.as_ref(), defaults.clone())?;
+    spawn_attempts::recover(&store.connection)?;
     let browser = browser::BrowserAuth::initialize(&mut store, &token, browser_config)?;
     let mut initial = store.snapshot()?;
     let mut changed = false;
@@ -1821,6 +1836,7 @@ pub fn router_with_browser(
     let shutdown = Shutdown {
         workspace: workspace.clone(),
     };
+    spawn_attempts::recover_notices(&workspace)?;
     Ok((
         Router::new()
             .route("/v1/boards/discover", post(discover_board))

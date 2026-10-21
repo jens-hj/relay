@@ -201,7 +201,7 @@ fn flush(workspace: &Workspace, parent: &str) -> Result<(), Error> {
     if store.closing {
         return Ok(());
     }
-    let mut snapshot = store.snapshot()?;
+    let snapshot = store.snapshot()?;
     let Some(target) = snapshot.sessions.iter().find(|s| s.id == parent) else {
         return Ok(());
     };
@@ -246,6 +246,7 @@ fn flush(workspace: &Workspace, parent: &str) -> Result<(), Error> {
             "Inspect each worker without a result, then resume it, send a follow-up, or accept and archive it."
         });
     }
+    guidance.push("Complete cleanup of successful, failed, accidental and superseded inactive workers once no active or follow-up work remains. Archive useful history and evidence by default; archiving a failed attempt does not accept its fix. Delete a disposable archived branch only after retaining needed handoff and evidence elsewhere; deletion irreversibly removes contents and owned isolated workspaces.");
     if target.parent_session_id.is_some() {
         guidance.push(
             "When your delegated work is accepted, call report_result to report it to your parent.",
@@ -256,8 +257,50 @@ fn flush(workspace: &Workspace, parent: &str) -> Result<(), Error> {
         lines.join("\n"),
         guidance.join(" ")
     );
-    let parts = vec![Part::text(&text)];
     let id = format!("{PREFIX}{}", uuid::Uuid::new_v4());
+    enqueue(
+        workspace,
+        &mut store,
+        snapshot,
+        parent,
+        Delivery {
+            text,
+            id,
+            attempt: None,
+            allow_launch: true,
+        },
+    )
+}
+
+pub(super) struct Delivery<'a> {
+    pub text: String,
+    pub id: String,
+    pub attempt: Option<&'a str>,
+    pub allow_launch: bool,
+}
+
+/// Persist an outcome notice and its outbox receipt atomically. Recovery may
+/// hold it for explicit continuation rather than starting a harness at boot.
+pub(super) fn enqueue(
+    workspace: &Workspace,
+    store: &mut Store,
+    mut snapshot: Snapshot,
+    parent: &str,
+    delivery: Delivery<'_>,
+) -> Result<(), Error> {
+    let Delivery {
+        text,
+        id,
+        attempt,
+        allow_launch,
+    } = delivery;
+    let Some(target) = find(&snapshot, parent) else {
+        return Ok(());
+    };
+    if target.archived || target.fixture || target.worker.is_none() {
+        return Ok(());
+    }
+    let parts = vec![Part::text(&text)];
     let active = runtime::active(&target.worker.as_ref().unwrap().status);
     let held = snapshot
         .submissions
@@ -278,7 +321,7 @@ fn flush(workspace: &Workspace, parent: &str) -> Result<(), Error> {
         last_edit_request: None,
         sender: Sender::User,
     };
-    if held {
+    if held || !allow_launch {
         submission.state = SubmissionState::Paused;
         submission.error = Some("Queue paused; resume to continue".into());
     } else if !active && !waiting {
@@ -302,6 +345,14 @@ fn flush(workspace: &Workspace, parent: &str) -> Result<(), Error> {
         .connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(Error::internal)?;
+    if let Some(attempt) = attempt {
+        transaction
+            .execute(
+                "UPDATE spawn_attempts SET notice_id=?1 WHERE id=?2 AND notice_id IS NULL",
+                params![id, attempt],
+            )
+            .map_err(Error::internal)?;
+    }
     if launch {
         transaction
             .execute(

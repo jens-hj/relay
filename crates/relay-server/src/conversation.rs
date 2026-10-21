@@ -766,7 +766,7 @@ pub(super) fn reserve(snapshot: &mut Snapshot, session: &str, id: &str, parts: &
         .find(|s| s.id == id)
         .map(|s| s.sender.clone())
         .unwrap_or_default();
-    snapshot.messages.push(Message {
+    let prompt = Message {
         id: format!("prompt-{id}"),
         session_id: session.into(),
         author: if id.starts_with(crate::notices::PREFIX) {
@@ -780,7 +780,15 @@ pub(super) fn reserve(snapshot: &mut Snapshot, session: &str, id: &str, parts: &
         body: plain_text(parts),
         parts: parts.to_vec(),
         tool: None,
-    });
+    };
+    // Resuming a failed/interrupted reservation delivers the same logical
+    // submission. Keep its history anchor and position, including after a
+    // restart; do not append another row with the same message ID.
+    if let Some(existing) = snapshot.messages.iter_mut().find(|m| m.id == prompt.id) {
+        *existing = prompt;
+    } else {
+        snapshot.messages.push(prompt);
+    }
 }
 
 pub(super) fn advance(workspace: &Workspace, session: &str, run: &str) -> Result<(), Error> {

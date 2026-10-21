@@ -250,6 +250,9 @@ pub(super) async fn execute(
         {
             return Err(Error::invalid("Claude Code resumed a different session"));
         }
+        if value["type"] == "assistant" && sent {
+            crate::spawn_attempts::consumed(workspace, session, run)?;
+        }
         match value["type"].as_str().unwrap_or("") {
             "control_response" if value["response"]["request_id"] == "relay-initialize" => {
                 if value["response"]["subtype"] != "success" {

@@ -108,6 +108,19 @@ pub(super) fn delete(
         }
     }
     for id in &ids {
+        transaction
+            .execute("DELETE FROM spawn_native_calls WHERE caller=?1", [id])
+            .map_err(Error::internal)?;
+        transaction
+            .execute("DELETE FROM spawn_notice_consumption WHERE caller=?1", [id])
+            .map_err(Error::internal)?;
+        transaction.execute("DELETE FROM spawn_requests WHERE attempt IN (SELECT id FROM spawn_attempts WHERE caller=?1)", [id]).map_err(Error::internal)?;
+        transaction
+            .execute("DELETE FROM spawn_attempts WHERE caller=?1", [id])
+            .map_err(Error::internal)?;
+        // Keep parent-side retry identities, but never return a deleted child
+        // as a live session or allow the same request to recreate it.
+        transaction.execute("UPDATE spawn_attempts SET child=NULL,phase='child_deleted',response=json_object('spawn_attempt',id,'phase','child_deleted','deleted',json('true')) WHERE child=?1", [id]).map_err(Error::internal)?;
         for table in ["drafts", "runs", "processes"] {
             transaction
                 .execute(&format!("DELETE FROM {table} WHERE session_id=?1"), [id])

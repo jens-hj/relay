@@ -430,7 +430,11 @@ async fn claude_first_turn_resume_modes_and_bound_harness() {
     let system = argv.split("--append-system-prompt\n").nth(1).unwrap();
     assert!(system.contains("delegate every change to repository files"));
     assert!(system.contains("do not call wait_for_agents or otherwise block your turn"));
-    assert!(system.contains("accept it as done, archive that worker with archive_agent"));
+    assert!(
+        system
+            .contains("cleanup of successful, failed, accidental and superseded inactive workers")
+    );
+    assert!(system.contains("archiving a failed attempt does not accept its fix"));
     // Director harness changes apply to new workers only. Its execution policy
     // still flows through unless the worker has an explicit override.
     s.projects[0].defaults.harness = Harness::Codex;
@@ -1829,7 +1833,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        27
+        28
     );
     let worker = snapshot.sessions[0].worker.as_mut().unwrap();
     worker.model = Some("reported-model".into());

@@ -344,7 +344,14 @@ fn publish(
                         });
                     }
                 }
-                let name = item["tool"].as_str().unwrap_or(kind);
+                let raw_name = item["tool"].as_str().unwrap_or(kind);
+                let qualified = match (kind, item["server"].as_str()) {
+                    ("mcpToolCall", Some(server)) => format!("mcp__{server}__{raw_name}"),
+                    ("mcpToolCall", None) => raw_name.to_owned(),
+                    _ if raw_name == "mcp__relay__spawn_agent" => kind.to_owned(),
+                    _ => raw_name.to_owned(),
+                };
+                let name = qualified.as_str();
                 let tool_kind = match kind {
                     "commandExecution" if item["command"].as_str().is_some_and(is_test_command) => {
                         Some(ToolKind::Test)
@@ -381,6 +388,7 @@ fn publish(
                         _ => tool_activity::target(&item["arguments"]),
                     };
                     let failed = matches!(item["status"].as_str(), Some("failed" | "declined"))
+                        || item["result"]["isError"] == true
                         || item["exitCode"].as_i64().is_some_and(|code| code != 0)
                         || !item["error"].is_null()
                         || item["success"].as_bool() == Some(false);
@@ -848,6 +856,7 @@ pub(super) async fn execute(
                         if turn.as_deref().is_some_and(|expected|expected!=id){return Err(Error::invalid("Codex started a different turn"));}
                         turn=Some(id.to_owned());
                         workspace.update_run(session, run, |s| { crate::agent_tools::mark_read(s, run); Ok(()) })?;
+                        crate::spawn_attempts::consumed(workspace, session, run)?;
                     }else if command.as_ref().is_none_or(|c|c.name!="compact"){return Err(Error::invalid("Codex turn ID missing"));}
                 } else if value.get("id").is_some() && value.get("method").is_some() {
                     if !belongs_to_thread(&value, &thread) {
@@ -863,7 +872,7 @@ pub(super) async fn execute(
                 }
                 else {
                     if !belongs_to_thread(&value, &thread) { continue; }
-                    if value["method"]=="turn/started" && let Some(id)=value["params"]["turn"]["id"].as_str() && turn.is_none(){turn=Some(id.to_owned()); workspace.update_run(session, run, |s| { crate::agent_tools::mark_read(s, run); Ok(()) })?;}
+                    if value["method"]=="turn/started" && let Some(id)=value["params"]["turn"]["id"].as_str() && turn.is_none(){turn=Some(id.to_owned()); workspace.update_run(session, run, |s| { crate::agent_tools::mark_read(s, run); Ok(()) })?; crate::spawn_attempts::consumed(workspace, session, run)?;}
                     if let Some(id)=value["params"]["turnId"].as_str().or_else(||value["params"]["turn"]["id"].as_str()) && turn.as_deref().is_some_and(|expected|expected!=id) { return Err(Error::invalid("Codex event belongs to a different turn")); }
                     if publish(workspace,session,run,&value,&mut summaries)? { return Ok(()); }
                 }

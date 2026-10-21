@@ -1487,7 +1487,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            27
+            28
         );
     }
 
@@ -1560,7 +1560,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            27
+            28
         );
     }
 

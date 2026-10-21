@@ -251,7 +251,7 @@ fn state(snapshot: &Snapshot, id: &str) -> Value {
         .rev()
         .find(|m| m.session_id == id && m.kind == "agent_result" && matches!(m.tool.as_ref().and_then(|t|t.detail.as_ref()),Some(ToolDetail::Result {from_session_id:Some(from),..}) if from == id));
     let result = result.and_then(|m| serde_json::from_str::<Value>(&m.body).ok());
-    json!({"id":id,"title":session.title,"parent_session_id":session.parent_session_id,"status":session.worker.as_ref().map(|w| &w.status),"worktree":session.worker.as_ref().and_then(|w| w.worktree.as_ref()),"result":result})
+    json!({"id":id,"title":session.title,"parent_session_id":session.parent_session_id,"status":session.worker.as_ref().map(|w| &w.status),"archived":session.archived,"worktree":session.worker.as_ref().and_then(|w| w.worktree.as_ref()),"result":result})
 }
 fn rank(permission: Permission) -> u8 {
     match permission {
@@ -263,6 +263,8 @@ fn rank(permission: Permission) -> u8 {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Spawn {
+    /// Stable identity for this logical call; reuse only for an explicit retry.
+    call_id: Option<String>,
     title: String,
     task: String,
     context: Option<String>,
@@ -334,12 +336,13 @@ fn archive_scope(snapshot: &Snapshot, caller: &str, agent: &str) -> Result<(), E
     Ok(())
 }
 
-async fn archive_agent(
+async fn manage_agent(
     workspace: &Workspace,
     caller: &str,
     run: &str,
     input: Value,
     stop: &mut watch::Receiver<bool>,
+    delete: bool,
 ) -> Result<Value, Error> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -347,11 +350,19 @@ async fn archive_agent(
         agent: String,
     }
     let args: Archive = parse(input)?;
-    let delegate = {
+    let (delegate, delete_plan) = {
         let snapshot = workspace.snapshots.borrow().clone();
         archive_scope(&snapshot, caller, &args.agent)?;
+        let plan = if delete {
+            Some(deletion_scope(&snapshot, &args.agent)?)
+        } else {
+            None
+        };
         let parent = snapshot.sessions.iter().find(|s| s.id == caller).unwrap();
-        profile(&snapshot, parent)?.permissions[&Task::Delegate]
+        (
+            profile(&snapshot, parent)?.permissions[&Task::Delegate],
+            plan,
+        )
     };
     match delegate {
         Permission::Deny => return Err(Error::invalid("Profile denies managing subagents")),
@@ -360,8 +371,8 @@ async fn archive_agent(
                 workspace,
                 caller,
                 run,
-                "mcp__relay__archive_agent",
-                &format!("Archive subagent {} and its descendants", args.agent),
+                if delete { "mcp__relay__delete_agent" } else { "mcp__relay__archive_agent" },
+                &if delete { format!("Permanently delete subagent {} and its entire archived branch: removes chat contents, drafts, unshared attachments and owned isolated workspaces. This cannot be undone; retain needed handoff and evidence elsewhere first.", args.agent) } else { format!("Archive subagent {} and its descendants", args.agent) },
                 stop,
             )
             .await?
@@ -376,19 +387,59 @@ async fn archive_agent(
     if profile(&current, parent)?.permissions[&Task::Delegate] != delegate {
         return Err(Error::invalid("Agent policy changed; retry"));
     }
+    if let Some(plan) = delete_plan
+        && deletion_scope(&current, &args.agent)? != plan
+    {
+        return Err(Error::invalid("Deletion branch changed; review and retry"));
+    }
     let (snapshot, _) = store.apply(
         CommandEnvelope {
             request_id: uuid::Uuid::new_v4().to_string(),
             expected_revision: current.revision,
-            command: Command::SetSessionArchived {
-                session_id: args.agent.clone(),
-                archived: true,
+            command: if delete {
+                Command::DeleteSessionBranch {
+                    session_id: args.agent.clone(),
+                }
+            } else {
+                Command::SetSessionArchived {
+                    session_id: args.agent.clone(),
+                    archived: true,
+                }
             },
         },
         &workspace.config,
     )?;
     workspace.snapshots.send_replace(snapshot);
-    Ok(json!({"agent":args.agent,"archived":true}))
+    Ok(if delete {
+        json!({"agent":args.agent,"deleted":true})
+    } else {
+        json!({"agent":args.agent,"archived":true})
+    })
+}
+
+/// Capture the affected session/workspace identities before asking approval;
+/// new descendants or changed workspace ownership need a fresh decision.
+/// Actual filesystem planning/removal remains in production deletion machinery.
+fn deletion_scope(snapshot: &Snapshot, agent: &str) -> Result<Vec<Session>, Error> {
+    let ids = snapshot.session_branch_ids(agent);
+    if !snapshot.can_archive_session(agent)
+        || snapshot
+            .sessions
+            .iter()
+            .any(|s| ids.contains(&s.id) && !s.archived)
+    {
+        return Err(Error::invalid(
+            "Archive this entire branch and stop its workers before deleting it",
+        ));
+    }
+    let mut sessions: Vec<_> = snapshot
+        .sessions
+        .iter()
+        .filter(|s| ids.contains(&s.id))
+        .cloned()
+        .collect();
+    sessions.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(sessions)
 }
 
 pub(super) async fn route(
@@ -399,6 +450,69 @@ pub(super) async fn route(
 ) -> Result<Json<Value>, Error> {
     // Authentication locks the store and loads the snapshot.
     let (session, run, mut stop) = blocking(|| authenticate(&workspace, &headers))?;
+    if tool == "spawn_agent" {
+        let request = headers
+            .get(crate::spawn_attempts::REQUEST)
+            .and_then(|h| h.to_str().ok())
+            .map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let request = input
+            .get("call_id")
+            .and_then(Value::as_str)
+            .unwrap_or(&request);
+        let (id, previous) =
+            crate::spawn_attempts::begin(&workspace, &session, &run, request, &input)?;
+        if let Some(value) = previous {
+            return Ok(Json(value));
+        }
+        // A disconnected HTTP client must not discard a pending approval's
+        // eventual outcome. The run's cancellation still stops the operation.
+        let task = tokio::spawn(async move {
+            struct OutcomeGuard {
+                workspace: Workspace,
+                id: String,
+                caller: String,
+            }
+            impl Drop for OutcomeGuard {
+                fn drop(&mut self) {
+                    let _ = crate::spawn_attempts::finish(&self.workspace, &self.id, true, false);
+                    let _ = crate::spawn_attempts::flush(&self.workspace, &self.caller, true);
+                }
+            }
+            let _guard = OutcomeGuard {
+                workspace: workspace.clone(),
+                id: id.clone(),
+                caller: session.clone(),
+            };
+            let result = match parse(input) {
+                Ok(args) => spawn(&workspace, &session, &run, args, &mut stop, Some(&id)).await,
+                Err(error) => Err(error),
+            };
+            let permission_refused = result
+                .as_ref()
+                .is_err_and(|e| e.message == "Human denied agent tool permission");
+            let denied = permission_refused
+                && workspace
+                    .snapshots
+                    .borrow()
+                    .tool_permissions
+                    .iter()
+                    .any(|p| {
+                        p.session_id == session
+                            && p.run_id == run
+                            && p.description.contains(&id)
+                            && p.decision == Some(false)
+                    });
+            let cancelled = *stop.borrow()
+                || stop.has_changed().is_err()
+                || (permission_refused && !denied)
+                || result.as_ref().is_err_and(|e| e.code == "agent_capability");
+            let value = crate::spawn_attempts::finish(&workspace, &id, cancelled, denied)?;
+            crate::spawn_attempts::flush(&workspace, &session, true)?;
+            Ok::<_, Error>(value)
+        });
+        return task.await.map_err(Error::internal)?.map(Json);
+    }
     call(&workspace, &session, &run, &tool, input, &mut stop)
         .await
         .map(Json)
@@ -446,7 +560,9 @@ async fn call(
                 .find(|s| s.id == caller)
                 .ok_or_else(|| Error::invalid("Agent missing"))?;
             let policy = profile(&snapshot, caller)?.worker_models;
-            Ok(json!({"agents":agents,"worker_models":worker_models(&snapshot, &policy)}))
+            Ok(
+                json!({"agents":agents,"spawn_attempts":crate::spawn_attempts::view(workspace, &caller.id)?,"worker_models":worker_models(&snapshot, &policy)}),
+            )
         }
         // Tool specifications for this run, read by the stdio bridge.
         "tools" => {
@@ -469,7 +585,7 @@ async fn call(
                 Some((crate::harness::mode(&snapshot, &caller.id)?, approval)),
             ))
         }
-        "spawn_agent" => spawn(workspace, caller, run, parse(input)?, stop).await,
+        "spawn_agent" => spawn(workspace, caller, run, parse(input)?, stop, None).await,
         crate::nix::TOOL => crate::nix::run(workspace, caller, run, input, stop).await,
         "stop_agent" => {
             #[derive(Deserialize)]
@@ -552,7 +668,8 @@ async fn call(
             workspace.snapshots.send_replace(current);
             Ok(json!({"agent":args.agent,"stop_requested":true}))
         }
-        "archive_agent" => archive_agent(workspace, caller, run, input, stop).await,
+        "archive_agent" => manage_agent(workspace, caller, run, input, stop, false).await,
+        "delete_agent" => manage_agent(workspace, caller, run, input, stop, true).await,
         "message_agent" => message_agent(workspace, caller, run, parse(input)?, stop).await,
         "wait_for_agents" => {
             let args: Wait = parse(input)?;
@@ -732,8 +849,16 @@ async fn spawn(
     run: &str,
     args: Spawn,
     stop: &mut watch::Receiver<bool>,
+    attempt: Option<&str>,
 ) -> Result<Value, Error> {
     validate_prompt(&args.task)?;
+    if args
+        .call_id
+        .as_ref()
+        .is_some_and(|id| id.is_empty() || id.len() > 256)
+    {
+        return Err(Error::invalid("Invalid spawn call identity"));
+    }
     if args.title.trim().is_empty()
         || args.title.len() > 200
         || args.context.as_ref().is_some_and(|c| c.len() > 16000)
@@ -901,12 +1026,20 @@ async fn spawn(
         reasons.push("implementation for its first turn".to_string());
     }
     if !reasons.is_empty() {
+        crate::spawn_attempts::phase(workspace, attempt, "pending_approval")?;
         approval(
             workspace,
             caller,
             run,
             "mcp__relay__spawn_agent",
-            &format!("Spawn {} with:\n{}", args.title, reasons.join("\n")),
+            &format!(
+                "Spawn {} with:\n{}{}",
+                args.title,
+                reasons.join("\n"),
+                attempt
+                    .map(|id| format!("\nSpawn attempt: {id}"))
+                    .unwrap_or_default()
+            ),
             stop,
         )
         .await?;
@@ -933,6 +1066,7 @@ async fn spawn(
             .map_err(Error::invalid)?;
     }
     let id = uuid::Uuid::new_v4().to_string();
+    crate::spawn_attempts::phase(workspace, attempt, "preparing_workspace")?;
     let source = parent.clone();
     let fork_id = id.clone();
     let cancellation = stop.clone();
@@ -1060,6 +1194,7 @@ async fn spawn(
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(Error::internal)?;
+        crate::spawn_attempts::created(&transaction, attempt, &id)?;
         transaction
             .execute(
                 "INSERT INTO runs(session_id,run_id) VALUES(?1,?2)",
@@ -1302,6 +1437,7 @@ fn spawn_spec(
         }
     }
     let mut properties = json!({
+        "call_id": {"type":"string","minLength":1,"maxLength":256,"description":"Unique identity for this intentional call. Reuse this exact identity and arguments only to retry the same logical call; use a new identity for a new call, even with the same task."},
         "title": string,
         "task": string,
         "context": string,
@@ -1315,7 +1451,7 @@ fn spawn_spec(
         Some(efforts) if efforts.is_empty() => {}
         Some(efforts) => properties["effort"] = json!({"type":"string","enum":efforts}),
     }
-    let mut required = vec!["title", "task"];
+    let mut required = vec!["title", "task", "call_id"];
     let rule = if policy.is_fixed() {
         "Worker model is fixed: omit harness, model and effort; differing values are rejected."
             .to_string()
@@ -1337,7 +1473,7 @@ fn spawn_spec(
     };
     (
         format!(
-            "Start a child Relay session. Relay enforces delegation and human approval for wider permissions. {rule} {} {execution}",
+            "Start a child Relay session. Give each intentional call a new call_id. For an explicit transport retry of that same logical call, reuse its call_id and exact arguments; never reuse a denied or failed call identity for a new attempt. Relay enforces delegation and human approval for wider permissions. {rule} {} {execution}",
             policy.allowed_summary()
         ),
         properties,
@@ -1384,7 +1520,13 @@ fn tools(
         ),
         (
             "archive_agent",
-            "Archive an inactive descendant and its subtree. Requires delegation permission; retains history and workspaces and pauses queued turns. Directors archive workers whose results they have reviewed and accepted.",
+            "Archive an inactive descendant and its subtree. Requires delegation permission; retains history and workspaces and pauses queued turns. Archive useful history and evidence by default after successful, failed, accidental or superseded inactive work is resolved. Archiving a failed attempt does not accept its fix. Do not archive active workers or those needing follow-up.",
+            json!({"agent":string}),
+            vec!["agent"],
+        ),
+        (
+            "delete_agent",
+            "Permanently delete your own inactive descendant branch, only after the entire branch is archived. Requires delegation permission. Irreversibly removes chat contents, drafts, unshared attachments and owned isolated workspaces; retain needed handoff and evidence elsewhere first. Prefer archive_agent for useful history; never delete active or follow-up work.",
             json!({"agent":string}),
             vec!["agent"],
         ),
@@ -1408,7 +1550,7 @@ fn tools(
         ),
         (
             "list_agents",
-            "List your subtree and parent with current statuses, sessions a human mentioned with you (relationship \"peer\": ID, title, project and status only; message them with message_agent), and your worker model policy with remaining usage when it applies.",
+            "List your subtree and parent with current statuses and archived flags, your caller-scoped durable spawn attempts and their phases, sessions a human mentioned with you (relationship \"peer\": ID, title, project and status only; message them with message_agent), and your worker model policy with remaining usage when it applies. A pending spawn is not a created child; inspect its outcome before retrying.",
             json!({}),
             vec![],
         ),
@@ -1430,6 +1572,9 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let mut reader = BufReader::new(tokio::io::stdin());
     let mut writer = tokio::io::stdout();
+    // MCP request numbers can restart when a harness reconnects its bridge.
+    // Exact same-run argument retries still deduplicate across bridge instances.
+    let bridge = uuid::Uuid::new_v4();
     while let Some(bytes) = runtime::line(&mut reader).await? {
         let request: Value = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
@@ -1479,6 +1624,7 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
                         "spawn_agent",
                         "stop_agent",
                         "archive_agent",
+                        "delete_agent",
                         "message_agent",
                         "wait_for_agents",
                         "report_result",
@@ -1492,6 +1638,7 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
                         let response = client
                             .post(format!("{endpoint}/v1/agent-tools/{name}"))
                             .bearer_auth(&secret)
+                            .header(crate::spawn_attempts::REQUEST, format!("{bridge}:{id}"))
                             .json(
                                 &request["params"]
                                     .get("arguments")
@@ -1513,6 +1660,7 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Err(_) => (json!({"message":"Relay server unavailable"}), true),
                         };
+                        let error = error || value["isError"] == true;
                         Ok(
                             json!({"content":[{"type":"text","text":value.to_string()}],"isError":error}),
                         )
@@ -1695,6 +1843,1083 @@ mod tests {
                 .as_deref()
                 == Some(run)
         );
+    }
+
+    fn durable_headers(f: &Fixture, request: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "Bearer fixture-capability".parse().unwrap(),
+        );
+        headers.insert(crate::spawn_attempts::REQUEST, request.parse().unwrap());
+        f.workspace.store.lock().unwrap().agent_capabilities.insert(
+            f.caller.clone(),
+            Capability {
+                hash: digest("fixture-capability"),
+                run: f.run.clone(),
+            },
+        );
+        headers
+    }
+
+    async fn durable_spawn(f: &Fixture, request: &str, args: Value) -> Value {
+        route(
+            State(f.workspace.clone()),
+            durable_headers(f, request),
+            axum::extract::Path("spawn_agent".into()),
+            Json(args),
+        )
+        .await
+        .unwrap()
+        .0
+    }
+
+    fn spawn_notices(f: &Fixture) -> Vec<Submission> {
+        f.workspace
+            .snapshots
+            .borrow()
+            .submissions
+            .iter()
+            .filter(|s| s.id.starts_with("relay-notice-spawn-"))
+            .cloned()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_interrupted_transport_pending_denial_has_no_child_and_one_notice() {
+        let f = Fixture::new(Permission::Ask);
+        let workspace = f.workspace.clone();
+        let headers = durable_headers(&f, "lost-cell");
+        let task = tokio::spawn(route(
+            State(workspace.clone()),
+            headers,
+            axum::extract::Path("spawn_agent".into()),
+            Json(json!({"title":"Lost cell", "task":"Verify"})),
+        ));
+        // The HTTP/tool transport disappears while the approval remains pending.
+        let mut events = workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !events
+                .borrow()
+                .tool_permissions
+                .iter()
+                .any(|p| p.decision.is_none())
+            {
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::spawn_attempts::view(&workspace, &f.caller).unwrap()[0]["phase"],
+            "pending_approval"
+        );
+        let pending = durable_spawn(
+            &f,
+            "lost-cell",
+            json!({"title":"Lost cell", "task":"Verify"}),
+        )
+        .await;
+        assert_eq!(pending["pending"], true);
+        assert_eq!(pending["phase"], "pending_approval");
+        assert_eq!(pending["agent"], Value::Null);
+        assert_eq!(workspace.snapshots.borrow().tool_permissions.len(), 1);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(workspace.snapshots.borrow().sessions.len(), 1);
+        decide(&workspace, &f.caller, &f.run, false, "Spawn Lost cell").await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while spawn_notices(&f).is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let outcomes = crate::spawn_attempts::view(&workspace, &f.caller).unwrap();
+        assert_eq!(outcomes[0]["phase"], "denied");
+        assert_eq!(outcomes[0]["agent"], Value::Null);
+        assert_eq!(workspace.snapshots.borrow().sessions.len(), 1);
+        assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Queued);
+        // An explicit replay of the same request identity returns its denial and
+        // never creates another approval, workspace or child.
+        let value = durable_spawn(
+            &f,
+            "lost-cell",
+            json!({"title":"Lost cell", "task":"Verify"}),
+        )
+        .await;
+        assert_eq!(value["phase"], "denied");
+        assert_eq!(workspace.snapshots.borrow().tool_permissions.len(), 1);
+        crate::spawn_attempts::flush(&workspace, &f.caller, true).unwrap();
+        assert_eq!(spawn_notices(&f).len(), 1);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_ack_requires_native_relay_start_identity_and_exact_envelope() {
+        let f = Fixture::new(Permission::Deny);
+        let input = json!({"call_id":"ack-call","title":"Denied","task":"Verify"});
+        let start = |f: &Fixture, id: &str, name: &str| {
+            f.change(|s| {
+                tool_activity::start(
+                    s,
+                    &f.caller,
+                    id.into(),
+                    "Codex",
+                    tool_activity::call(
+                        &f.run,
+                        name,
+                        ToolKind::Spawn,
+                        input.to_string(),
+                        String::new(),
+                    ),
+                )
+            })
+        };
+        start(&f, "native-original", "mcp__relay__spawn_agent");
+        let response = durable_spawn(&f, "transport", input.clone()).await;
+        // Pinned Codex McpToolCallResult has content/optional metadata, not
+        // isError. The enclosing item supplies the failed terminal status.
+        let envelope = json!({"content":[{"type":"text","text":response.to_string()}]});
+        let complete = |f: &Fixture, id: &str, name: &str, body: &Value| {
+            f.change(|s| {
+                if !s.messages.iter().any(|m| m.id == id) {
+                    tool_activity::start(
+                        s,
+                        &f.caller,
+                        id.into(),
+                        "Codex",
+                        tool_activity::call(
+                            &f.run,
+                            name,
+                            ToolKind::Spawn,
+                            input.to_string(),
+                            String::new(),
+                        ),
+                    );
+                }
+                let message = s.messages.iter_mut().find(|m| m.id == id).unwrap();
+                message.body = body.to_string();
+                tool_activity::finish(message, ToolState::Failed);
+            })
+        };
+        // A different native ID never received a start binding.
+        complete(&f, "wrong-native-id", "mcp__relay__spawn_agent", &envelope);
+        assert_eq!(spawn_notices(&f).len(), 1);
+        // Native Task/Agent and other MCP namespaces remain unrelated even if
+        // they emit the exact public receipt and share the Spawn category.
+        for (id, name) in [
+            ("other-mcp", "mcp__other__spawn_agent"),
+            ("native-task", "Task"),
+            ("native-agent", "Agent"),
+            ("collab", "collabAgentToolCall"),
+        ] {
+            start(&f, id, name);
+            complete(&f, id, name, &envelope);
+            assert_eq!(spawn_notices(&f).len(), 1, "{name}");
+        }
+        let pending = json!({"content":[{"type":"text","text":json!({"spawn_attempt":response["spawn_attempt"],"pending":true}).to_string()}]});
+        complete(&f, "native-original", "mcp__relay__spawn_agent", &pending);
+        assert_eq!(spawn_notices(&f).len(), 1);
+        // No arbitrary recursive JSON search, including a text block whose
+        // string happens to contain the expected receipt in an echoed object.
+        for echo in [
+            json!({"echo":response}),
+            json!({"content":[{"type":"text","text":json!({"echo":response}).to_string()}]}),
+            json!({"content":envelope["content"],"isError":true}),
+        ] {
+            complete(&f, "native-original", "mcp__relay__spawn_agent", &echo);
+            assert_eq!(spawn_notices(&f).len(), 1);
+        }
+        complete(&f, "native-original", "mcp__relay__spawn_agent", &envelope);
+        assert!(spawn_notices(&f).is_empty());
+        assert_eq!(
+            crate::spawn_attempts::view(&f.workspace, &f.caller).unwrap()[0]["response_delivered"],
+            true
+        );
+        crate::spawn_attempts::flush(&f.workspace, &f.caller, true).unwrap();
+        assert!(spawn_notices(&f).is_empty());
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_codex_native_success_and_failure_require_matching_status_and_one_receipt()
+     {
+        for permission in [Permission::Allow, Permission::Deny] {
+            let f = Fixture::new(permission);
+            let input = json!({"call_id":"native-result","title":"Native receipt","task":"Verify"});
+            f.change(|s| {
+                tool_activity::start(
+                    s,
+                    &f.caller,
+                    "native-result".into(),
+                    "Codex",
+                    tool_activity::call(
+                        &f.run,
+                        "mcp__relay__spawn_agent",
+                        ToolKind::Spawn,
+                        input.to_string(),
+                        String::new(),
+                    ),
+                )
+            });
+            let response = durable_spawn(&f, "bridge", input).await;
+            let failed = response["isError"] == true;
+            let matching = if failed {
+                ToolState::Failed
+            } else {
+                ToolState::Completed
+            };
+            let opposite = if failed {
+                ToolState::Completed
+            } else {
+                ToolState::Failed
+            };
+            let complete = |body: Value, state| {
+                f.change(|s| {
+                    let message = s
+                        .messages
+                        .iter_mut()
+                        .find(|m| m.id == "native-result")
+                        .unwrap();
+                    message.body = body.to_string();
+                    tool_activity::finish(message, state);
+                })
+            };
+            let text = json!({"type":"text","text":serde_json::to_string_pretty(&response).unwrap(),"annotations":{"audience":["assistant"]},"_meta":{"source":"fixture"}});
+            // These are the actual pinned result fields; status lives outside
+            // the result and must agree with the persisted Relay outcome.
+            let native = json!({"content":[text],"structuredContent":{"optional":"metadata"},"_meta":{"fixture":true}});
+            complete(native.clone(), opposite);
+            assert_eq!(spawn_notices(&f).len(), 1);
+            for invalid in [
+                json!({"content":[],"structuredContent":response}),
+                json!({"content":[text,text]}),
+                json!({"content":[{"type":"text","text":json!({"echo":response}).to_string()}]}),
+                json!({"content":[{"type":"image","text":response.to_string()}]}),
+                json!({"content":[text],"isError":failed}),
+            ] {
+                complete(invalid, matching);
+                assert_eq!(spawn_notices(&f).len(), 1);
+            }
+            complete(native, matching);
+            assert!(spawn_notices(&f).is_empty());
+            assert_eq!(
+                crate::spawn_attempts::view(&f.workspace, &f.caller).unwrap()[0]["response_delivered"],
+                true
+            );
+            f.finish().await;
+        }
+    }
+    #[tokio::test]
+    async fn durable_spawn_stop_cancels_approval_and_holds_recovery_without_wake() {
+        let f = Fixture::new(Permission::Ask);
+        let workspace = f.workspace.clone();
+        let headers = durable_headers(&f, "stopped-cell");
+        let task = tokio::spawn(route(
+            State(workspace.clone()),
+            headers,
+            axum::extract::Path("spawn_agent".into()),
+            Json(json!({"title":"Stopped", "task":"Verify"})),
+        ));
+        let mut events = workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !events
+                .borrow()
+                .tool_permissions
+                .iter()
+                .any(|p| p.decision.is_none())
+            {
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        f.workspace
+            .store
+            .lock()
+            .unwrap()
+            .controls
+            .get(&f.caller)
+            .unwrap()
+            .send_replace(true);
+        f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Stopped);
+        let response = task.await.unwrap().unwrap().0;
+        assert_eq!(response["phase"], "cancelled");
+        assert_eq!(workspace.snapshots.borrow().sessions.len(), 1);
+        assert_eq!(spawn_notices(&f).len(), 1);
+        assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Paused);
+        assert_eq!(
+            workspace.snapshots.borrow().sessions[0]
+                .worker
+                .as_ref()
+                .unwrap()
+                .status,
+            WorkerStatus::Stopped
+        );
+        Shutdown { workspace }.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_workspace_error_is_sanitized_and_created_retry_is_single_child() {
+        let f = Fixture::new(Permission::Allow);
+        f.change(|s| {
+            s.sessions[0].workspaces[0].path = "/nonexistent/fixture-private-value".into()
+        });
+        let value = durable_spawn(
+            &f,
+            "workspace-fail",
+            json!({"title":"Workspace", "task":"Verify"}),
+        )
+        .await;
+        assert_eq!(value["phase"], "workspace_failed");
+        assert!(!value.to_string().contains("fixture-private-value"));
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
+        f.finish().await;
+        let f = Fixture::new(Permission::Allow);
+        let args = json!({"title":"One child", "task":"Verify"});
+        let first = durable_spawn(&f, "original", args.clone()).await;
+        assert_eq!(first["phase"], "created_queued");
+        let second = durable_spawn(&f, "original", args.clone()).await;
+        assert_eq!(first, second);
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 2);
+        assert!(
+            crate::spawn_attempts::begin(
+                &f.workspace,
+                &f.caller,
+                &f.run,
+                "original",
+                &json!({"title":"Different","task":"Verify"})
+            )
+            .is_err()
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_distinct_calls_with_identical_arguments_create_distinct_children() {
+        let f = Fixture::new(Permission::Allow);
+        let args = json!({"title":"Same task","task":"Verify"});
+        let a = durable_spawn(&f, "native-A", args.clone()).await;
+        let b = durable_spawn(&f, "native-B", args.clone()).await;
+        assert_ne!(a["agent"], b["agent"]);
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 3);
+        assert_eq!(durable_spawn(&f, "native-A", args).await, a);
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 3);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_new_call_after_repair_or_denial_is_separately_authorized() {
+        let f = Fixture::new(Permission::Allow);
+        let path = f.workspace.snapshots.borrow().sessions[0].workspaces[0]
+            .path
+            .clone();
+        let args = json!({"title":"Repairable","task":"Verify"});
+        f.change(|s| s.sessions[0].workspaces[0].path = "/missing-fixture-workspace".into());
+        let failed = durable_spawn(&f, "failed-call", args.clone()).await;
+        assert_eq!(failed["phase"], "workspace_failed");
+        f.change(|s| s.sessions[0].workspaces[0].path = path);
+        let repaired = durable_spawn(&f, "repaired-call", args.clone()).await;
+        assert_eq!(repaired["phase"], "created_queued");
+        assert_eq!(durable_spawn(&f, "failed-call", args).await, failed);
+        f.finish().await;
+
+        let f = Fixture::new(Permission::Ask);
+        let args = json!({"title":"Separate approval","task":"Verify"});
+        let (denied, ()) = tokio::join!(
+            durable_spawn(&f, "denied-call", args.clone()),
+            decide(&f.workspace, &f.caller, &f.run, false, "Separate approval")
+        );
+        assert_eq!(denied["phase"], "denied");
+        let (approved, ()) = tokio::join!(
+            durable_spawn(&f, "new-authorized-call", args.clone()),
+            decide(&f.workspace, &f.caller, &f.run, true, "Separate approval")
+        );
+        assert_eq!(approved["phase"], "created_queued");
+        assert_eq!(f.workspace.snapshots.borrow().tool_permissions.len(), 2);
+        assert_eq!(durable_spawn(&f, "denied-call", args).await, denied);
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 2);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_explicit_logical_identity_survives_bridge_reconnect_only_for_retry() {
+        let f = Fixture::new(Permission::Allow);
+        let args = json!({"call_id":"logical-A","title":"Same task","task":"Verify"});
+        let a = durable_spawn(&f, "bridge-1:17", args.clone()).await;
+        assert_eq!(durable_spawn(&f, "bridge-2:1", args.clone()).await, a);
+        let mut next = args;
+        next["call_id"] = json!("logical-B");
+        let b = durable_spawn(&f, "bridge-2:2", next).await;
+        assert_ne!(a["agent"], b["agent"]);
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 3);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_restart_recovers_pending_attempt_once_without_reapproval_or_launch() {
+        let f = Fixture::new(Permission::Ask);
+        let (attempt, _) = crate::spawn_attempts::begin(
+            &f.workspace,
+            &f.caller,
+            &f.run,
+            "pre-restart",
+            &json!({"title":"Before restart","task":"Verify"}),
+        )
+        .unwrap();
+        crate::spawn_attempts::phase(&f.workspace, Some(&attempt), "pending_approval").unwrap();
+        f.finish().await;
+        let path = f._directory.path().join("db");
+        let config = (*f.workspace.config).clone();
+        let defaults = f.workspace.store.lock().unwrap().defaults.clone();
+        for _ in 0..2 {
+            let (_, shutdown) = router_with_shutdown(
+                &path,
+                "fixture-workspace-token".into(),
+                defaults.clone(),
+                config.clone(),
+            )
+            .unwrap();
+            let restored = &shutdown.workspace;
+            let outcomes = crate::spawn_attempts::view(restored, &f.caller).unwrap();
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(outcomes[0]["phase"], "cancelled");
+            assert_eq!(outcomes[0]["agent"], Value::Null);
+            let snapshot = restored.snapshots.borrow().clone();
+            assert_eq!(snapshot.sessions.len(), 1);
+            assert!(snapshot.tool_permissions.is_empty());
+            assert!(restored.store.lock().unwrap().controls.is_empty());
+            let notices: Vec<_> = snapshot
+                .submissions
+                .iter()
+                .filter(|s| s.id.starts_with("relay-notice-spawn-"))
+                .collect();
+            assert_eq!(notices.len(), 1);
+            assert_eq!(notices[0].state, SubmissionState::Paused);
+            shutdown.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_http_disconnect_does_not_drop_pending_outcome() {
+        let f = Fixture::new(Permission::Ask);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!(
+            "http://{}/v1/agent-tools/spawn_agent",
+            listener.local_addr().unwrap()
+        );
+        let app = Router::new()
+            .route("/v1/agent-tools/{tool}", post(route))
+            .with_state(f.workspace.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let headers = durable_headers(&f, "http-lost-cell");
+        let request = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(endpoint)
+                .headers(headers)
+                .json(&json!({"title":"HTTP lost cell","task":"Verify"}))
+                .send()
+                .await
+        });
+        let mut events = f.workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !events
+                .borrow()
+                .tool_permissions
+                .iter()
+                .any(|p| p.decision.is_none())
+            {
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        request.abort();
+        let _ = request.await;
+        decide(
+            &f.workspace,
+            &f.caller,
+            &f.run,
+            false,
+            "Spawn HTTP lost cell",
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while spawn_notices(&f).is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::spawn_attempts::view(&f.workspace, &f.caller).unwrap()[0]["phase"],
+            "denied"
+        );
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
+        assert_eq!(spawn_notices(&f).len(), 1);
+        server.abort();
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_http_rejects_unauthenticated_and_malformed_transport_without_side_effects()
+     {
+        let f = Fixture::new(Permission::Allow);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!(
+            "http://{}/v1/agent-tools/spawn_agent",
+            listener.local_addr().unwrap()
+        );
+        let app = Router::new()
+            .route("/v1/agent-tools/{tool}", post(route))
+            .with_state(f.workspace.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let input = json!({"title":"Unauthorized", "task":"Verify"});
+        for authorization in [
+            None,
+            Some("Bearer test-token"),
+            Some("Bearer invalid-fixture-capability"),
+        ] {
+            let mut request = client.post(&endpoint).json(&input);
+            if let Some(authorization) = authorization {
+                request = request.header("authorization", authorization);
+            }
+            assert_eq!(
+                request.send().await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let headers = durable_headers(&f, "invalid-json");
+        assert_eq!(
+            client
+                .post(&endpoint)
+                .headers(headers)
+                .header("content-type", "application/json")
+                .body("{")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let mut headers = durable_headers(&f, "invalid-identity");
+        headers.insert(
+            crate::spawn_attempts::REQUEST,
+            "x".repeat(257).parse().unwrap(),
+        );
+        assert_eq!(
+            client
+                .post(&endpoint)
+                .headers(headers)
+                .json(&input)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        // A capability for an earlier run cannot reserve even a pending attempt.
+        let headers = durable_headers(&f, "superseded-run");
+        f.workspace
+            .store
+            .lock()
+            .unwrap()
+            .connection
+            .execute(
+                "UPDATE runs SET run_id='superseded-fixture-run' WHERE session_id=?1",
+                [&f.caller],
+            )
+            .unwrap();
+        assert_eq!(
+            client
+                .post(&endpoint)
+                .headers(headers)
+                .json(&input)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        f.workspace
+            .store
+            .lock()
+            .unwrap()
+            .connection
+            .execute(
+                "UPDATE runs SET run_id=?1 WHERE session_id=?2",
+                params![f.run, f.caller],
+            )
+            .unwrap();
+        assert!(
+            crate::spawn_attempts::view(&f.workspace, &f.caller)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(spawn_notices(&f).is_empty());
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
+        // Well-formed authenticated transport with invalid tool arguments is a
+        // correlated rejection, never a session or a silent retry.
+        let value =
+            durable_spawn(&f, "invalid-arguments", json!({"title":42,"task":"Verify"})).await;
+        assert_eq!(value["phase"], "rejected");
+        assert_eq!(value["isError"], true);
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
+        assert_eq!(spawn_notices(&f).len(), 1);
+        assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Queued);
+        assert!(f.workspace.snapshots.borrow().tool_permissions.is_empty());
+        server.abort();
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_wider_review_approval_is_revalidated_without_child_creation() {
+        let f = Fixture::new(Permission::Allow);
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Review, Permission::Ask);
+        });
+        let (value, ()) = tokio::join!(
+            durable_spawn(
+                &f,
+                "review-raise",
+                json!({"title":"Review","task":"Verify","permissions":{"review":"allow"}})
+            ),
+            async {
+                decide(
+                    &f.workspace,
+                    &f.caller,
+                    &f.run,
+                    true,
+                    "review allow (parent: ask)",
+                )
+                .await;
+                f.change(|s| {
+                    s.projects[0]
+                        .defaults
+                        .permissions
+                        .insert(Task::Review, Permission::Deny);
+                });
+            }
+        );
+        assert_eq!(value["phase"], "rejected");
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
+        assert_eq!(f.workspace.snapshots.borrow().tool_permissions.len(), 1);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_idle_parent_runs_one_authorized_notice_with_fake_harness() {
+        let f = Fixture::new(Permission::Allow);
+        let native = crate::tests::command_tests::CODEX
+            .replace(
+                "@CAPTURE@",
+                f._directory.path().join("capture").to_str().unwrap(),
+            )
+            .replace("test-model", "fixture-model");
+        std::fs::write(&f.workspace.config.codex, format!("#!/bin/sh\n{native}")).unwrap();
+        let (attempt, _) = crate::spawn_attempts::begin(
+            &f.workspace,
+            &f.caller,
+            &f.run,
+            "idle-outcome",
+            &json!({"title":"Never created","task":"Verify"}),
+        )
+        .unwrap();
+        crate::spawn_attempts::finish(&f.workspace, &attempt, true, false).unwrap();
+        f.change(|s| {
+            let worker = s.sessions[0].worker.as_mut().unwrap();
+            worker.status = WorkerStatus::Completed;
+            worker.thread_id = Some("thread".into());
+        });
+        crate::spawn_attempts::flush(&f.workspace, &f.caller, true).unwrap();
+        let notice = spawn_notices(&f)[0].id.clone();
+        let mut events = f.workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let done = events
+                    .borrow()
+                    .submissions
+                    .iter()
+                    .any(|s| s.id == notice && s.state == SubmissionState::Completed);
+                if done {
+                    break;
+                }
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        crate::spawn_attempts::flush(&f.workspace, &f.caller, true).unwrap();
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        assert_eq!(spawn_notices(&f).len(), 1);
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(
+            crate::spawn_attempts::view(&f.workspace, &f.caller).unwrap()[0]["notice_consumed"],
+            true
+        );
+        assert!(
+            !snapshot
+                .submissions
+                .iter()
+                .any(|s| s.id == notice && s.approve_implementation)
+        );
+        assert!(
+            snapshot
+                .messages
+                .iter()
+                .any(|m| m.id == format!("prompt-{notice}") && m.body.contains(&attempt))
+        );
+        Shutdown {
+            workspace: f.workspace.clone(),
+        }
+        .shutdown()
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn durable_spawn_notice_commit_before_consumption_recovers_paused_across_restarts() {
+        let f = Fixture::new(Permission::Allow);
+        let (attempt, _) = crate::spawn_attempts::begin(
+            &f.workspace,
+            &f.caller,
+            &f.run,
+            "crash-boundary",
+            &json!({"title":"Not created","task":"Verify"}),
+        )
+        .unwrap();
+        crate::spawn_attempts::finish(&f.workspace, &attempt, true, false).unwrap();
+        f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
+        // A current-thread runtime commits the real enqueue/reservation, then
+        // is dropped before its spawned harness task can be polled at all.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            crate::spawn_attempts::flush(&f.workspace, &f.caller, true).unwrap();
+        });
+        drop(runtime);
+        let notice = spawn_notices(&f)[0].id.clone();
+        assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Launching);
+        assert_eq!(
+            crate::spawn_attempts::view(&f.workspace, &f.caller).unwrap()[0]["notice_consumed"],
+            false
+        );
+        let defaults = f.workspace.store.lock().unwrap().defaults.clone();
+        for _ in 0..3 {
+            let (_, shutdown) = router_with_shutdown(
+                f._directory.path().join("db"),
+                "fixture-workspace-token".into(),
+                defaults.clone(),
+                (*f.workspace.config).clone(),
+            )
+            .unwrap();
+            let workspace = &shutdown.workspace;
+            let snapshot = workspace.snapshots.borrow().clone();
+            let turns: Vec<_> = snapshot
+                .submissions
+                .iter()
+                .filter(|s| s.id == notice)
+                .collect();
+            assert_eq!(turns.len(), 1);
+            assert_eq!(turns[0].state, SubmissionState::Paused);
+            assert_eq!(snapshot.sessions.len(), 1);
+            assert!(snapshot.tool_permissions.is_empty());
+            assert!(workspace.store.lock().unwrap().controls.is_empty());
+            let revision = snapshot.revision;
+            crate::spawn_attempts::recover_notices(workspace).unwrap();
+            assert_eq!(workspace.snapshots.borrow().revision, revision);
+            assert_eq!(
+                crate::spawn_attempts::view(workspace, &f.caller).unwrap()[0]["notice_consumed"],
+                false
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_notification_launch_failure_stays_paused_without_wake_loop() {
+        fn assert_one_prompt(snapshot: &Snapshot, notice: &str) {
+            let ids = snapshot
+                .messages
+                .iter()
+                .map(|m| &m.id)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(ids.len(), snapshot.messages.len(), "Duplicate message IDs");
+            assert_eq!(
+                snapshot
+                    .messages
+                    .iter()
+                    .filter(|m| m.id == format!("prompt-{notice}") && m.kind == "prompt")
+                    .count(),
+                1
+            );
+        }
+        let f = Fixture::new(Permission::Allow);
+        let (attempt, _) = crate::spawn_attempts::begin(
+            &f.workspace,
+            &f.caller,
+            &f.run,
+            "notice-launch-failure",
+            &json!({"title":"Not created","task":"Verify"}),
+        )
+        .unwrap();
+        crate::spawn_attempts::finish(&f.workspace, &attempt, true, false).unwrap();
+        f.change(|s| {
+            let worker = s.sessions[0].worker.as_mut().unwrap();
+            worker.status = WorkerStatus::Completed;
+            worker.thread_id = Some("thread".into());
+        });
+        std::fs::remove_file(&f.workspace.config.codex).unwrap();
+        crate::spawn_attempts::flush(&f.workspace, &f.caller, true).unwrap();
+        let notice = spawn_notices(&f)[0].id.clone();
+        let mut events = f.workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if events
+                    .borrow()
+                    .submissions
+                    .iter()
+                    .any(|s| s.id == notice && s.state == SubmissionState::Paused)
+                {
+                    break;
+                }
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            crate::spawn_attempts::flush(&f.workspace, &f.caller, true).unwrap();
+        }
+        assert_eq!(spawn_notices(&f).len(), 1);
+        assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Paused);
+        assert_one_prompt(&f.workspace.snapshots.borrow(), &notice);
+        assert_eq!(
+            crate::spawn_attempts::view(&f.workspace, &f.caller).unwrap()[0]["notice_consumed"],
+            false
+        );
+        assert!(f.workspace.store.lock().unwrap().controls.is_empty());
+        Shutdown {
+            workspace: f.workspace.clone(),
+        }
+        .shutdown()
+        .await
+        .unwrap();
+        let defaults = f.workspace.store.lock().unwrap().defaults.clone();
+        for _ in 0..2 {
+            let (_, shutdown) = router_with_shutdown(
+                f._directory.path().join("db"),
+                "fixture-workspace-token".into(),
+                defaults.clone(),
+                (*f.workspace.config).clone(),
+            )
+            .unwrap();
+            let snapshot = shutdown.workspace.snapshots.borrow().clone();
+            assert_eq!(
+                snapshot
+                    .submissions
+                    .iter()
+                    .filter(|s| s.id == notice)
+                    .count(),
+                1
+            );
+            assert!(
+                snapshot
+                    .submissions
+                    .iter()
+                    .any(|s| s.id == notice && s.state == SubmissionState::Paused)
+            );
+            assert_eq!(snapshot.sessions.len(), 1);
+            assert_one_prompt(&snapshot, &notice);
+            assert!(shutdown.workspace.store.lock().unwrap().controls.is_empty());
+            // Explicit resumption while the executable is still missing may
+            // fail again, but must retain the same logical prompt/history ID.
+            let workspace = &shutdown.workspace;
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "authorization",
+                "Bearer fixture-workspace-token".parse().unwrap(),
+            );
+            let revision = workspace.snapshots.borrow().revision;
+            let _ = command(
+                State(workspace.clone()),
+                headers,
+                Ok(Json(crate::tests::env(
+                    revision,
+                    Command::ResumeQueue {
+                        session_id: f.caller.clone(),
+                        queue: None,
+                    },
+                ))),
+            )
+            .await
+            .unwrap();
+            let mut events = workspace.snapshots.subscribe();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if events
+                        .borrow()
+                        .submissions
+                        .iter()
+                        .any(|s| s.id == notice && s.state == SubmissionState::Paused)
+                    {
+                        break;
+                    }
+                    events.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            assert_one_prompt(&workspace.snapshots.borrow(), &notice);
+            assert_eq!(
+                workspace
+                    .snapshots
+                    .borrow()
+                    .submissions
+                    .iter()
+                    .filter(|s| s.id == notice)
+                    .count(),
+                1
+            );
+            shutdown.shutdown().await.unwrap();
+        }
+        // A human continuation can deliver that same restored notice after
+        // repairing the harness; restoration itself never launches it.
+        let native = crate::tests::command_tests::CODEX
+            .replace(
+                "@CAPTURE@",
+                f._directory
+                    .path()
+                    .join("notice-resume-capture")
+                    .to_str()
+                    .unwrap(),
+            )
+            .replace("test-model", "fixture-model");
+        std::fs::write(&f.workspace.config.codex, format!("#!/bin/sh\n{native}")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &f.workspace.config.codex,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let (_, shutdown) = router_with_shutdown(
+            f._directory.path().join("db"),
+            "fixture-workspace-token".into(),
+            defaults,
+            (*f.workspace.config).clone(),
+        )
+        .unwrap();
+        let workspace = &shutdown.workspace;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "Bearer fixture-workspace-token".parse().unwrap(),
+        );
+        let revision = workspace.snapshots.borrow().revision;
+        let _ = command(
+            State(workspace.clone()),
+            headers,
+            Ok(Json(crate::tests::env(
+                revision,
+                Command::ResumeQueue {
+                    session_id: f.caller.clone(),
+                    queue: None,
+                },
+            ))),
+        )
+        .await
+        .unwrap();
+        let mut events = workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if events
+                    .borrow()
+                    .submissions
+                    .iter()
+                    .any(|s| s.id == notice && s.state == SubmissionState::Completed)
+                {
+                    break;
+                }
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::spawn_attempts::view(workspace, &f.caller).unwrap()[0]["notice_consumed"],
+            true
+        );
+        crate::spawn_attempts::recover_notices(workspace).unwrap();
+        assert_eq!(workspace.snapshots.borrow().sessions.len(), 1);
+        assert_eq!(
+            workspace
+                .snapshots
+                .borrow()
+                .submissions
+                .iter()
+                .filter(|s| s.id == notice)
+                .count(),
+            1
+        );
+        assert!(
+            workspace
+                .snapshots
+                .borrow()
+                .submissions
+                .iter()
+                .any(|s| s.id == notice
+                    && s.state == SubmissionState::Completed
+                    && !s.approve_implementation)
+        );
+        assert!(workspace.snapshots.borrow().tool_permissions.is_empty());
+        assert_one_prompt(&workspace.snapshots.borrow(), &notice);
+        shutdown.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_created_child_reports_launch_failure_separately() {
+        let f = Fixture::new(Permission::Allow);
+        std::fs::remove_file(&f.workspace.config.codex).unwrap();
+        let response = durable_spawn(
+            &f,
+            "launch-failure",
+            json!({"title":"Launch fails","task":"Verify"}),
+        )
+        .await;
+        assert_eq!(response["phase"], "created_queued");
+        let child = response["agent"].as_str().unwrap();
+        let mut events = f.workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if events.borrow().sessions.iter().any(|s| {
+                    s.id == child
+                        && s.worker
+                            .as_ref()
+                            .is_some_and(|w| w.status == WorkerStatus::Failed)
+                }) {
+                    break;
+                }
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let outcome = crate::spawn_attempts::view(&f.workspace, &f.caller).unwrap();
+        assert_eq!(outcome[0]["agent"], child);
+        assert_eq!(outcome[0]["child_status"], "failed");
+        assert_eq!(outcome[0]["launch_failed"], true);
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 2);
+        f.finish().await;
     }
     #[tokio::test]
     async fn scoped_root_profiles_start_on_the_selected_task_without_creating_another() {
@@ -1978,6 +3203,183 @@ mod tests {
             json!({"agent":{"type":"string"}})
         );
         assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+    }
+
+    #[tokio::test]
+    async fn delete_requires_archived_inactive_branch_and_preserves_parent_retry_receipt() {
+        let f = Fixture::new(Permission::Allow);
+        archive_fixture(&f);
+        assert!(
+            f.call("delete_agent", json!({"agent":"archive-child"}))
+                .await
+                .is_err()
+        );
+        f.call("archive_agent", json!({"agent":"archive-child"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            f.call("list_agents", json!({})).await.unwrap()["agents"][1]["archived"],
+            true
+        );
+        let args = json!({"title":"Disposable", "task":"Verify"});
+        let (attempt, _) =
+            crate::spawn_attempts::begin(&f.workspace, &f.caller, &f.run, "deleted-child", &args)
+                .unwrap();
+        {
+            let mut store = f.workspace.store.lock().unwrap();
+            let tx = store.connection.transaction().unwrap();
+            crate::spawn_attempts::created(&tx, Some(&attempt), "archive-child").unwrap();
+            tx.execute(
+                "INSERT INTO drafts(session_id,draft) VALUES(?1,?2)",
+                params![
+                    "archive-child",
+                    serde_json::to_string(&Draft {
+                        session_id: "archive-child".into(),
+                        revision: 1,
+                        parts: vec![Part::text("Disposable draft")]
+                    })
+                    .unwrap()
+                ],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        let parent_path = f.workspace.snapshots.borrow().sessions[0].workspaces[0]
+            .path
+            .clone();
+        assert_eq!(
+            f.call("delete_agent", json!({"agent":"archive-child"}))
+                .await
+                .unwrap(),
+            json!({"agent":"archive-child","deleted":true})
+        );
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
+        assert!(Path::new(&parent_path).exists());
+        assert!(
+            conversation::read_drafts(&f.workspace.store.lock().unwrap().connection)
+                .unwrap()
+                .is_empty()
+        );
+        let (_, replay) =
+            crate::spawn_attempts::begin(&f.workspace, &f.caller, &f.run, "deleted-child", &args)
+                .unwrap();
+        assert_eq!(replay.unwrap()["phase"], "child_deleted");
+        let new_call = durable_spawn(&f, "new-call-after-deletion", args).await;
+        assert_eq!(new_call["phase"], "created_queued");
+        assert_ne!(new_call["agent"], "archive-child");
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn delete_denies_other_scope_and_revalidates_after_approval() {
+        let f = Fixture::new(Permission::Deny);
+        archive_fixture(&f);
+        assert!(
+            f.call("delete_agent", json!({"agent":"archive-child"}))
+                .await
+                .is_err()
+        );
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Delegate, Permission::Allow)
+                .map(|_| ())
+                .unwrap()
+        });
+        f.call("archive_agent", json!({"agent":"archive-child"}))
+            .await
+            .unwrap();
+        for target in [f.caller.as_str(), "missing"] {
+            assert!(
+                f.call("delete_agent", json!({"agent":target}))
+                    .await
+                    .is_err()
+            );
+        }
+        let original = f.workspace.snapshots.borrow().clone();
+        for (id, parent, project) in [
+            (
+                "archive-child",
+                None,
+                original.sessions[0].project_id.as_str(),
+            ),
+            ("archive-child", Some(f.caller.as_str()), "other-project"),
+            ("archive-grandchild", Some("archive-child"), "other-project"),
+        ] {
+            f.change(|s| {
+                s.sessions = original.sessions.clone();
+                let child = s.sessions.iter_mut().find(|s| s.id == id).unwrap();
+                child.parent_session_id = parent.map(str::to_owned);
+                child.project_id = project.into();
+            });
+            assert!(
+                f.call("delete_agent", json!({"agent":"archive-child"}))
+                    .await
+                    .is_err()
+            );
+        }
+        f.change(|s| {
+            s.sessions = original.sessions.clone();
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Delegate, Permission::Ask);
+        });
+        let (result, ()) = tokio::join!(
+            f.call("delete_agent", json!({"agent":"archive-child"})),
+            decide(&f.workspace, &f.caller, &f.run, false, "Permanently delete")
+        );
+        assert!(result.is_err());
+        for mutation in [
+            "policy",
+            "scope",
+            "active",
+            "unarchive",
+            "branch",
+            "workspace",
+        ] {
+            let before = f.workspace.snapshots.borrow().clone();
+            let (result, ()) = tokio::join!(
+                f.call("delete_agent", json!({"agent":"archive-child"})),
+                async {
+                    decide(&f.workspace, &f.caller, &f.run, true, "Permanently delete").await;
+                    f.change(|s| match mutation {
+                        "policy" => {
+                            s.projects[0]
+                                .defaults
+                                .permissions
+                                .insert(Task::Delegate, Permission::Deny);
+                        }
+                        "scope" => s.sessions[1].parent_session_id = None,
+                        "active" => s.sessions[2].worker = s.sessions[0].worker.clone(),
+                        "unarchive" => s.sessions[2].archived = false,
+                        "branch" => {
+                            let mut child = s.sessions[2].clone();
+                            child.id = "new-archived-child".into();
+                            s.sessions.push(child);
+                        }
+                        "workspace" => s.sessions[2].workspaces[0].path.push_str("-changed"),
+                        _ => unreachable!(),
+                    });
+                }
+            );
+            assert!(result.is_err(), "{mutation}");
+            assert_eq!(
+                f.workspace.snapshots.borrow().sessions.len(),
+                if mutation == "branch" { 4 } else { 3 }
+            );
+            f.change(|s| {
+                s.sessions = before.sessions;
+                s.projects = before.projects;
+            });
+        }
+        let (result, ()) = tokio::join!(
+            f.call("delete_agent", json!({"agent":"archive-child"})),
+            decide(&f.workspace, &f.caller, &f.run, true, "Permanently delete")
+        );
+        assert!(result.is_ok());
+        f.finish().await;
     }
 
     #[tokio::test]
@@ -2320,7 +3722,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 27);
+        assert_eq!(schema, 28);
         f.finish().await;
     }
     #[tokio::test]
@@ -2744,7 +4146,7 @@ mod tests {
         );
         assert_eq!(
             open["inputSchema"]["required"],
-            json!(["title", "task", "harness", "model", "rationale"])
+            json!(["title", "task", "call_id", "harness", "model", "rationale"])
         );
         let description = open["description"].as_str().unwrap();
         assert!(
@@ -2801,7 +4203,10 @@ mod tests {
             json!(["low"])
         );
         assert_eq!(fixed["inputSchema"]["properties"].get("rationale"), None);
-        assert_eq!(fixed["inputSchema"]["required"], json!(["title", "task"]));
+        assert_eq!(
+            fixed["inputSchema"]["required"],
+            json!(["title", "task", "call_id"])
+        );
         assert!(
             fixed["description"]
                 .as_str()

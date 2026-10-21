@@ -20,7 +20,7 @@ fn workflow_guidance(profile: &AgentProfile) -> String {
         Permission::Allow => {
             guidance.push_str("Use Relay MCP delegation when useful within the user's task and effective permissions. This is a standing instruction; the user does not need to say 'delegate' on each turn. ");
             if profile.responsibilities.contains(&Task::Delegate) {
-                guidance.push_str("Delegate is a responsibility: act as a director by planning and coordinating the work, delegate every change to repository files to a suitable worker, and verify their results. Work directly only for read-only investigation, answering questions, planning, verifying or reviewing worker results, and trivial edits of a few lines you have already located. Do not implement a change yourself because it looks small; if you are unsure of its size, delegate it. Stay available to the user: do not call wait_for_agents or otherwise block your turn to await workers. After spawning or messaging workers, report their status and end your turn; review worker results when they report back or when the user asks. After you review a worker's result and accept it as done, archive that worker with archive_agent; archiving keeps its history and workspaces. Do not archive workers whose results you rejected, that still need follow-up, or that are still active.");
+                guidance.push_str("Delegate is a responsibility: act as a director by planning and coordinating the work, delegate every change to repository files to a suitable worker, and verify their results. Work directly only for read-only investigation, answering questions, planning, verifying or reviewing worker results, and trivial edits of a few lines you have already located. Do not implement a change yourself because it looks small; if you are unsure of its size, delegate it. Stay available to the user: do not call wait_for_agents or otherwise block your turn to await workers. After spawning or messaging workers, report their status and end your turn; review worker results when they report back or when the user asks.");
                 guidance.push_str(" Relay notifies you with a new turn when a worker reports a result, and when a worker ends without reporting one once that worker's own workers have ended; inspect that worker, then resume it, send a follow-up, or accept and archive it. If you were started by a parent agent, you are also its worker and must still call report_result to that parent: do so once you have reviewed and accepted your workers' results, in the turn where Relay notifies you that they reported back, not by blocking on them. Ending a turn while your workers are still running is not a report; Relay does not tell your parent you ended until your workers have ended.");
             } else {
                 guidance.push_str("Delegation is optional for trivial work or when doing the work directly is more sensible.");
@@ -28,7 +28,8 @@ fn workflow_guidance(profile: &AgentProfile) -> String {
         }
     }
     if profile.permissions[&Task::Delegate] != Permission::Deny {
-        guidance.push_str(" Use Relay MCP spawn_agent to start child sessions, stop_agent to stop your own descendants, archive_agent to archive inactive descendants and their subtrees while retaining history and workspaces, message_agent to queue turns within your tree or for sessions a human mentioned with you, wait_for_agents to block until agents are terminal when you are not acting as a director, list_agents to inspect your subtree, parent and mentioned peers, and report_result to report to your parent with your worktree path. Relay enforces delegation approval and explicit human approval for wider child permissions. Do not start workers outside Relay. Child repository edits use their assigned isolated worktrees; connected directories remain shared. Do not bypass workspace isolation or worker limits.");
+        guidance.push_str(" Complete delegation through cleanup of successful, failed, accidental and superseded inactive workers. Resolve any active or follow-up work first. Archive useful history and evidence by default with archive_agent; archiving a failed attempt does not accept its fix. You may instead choose delete_agent for a disposable archived branch only after retaining needed handoff and evidence elsewhere; deletion irreversibly removes its contents and owned isolated workspaces. Do not clean up active workers or workers needing follow-up.");
+        guidance.push_str(" Use Relay MCP spawn_agent to start child sessions, stop_agent to stop your own descendants, archive_agent to archive inactive descendants and their subtrees while retaining history and workspaces, delete_agent to permanently remove your own entirely archived inactive descendant branch after retaining needed evidence elsewhere, message_agent to queue turns within your tree or for sessions a human mentioned with you, wait_for_agents to block until agents are terminal when you are not acting as a director, list_agents to inspect your subtree, parent and mentioned peers, and report_result to report to your parent with your worktree path. Relay enforces delegation approval and explicit human approval for wider child permissions. Do not start workers outside Relay. Child repository edits use their assigned isolated worktrees; connected directories remain shared. Do not bypass workspace isolation or worker limits.");
     }
     guidance
 }
@@ -247,10 +248,14 @@ mod workflow_context_tests {
         assert!(guidance.contains(
             "in the turn where Relay notifies you that they reported back, not by blocking on them"
         ));
-        assert!(guidance.contains("accept it as done, archive that worker with archive_agent"));
-        assert!(guidance.contains(
-            "Do not archive workers whose results you rejected, that still need follow-up, or that are still active"
-        ));
+        assert!(
+            guidance.contains(
+                "cleanup of successful, failed, accidental and superseded inactive workers"
+            )
+        );
+        assert!(guidance.contains("Do not clean up active workers or workers needing follow-up"));
+        assert!(guidance.contains("archiving a failed attempt does not accept its fix"));
+        assert!(guidance.contains("delete_agent"));
         assert!(guidance.contains("verify their results"));
         assert!(!guidance.contains("optional for trivial work"));
         assert!(
@@ -1372,6 +1377,9 @@ impl Drop for RunGuard {
         if let Err(error) = crate::notices::finished(&self.workspace, &self.session, &self.run) {
             eprintln!("Relay notice failed: {error}");
         }
+        if crate::spawn_attempts::flush(&self.workspace, &self.session, true).is_err() {
+            eprintln!("Spawn outcome notice could not be queued");
+        }
     }
 }
 async fn execute(
@@ -1479,6 +1487,7 @@ async fn execute(
         "body": bounded(&issue.body, 8192),
     });
     let context = serde_json::json!({
+        "spawn_attempts": crate::spawn_attempts::view(workspace, session_id)?,
         "source_issue": source,
         "project": {"id":session.project_id,"name":snapshot.project(&session.project_id).map_err(Error::invalid)?.name},
         "workspaces": spaces.iter().map(|s|serde_json::json!({"path":s.path,"repository":s.repository,"connection_id":s.connection_id})).collect::<Vec<_>>(),
