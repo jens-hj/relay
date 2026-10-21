@@ -1729,23 +1729,6 @@ async fn execute(
     {
         cmd.process_group(0);
     }
-    #[cfg(target_os = "linux")]
-    {
-        let parent = unsafe { libc::getpid() };
-        // Only async-signal-safe operations between fork and exec. Checking the
-        // parent closes the race where it dies before PR_SET_PDEATHSIG is set.
-        unsafe {
-            cmd.pre_exec(move || {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::getppid() != parent {
-                    libc::_exit(127);
-                }
-                Ok(())
-            });
-        }
-    }
     crate::process::background_worker(&mut cmd);
     // Launch and stop reservation are serialized by the same store lock.
     let mut child = {
@@ -1852,7 +1835,7 @@ async fn execute(
         crate::agent_tools::authorize_session(&current, session, approved, &workspace.config)?;
         let launched_network_policy =
             LaunchedNetworkPolicy::new(worker.harness, mode, network_access);
-        let mut child = cmd.spawn().map_err(|_| {
+        let mut child = crate::process::spawn(&mut cmd).map_err(|_| {
             Error::invalid(
                 "Cannot launch agent harness; check its executable and authentication in Settings",
             )
@@ -1956,8 +1939,8 @@ async fn execute(
     terminate(&mut child).await;
     result
 }
-/// Explain a harness that disconnected because it was killed, typically by the
-/// OOM killer, instead of reporting a generic disconnect.
+/// Explain a harness that disconnected because it was killed, including OOM
+/// only when the worker cgroup provides evidence.
 async fn exit_failure(child: &mut tokio::process::Child, cgroup: Option<&Path>) -> Option<Error> {
     let oom_kills = cgroup.and_then(crate::process::oom_kills);
     let group = child.id();

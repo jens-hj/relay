@@ -626,22 +626,6 @@ pub(crate) async fn run(
     {
         command.process_group(0);
     }
-    #[cfg(target_os = "linux")]
-    {
-        let parent = unsafe { libc::getpid() };
-        // Only async-signal-safe operations between fork and exec.
-        unsafe {
-            command.pre_exec(move || {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::getppid() != parent {
-                    libc::_exit(127);
-                }
-                Ok(())
-            });
-        }
-    }
     crate::process::background_worker(&mut command);
     before_launch();
     // The final checks, the slot, the Running record and the launch share
@@ -698,7 +682,7 @@ pub(crate) async fn run(
             .checked_add(1)
             .ok_or_else(|| Error::invalid("Revision exhausted"))?;
         store.save(&current)?;
-        let child = match command.spawn() {
+        let child = match crate::process::spawn(&mut command) {
             Ok(child) => child,
             Err(_) => {
                 if let Some(record) = current.messages.iter_mut().find(|m| m.id == id) {

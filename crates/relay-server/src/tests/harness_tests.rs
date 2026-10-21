@@ -369,9 +369,9 @@ async fn launch(w: &Workspace) -> (String, Snapshot) {
 }
 
 #[tokio::test]
-async fn harness_killed_by_sigkill_reports_out_of_memory() {
+async fn harness_killed_by_sigkill_without_oom_evidence_reports_signal() {
     let dir = tempfile::tempdir().unwrap();
-    // The kernel OOM killer ends a harness with SIGKILL mid-turn.
+    // SIGKILL mid-turn does not establish that an OOM killer sent it.
     let w = claude_workspace(dir.path(), "read line\nkill -9 $$");
     let s = w.snapshots.borrow().clone();
     let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
@@ -379,7 +379,10 @@ async fn harness_killed_by_sigkill_reports_out_of_memory() {
     let snapshot = finished(&w, &id).await;
     let work = worker(&snapshot, &id);
     assert_eq!(work.status, WorkerStatus::Failed);
-    assert_eq!(work.error.as_deref(), Some(crate::process::OUT_OF_MEMORY));
+    assert_eq!(
+        work.error.as_deref(),
+        Some("Worker harness was killed (SIGKILL)")
+    );
 }
 
 #[tokio::test]

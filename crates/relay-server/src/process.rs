@@ -7,6 +7,105 @@ use std::{
     process::{Command, ExitStatus, Stdio},
     time::{Duration, Instant},
 };
+
+/// Linux parent-death signals track the *spawning thread*. Tokio can retire a
+/// worker after block_in_place, even while the runtime and server are alive.
+/// Keep one spawning thread alive for the process lifetime instead. It only
+/// creates children; the existing callers still own, stop and reap them.
+#[cfg(target_os = "linux")]
+fn on_spawn_thread<T: Send + 'static>(
+    spawn: impl FnOnce() -> T + Send + 'static,
+) -> std::io::Result<T> {
+    use std::sync::{Mutex, mpsc};
+    type Job = Box<dyn FnOnce() + Send>;
+    static SPAWNER: Mutex<Option<mpsc::Sender<Job>>> = Mutex::new(None);
+    let sender = {
+        let mut sender = SPAWNER
+            .lock()
+            .map_err(|_| std::io::Error::other("Process spawning lock poisoned"))?;
+        if sender.is_none() {
+            let (tx, rx) = mpsc::channel::<Job>();
+            std::thread::Builder::new()
+                .name("relay-process-spawner".into())
+                .spawn(move || {
+                    for job in rx {
+                        job();
+                    }
+                })?;
+            // Keep the sender across runtime shutdown. Process exit ends this
+            // thread and delivers PDEATHSIG to its surviving children.
+            *sender = Some(tx);
+        }
+        sender.as_ref().unwrap().clone()
+    };
+    let (tx, rx) = mpsc::sync_channel(1);
+    sender
+        .send(Box::new(move || {
+            let _ = tx.send(spawn());
+        }))
+        .map_err(|_| std::io::Error::other("Process spawning thread stopped"))?;
+    rx.recv()
+        .map_err(|_| std::io::Error::other("Process spawning thread stopped"))
+}
+
+#[cfg(target_os = "linux")]
+fn parent_death(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    let parent = unsafe { libc::getpid() };
+    // Only async-signal-safe operations between fork and exec. The parent
+    // check closes the race where the server dies before prctl is set.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                libc::_exit(127);
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Spawn a server-owned child with Linux parent-death protection tied to the
+/// process-lifetime spawning thread, not the calling runtime worker.
+pub(crate) fn spawn(
+    command: &mut tokio::process::Command,
+) -> std::io::Result<tokio::process::Child> {
+    #[cfg(target_os = "linux")]
+    {
+        parent_death(command.as_std_mut());
+        // Register IO/reaping with the caller's runtime, rather than creating
+        // another runtime on the process-lifetime spawning thread.
+        let runtime = tokio::runtime::Handle::try_current().map_err(std::io::Error::other)?;
+        let mut owned = std::mem::replace(command, tokio::process::Command::new(""));
+        let (original, result) = on_spawn_thread(move || {
+            let _entered = runtime.enter();
+            let result = owned.spawn();
+            (owned, result)
+        })?;
+        *command = original;
+        result
+    }
+    #[cfg(not(target_os = "linux"))]
+    command.spawn()
+}
+
+fn spawn_capture(command: &mut Command) -> std::io::Result<std::process::Child> {
+    #[cfg(target_os = "linux")]
+    {
+        parent_death(command);
+        let mut owned = std::mem::replace(command, Command::new(""));
+        let (original, result) = on_spawn_thread(move || {
+            let result = owned.spawn();
+            (owned, result)
+        })?;
+        *command = original;
+        result
+    }
+    #[cfg(not(target_os = "linux"))]
+    command.spawn()
+}
 thread_local! {
     static CANCELLATION: RefCell<Option<tokio::sync::watch::Receiver<bool>>> = const { RefCell::new(None) };
 }
@@ -209,23 +308,7 @@ pub(crate) fn capture(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::process::CommandExt;
-        let parent = unsafe { libc::getpid() };
-        unsafe {
-            command.pre_exec(move || {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::getppid() != parent {
-                    libc::_exit(127);
-                }
-                Ok(())
-            });
-        }
-    }
-    let child = command.spawn().map_err(|_| {
+    let child = spawn_capture(command).map_err(|_| {
         Error::invalid(format!(
             "Cannot execute {label}; check tool installation and server configuration"
         ))
@@ -421,10 +504,9 @@ pub(crate) fn oom_kills(cgroup: &std::path::Path) -> Option<u64> {
         .find_map(|line| line.strip_prefix("oom_kill "))
         .and_then(|count| count.trim().parse().ok())
 }
-pub(crate) const OUT_OF_MEMORY: &str = "Worker build ran out of memory and the harness was killed; reduce build parallelism or raise RELAY_WORKER_MEMORY_MAX";
-/// Relay only sends SIGKILL after a turn has finished, so a harness that
-/// disconnects after SIGKILL was killed externally, almost always by the
-/// kernel OOM killer. A readable scope with no OOM kills rules that out.
+pub(crate) const OUT_OF_MEMORY: &str = "Worker ran out of memory and the harness was killed; reduce memory use or raise RELAY_WORKER_MEMORY_MAX";
+/// SIGKILL alone does not establish its cause. Only attribute it to worker OOM
+/// when the worker cgroup reports an OOM kill; it does not identify a build.
 pub(crate) fn exit_failure(status: Option<ExitStatus>, oom_kills: Option<u64>) -> Option<Error> {
     #[cfg(unix)]
     {
@@ -432,11 +514,13 @@ pub(crate) fn exit_failure(status: Option<ExitStatus>, oom_kills: Option<u64>) -
         if status.and_then(|s| s.signal()) != Some(libc::SIGKILL) {
             return None;
         }
-        Some(Error::invalid(if oom_kills == Some(0) {
-            "Worker harness was killed (SIGKILL)"
-        } else {
-            OUT_OF_MEMORY
-        }))
+        Some(Error::invalid(
+            if oom_kills.is_some_and(|kills| kills > 0) {
+                OUT_OF_MEMORY
+            } else {
+                "Worker harness was killed (SIGKILL)"
+            },
+        ))
     }
     #[cfg(not(unix))]
     {
@@ -450,6 +534,201 @@ mod tests {
     use super::*;
     use std::path::Path;
     use tokio::io::{AsyncBufReadExt, BufReader};
+
+    fn protected_sleep() -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("sleep");
+        command.arg("30").process_group(0).kill_on_drop(true);
+        command
+    }
+
+    #[test]
+    fn protected_worker_survives_tokio_thread_retirement_and_still_stops() {
+        use std::os::unix::process::ExitStatusExt;
+        let (tx, stopped) = std::sync::mpsc::channel();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_keep_alive(Duration::from_millis(50))
+            .on_thread_stop(move || {
+                let _ = tx.send(unsafe { libc::syscall(libc::SYS_gettid) });
+            })
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (mut child, origin) = tokio::spawn(async {
+                let origin = unsafe { libc::syscall(libc::SYS_gettid) };
+                let child = spawn(&mut protected_sleep()).unwrap();
+                let handle = tokio::runtime::Handle::current();
+                tokio::task::block_in_place(|| {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    handle.spawn(async move { tx.send(()).unwrap() });
+                    // Require the replacement worker to take the runtime core
+                    // before returning, rather than relying on scheduling luck.
+                    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                });
+                (child, origin)
+            })
+            .await
+            .unwrap();
+            let started = Instant::now();
+            let deadline = started + Duration::from_secs(5);
+            loop {
+                let tid = stopped
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .expect("originating Tokio thread did not retire");
+                if tid == origin {
+                    break;
+                }
+            }
+            assert!(child.try_wait().unwrap().is_none());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), child.wait())
+                    .await
+                    .is_err()
+            );
+            eprintln!(
+                "spawning caller retired; protected worker still alive after {}ms",
+                started.elapsed().as_millis()
+            );
+            // StopWorker ultimately uses this same process-group termination.
+            crate::runtime::terminate(&mut child).await;
+            assert_eq!(child.wait().await.unwrap().signal(), Some(libc::SIGKILL));
+
+            let child = spawn(&mut protected_sleep()).unwrap();
+            let pid = child.id().unwrap();
+            drop(child);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while Path::new(&format!("/proc/{pid}")).exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("kill_on_drop did not kill and reap worker");
+        });
+    }
+
+    #[test]
+    fn protected_capture_survives_calling_thread_exit() {
+        let child = std::thread::spawn(|| spawn_capture(protected_sleep().as_std_mut()).unwrap())
+            .join()
+            .unwrap();
+        let mut owned = Owned {
+            child,
+            finished: false,
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(owned.child.try_wait().unwrap().is_none());
+        owned.terminate();
+    }
+
+    // Run the server-death assertion inside its own subreaper process, so the
+    // disposable orphan can be reaped without changing the main test process.
+    #[test]
+    fn parent_death_fixture() {
+        let Some(directory) = std::env::var_os("RELAY_PROCESS_LIFETIME_FIXTURE") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        let kind = std::env::var("RELAY_PROCESS_LIFETIME_KIND").unwrap();
+        if std::env::var_os("RELAY_PROCESS_LIFETIME_OWNER").is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let mut command = protected_sleep();
+                if kind == "capture" {
+                    let mut child = spawn_capture(command.as_std_mut()).unwrap();
+                    std::fs::write(directory.join("pid"), child.id().to_string()).unwrap();
+                    child.wait().unwrap();
+                } else {
+                    let mut child = spawn(&mut command).unwrap();
+                    std::fs::write(directory.join("pid"), child.id().unwrap().to_string()).unwrap();
+                    child.wait().await.unwrap();
+                }
+            });
+            return;
+        }
+        assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+        let mut server = Command::new(std::env::current_exe().unwrap());
+        server
+            .args([
+                "--exact",
+                "process::tests::parent_death_fixture",
+                "--nocapture",
+            ])
+            .env("RELAY_PROCESS_LIFETIME_OWNER", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        use std::os::unix::process::CommandExt;
+        server.process_group(0);
+        let mut server = Owned {
+            child: server.spawn().unwrap(),
+            finished: false,
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pid: i32 = loop {
+            if let Ok(pid) = std::fs::read_to_string(directory.join("pid"))
+                && let Ok(pid) = pid.parse()
+            {
+                break pid;
+            }
+            assert!(
+                server.child.try_wait().unwrap().is_none(),
+                "fixture owner exited early"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "fixture owner did not launch child"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        server.child.kill().unwrap(); // Abrupt process death, no Drop/shutdown.
+        server.child.wait().unwrap();
+        server.finished = true;
+        let mut status = 0;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let reaped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if reaped == pid {
+                break;
+            }
+            if Instant::now() >= deadline {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                    libc::waitpid(pid, &mut status, 0);
+                }
+                panic!("{kind} worker survived server death");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(libc::WIFSIGNALED(status));
+        assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+        eprintln!("{kind} worker killed by SIGKILL after disposable owner process death");
+    }
+
+    #[test]
+    fn protected_workers_die_with_server_process() {
+        for kind in ["tokio", "capture"] {
+            let directory = tempfile::tempdir().unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "process::tests::parent_death_fixture",
+                    "--nocapture",
+                ])
+                .env("RELAY_PROCESS_LIFETIME_FIXTURE", directory.path())
+                .env("RELAY_PROCESS_LIFETIME_KIND", kind)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        }
+    }
 
     #[tokio::test]
     async fn background_worker_priority_is_inherited_without_renicing_server() {
@@ -594,11 +873,14 @@ mod tests {
     }
 
     #[test]
-    fn killed_harness_is_reported_as_out_of_memory() {
+    fn killed_harness_requires_evidence_to_report_out_of_memory() {
         use std::os::unix::process::ExitStatusExt;
         let killed = Some(ExitStatus::from_raw(libc::SIGKILL));
         let message = |status, kills| exit_failure(status, kills).map(|e| e.to_string());
-        assert_eq!(message(killed, None).as_deref(), Some(OUT_OF_MEMORY));
+        assert_eq!(
+            message(killed, None).as_deref(),
+            Some("Worker harness was killed (SIGKILL)")
+        );
         assert_eq!(message(killed, Some(2)).as_deref(), Some(OUT_OF_MEMORY));
         assert_eq!(
             message(killed, Some(0)).as_deref(),
@@ -655,6 +937,7 @@ mod tests {
                 .map(|d| d.join("systemd-run"))
                 .find(|p| p.is_file())
         }) else {
+            eprintln!("SKIP real scope: systemd-run unavailable");
             return;
         };
         let scope = WorkerScope {
@@ -664,6 +947,7 @@ mod tests {
             bind: None,
         };
         if !scope_available(&scope) {
+            eprintln!("SKIP real scope: systemd user manager unavailable or scope probe denied");
             return;
         }
         let limits = WorkerLimits { scope: Some(scope) };
@@ -675,7 +959,8 @@ mod tests {
             .kill_on_drop(true)
             .process_group(0);
         background_worker(&mut command);
-        let mut child = command.spawn().unwrap();
+        // Exercise the same stable spawning thread as scoped harnesses/Nix.
+        let mut child = spawn(&mut command).unwrap();
         let pid = child.id().unwrap();
         let mut output = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
