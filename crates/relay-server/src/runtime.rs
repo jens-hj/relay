@@ -525,14 +525,34 @@ pub(crate) fn configured_project(project: &Project, config: &RuntimeConfig) -> b
 }
 
 pub(super) fn check_shared(snapshot: &Snapshot, id: &str) -> Result<(), Error> {
+    if shared_available(snapshot, id)? {
+        Ok(())
+    } else {
+        Err(Error::new(
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "workspace_busy",
+            "Another agent is using a shared workspace; wait for its turn to finish",
+        ))
+    }
+}
+
+/// Contention is transient; an unavailable workspace is an error even if a
+/// different recorded workspace is currently occupied.
+pub(super) fn shared_available(snapshot: &Snapshot, id: &str) -> Result<bool, Error> {
     let session = snapshot
         .sessions
         .iter()
         .find(|s| s.id == id)
         .ok_or_else(|| Error::invalid("Session not found"))?;
-    for space in &session.workspaces {
-        let path = std::fs::canonicalize(&space.path)
-            .map_err(|_| Error::invalid("Session workspace unavailable"))?;
+    let paths = session
+        .workspaces
+        .iter()
+        .map(|space| {
+            std::fs::canonicalize(&space.path)
+                .map_err(|_| Error::invalid("Session workspace unavailable"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (space, path) in session.workspaces.iter().zip(paths) {
         if snapshot
             .sessions
             .iter()
@@ -548,12 +568,10 @@ pub(super) fn check_shared(snapshot: &Snapshot, id: &str) -> Result<(), Error> {
             .flat_map(|s| &s.workspaces)
             .any(|other| std::fs::canonicalize(&other.path).is_ok_and(|p| p == path))
         {
-            return Err(Error::invalid(
-                "Another agent is using a shared workspace; wait for its turn to finish",
-            ));
+            return Ok(false);
         }
     }
-    Ok(())
+    Ok(true)
 }
 pub(crate) fn authorize_turn(
     snapshot: &Snapshot,
@@ -1244,12 +1262,54 @@ pub(crate) async fn run(
     prompt: String,
     mut stop: watch::Receiver<bool>,
 ) {
-    let _guard = RunGuard {
+    let cleanup = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut guard = RunGuard {
         workspace: workspace.clone(),
         session: session_id.clone(),
         run: run_id.clone(),
+        armed: true,
+        cleanup: cleanup.clone(),
     };
-    let result = execute(&workspace, &session_id, &run_id, &prompt, &mut stop).await;
+    let result = execute(
+        &workspace,
+        &session_id,
+        &run_id,
+        &prompt,
+        &mut stop,
+        &cleanup,
+    )
+    .await;
+    let released = cleanup.lock().unwrap().clone();
+    if let Some(mut released) = released {
+        // A stopped catalog probe can finish execute before its reaper. Keep
+        // the guard's own receiver registered while this wait is cancellable.
+        if released.wait_for(|released| *released).await.is_err() {
+            return;
+        }
+        *cleanup.lock().unwrap() = None;
+    }
+    // A reservation may encounter contention introduced while preparing its
+    // workspaces. No process was launched when this typed guard error returns.
+    if !*stop.borrow() && result.as_ref().is_err_and(|e| e.code == "workspace_busy") {
+        #[cfg(test)]
+        runtime_gate(&workspace, &session_id, "before_defer").await;
+        match crate::conversation::defer_launch(&workspace, &session_id, &run_id, &stop) {
+            Ok(true) => {
+                // The original submission identity will be reused. This
+                // attempt relinquished ownership under the deferral lock, so
+                // its destructor must never touch a subsequent reservation.
+                guard.armed = false;
+                #[cfg(test)]
+                runtime_gate(&workspace, &session_id, "after_defer").await;
+                drop(guard);
+                #[cfg(test)]
+                runtime_gate(&workspace, &session_id, "after_guard").await;
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => eprintln!("Workspace deferral failed: {error}"),
+        }
+    }
     // Diff collection runs outside the writer lock and async executor.
     let snapshot = workspace.snapshots.borrow().clone();
     let completed_session = snapshot
@@ -1370,16 +1430,48 @@ struct RunGuard {
     workspace: Workspace,
     session: String,
     run: String,
+    armed: bool,
+    cleanup: Cleanup,
 }
+pub(super) type Cleanup = std::sync::Arc<std::sync::Mutex<Option<watch::Receiver<bool>>>>;
 impl Drop for RunGuard {
     fn drop(&mut self) {
-        let _ = self.workspace.interrupt_run(&self.session, &self.run);
-        if let Err(error) = crate::notices::finished(&self.workspace, &self.session, &self.run) {
+        let cleanup = self.cleanup.lock().unwrap().take();
+        let workspace = self.workspace.clone();
+        let session = self.session.clone();
+        let run = self.run.clone();
+        let armed = self.armed;
+        if let Some(mut cleanup) = cleanup {
+            let released = *cleanup.borrow();
+            if !released {
+                // Dropping execute transfers its child to an independent
+                // reaper. Keep the worker active until that reaper confirms
+                // physical process/group exit, even if this task is aborted.
+                tokio::spawn(async move {
+                    if cleanup.wait_for(|released| *released).await.is_ok() {
+                        finish_run_guard(&workspace, &session, &run, armed);
+                    }
+                });
+                return;
+            }
+        }
+        finish_run_guard(&workspace, &session, &run, armed);
+    }
+}
+fn finish_run_guard(workspace: &Workspace, session: &str, run: &str, armed: bool) {
+    if armed {
+        let _ = workspace.interrupt_run(session, run);
+        if let Err(error) = crate::notices::finished(workspace, session, run) {
             eprintln!("Relay notice failed: {error}");
         }
-        if crate::spawn_attempts::flush(&self.workspace, &self.session, true).is_err() {
+        if crate::spawn_attempts::flush(workspace, session, true).is_err() {
             eprintln!("Spawn outcome notice could not be queued");
         }
+    }
+    // A disarmed guard may still wake a queue whose owner finished just before
+    // deferral committed. It has no authority to clean up that queue's new run.
+    if let Err(error) = crate::conversation::drain_workspace_waits(workspace) {
+        eprintln!("Shared workspace queue advancement failed: {error}");
     }
 }
 async fn execute(
@@ -1388,6 +1480,7 @@ async fn execute(
     run_id: &str,
     prompt: &str,
     stop: &mut watch::Receiver<bool>,
+    cleanup: &Cleanup,
 ) -> Result<(), Error> {
     if *stop.borrow() {
         return Ok(());
@@ -1550,13 +1643,7 @@ async fn execute(
     let selects = session.selection.model.is_some() || session.selection.effort.is_some();
     let catalog = if fork.is_none() && (invokes || selects) {
         tokio::select! {
-            result = async {
-                if invokes {
-                    crate::commands::discover(workspace, session_id, true).await
-                } else {
-                    crate::commands::discover_selection(workspace, session_id).await
-                }
-            } => Some(result?),
+            result = crate::commands::discover_turn(workspace, session_id, invokes, cleanup) => Some(result?),
             _ = stop.wait_for(|stopped| *stopped) => return Ok(()),
         }
     } else {
@@ -1740,6 +1827,8 @@ async fn execute(
     }
     crate::process::background_worker(&mut cmd);
     // Launch and stop reservation are serialized by the same store lock.
+    #[cfg(test)]
+    runtime_gate(workspace, session_id, "before_launch").await;
     let mut child = {
         let mut store = workspace.store.lock().map_err(Error::internal)?;
         if *stop.borrow() {
@@ -1824,7 +1913,6 @@ async fn execute(
             .find(|submission| submission.id == run_id)
             .map(|submission| submission.approve_implementation)
             .unwrap_or(approved);
-        check_shared(&current, session_id)?;
         let index = current
             .sessions
             .iter()
@@ -1842,13 +1930,18 @@ async fn execute(
             ));
         }
         crate::agent_tools::authorize_session(&current, session, approved, &workspace.config)?;
+        if let Some(submission) = current.submissions.iter().find(|s| s.id == run_id) {
+            crate::conversation::authorize_sender(&current, session_id, &submission.sender)?;
+        }
+        check_shared(&current, session_id)?;
         let launched_network_policy =
             LaunchedNetworkPolicy::new(worker.harness, mode, network_access);
-        let mut child = crate::process::spawn(&mut cmd).map_err(|_| {
+        let child = crate::process::spawn(&mut cmd).map_err(|_| {
             Error::invalid(
                 "Cannot launch agent harness; check its executable and authentication in Settings",
             )
         })?;
+        let mut child = WorkerProcess::new(child, cleanup, workspace, session_id);
         let identity = child
             .id()
             .and_then(|pid| process_identity(pid).map(|identity| (pid, identity)));
@@ -1859,6 +1952,7 @@ async fn execute(
             let worker = current.sessions[index].worker.as_mut().unwrap();
             worker.launched_network_policy = Some(launched_network_policy);
             worker.status = WorkerStatus::Running;
+            current.sessions[index].awaiting_first_message = false;
             current.revision = current
                 .revision
                 .checked_add(1)
@@ -1890,11 +1984,6 @@ async fn execute(
             return Err(error);
         }
         child
-    };
-    let _process_guard = ProcessGuard {
-        owned: child
-            .id()
-            .and_then(|pid| process_identity(pid).map(|identity| (pid, identity))),
     };
     let cgroup = match child.id() {
         Some(pid) => crate::process::worker_cgroup(pid, &workspace.config.worker).await,
@@ -1945,8 +2034,188 @@ async fn execute(
             .unwrap_or(error)),
         ok => ok,
     };
-    terminate(&mut child).await;
+    child.release().await;
     result
+}
+
+/// Owns the Child until a reaper has awaited its exit. Both normal termination
+/// and cancellation use the same detached cleanup, so aborting an await cannot
+/// discard the only waiter and falsely release this worker's workspace.
+pub(super) struct WorkerProcess {
+    child: Option<tokio::process::Child>,
+    group: Option<u32>,
+    owned: Option<(u32, String)>,
+    done: Option<watch::Sender<bool>>,
+    #[cfg(test)]
+    context: (Workspace, String),
+}
+impl WorkerProcess {
+    pub(super) fn new(
+        child: tokio::process::Child,
+        cleanup: &Cleanup,
+        _workspace: &Workspace,
+        _session: &str,
+    ) -> Self {
+        let group = child.id();
+        let owned = group.and_then(|pid| process_identity(pid).map(|identity| (pid, identity)));
+        let (done, released) = watch::channel(false);
+        *cleanup.lock().unwrap() = Some(released);
+        Self {
+            child: Some(child),
+            group,
+            owned,
+            done: Some(done),
+            #[cfg(test)]
+            context: (_workspace.clone(), _session.into()),
+        }
+    }
+    fn reap(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let mut child = self.child.take()?;
+        let owned = self.owned.take();
+        let group = self.group.take();
+        // Signal while the recorded identity still establishes ownership. The
+        // child stays owned by the reaper until wait confirms its physical exit.
+        if let Some((pid, identity)) = &owned {
+            reap_owned(*pid, identity);
+        }
+        let done = self.done.take();
+        #[cfg(test)]
+        let (workspace, session) = self.context.clone();
+        Some(tokio::spawn(async move {
+            #[cfg(test)]
+            runtime_gate(&workspace, &session, "cleanup").await;
+            terminate(&mut child).await;
+            if let Some(group) = group {
+                // A killed grandchild may outlive the leader's wait. Zombies
+                // have physically exited; live members still hold the workspace.
+                while match &owned {
+                    Some((_, identity)) => owned_group_active(group, identity),
+                    None => process_group_active(group),
+                }
+                .unwrap_or(true)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+            #[cfg(test)]
+            runtime_gate(&workspace, &session, "reaped").await;
+            if let Some(done) = done {
+                done.send_replace(true);
+            }
+        }))
+    }
+    pub(super) async fn release(&mut self) {
+        if let Some(reaper) = self.reap() {
+            let _ = reaper.await;
+        }
+    }
+}
+impl std::ops::Deref for WorkerProcess {
+    type Target = tokio::process::Child;
+    fn deref(&self) -> &Self::Target {
+        self.child.as_ref().unwrap()
+    }
+}
+impl std::ops::DerefMut for WorkerProcess {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.child.as_mut().unwrap()
+    }
+}
+impl Drop for WorkerProcess {
+    fn drop(&mut self) {
+        let _reaper = self.reap();
+    }
+}
+
+pub(super) fn process_group_active(group: u32) -> Result<bool, std::io::Error> {
+    #[cfg(target_os = "linux")]
+    {
+        for entry in std::fs::read_dir("/proc")? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
+                continue;
+            }
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            let Some((_, fields)) = stat.rsplit_once(')') else {
+                continue;
+            };
+            let fields: Vec<_> = fields.split_whitespace().collect();
+            if fields.get(2).and_then(|p| p.parse::<u32>().ok()) == Some(group)
+                && fields
+                    .first()
+                    .is_some_and(|state| !matches!(*state, "Z" | "X"))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        if unsafe { libc::kill(-(group as i32), 0) } == 0 {
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = group;
+        Ok(false)
+    }
+}
+
+pub(super) fn owned_group_active(group: u32, identity: &str) -> Result<bool, std::io::Error> {
+    // A new process with the old leader's numeric PID belongs to a different
+    // generation. Neither cleanup nor recovery may wait on or signal it.
+    if process_identity(group).is_some_and(|current| current != identity) {
+        return Ok(false);
+    }
+    process_group_active(group)
+}
+
+#[cfg(test)]
+pub(super) struct RuntimeGate {
+    reached: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+#[cfg(test)]
+impl RuntimeGate {
+    pub(super) fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            reached: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        })
+    }
+    pub(super) async fn entered(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(20), self.reached.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+    }
+    pub(super) fn open(&self) {
+        self.release.add_permits(1);
+    }
+}
+#[cfg(test)]
+pub(super) async fn runtime_gate(workspace: &Workspace, session: &str, point: &'static str) {
+    let gate = workspace
+        .store
+        .lock()
+        .unwrap()
+        .runtime_gates
+        .remove(&(session.into(), point));
+    if let Some(gate) = gate {
+        gate.reached.add_permits(1);
+        gate.release.acquire().await.unwrap().forget();
+    }
 }
 /// Explain a harness that disconnected because it was killed, including OOM
 /// only when the worker cgroup provides evidence.

@@ -227,7 +227,7 @@ fn related(snapshot: &Snapshot, caller: &str, target: &str) -> Result<(), Error>
 }
 /// Messaging alone also reaches a live session a human mentioned with the
 /// caller; every other tool stays within the tree.
-fn can_message(snapshot: &Snapshot, caller: &str, target: &str) -> Result<(), Error> {
+pub(super) fn can_message(snapshot: &Snapshot, caller: &str, target: &str) -> Result<(), Error> {
     if snapshot.is_peer(caller, target) {
         return Ok(());
     }
@@ -1313,7 +1313,9 @@ async fn message_agent(
             session_id: args.agent.clone(),
             draft_revision: revision,
             parts,
-            approve_implementation: true,
+            // Only an actual approval authorizes a later Ask policy. Allow at
+            // acceptance must not silently approve a changed target policy.
+            approve_implementation: permissions[&Task::Implement] == Permission::Ask,
         };
         let action = conversation::apply(
             &transaction,
@@ -1786,16 +1788,26 @@ mod tests {
                 .unwrap();
         }
         async fn finish(&self) {
-            self.change(|s| {
-                s.sessions
+            // Some boundary tests run the fixture caller's real harness turn.
+            // It may already be terminal (including after restart recovery).
+            {
+                let mut store = self.workspace.store.lock().unwrap();
+                let mut snapshot = store.snapshot().unwrap();
+                let worker = snapshot
+                    .sessions
                     .iter_mut()
                     .find(|s| s.id == self.caller)
                     .unwrap()
                     .worker
                     .as_mut()
-                    .unwrap()
-                    .status = WorkerStatus::Completed
-            });
+                    .unwrap();
+                if runtime::active(&worker.status) {
+                    worker.status = WorkerStatus::Completed;
+                    snapshot.revision += 1;
+                    store.save(&snapshot).unwrap();
+                    self.workspace.snapshots.send_replace(snapshot);
+                }
+            }
             let shutdown = Shutdown {
                 workspace: self.workspace.clone(),
             };
@@ -3150,7 +3162,8 @@ mod tests {
                 .unwrap();
             assert!(matches!(action, Some(Action::Run { session_id, .. }) if session_id == id));
             let child = after.sessions.iter().find(|s| s.id == id).unwrap();
-            assert!(!child.awaiting_first_message);
+            // A reservation names the first turn but has not launched it yet.
+            assert!(child.awaiting_first_message);
             assert_eq!(
                 child.title,
                 if name.is_empty() {
@@ -3722,7 +3735,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 28);
+        assert_eq!(schema, 29);
         f.finish().await;
     }
     #[tokio::test]
@@ -6956,6 +6969,1268 @@ mod tests {
             },
         }
     }
+    /// Same-project roots authorized by an accepted human mention, sharing a
+    /// connected nonrepository directory (not an ancestor/descendant exemption).
+    fn shared_peer(f: &Fixture) -> String {
+        let id = "shared-peer".to_owned();
+        let shared = f._directory.path().join("connected-directory");
+        std::fs::create_dir_all(&shared).unwrap();
+        f.change(|s| {
+            let caller = s.sessions.iter_mut().find(|s| s.id == f.caller).unwrap();
+            caller.workspaces = vec![SessionWorkspace {
+                connection_id: "shared-directory".into(),
+                path: shared.display().to_string(),
+                repository: false,
+                branch: None,
+                base_commit: None,
+                changes: None,
+            }];
+            caller.worker.as_mut().unwrap().worktree = Some(shared.display().to_string());
+            let mut peer = caller.clone();
+            peer.id = id.clone();
+            peer.parent_session_id = None;
+            peer.worker.as_mut().unwrap().status = WorkerStatus::Completed;
+            peer.worker.as_mut().unwrap().thread_id = Some("receiver-thread".into());
+            s.sessions.push(peer);
+            assert!(s.grant_peer(&f.caller, &id, "accepted-human-mention", 1));
+        });
+        id
+    }
+
+    #[tokio::test]
+    async fn shared_peer_message_http_queues_until_sender_harness_releases_directory() {
+        shared_peer_message_delivery("complete").await;
+    }
+
+    #[tokio::test]
+    async fn shared_peer_message_http_wakes_after_sender_stop_and_task_cancellation() {
+        for outcome in ["stop", "abort"] {
+            shared_peer_message_delivery(outcome).await;
+        }
+    }
+
+    async fn shared_peer_message_delivery(outcome: &str) {
+        let f = Fixture::new(Permission::Allow);
+        let peer = shared_peer(&f);
+        let capture = f._directory.path().join("capture");
+        let release = f._directory.path().join("release-sender");
+        let native = crate::tests::command_tests::CODEX
+            .replace("@CAPTURE@", capture.to_str().unwrap())
+            .replace("test-model", "fixture-model")
+            .replace(
+                "    turn/start|review/start)",
+                &format!(
+                    "    turn/start|review/start)\n      if [ \"$(printf '%s' \"$line\" | jq -r '.params.threadId')\" = parent-thread ]; then\n        while [ ! -e '{}' ]; do sleep 0.01; done\n      fi",
+                    release.display()
+                ),
+            );
+        std::fs::write(&f.workspace.config.codex, format!("#!/bin/sh\n{native}")).unwrap();
+        let sender = tokio::spawn(runtime::run(
+            f.workspace.clone(),
+            f.caller.clone(),
+            f.run.clone(),
+            "Sender".into(),
+            f.stop.clone(),
+        ));
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !std::fs::read_to_string(&capture)
+                .unwrap_or_default()
+                .contains("turn/start")
+            {
+                let snapshot = f.workspace.snapshots.borrow().clone();
+                let worker = snapshot
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == f.caller)
+                    .unwrap()
+                    .worker
+                    .as_ref()
+                    .unwrap();
+                assert_ne!(
+                    worker.status,
+                    WorkerStatus::Failed,
+                    "sender setup: {:?}",
+                    worker.error
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!(
+            "http://{}/v1/agent-tools/message_agent",
+            listener.local_addr().unwrap()
+        );
+        let app = Router::new()
+            .route("/v1/agent-tools/{tool}", post(route))
+            .with_state(f.workspace.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let draft = Draft {
+            session_id: peer.clone(),
+            revision: 9,
+            parts: vec![Part::text("Human draft")],
+        };
+        {
+            let store = f.workspace.store.lock().unwrap();
+            store
+                .connection
+                .execute(
+                    "INSERT INTO drafts(session_id,draft) VALUES(?1,?2)",
+                    params![peer, serde_json::to_string(&draft).unwrap()],
+                )
+                .unwrap();
+        }
+        let response = reqwest::Client::new()
+            .post(endpoint)
+            .headers(durable_headers(&f, "message"))
+            .json(&json!({"agent":peer,"text":"First peer message"}))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "message rejected: {}",
+            response.text().await.unwrap()
+        );
+        let value: Value = response.json().await.unwrap();
+        let first = value["submission"].as_str().unwrap().to_owned();
+        let second = f
+            .call(
+                "message_agent",
+                json!({"agent":peer,"text":"Second peer message"}),
+            )
+            .await
+            .unwrap()["submission"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        {
+            let store = f.workspace.store.lock().unwrap();
+            let snapshot = store.snapshot().unwrap();
+            for id in [&first, &second] {
+                assert_eq!(
+                    snapshot
+                        .submissions
+                        .iter()
+                        .find(|s| &s.id == id)
+                        .unwrap()
+                        .state,
+                    SubmissionState::Queued
+                );
+                assert!(
+                    store
+                        .connection
+                        .query_row(
+                            "SELECT request FROM receipts WHERE request_id=?1",
+                            [id],
+                            |r| r.get::<_, String>(0)
+                        )
+                        .is_ok()
+                );
+                assert!(
+                    !snapshot
+                        .messages
+                        .iter()
+                        .any(|m| m.id == format!("prompt-{id}"))
+                );
+            }
+            assert_eq!(
+                conversation::read_drafts(&store.connection)
+                    .unwrap()
+                    .into_iter()
+                    .find(|d| d.session_id == peer),
+                Some(draft.clone())
+            );
+            assert_eq!(
+                snapshot
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == peer)
+                    .unwrap()
+                    .worker
+                    .as_ref()
+                    .unwrap()
+                    .status,
+                WorkerStatus::Completed
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&capture)
+                .unwrap()
+                .lines()
+                .filter(|l| l.contains("turn/start"))
+                .count(),
+            1
+        );
+        match outcome {
+            "complete" => {
+                std::fs::write(&release, "release").unwrap();
+                sender.await.unwrap();
+            }
+            "stop" => {
+                stop_worker(&f, &f.caller, false).await;
+                sender.await.unwrap();
+            }
+            "abort" => {
+                sender.abort();
+                assert!(sender.await.unwrap_err().is_cancelled());
+            }
+            _ => unreachable!(),
+        }
+        let mut events = f.workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if events
+                    .borrow()
+                    .submissions
+                    .iter()
+                    .find(|s| s.id == second)
+                    .is_some_and(|s| s.state == SubmissionState::Completed)
+                {
+                    break;
+                }
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let turns: Vec<Value> = std::fs::read_to_string(&capture)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .filter(|v| v["method"] == "turn/start")
+            .collect();
+        assert_eq!(turns.len(), 3);
+        assert!(turns[1].to_string().contains("First peer message"));
+        assert!(turns[2].to_string().contains("Second peer message"));
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        for id in [&first, &second] {
+            let prompts: Vec<_> = snapshot
+                .messages
+                .iter()
+                .filter(|m| m.id == format!("prompt-{id}"))
+                .collect();
+            assert_eq!(prompts.len(), 1);
+            assert_eq!(
+                prompts[0].sender,
+                Sender::Agent {
+                    session_id: f.caller.clone()
+                }
+            );
+            assert!(
+                snapshot
+                    .messages
+                    .iter()
+                    .any(|m| m.id == format!("agent-message-{id}")
+                        && matches!(
+                            m.tool.as_ref().and_then(|t| t.detail.as_ref()),
+                            Some(ToolDetail::Message { read: true, .. })
+                        ))
+            );
+        }
+        assert_eq!(
+            conversation::read_drafts(&f.workspace.store.lock().unwrap().connection)
+                .unwrap()
+                .into_iter()
+                .find(|d| d.session_id == peer),
+            Some(draft)
+        );
+        server.abort();
+        f.finish().await;
+    }
+
+    fn workspace_wait_count(f: &Fixture) -> u32 {
+        f.workspace
+            .store
+            .lock()
+            .unwrap()
+            .connection
+            .query_row("SELECT COUNT(*) FROM workspace_waits", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn shared_peer_wait_rechecks_policy_grants_and_workspace_without_wake_loops() {
+        for change in [
+            "deny", "ask", "grant", "missing", "archive", "cancel", "pause", "delete",
+        ] {
+            let f = Fixture::new(Permission::Allow);
+            let peer = shared_peer(&f);
+            let queued = f
+                .call("message_agent", json!({"agent":peer,"text":"Wait"}))
+                .await
+                .unwrap()["submission"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let revision = f.workspace.snapshots.borrow().revision;
+            for _ in 0..3 {
+                conversation::drain_workspace_waits(&f.workspace).unwrap();
+            }
+            assert_eq!(
+                f.workspace.snapshots.borrow().revision,
+                revision,
+                "busy wake changed the queue"
+            );
+            assert_eq!(workspace_wait_count(&f), 1);
+            if matches!(change, "archive" | "cancel" | "pause" | "delete") {
+                let command = match change {
+                    "archive" | "delete" => Command::SetSessionArchived {
+                        session_id: peer.clone(),
+                        archived: true,
+                    },
+                    "cancel" => Command::CancelTurn {
+                        submission_id: queued.clone(),
+                    },
+                    _ => Command::PauseQueue {
+                        session_id: peer.clone(),
+                    },
+                };
+                let revision = f.workspace.snapshots.borrow().revision;
+                human(&f, crate::tests::env(revision, command)).unwrap();
+                if change == "delete" {
+                    let revision = f.workspace.snapshots.borrow().revision;
+                    human(
+                        &f,
+                        crate::tests::env(
+                            revision,
+                            Command::DeleteSessionBranch {
+                                session_id: peer.clone(),
+                            },
+                        ),
+                    )
+                    .unwrap();
+                }
+            } else {
+                f.change(|s| match change {
+                    "deny" | "ask" => {
+                        s.projects[0].defaults.permissions.insert(
+                            Task::Implement,
+                            if change == "deny" {
+                                Permission::Deny
+                            } else {
+                                Permission::Ask
+                            },
+                        );
+                    }
+                    "grant" => s.session_peers.clear(),
+                    "missing" => {
+                        s.sessions
+                            .iter_mut()
+                            .find(|s| s.id == peer)
+                            .unwrap()
+                            .workspaces[0]
+                            .path = f
+                            ._directory
+                            .path()
+                            .join("unavailable")
+                            .display()
+                            .to_string();
+                    }
+                    _ => unreachable!(),
+                });
+            }
+            // Releasing one owner is an event, not permission to skip any of
+            // the target's current policy, queue hold, grant or path checks.
+            settle(&f, &[&f.caller]);
+            conversation::drain_workspace_waits(&f.workspace).unwrap();
+            assert_eq!(workspace_wait_count(&f), 0, "{change}");
+            let snapshot = f.workspace.snapshots.borrow().clone();
+            if change != "delete" {
+                let submission = snapshot
+                    .submissions
+                    .iter()
+                    .find(|s| s.id == queued)
+                    .unwrap();
+                assert_eq!(
+                    submission.state,
+                    if change == "cancel" {
+                        SubmissionState::Cancelled
+                    } else {
+                        SubmissionState::Paused
+                    },
+                    "{change}"
+                );
+                assert!(
+                    !snapshot
+                        .messages
+                        .iter()
+                        .any(|m| m.id == format!("prompt-{queued}")),
+                    "{change}"
+                );
+            }
+            let revision = snapshot.revision;
+            conversation::drain_workspace_waits(&f.workspace).unwrap();
+            assert_eq!(f.workspace.snapshots.borrow().revision, revision);
+            f.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_peer_contention_does_not_hide_unavailable_workspace_or_denied_policy() {
+        let f = Fixture::new(Permission::Allow);
+        let peer = shared_peer(&f);
+        f.change(|s| {
+            let target = s.sessions.iter_mut().find(|s| s.id == peer).unwrap();
+            let mut missing = target.workspaces[0].clone();
+            missing.path = f._directory.path().join("missing").display().to_string();
+            target.workspaces.push(missing);
+        });
+        let error = f
+            .call("message_agent", json!({"agent":peer,"text":"Missing"}))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("unavailable"));
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Implement, Permission::Deny);
+        });
+        let error = f
+            .call("message_agent", json!({"agent":peer,"text":"Denied"}))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("denies implementation"));
+        assert_eq!(workspace_wait_count(&f), 0);
+        assert!(f.workspace.snapshots.borrow().submissions.is_empty());
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn shared_peer_waits_for_every_global_owner_and_concurrent_messages_remain_ordered() {
+        let f = Fixture::new(Permission::Allow);
+        let peer = shared_peer(&f);
+        f.change(|s| {
+            let mut owner = s
+                .sessions
+                .iter()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .clone();
+            owner.id = "unrelated-root".into();
+            s.sessions.push(owner);
+        });
+        let (first, second) = tokio::join!(
+            f.call("message_agent", json!({"agent":peer,"text":"A"})),
+            f.call("message_agent", json!({"agent":peer,"text":"B"})),
+        );
+        let first = first.unwrap()["submission"].as_str().unwrap().to_owned();
+        let second = second.unwrap()["submission"].as_str().unwrap().to_owned();
+        settle(&f, &[&f.caller]);
+        conversation::drain_workspace_waits(&f.workspace).unwrap();
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        assert_eq!(
+            snapshot
+                .submissions
+                .iter()
+                .map(|s| &s.id)
+                .collect::<Vec<_>>(),
+            vec![&first, &second]
+        );
+        assert!(
+            snapshot
+                .submissions
+                .iter()
+                .all(|s| s.state == SubmissionState::Queued)
+        );
+        assert_eq!(workspace_wait_count(&f), 1);
+        assert!(runtime::check_shared(&snapshot, &peer).is_err());
+        // Cancelling the head must not remove the next message's wakeup.
+        human(
+            &f,
+            crate::tests::env(
+                snapshot.revision,
+                Command::CancelTurn {
+                    submission_id: first,
+                },
+            ),
+        )
+        .unwrap();
+        let capture = f._directory.path().join("capture");
+        let native = crate::tests::command_tests::CODEX
+            .replace("@CAPTURE@", capture.to_str().unwrap())
+            .replace("test-model", "fixture-model");
+        std::fs::write(&f.workspace.config.codex, format!("#!/bin/sh\n{native}")).unwrap();
+        {
+            let mut store = f.workspace.store.lock().unwrap();
+            let mut snapshot = store.snapshot().unwrap();
+            snapshot
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == "unrelated-root")
+                .unwrap()
+                .worker
+                .as_mut()
+                .unwrap()
+                .status = WorkerStatus::Completed;
+            snapshot.revision += 1;
+            store.save(&snapshot).unwrap();
+            f.workspace.snapshots.send_replace(snapshot);
+        }
+        conversation::drain_workspace_waits(&f.workspace).unwrap();
+        let mut events = f.workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if events
+                    .borrow()
+                    .submissions
+                    .iter()
+                    .find(|s| s.id == second)
+                    .unwrap()
+                    .state
+                    == SubmissionState::Completed
+                {
+                    break;
+                }
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(workspace_wait_count(&f), 0);
+        assert_eq!(
+            std::fs::read_to_string(capture)
+                .unwrap()
+                .lines()
+                .filter(|l| l.contains("turn/start"))
+                .count(),
+            1
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn shared_peer_wait_is_durable_but_restart_requires_explicit_resume() {
+        let f = Fixture::new(Permission::Allow);
+        let peer = shared_peer(&f);
+        let queued = f
+            .call("message_agent", json!({"agent":peer,"text":"Persistent"}))
+            .await
+            .unwrap()["submission"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let store = Store::open(&f._directory.path().join("db"), AgentProfile::default()).unwrap();
+        assert_eq!(
+            store
+                .snapshot()
+                .unwrap()
+                .submissions
+                .iter()
+                .find(|s| s.id == queued)
+                .unwrap()
+                .state,
+            SubmissionState::Queued
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM workspace_waits", [], |r| r
+                    .get::<_, u32>(0))
+                .unwrap(),
+            1
+        );
+        drop(store);
+        let (_router, shutdown) = router_with_shutdown(
+            f._directory.path().join("db"),
+            "disposable-test-token".into(),
+            AgentProfile::default(),
+            (*f.workspace.config).clone(),
+        )
+        .unwrap();
+        let snapshot = shutdown.workspace.snapshots.borrow().clone();
+        let submission = snapshot
+            .submissions
+            .iter()
+            .find(|s| s.id == queued)
+            .unwrap();
+        assert_eq!(submission.state, SubmissionState::Paused);
+        assert!(
+            submission
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("explicit resume")
+        );
+        assert_eq!(
+            submission.sender,
+            Sender::Agent {
+                session_id: f.caller.clone()
+            }
+        );
+        conversation::drain_workspace_waits(&shutdown.workspace).unwrap();
+        assert_eq!(
+            shutdown.workspace.snapshots.borrow().revision,
+            snapshot.revision
+        );
+        shutdown.shutdown().await.unwrap();
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn shared_peer_message_rechecks_launch_guard_and_defers_new_contention() {
+        let f = Fixture::new(Permission::Allow);
+        let peer = shared_peer(&f);
+        let capture = f._directory.path().join("capture");
+        let native = crate::tests::command_tests::CODEX
+            .replace("@CAPTURE@", capture.to_str().unwrap())
+            .replace("test-model", "fixture-model");
+        std::fs::write(&f.workspace.config.codex, format!("#!/bin/sh\n{native}")).unwrap();
+        f.change(|s| {
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .workspaces
+                .clear();
+        });
+        let queued = f
+            .call("message_agent", json!({"agent":peer,"text":"Guarded"}))
+            .await
+            .unwrap()["submission"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // The receiver is reserved but has not run its asynchronous preparation
+        // yet. A different root acquires the shared directory in that interval.
+        f.change(|s| {
+            let workspaces = s
+                .sessions
+                .iter()
+                .find(|s| s.id == peer)
+                .unwrap()
+                .workspaces
+                .clone();
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .workspaces = workspaces;
+        });
+        let mut events = f.workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if events
+                    .borrow()
+                    .submissions
+                    .iter()
+                    .find(|s| s.id == queued)
+                    .unwrap()
+                    .state
+                    == SubmissionState::Queued
+                {
+                    break;
+                }
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(workspace_wait_count(&f), 1);
+        assert!(
+            !std::fs::read_to_string(&capture)
+                .unwrap_or_default()
+                .contains("turn/start")
+        );
+        settle(&f, &[&f.caller]);
+        conversation::drain_workspace_waits(&f.workspace).unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if events
+                    .borrow()
+                    .submissions
+                    .iter()
+                    .find(|s| s.id == queued)
+                    .unwrap()
+                    .state
+                    == SubmissionState::Completed
+                {
+                    break;
+                }
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(capture)
+                .unwrap()
+                .lines()
+                .filter(|l| l.contains("turn/start"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .borrow()
+                .messages
+                .iter()
+                .filter(|m| m.id == format!("prompt-{queued}"))
+                .count(),
+            1
+        );
+        f.finish().await;
+    }
+
+    fn arm_runtime_gate(
+        f: &Fixture,
+        session: &str,
+        point: &'static str,
+    ) -> std::sync::Arc<runtime::RuntimeGate> {
+        let gate = runtime::RuntimeGate::new();
+        f.workspace
+            .store
+            .lock()
+            .unwrap()
+            .runtime_gates
+            .insert((session.into(), point), gate.clone());
+        gate
+    }
+    fn install_peer_native(f: &Fixture, hold: bool) -> std::path::PathBuf {
+        let capture = f._directory.path().join("review-capture");
+        let mut native = crate::tests::command_tests::CODEX
+            .replace("@CAPTURE@", capture.to_str().unwrap())
+            .replace("test-model", "fixture-model");
+        if hold {
+            native = native.replace(
+                "    turn/start|review/start)",
+                &format!(
+                    "    turn/start|review/start)\n      while [ ! -e '{}' ]; do sleep 0.01; done",
+                    f._directory.path().join("release-receiver").display()
+                ),
+            );
+        }
+        std::fs::write(&f.workspace.config.codex, format!("#!/bin/sh\n{native}")).unwrap();
+        capture
+    }
+    async fn wait_peer_submission(workspace: &Workspace, id: &str, state: SubmissionState) {
+        let mut events = workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if events
+                    .borrow()
+                    .submissions
+                    .iter()
+                    .any(|s| s.id == id && s.state == state)
+                {
+                    break;
+                }
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+    fn change_shared_fixture(f: &Fixture, change: impl FnOnce(&mut Snapshot)) {
+        let mut store = f.workspace.store.lock().unwrap();
+        let mut snapshot = store.snapshot().unwrap();
+        change(&mut snapshot);
+        snapshot.revision += 1;
+        store.save(&snapshot).unwrap();
+        f.workspace.snapshots.send_replace(snapshot);
+    }
+    fn release_shared_owner(f: &Fixture) {
+        change_shared_fixture(f, |s| {
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .worker
+                .as_mut()
+                .unwrap()
+                .status = WorkerStatus::Completed
+        });
+    }
+    async fn late_peer_message(f: &Fixture, peer: &str) -> String {
+        let launch = arm_runtime_gate(f, peer, "before_launch");
+        f.change(|s| {
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .workspaces
+                .clear()
+        });
+        let id = f
+            .call(
+                "message_agent",
+                json!({"agent":peer,"text":"Reviewed retry"}),
+            )
+            .await
+            .unwrap()["submission"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        launch.entered().await;
+        f.change(|s| {
+            let spaces = s
+                .sessions
+                .iter()
+                .find(|s| s.id == peer)
+                .unwrap()
+                .workspaces
+                .clone();
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .workspaces = spaces;
+        });
+        launch.open();
+        id
+    }
+    async fn wait_native_turn(capture: &Path) {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !std::fs::read_to_string(capture)
+                .unwrap_or_default()
+                .contains("turn/start")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shared_peer_review_obsolete_guard_cannot_interrupt_same_id_retry() {
+        let f = Fixture::new(Permission::Allow);
+        *f.workspace.agent_endpoint.lock().unwrap() = Some("http://127.0.0.1:1".into());
+        let peer = shared_peer(&f);
+        let capture = install_peer_native(&f, true);
+        let deferred = arm_runtime_gate(&f, &peer, "after_defer");
+        let dropped = arm_runtime_gate(&f, &peer, "after_guard");
+        let id = late_peer_message(&f, &peer).await;
+        deferred.entered().await;
+        release_shared_owner(&f);
+        conversation::drain_workspace_waits(&f.workspace).unwrap();
+        wait_native_turn(&capture).await;
+        let (pid, identity): (u32, String) = f
+            .workspace
+            .store
+            .lock()
+            .unwrap()
+            .connection
+            .query_row(
+                "SELECT pid,identity FROM processes WHERE session_id=?1 AND run_id=?2",
+                params![peer, id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let control = f.workspace.store.lock().unwrap().controls[&peer].subscribe();
+        deferred.open();
+        dropped.entered().await;
+        {
+            let store = f.workspace.store.lock().unwrap();
+            assert_eq!(store.run_id(&peer).unwrap().as_deref(), Some(id.as_str()));
+            assert!(!*control.borrow());
+            assert!(control.same_channel(&store.controls[&peer].subscribe()));
+            assert!(store.agent_capabilities.contains_key(&peer));
+            assert_eq!(
+                store
+                    .snapshot()
+                    .unwrap()
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == peer)
+                    .unwrap()
+                    .worker
+                    .as_ref()
+                    .unwrap()
+                    .status,
+                WorkerStatus::Running
+            );
+        }
+        assert_eq!(
+            runtime::process_identity(pid).as_deref(),
+            Some(identity.as_str())
+        );
+        dropped.open();
+        std::fs::write(f._directory.path().join("release-receiver"), "").unwrap();
+        wait_peer_submission(&f.workspace, &id, SubmissionState::Completed).await;
+        f.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shared_peer_review_stop_accepted_at_deferral_lock_is_never_resumed() {
+        for ancestor in [false, true] {
+            let f = Fixture::new(Permission::Allow);
+            let peer = shared_peer(&f);
+            if ancestor {
+                f.change(|s| {
+                    let mut parent = s.sessions.iter().find(|s| s.id == peer).unwrap().clone();
+                    parent.id = "receiver-parent".into();
+                    parent.workspaces.clear();
+                    s.sessions.push(parent);
+                    s.sessions
+                        .iter_mut()
+                        .find(|s| s.id == peer)
+                        .unwrap()
+                        .parent_session_id = Some("receiver-parent".into());
+                });
+            }
+            let capture = install_peer_native(&f, false);
+            let before = arm_runtime_gate(&f, &peer, "before_defer");
+            let id = late_peer_message(&f, &peer).await;
+            before.entered().await;
+            let second = f
+                .call(
+                    "message_agent",
+                    json!({"agent":peer,"text":"Must remain paused"}),
+                )
+                .await
+                .unwrap()["submission"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            stop_worker(
+                &f,
+                if ancestor { "receiver-parent" } else { &peer },
+                ancestor,
+            )
+            .await;
+            before.open();
+            wait_peer_submission(&f.workspace, &id, SubmissionState::Interrupted).await;
+            release_shared_owner(&f);
+            conversation::drain_workspace_waits(&f.workspace).unwrap();
+            let snapshot = f.workspace.snapshots.borrow().clone();
+            assert_eq!(
+                snapshot
+                    .submissions
+                    .iter()
+                    .find(|s| s.id == second)
+                    .unwrap()
+                    .state,
+                SubmissionState::Paused
+            );
+            assert_eq!(
+                snapshot
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == peer)
+                    .unwrap()
+                    .worker
+                    .as_ref()
+                    .unwrap()
+                    .status,
+                WorkerStatus::Stopped
+            );
+            assert!(
+                !std::fs::read_to_string(&capture)
+                    .unwrap_or_default()
+                    .contains("turn/start")
+            );
+            assert!(
+                !f.workspace
+                    .store
+                    .lock()
+                    .unwrap()
+                    .controls
+                    .contains_key(&peer)
+            );
+            f.finish().await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shared_peer_review_first_message_survives_late_deferral_and_explicit_resume() {
+        for mode in ["automatic", "paused", "restart"] {
+            let f = Fixture::new(Permission::Allow);
+            let peer = shared_peer(&f);
+            f.change(|s| {
+                let receiver = s.sessions.iter_mut().find(|s| s.id == peer).unwrap();
+                receiver.awaiting_first_message = true;
+                receiver.worker.as_mut().unwrap().thread_id = None;
+                receiver.conversations.clear();
+            });
+            let capture = install_peer_native(&f, false);
+            let deferred = arm_runtime_gate(&f, &peer, "after_defer");
+            let dropped = arm_runtime_gate(&f, &peer, "after_guard");
+            let id = late_peer_message(&f, &peer).await;
+            deferred.entered().await;
+            let snapshot = f.workspace.snapshots.borrow().clone();
+            let receiver = snapshot.sessions.iter().find(|s| s.id == peer).unwrap();
+            assert!(receiver.awaiting_first_message);
+            assert!(receiver.worker.as_ref().unwrap().thread_id.is_none());
+            if mode == "paused" {
+                human(
+                    &f,
+                    crate::tests::env(
+                        snapshot.revision,
+                        Command::PauseQueue {
+                            session_id: peer.clone(),
+                        },
+                    ),
+                )
+                .unwrap();
+            }
+            if mode != "restart" {
+                release_shared_owner(&f);
+            }
+            deferred.open();
+            dropped.entered().await;
+            let restarted = if mode == "restart" {
+                let (_router, shutdown) = router_with_shutdown(
+                    f._directory.path().join("db"),
+                    "restart-first-message-test".into(),
+                    AgentProfile::default(),
+                    (*f.workspace.config).clone(),
+                )
+                .unwrap();
+                Some(shutdown)
+            } else {
+                None
+            };
+            let workspace = restarted.as_ref().map_or(&f.workspace, |s| &s.workspace);
+            if mode != "automatic" {
+                assert!(
+                    !std::fs::read_to_string(&capture)
+                        .unwrap_or_default()
+                        .contains("turn/start")
+                );
+                let snapshot = workspace.snapshots.borrow().clone();
+                assert!(
+                    snapshot
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == peer)
+                        .unwrap()
+                        .awaiting_first_message
+                );
+                assert_eq!(
+                    snapshot
+                        .submissions
+                        .iter()
+                        .find(|s| s.id == id)
+                        .unwrap()
+                        .state,
+                    SubmissionState::Paused
+                );
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    "authorization",
+                    if mode == "restart" {
+                        "Bearer restart-first-message-test"
+                    } else {
+                        "Bearer test-token"
+                    }
+                    .parse()
+                    .unwrap(),
+                );
+                let _ = command(
+                    State(workspace.clone()),
+                    headers,
+                    Ok(Json(crate::tests::env(
+                        snapshot.revision,
+                        Command::ResumeQueue {
+                            session_id: peer.clone(),
+                            queue: Some(snapshot.queued_turns(&peer)),
+                        },
+                    ))),
+                )
+                .await
+                .unwrap();
+            }
+            dropped.open();
+            wait_peer_submission(workspace, &id, SubmissionState::Completed).await;
+            let snapshot = workspace.snapshots.borrow().clone();
+            assert!(
+                !snapshot
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == peer)
+                    .unwrap()
+                    .awaiting_first_message
+            );
+            assert_eq!(
+                std::fs::read_to_string(&capture)
+                    .unwrap()
+                    .lines()
+                    .filter(|l| l.contains("turn/start"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                snapshot
+                    .messages
+                    .iter()
+                    .filter(|m| m.id == format!("prompt-{id}"))
+                    .count(),
+                1
+            );
+            if let Some(shutdown) = restarted {
+                shutdown.shutdown().await.unwrap();
+            }
+            f.finish().await;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shared_peer_review_abort_confirms_group_exit_before_receiver_process_launch() {
+        for catalog in [false, true] {
+            let f = Fixture::new(Permission::Allow);
+            let peer = shared_peer(&f);
+            if catalog {
+                f.change(|s| {
+                    s.sessions
+                        .iter_mut()
+                        .find(|s| s.id == f.caller)
+                        .unwrap()
+                        .selection
+                        .model = Some("fixture-model".into())
+                });
+            }
+            let capture = f._directory.path().join("review-capture");
+            let owner_pids = f._directory.path().join("owner-pids");
+            let receiver_started = f._directory.path().join("receiver-process-started");
+            let violation = f._directory.path().join("early-receiver");
+            // Every later process (including discovery) checks physical owner and
+            // descendant state at exec time, before even serving initialize RPC.
+            let prefix = format!(
+                r#"
+if [ -e '{pids}' ]; then
+  for owner_pid in $(cat '{pids}'); do
+    if [ -r "/proc/$owner_pid/stat" ]; then
+      owner_state=$(sed 's/.*) //' "/proc/$owner_pid/stat" | cut -d ' ' -f 1)
+      case "$owner_state" in Z|X|'') ;; *) touch '{violation}' ;; esac
+    fi
+  done
+  touch '{started}'
+fi
+"#,
+                pids = owner_pids.display(),
+                violation = violation.display(),
+                started = receiver_started.display()
+            );
+            let mut native = crate::tests::command_tests::CODEX
+                .replace("@CAPTURE@", capture.to_str().unwrap())
+                .replace("test-model", "fixture-model");
+            if catalog {
+                native = native.replace("    model/list)", &format!("    model/list)\n      sleep 60 &\n      printf '%s %s\\n' \"$$\" \"$!\" > '{}'\n      while :; do sleep 0.01; done\n", owner_pids.display()));
+            } else {
+                native = native.replace(
+                    "    turn/start|review/start)",
+                    &format!(
+                        r#"    turn/start|review/start)
+      if [ "$(printf '%s' "$line" | jq -r '.params.threadId')" = parent-thread ]; then
+        sleep 60 &
+        printf '%s %s\n' "$$" "$!" > '{}'
+        while :; do sleep 0.01; done
+      fi"#,
+                        owner_pids.display()
+                    ),
+                );
+            }
+            std::fs::write(
+                &f.workspace.config.codex,
+                format!("#!/bin/sh\n{prefix}\n{native}"),
+            )
+            .unwrap();
+            let cleanup = arm_runtime_gate(&f, &f.caller, "cleanup");
+            let reaped = arm_runtime_gate(&f, &f.caller, "reaped");
+            let task = tokio::spawn(runtime::run(
+                f.workspace.clone(),
+                f.caller.clone(),
+                f.run.clone(),
+                "Owner".into(),
+                f.stop.clone(),
+            ));
+            tokio::time::timeout(Duration::from_secs(20), async {
+                while !owner_pids.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let pids: Vec<u32> = std::fs::read_to_string(&owner_pids)
+                .unwrap()
+                .split_whitespace()
+                .map(|p| p.parse().unwrap())
+                .collect();
+            assert_eq!(pids.len(), 2);
+            assert!(runtime::process_group_active(pids[0]).unwrap());
+            let id = f
+                .call(
+                    "message_agent",
+                    json!({"agent":peer,"text":"After physical exit"}),
+                )
+                .await
+                .unwrap()["submission"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            cleanup.entered().await;
+            // Signal dispatch alone is insufficient to publish inactivity or wake
+            // a different root. Cleanup has not awaited the child's exit yet.
+            assert!(runtime::active(
+                &f.workspace
+                    .snapshots
+                    .borrow()
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == f.caller)
+                    .unwrap()
+                    .worker
+                    .as_ref()
+                    .unwrap()
+                    .status
+            ));
+            assert!(!receiver_started.exists());
+            conversation::drain_workspace_waits(&f.workspace).unwrap();
+            assert!(!receiver_started.exists());
+            cleanup.open();
+            reaped.entered().await;
+            assert!(
+                runtime::process_identity(pids[0]).is_none(),
+                "leader has been awaited/reaped"
+            );
+            assert!(
+                !runtime::process_group_active(pids[0]).unwrap(),
+                "all group members physically exited"
+            );
+            assert!(
+                !receiver_started.exists(),
+                "receiver is held until cleanup acknowledges exit"
+            );
+            assert!(runtime::active(
+                &f.workspace
+                    .snapshots
+                    .borrow()
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == f.caller)
+                    .unwrap()
+                    .worker
+                    .as_ref()
+                    .unwrap()
+                    .status
+            ));
+            reaped.open();
+            wait_peer_submission(&f.workspace, &id, SubmissionState::Completed).await;
+            assert!(receiver_started.exists());
+            assert!(
+                !violation.exists(),
+                "receiver exec observed a live holder/group member"
+            );
+            assert_eq!(
+                std::fs::read_to_string(capture)
+                    .unwrap()
+                    .lines()
+                    .filter(|l| l.contains("turn/start"))
+                    .count(),
+                if catalog { 1 } else { 2 }
+            );
+            f.finish().await;
+        }
+    }
+
     /// A running root session of a second project, able to call agent tools.
     fn other_project_session(f: &Fixture, id: &str) -> String {
         let run = format!("{id}-run");

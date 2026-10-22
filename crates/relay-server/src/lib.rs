@@ -199,6 +199,8 @@ struct Store {
     held: HashMap<String, String>,
     /// Sessions with a Nix command running; one at a time per session.
     nix_runs: std::collections::HashSet<String>,
+    #[cfg(test)]
+    runtime_gates: HashMap<(String, &'static str), Arc<runtime::RuntimeGate>>,
 }
 
 // Fixed phase names and numeric measurements only; never include stored data.
@@ -262,7 +264,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 28 {
+        if version > 29 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -288,7 +290,8 @@ impl Store {
              CREATE TABLE IF NOT EXISTS spawn_native_calls(caller TEXT NOT NULL, run TEXT NOT NULL, native_id TEXT NOT NULL, attempt TEXT NOT NULL, input_hash TEXT NOT NULL, PRIMARY KEY(caller,run,native_id));
              CREATE TABLE IF NOT EXISTS spawn_notice_consumption(notice_id TEXT PRIMARY KEY, caller TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS spawn_requests(id TEXT PRIMARY KEY, attempt TEXT NOT NULL);
-             PRAGMA user_version = 28;"
+             CREATE TABLE IF NOT EXISTS workspace_waits(session_id TEXT PRIMARY KEY);
+             PRAGMA user_version = 29;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -426,6 +429,8 @@ impl Store {
             notices: HashMap::new(),
             held: HashMap::new(),
             nix_runs: std::collections::HashSet::new(),
+            #[cfg(test)]
+            runtime_gates: HashMap::new(),
         })
     }
     fn snapshot(&self) -> Result<Snapshot, Error> {
@@ -1236,6 +1241,9 @@ impl Workspace {
             .map_err(Error::internal)?;
         if let Some((pid, identity)) = process {
             runtime::reap_owned(pid, &identity);
+            if runtime::owned_group_active(pid, &identity).map_err(Error::internal)? {
+                return Err(Error::invalid("Owned process cleanup is still in progress"));
+            }
         }
         worker.status = WorkerStatus::Interrupted;
         worker.error = Some(
@@ -1688,6 +1696,12 @@ pub fn router_with_browser(
             changed = true;
         }
     }
+    // Schema 29's waits are scheduling hints, never permission to replay a
+    // turn. Restart pauses their durable queued submissions above.
+    store
+        .connection
+        .execute("DELETE FROM workspace_waits", [])
+        .map_err(Error::internal)?;
     if let Some(remote) = &config.remote {
         let selected = if let Some(index) = initial.projects.iter().position(|project| {
             project.id != "demo" && runtime::configured_project(project, &config)

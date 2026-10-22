@@ -342,6 +342,16 @@ pub(super) fn authorize(
     approved: bool,
     config: &RuntimeConfig,
 ) -> Result<(), Error> {
+    authorize_policy(snapshot, session, approved, config)?;
+    runtime::check_shared(snapshot, session)
+}
+
+fn authorize_policy(
+    snapshot: &Snapshot,
+    session: &str,
+    approved: bool,
+    config: &RuntimeConfig,
+) -> Result<(), Error> {
     let mut candidate = snapshot.clone();
     let index = candidate
         .sessions
@@ -355,7 +365,6 @@ pub(super) fn authorize(
     if session.fixture || session.worker.is_none() {
         return Err(Error::invalid("This session cannot run agent turns"));
     }
-    runtime::check_shared(snapshot, &session.id)?;
     let worker = session.worker.as_ref().unwrap();
     if !runtime::active(&worker.status)
         && ((worker.thread_id.is_none()
@@ -368,6 +377,50 @@ pub(super) fn authorize(
         ));
     }
     crate::agent_tools::authorize_session(snapshot, &session, approved, config)
+}
+
+pub(super) fn authorize_sender(
+    snapshot: &Snapshot,
+    session: &str,
+    sender: &Sender,
+) -> Result<(), Error> {
+    if let Sender::Agent { session_id } = sender {
+        crate::agent_tools::can_message(snapshot, session_id, session)?;
+    }
+    Ok(())
+}
+
+fn authorize_queued(
+    snapshot: &Snapshot,
+    session: &str,
+    approved: bool,
+    config: &RuntimeConfig,
+    sender: &Sender,
+) -> Result<bool, Error> {
+    authorize_policy(snapshot, session, approved, config)?;
+    authorize_sender(snapshot, session, sender)?;
+    runtime::shared_available(snapshot, session)
+}
+
+fn wait_for_workspace(
+    connection: &Connection,
+    snapshot: &mut Snapshot,
+    session: &str,
+) -> Result<(), Error> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO workspace_waits(session_id) VALUES(?1)",
+            [session],
+        )
+        .map_err(Error::internal)?;
+    if let Some(next) = snapshot
+        .submissions
+        .iter_mut()
+        .find(|s| s.session_id == session && s.state == SubmissionState::Queued)
+    {
+        next.error = Some("Waiting for a shared workspace".into());
+    }
+    Ok(())
 }
 
 /// Mint the peer grants of an accepted message sent to `session`. Only a
@@ -433,7 +486,15 @@ pub(super) fn apply(
             if !has_content(&parts) {
                 return Err(Error::invalid("Write a message first"));
             }
-            authorize(snapshot, &session_id, approve_implementation, config)?;
+            let available = if matches!(sender, Sender::Agent { .. }) {
+                // message_agent already rechecks the sender under this writer
+                // lock. Keep mention validation's normal rejection below.
+                authorize_policy(snapshot, &session_id, approve_implementation, config)?;
+                runtime::shared_available(snapshot, &session_id)?
+            } else {
+                authorize(snapshot, &session_id, approve_implementation, config)?;
+                true
+            };
             let previous = draft(transaction, &session_id)?;
             if previous.revision != draft_revision || previous.parts != parts {
                 return Err(Error::new(
@@ -469,7 +530,8 @@ pub(super) fn apply(
                     "This worker has no resumable thread; start a new linked worker",
                 ));
             }
-            let start = !runtime::active(&worker.status)
+            let start = available
+                && !runtime::active(&worker.status)
                 && !snapshot.submissions.iter().any(|s| {
                     s.session_id == session_id
                         && matches!(s.state, SubmissionState::Queued | SubmissionState::Paused)
@@ -491,6 +553,9 @@ pub(super) fn apply(
                 sender,
             };
             snapshot.submissions.push(submission);
+            if !available {
+                wait_for_workspace(transaction, snapshot, &session_id)?;
+            }
             store_draft(
                 transaction,
                 &Draft {
@@ -744,7 +809,9 @@ pub(super) fn reserve(snapshot: &mut Snapshot, session: &str, id: &str, parts: &
         if let Some(spawn) = agent.spawn.as_mut() {
             spawn.task = plain_text(parts);
         }
-        agent.awaiting_first_message = false;
+        // Naming can happen at reservation, but first-message eligibility is
+        // consumed only when the harness actually launches. A late guard may
+        // still return this never-launched turn to the queue.
     }
     let worker = snapshot
         .sessions
@@ -842,13 +909,17 @@ pub(super) fn advance(workspace: &Workspace, session: &str, run: &str) -> Result
             );
         }
     } else if let Some(next) = next {
-        if let Err(error) = authorize(
+        let authorization = authorize_queued(
             &snapshot,
             session,
             next.approve_implementation,
             &workspace.config,
-        ) {
+            &next.sender,
+        );
+        if let Err(error) = authorization {
             pause(&mut snapshot, session, &error.to_string());
+        } else if matches!(authorization, Ok(false)) {
+            wait_for_workspace(&store.connection, &mut snapshot, session)?;
         } else {
             validate(&store.connection, &snapshot, session, &next.parts)?;
             snapshot
@@ -857,6 +928,12 @@ pub(super) fn advance(workspace: &Workspace, session: &str, run: &str) -> Result
                 .find(|s| s.id == next.id)
                 .unwrap()
                 .state = SubmissionState::Launching;
+            snapshot
+                .submissions
+                .iter_mut()
+                .find(|s| s.id == next.id)
+                .unwrap()
+                .error = None;
             reserve(&mut snapshot, session, &next.id, &next.parts);
             let transaction = store
                 .connection
@@ -892,5 +969,183 @@ pub(super) fn advance(workspace: &Workspace, session: &str, run: &str) -> Result
     snapshot.revision += 1;
     store.save(&snapshot)?;
     workspace.snapshots.send_replace(snapshot);
+    Ok(())
+}
+
+/// Return an agent message rejected by the final launch guard to its durable
+/// queue. A reservation is not delivery, and reserve keeps the prompt identity
+/// stable when this turn is eventually launched again.
+pub(super) fn defer_launch(
+    workspace: &Workspace,
+    session: &str,
+    run: &str,
+    stop: &watch::Receiver<bool>,
+) -> Result<bool, Error> {
+    let mut store = workspace.store.lock().map_err(Error::internal)?;
+    // Stop acceptance signals this channel under this same writer lock. A
+    // pre-lock observation cannot authorize replacing its accepted stop with a
+    // fresh channel in a subsequent queue drain.
+    if *stop.borrow() || store.run_id(session)?.as_deref() != Some(run) || store.closing {
+        return Ok(false);
+    }
+    let mut snapshot = store.snapshot()?;
+    let Some(submission) = snapshot.submissions.iter_mut().find(|s| {
+        s.id == run
+            && s.state == SubmissionState::Launching
+            && matches!(s.sender, Sender::Agent { .. })
+    }) else {
+        return Ok(false);
+    };
+    submission.state = SubmissionState::Queued;
+    submission.interrupts_run = None;
+    let worker = snapshot
+        .sessions
+        .iter_mut()
+        .find(|s| s.id == session)
+        .and_then(|s| s.worker.as_mut())
+        .ok_or_else(|| Error::invalid("Worker missing"))?;
+    // The reservation never launched a harness and must no longer hold a lock.
+    worker.status = WorkerStatus::Completed;
+    worker.error = None;
+    let transaction = store.connection.transaction().map_err(Error::internal)?;
+    wait_for_workspace(&transaction, &mut snapshot, session)?;
+    snapshot.revision += 1;
+    transaction
+        .execute(
+            "UPDATE workspace SET snapshot=?1 WHERE id=1",
+            [serde_json::to_string(&snapshot).map_err(Error::internal)?],
+        )
+        .map_err(Error::internal)?;
+    transaction.commit().map_err(Error::internal)?;
+    store.controls.remove(session);
+    store.agent_capabilities.remove(session);
+    workspace.snapshots.send_replace(snapshot);
+    Ok(true)
+}
+
+/// One event-driven pass, under the same writer lock as acceptance and launch.
+/// Only queues explicitly deferred for contention are eligible. Paused queues
+/// (including restart recovery) always require a human resume. Reservations in
+/// this pass immediately participate in the guard for the following candidate.
+pub(super) fn drain_workspace_waits(workspace: &Workspace) -> Result<(), Error> {
+    let mut store = workspace.store.lock().map_err(Error::internal)?;
+    if store.closing {
+        return Ok(());
+    }
+    let mut waiting = {
+        let mut query = store
+            .connection
+            .prepare("SELECT session_id FROM workspace_waits")
+            .map_err(Error::internal)?;
+        query
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(Error::internal)?
+            .collect::<Result<std::collections::HashSet<_>, _>>()
+            .map_err(Error::internal)?
+    };
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    let mut snapshot = store.snapshot()?;
+    let next: Vec<_> = snapshot
+        .submissions
+        .iter()
+        .filter(|s| s.state == SubmissionState::Queued && waiting.remove(&s.session_id))
+        .cloned()
+        .collect();
+    let transaction = store.connection.transaction().map_err(Error::internal)?;
+    // Deleted sessions and queues with no queued turns have nothing to wake.
+    for id in waiting {
+        transaction
+            .execute("DELETE FROM workspace_waits WHERE session_id=?1", [id])
+            .map_err(Error::internal)?;
+    }
+    let mut launches = Vec::new();
+    let mut changed = false;
+    for next in next {
+        let session = &next.session_id;
+        let held = snapshot
+            .submissions
+            .iter()
+            .any(|s| s.session_id == *session && s.state == SubmissionState::Paused);
+        if held || !snapshot.sessions.iter().any(|s| s.id == *session) {
+            transaction
+                .execute("DELETE FROM workspace_waits WHERE session_id=?1", [session])
+                .map_err(Error::internal)?;
+            continue;
+        }
+        if snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == *session)
+            .and_then(|s| s.worker.as_ref())
+            .is_some_and(|w| runtime::active(&w.status))
+        {
+            continue;
+        }
+        let authorization = authorize_queued(
+            &snapshot,
+            session,
+            next.approve_implementation,
+            &workspace.config,
+            &next.sender,
+        )
+        .and_then(|available| {
+            validate(&transaction, &snapshot, session, &next.parts)?;
+            Ok(available)
+        });
+        match authorization {
+            Ok(false) => continue,
+            Err(error) => pause(&mut snapshot, session, &error.to_string()),
+            Ok(true) => {
+                let submission = snapshot
+                    .submissions
+                    .iter_mut()
+                    .find(|s| s.id == next.id)
+                    .unwrap();
+                submission.state = SubmissionState::Launching;
+                submission.error = None;
+                reserve(&mut snapshot, session, &next.id, &next.parts);
+                transaction
+                    .execute(
+                        "INSERT OR REPLACE INTO runs(session_id,run_id) VALUES(?1,?2)",
+                        params![session, next.id],
+                    )
+                    .map_err(Error::internal)?;
+                launches.push(next.clone());
+            }
+        }
+        changed = true;
+        transaction
+            .execute(
+                "DELETE FROM workspace_waits WHERE session_id=?1",
+                [&next.session_id],
+            )
+            .map_err(Error::internal)?;
+    }
+    if changed {
+        snapshot.revision += 1;
+        transaction
+            .execute(
+                "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                [serde_json::to_string(&snapshot).map_err(Error::internal)?],
+            )
+            .map_err(Error::internal)?;
+    }
+    transaction.commit().map_err(Error::internal)?;
+    if changed {
+        workspace.snapshots.send_replace(snapshot);
+    }
+    for next in launches {
+        let (sender, receiver) = watch::channel(false);
+        store.controls.insert(next.session_id.clone(), sender);
+        tokio::spawn(runtime::run(
+            workspace.clone(),
+            next.session_id,
+            next.id,
+            plain_text(&next.parts),
+            receiver,
+        ));
+    }
     Ok(())
 }

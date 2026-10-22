@@ -121,7 +121,7 @@ pub(super) fn delete(
         // Keep parent-side retry identities, but never return a deleted child
         // as a live session or allow the same request to recreate it.
         transaction.execute("UPDATE spawn_attempts SET child=NULL,phase='child_deleted',response=json_object('spawn_attempt',id,'phase','child_deleted','deleted',json('true')) WHERE child=?1", [id]).map_err(Error::internal)?;
-        for table in ["drafts", "runs", "processes"] {
+        for table in ["drafts", "runs", "processes", "workspace_waits"] {
             transaction
                 .execute(&format!("DELETE FROM {table} WHERE session_id=?1"), [id])
                 .map_err(Error::internal)?;

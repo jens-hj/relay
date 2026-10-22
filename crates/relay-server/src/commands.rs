@@ -189,16 +189,25 @@ pub(super) async fn discover(
     id: &str,
     force: bool,
 ) -> Result<HarnessCatalog, Error> {
-    discover_context(workspace, id, (!force).then_some(CATALOG_AGE), None).await
+    discover_context(workspace, id, (!force).then_some(CATALOG_AGE), None, None).await
 }
 
 /// A session's catalog for checking a turn's model and effort, reusing a
 /// recently discovered one.
-pub(super) async fn discover_selection(
+pub(super) async fn discover_turn(
     workspace: &Workspace,
     id: &str,
+    force: bool,
+    cleanup: &runtime::Cleanup,
 ) -> Result<HarnessCatalog, Error> {
-    discover_context(workspace, id, Some(SELECTION_CATALOG_AGE), None).await
+    discover_context(
+        workspace,
+        id,
+        (!force).then_some(SELECTION_CATALOG_AGE),
+        None,
+        Some(cleanup),
+    )
+    .await
 }
 
 /// The catalog saved for `key` less than `max_age` seconds ago.
@@ -227,7 +236,14 @@ pub(super) async fn discover_profile(
     harness: Harness,
 ) -> Result<HarnessCatalog, Error> {
     let key = format!("profile:{project}:{harness:?}");
-    discover_context(workspace, &key, Some(CATALOG_AGE), Some((project, harness))).await
+    discover_context(
+        workspace,
+        &key,
+        Some(CATALOG_AGE),
+        Some((project, harness)),
+        None,
+    )
+    .await
 }
 
 /// Discovers a catalog, reusing one saved less than `max_age` seconds ago;
@@ -237,6 +253,7 @@ async fn discover_context(
     id: &str,
     max_age: Option<u64>,
     profile_context: Option<(&str, Harness)>,
+    cleanup: Option<&runtime::Cleanup>,
 ) -> Result<HarnessCatalog, Error> {
     let snapshot = workspace.snapshots.borrow().clone();
     // Example sessions never run a harness; they describe the demo catalog.
@@ -370,15 +387,13 @@ async fn discover_context(
         command.process_group(0);
     }
     let phases = Phases::new();
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|_| Error::invalid("Cannot start harness discovery"))?;
     phases.mark("spawn");
-    let _guard = runtime::ProcessGuard {
-        owned: child
-            .id()
-            .and_then(|pid| runtime::process_identity(pid).map(|identity| (pid, identity))),
-    };
+    let local_cleanup = Default::default();
+    let mut child =
+        runtime::WorkerProcess::new(child, cleanup.unwrap_or(&local_cleanup), workspace, id);
     let _job = ProjectJob::new(workspace);
     let output = child
         .stdout
@@ -594,7 +609,7 @@ async fn discover_context(
     }
     // Includes time in an unfinished phase, even when the probe fails or times out.
     phases.mark("probe_end");
-    runtime::terminate(&mut child).await;
+    child.release().await;
     phases.mark("terminate");
     phases.report(
         &format!("{} discovery", harness.label()),
