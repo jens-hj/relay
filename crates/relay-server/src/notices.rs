@@ -321,15 +321,25 @@ pub(super) fn enqueue(
         last_edit_request: None,
         sender: Sender::User,
     };
+    let mut contended = false;
     if held || !allow_launch {
         submission.state = SubmissionState::Paused;
         submission.error = Some("Queue paused; resume to continue".into());
     } else if !active && !waiting {
-        if let Err(error) = conversation::authorize(&snapshot, parent, false, &workspace.config) {
-            submission.state = SubmissionState::Paused;
-            submission.error = Some(error.to_string());
-        } else {
-            submission.state = SubmissionState::Launching;
+        match conversation::authorize(
+            &store.connection,
+            &snapshot,
+            parent,
+            false,
+            &workspace.config,
+        ) {
+            Err(error) => {
+                submission.state = SubmissionState::Paused;
+                submission.error = Some(error.to_string());
+            }
+            Ok(true) => submission.state = SubmissionState::Launching,
+            // Stays queued until the shared workspace is released.
+            Ok(false) => contended = true,
         }
     }
     let launch = submission.state == SubmissionState::Launching;
@@ -352,6 +362,9 @@ pub(super) fn enqueue(
                 params![id, attempt],
             )
             .map_err(Error::internal)?;
+    }
+    if contended {
+        conversation::wait_for_workspace(&transaction, &mut snapshot, parent)?;
     }
     if launch {
         transaction

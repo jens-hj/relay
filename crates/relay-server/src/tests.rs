@@ -778,15 +778,25 @@ async fn stale_board_retry_over_http_runs_once_while_other_writes_continue() {
     );
     let project = format!("project-{}", create.request_id);
     assert!(send(create).await.unwrap().status().is_success());
+    // A failed sync commits twice: the operation's failure, then its board
+    // connection's. Wait for both, so no sync write lands among the renames.
+    let board_failed = |s: &Snapshot| {
+        s.connections.iter().any(|c| {
+            c.project_id == project
+                && matches!(c.kind, ConnectionKind::Board { .. })
+                && c.state == ConnectionState::Failed
+        })
+    };
     let mut failed = read(&client, addr, token).await;
     for _ in 0..100 {
-        if sync_state(&failed) == Some(OperationState::Failed) {
+        if sync_state(&failed) == Some(OperationState::Failed) && board_failed(&failed) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         failed = read(&client, addr, token).await;
     }
     assert_eq!(sync_state(&failed), Some(OperationState::Failed));
+    assert!(board_failed(&failed));
     let (sync, board) = failed
         .operations
         .iter()
@@ -5380,4 +5390,84 @@ async fn app_server_public_summary_stays_fresh_after_many_public_and_redacted_it
             .any(|m| m.body.contains("TEST_SENTINEL"))
     );
     assert!(projection.view(&finished).1.progress_summary.is_none());
+}
+
+#[test]
+fn failed_board_sync_settles_in_a_second_commit_after_its_failure_is_visible() {
+    let dir = tempfile::tempdir().unwrap();
+    let glab = dir.path().join("glab");
+    script(&glab, "exit 1");
+    let mut c = config();
+    c.glab = glab;
+    let w = workspace(&dir.path().join("db"), &live(), c.clone());
+    let board_connection = |s: &Snapshot, project: &str| {
+        s.connections
+            .iter()
+            .find(|c| c.project_id == project && matches!(c.kind, ConnectionKind::Board { .. }))
+            .unwrap()
+            .state
+            .clone()
+    };
+    let create = |name: &str, number: u64| {
+        let revision = w.snapshots.borrow().revision;
+        let envelope = env(
+            revision,
+            Command::CreateProject {
+                name: name.into(),
+                root: dir.path().join(name).display().to_string(),
+                connections: vec![ConnectionInput::Board {
+                    source: BoardSource::Gitlab {
+                        host: "gitlab.com".into(),
+                        group: true,
+                        path: "unincorporated/mosaic".into(),
+                        number,
+                        url: format!(
+                            "https://gitlab.com/groups/unincorporated/mosaic/-/boards/{number}"
+                        ),
+                    },
+                }],
+            },
+        );
+        let (snapshot, _) = w.store.lock().unwrap().apply(envelope.clone(), &c).unwrap();
+        w.snapshots.send_replace(snapshot.clone());
+        let project = format!("project-{}", envelope.request_id);
+        let operation = snapshot
+            .operations
+            .iter()
+            .find(|o| {
+                matches!(&o.kind, OperationKind::Sync { board_id }
+                    if snapshot.boards.iter().any(|b| &b.id == board_id && b.project_id == project))
+            })
+            .unwrap()
+            .id
+            .clone();
+        (project, operation)
+    };
+    let state = |s: &Snapshot, id: &str| {
+        s.operations
+            .iter()
+            .find(|o| o.id == id)
+            .unwrap()
+            .state
+            .clone()
+    };
+    // The provider's commit alone publishes the failed operation while its
+    // board connection is not yet failed: a client waiting only for the
+    // failure can act before the sync's last write.
+    let (first, operation) = create("First", 1);
+    let before = w.snapshots.borrow().revision;
+    assert!(crate::providers::execute(&w, &operation).is_err());
+    let visible = w.snapshots.borrow().clone();
+    assert_eq!(visible.revision, before + 1);
+    assert_eq!(state(&visible, &operation), OperationState::Failed);
+    assert_ne!(board_connection(&visible, &first), ConnectionState::Failed);
+    // The whole job commits once more after that failure, and only then is
+    // its board connection failed; nothing follows it.
+    let (second, operation) = create("Second", 2);
+    let before = w.snapshots.borrow().revision;
+    crate::projects::run(w.clone(), operation.clone());
+    let settled = w.snapshots.borrow().clone();
+    assert_eq!(settled.revision, before + 3);
+    assert_eq!(state(&settled, &operation), OperationState::Failed);
+    assert_eq!(board_connection(&settled, &second), ConnectionState::Failed);
 }

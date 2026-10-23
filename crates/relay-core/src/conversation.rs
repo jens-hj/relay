@@ -266,6 +266,40 @@ impl crate::Snapshot {
             })
             .collect()
     }
+
+    /// The session's first turn when it has never started a thread and that
+    /// turn still waits in its queue, so it can launch the session later. A
+    /// session whose first turn already ran, failed or was cancelled has none.
+    pub fn waiting_first_turn(&self, session: &crate::Session) -> Option<&Submission> {
+        if session.worker.as_ref()?.thread_id.is_some() || !session.conversations.is_empty() {
+            return None;
+        }
+        self.submissions
+            .iter()
+            .find(|s| s.session_id == session.id)
+            .filter(|s| {
+                matches!(
+                    s.state,
+                    SubmissionState::Queued | SubmissionState::Paused | SubmissionState::Launching
+                )
+            })
+    }
+
+    /// Whether a session can take another turn: it is queued or running, or
+    /// it has a worktree and a thread to resume, a pending first message or a
+    /// waiting first turn.
+    pub fn can_continue(&self, session: &crate::Session) -> bool {
+        session.worker.as_ref().is_some_and(|w| {
+            matches!(
+                w.status,
+                crate::WorkerStatus::Queued | crate::WorkerStatus::Running
+            ) || (w.worktree.is_some()
+                && (w.thread_id.is_some()
+                    || !session.conversations.is_empty()
+                    || session.awaiting_first_message
+                    || self.waiting_first_turn(session).is_some()))
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

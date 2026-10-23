@@ -432,7 +432,7 @@ fn shared_workspaces_block_overlapping_execution() {
         session.workspaces = vec![SessionWorkspace {
             connection_id: "shared".into(),
             path: dir.path().display().to_string(),
-            repository: false,
+            repository: true,
             branch: None,
             base_commit: None,
             changes: None,
@@ -455,11 +455,13 @@ fn shared_workspaces_block_overlapping_execution() {
             changes: None,
         });
     }
-    assert!(runtime::check_shared(&snapshot, &snapshot.sessions[0].id).is_err());
+    assert!(
+        runtime::check_shared(&snapshot, &snapshot.sessions[0].id, &Default::default()).is_err()
+    );
     for session in snapshot.sessions.iter_mut().skip(1) {
         session.worker.as_mut().unwrap().status = WorkerStatus::Completed;
     }
-    runtime::check_shared(&snapshot, &snapshot.sessions[0].id).unwrap();
+    runtime::check_shared(&snapshot, &snapshot.sessions[0].id, &Default::default()).unwrap();
 }
 
 const CLAUDE: &str = r#"
@@ -2143,4 +2145,492 @@ async fn codex_resume_skips_turn_history_only_when_the_version_supports_it() {
             "{agent}"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fork_of_a_held_worktree_waits_over_http_and_forks_once_after_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, id, capture) = setup(dir.path()).await;
+    let path = PathBuf::from(
+        w.snapshots
+            .borrow()
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .worktree
+            .clone()
+            .unwrap(),
+    );
+    std::fs::write(path.join("pending-fork"), "copied after release").unwrap();
+    let change = |update: &dyn Fn(&mut Snapshot)| {
+        let mut store = w.store.lock().unwrap();
+        let mut snapshot = store.snapshot().unwrap();
+        update(&mut snapshot);
+        snapshot.revision += 1;
+        store.save(&snapshot).unwrap();
+        w.snapshots.send_replace(snapshot);
+    };
+    // An unrelated running session records the same worktree.
+    change(&|s| {
+        let mut holder = s.sessions.iter().find(|s| s.id == id).unwrap().clone();
+        holder.id = "holder".into();
+        holder.parent_session_id = None;
+        holder.worker.as_mut().unwrap().status = WorkerStatus::Running;
+        s.sessions.push(holder);
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!(
+        "http://{}/v1/conversation/commands",
+        listener.local_addr().unwrap()
+    );
+    let app = axum::Router::new()
+        .route(
+            "/v1/conversation/commands",
+            axum::routing::post(crate::command),
+        )
+        .with_state(w.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let fork = env(
+        w.snapshots.borrow().revision,
+        Command::ConversationCommand {
+            session_id: id.clone(),
+            name: "fork".into(),
+            argument: String::new(),
+        },
+    );
+    let response = reqwest::Client::new()
+        .post(endpoint)
+        .header("authorization", "Bearer test-token")
+        .json(&fork)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "fork rejected: {}",
+        response.text().await.unwrap()
+    );
+    let forks = |snapshot: &Snapshot| {
+        snapshot
+            .sessions
+            .iter()
+            .filter(|s| s.id == fork.request_id)
+            .count()
+    };
+    let target = path
+        .parent()
+        .unwrap()
+        .join(format!("fork-{}-0", fork.request_id));
+    {
+        let snapshot = w.snapshots.borrow().clone();
+        let waiting = snapshot
+            .submissions
+            .iter()
+            .find(|s| s.id == fork.request_id)
+            .unwrap();
+        assert_eq!(
+            (
+                plain_text(&waiting.parts),
+                &waiting.state,
+                waiting.error.as_deref()
+            ),
+            (
+                "/fork".into(),
+                &SubmissionState::Queued,
+                Some("Waiting for a shared workspace")
+            )
+        );
+        let source = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
+        assert!(!runtime::active(&source.worker.as_ref().unwrap().status));
+        assert_eq!(forks(&snapshot), 0);
+    }
+    // Nothing was copied while the holder could edit the worktree.
+    assert!(!target.exists());
+    assert!(
+        !std::fs::read_to_string(&capture)
+            .unwrap()
+            .contains("thread/fork")
+    );
+    change(&|s| {
+        s.sessions
+            .iter_mut()
+            .find(|s| s.id == "holder")
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .status = WorkerStatus::Completed;
+    });
+    conversation::drain_workspace_waits(&w).unwrap();
+    let snapshot = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let snapshot = w.snapshots.borrow().clone();
+            if snapshot
+                .submissions
+                .iter()
+                .any(|s| s.id == fork.request_id && s.state == SubmissionState::Completed)
+                && forks(&snapshot) == 1
+            {
+                return snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let source = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
+    assert_eq!(
+        source.worker.as_ref().unwrap().status,
+        WorkerStatus::Completed
+    );
+    let copy = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == fork.request_id)
+        .unwrap();
+    let copied = PathBuf::from(copy.worker.as_ref().unwrap().worktree.as_ref().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(copied.join("pending-fork")).unwrap(),
+        "copied after release"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&capture)
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains("\"thread/fork\""))
+            .count(),
+        1
+    );
+    assert_eq!(
+        w.store
+            .lock()
+            .unwrap()
+            .connection
+            .query_row("SELECT COUNT(*) FROM workspace_waits", [], |r| r
+                .get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fork_meeting_contention_after_copying_removes_the_copy_before_waiting_and_forks_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, id, capture) = setup(dir.path()).await;
+    let path = PathBuf::from(
+        w.snapshots
+            .borrow()
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .worktree
+            .clone()
+            .unwrap(),
+    );
+    std::fs::write(path.join("pending-fork"), "copied by the retry").unwrap();
+    let change = |update: &dyn Fn(&mut Snapshot)| {
+        let mut store = w.store.lock().unwrap();
+        let mut snapshot = store.snapshot().unwrap();
+        update(&mut snapshot);
+        snapshot.revision += 1;
+        store.save(&snapshot).unwrap();
+        w.snapshots.send_replace(snapshot);
+    };
+    let launch = runtime::RuntimeGate::new();
+    w.store
+        .lock()
+        .unwrap()
+        .runtime_gates
+        .insert((id.clone(), "before_launch"), launch.clone());
+    // The worktree is free, so the fork is admitted to launch and copies it.
+    let fork = env(
+        w.snapshots.borrow().revision,
+        Command::ConversationCommand {
+            session_id: id.clone(),
+            name: "fork".into(),
+            argument: String::new(),
+        },
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!(
+        "http://{}/v1/conversation/commands",
+        listener.local_addr().unwrap()
+    );
+    let app = axum::Router::new()
+        .route(
+            "/v1/conversation/commands",
+            axum::routing::post(crate::command),
+        )
+        .with_state(w.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let response = reqwest::Client::new()
+        .post(endpoint)
+        .header("authorization", "Bearer test-token")
+        .json(&fork)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    launch.entered().await;
+    let target = path
+        .parent()
+        .unwrap()
+        .join(format!("fork-{}-0", fork.request_id));
+    let branch = format!("relay/fork-{}-0", fork.request_id);
+    let branches = || {
+        let output = std::process::Command::new("git")
+            .args(["branch", "--list", &branch])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert!(target.exists());
+    assert!(!branches().is_empty());
+    // Another session takes the worktree before the harness starts.
+    change(&|s| {
+        let mut holder = s.sessions.iter().find(|s| s.id == id).unwrap().clone();
+        holder.id = "holder".into();
+        holder.parent_session_id = None;
+        holder.worker.as_mut().unwrap().status = WorkerStatus::Running;
+        s.sessions.push(holder);
+    });
+    launch.open();
+    let waiting = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let snapshot = w.snapshots.borrow().clone();
+            if let Some(waiting) = snapshot
+                .submissions
+                .iter()
+                .find(|s| s.id == fork.request_id && s.state == SubmissionState::Queued)
+            {
+                return (snapshot.clone(), waiting.clone());
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // The copy and its branch were gone before the fork returned to the queue.
+    assert!(!target.exists());
+    assert!(branches().is_empty());
+    let (snapshot, submission) = waiting;
+    assert_eq!(
+        (
+            plain_text(&submission.parts),
+            submission.error.as_deref(),
+            submission.sender.clone()
+        ),
+        (
+            "/fork".into(),
+            Some("Waiting for a shared workspace"),
+            Sender::User
+        )
+    );
+    assert!(!snapshot.sessions.iter().any(|s| s.id == fork.request_id));
+    assert!(
+        !std::fs::read_to_string(&capture)
+            .unwrap()
+            .contains("thread/fork")
+    );
+    change(&|s| {
+        s.sessions
+            .iter_mut()
+            .find(|s| s.id == "holder")
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .status = WorkerStatus::Completed;
+    });
+    conversation::drain_workspace_waits(&w).unwrap();
+    let snapshot = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let snapshot = w.snapshots.borrow().clone();
+            if snapshot
+                .submissions
+                .iter()
+                .any(|s| s.id == fork.request_id && s.state == SubmissionState::Completed)
+                && snapshot.sessions.iter().any(|s| s.id == fork.request_id)
+            {
+                return snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        snapshot
+            .sessions
+            .iter()
+            .filter(|s| s.id == fork.request_id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        std::fs::read_to_string(&capture)
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains("\"thread/fork\""))
+            .count(),
+        1
+    );
+    // No cleanup left over from the first attempt removes the retry's copy.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        std::fs::read_to_string(target.join("pending-fork")).unwrap(),
+        "copied by the retry"
+    );
+    assert!(!branches().is_empty());
+    server.abort();
+}
+
+/// An older server accepts edits of a waiting fork's text. Its Claude fork
+/// launch is the same as this one's: `--fork-session` with the fixed `/status`
+/// message, never the queued text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_fork_from_the_queue_sends_only_its_fixed_command_even_after_its_text_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = review_repo(dir.path());
+    let capture = dir.path().join("claude.jsonl");
+    let argv = dir.path().join("argv");
+    let binary = dir.path().join("command-claude");
+    script(
+        &binary,
+        &CLAUDE
+            .replace("@CAPTURE@", capture.to_str().unwrap())
+            .replace("@ARGV@", argv.to_str().unwrap()),
+    );
+    let mut config = config();
+    config.repository = Some(repo);
+    config.claude = binary;
+    let mut snapshot = live();
+    snapshot.projects[0].defaults = AgentProfile {
+        harness: Harness::ClaudeCode,
+        ..Default::default()
+    };
+    let w = workspace(&dir.path().join("db"), &snapshot, config);
+    let (id, run, stop, prompt) = reserve(&w, env(snapshot.revision, start(&snapshot)));
+    runtime::run(w.clone(), id.clone(), run, prompt, stop).await;
+    finished(&w, &id).await;
+    let change = |update: &dyn Fn(&mut Snapshot)| {
+        let mut store = w.store.lock().unwrap();
+        let mut snapshot = store.snapshot().unwrap();
+        update(&mut snapshot);
+        snapshot.revision += 1;
+        store.save(&snapshot).unwrap();
+        w.snapshots.send_replace(snapshot);
+    };
+    change(&|s| {
+        let mut holder = s.sessions.iter().find(|s| s.id == id).unwrap().clone();
+        holder.id = "holder".into();
+        holder.parent_session_id = None;
+        holder.worker.as_mut().unwrap().status = WorkerStatus::Running;
+        s.sessions.push(holder);
+    });
+    let snapshot = apply(
+        &w,
+        Command::ConversationCommand {
+            session_id: id.clone(),
+            name: "fork".into(),
+            argument: String::new(),
+        },
+    );
+    let fork = snapshot
+        .submissions
+        .iter()
+        .find(|s| s.session_id == id && s.state == SubmissionState::Queued)
+        .unwrap()
+        .id
+        .clone();
+    // What an older server's queue edit stores for the waiting fork.
+    let edited = "Edited text that must not reach Claude";
+    change(&|s| {
+        let submission = s.submissions.iter_mut().find(|s| s.id == fork).unwrap();
+        submission.parts = vec![Part::text(edited)];
+        submission.last_edit_request = Some("older-server-edit".into());
+        s.sessions
+            .iter_mut()
+            .find(|s| s.id == "holder")
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .status = WorkerStatus::Completed;
+    });
+    let launched = std::fs::read_to_string(&capture).unwrap().lines().count();
+    conversation::drain_workspace_waits(&w).unwrap();
+    let snapshot = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let snapshot = w.snapshots.borrow().clone();
+            if snapshot
+                .submissions
+                .iter()
+                .any(|s| s.id == fork && s.state == SubmissionState::Completed)
+                && snapshot.sessions.iter().any(|s| s.id == fork)
+            {
+                return snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // The fork's run sent Claude only the fixed message that opens the fork.
+    let log = std::fs::read_to_string(&capture).unwrap();
+    let sent: Vec<Value> = log
+        .lines()
+        .skip(launched)
+        .map(|l| serde_json::from_str(l).unwrap())
+        .filter(|v: &Value| v["type"] == "user" && v["uuid"] == fork.as_str())
+        .collect();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0]["message"]["content"],
+        serde_json::json!([{"type":"text","text":"/status"}])
+    );
+    assert!(!log.contains(edited));
+    assert!(
+        std::fs::read_to_string(&argv)
+            .unwrap()
+            .contains("--fork-session")
+    );
+    assert_eq!(
+        snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == fork)
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .thread_id
+            .as_deref(),
+        Some("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+    );
+    // The transcript keeps the edited text as the turn's prompt, although the
+    // harness never received it.
+    assert_eq!(
+        snapshot
+            .messages
+            .iter()
+            .find(|m| m.id == format!("prompt-{fork}"))
+            .unwrap()
+            .body,
+        edited
+    );
 }

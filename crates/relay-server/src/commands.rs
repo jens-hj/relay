@@ -1027,8 +1027,17 @@ pub(super) fn cached(
     matching.last().map(|(_, c)| c.clone())
 }
 
-pub(super) fn reserve_fork(snapshot: &mut Snapshot, id: &str) -> Result<(), Error> {
-    runtime::check_shared(snapshot, id)?;
+/// Checks a fork of `id`. A fork copies the session's repository worktrees in
+/// several steps, so it must not run while another session's harness can edit
+/// one of them. When none can, the session is reserved and the fork launches
+/// now (`true`); otherwise the caller queues it to run once they are free.
+pub(super) fn reserve_fork(
+    snapshot: &mut Snapshot,
+    id: &str,
+    waiting: &std::collections::HashSet<String>,
+) -> Result<bool, Error> {
+    let available = runtime::launch_available(snapshot, id, waiting)?;
+
     let session = snapshot
         .sessions
         .iter()
@@ -1053,6 +1062,9 @@ pub(super) fn reserve_fork(snapshot: &mut Snapshot, id: &str) -> Result<(), Erro
     if session.worker.as_ref().unwrap().thread_id.is_none() {
         return Err(Error::invalid("This conversation has no history to fork"));
     }
+    if !available {
+        return Ok(false);
+    }
     snapshot
         .sessions
         .iter_mut()
@@ -1062,7 +1074,7 @@ pub(super) fn reserve_fork(snapshot: &mut Snapshot, id: &str) -> Result<(), Erro
         .as_mut()
         .unwrap()
         .status = WorkerStatus::Queued;
-    Ok(())
+    Ok(true)
 }
 
 pub(super) fn fork_workspaces(session: &Session, id: &str) -> Result<Session, Error> {
@@ -1400,16 +1412,27 @@ pub(super) fn delete_branch_workspaces(
 pub(super) struct ForkResources {
     pub workspace: Workspace,
     pub session: Session,
+    /// Whether dropping removes the copy when the fork was not published.
+    pub armed: bool,
+}
+impl ForkResources {
+    /// Remove the unpublished copy now, before its run can be retried under
+    /// the same identity, so no later cleanup can remove the retry's copy.
+    pub(super) fn discard(mut self) {
+        cleanup_fork(&self.session);
+        self.armed = false;
+    }
 }
 impl Drop for ForkResources {
     fn drop(&mut self) {
-        if self
-            .workspace
-            .snapshots
-            .borrow()
-            .sessions
-            .iter()
-            .any(|s| s.id == self.session.id)
+        if !self.armed
+            || self
+                .workspace
+                .snapshots
+                .borrow()
+                .sessions
+                .iter()
+                .any(|s| s.id == self.session.id)
         {
             return;
         }

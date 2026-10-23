@@ -336,14 +336,32 @@ pub(super) fn pause(snapshot: &mut Snapshot, session: &str, reason: &str) {
     }
 }
 
+/// Policy for accepting a turn, and whether its shared workspaces are free to
+/// launch it now. Contention never rejects a turn: the caller queues it and
+/// waits for the workspace, as for any other sender, behind earlier waiters.
 pub(super) fn authorize(
+    connection: &Connection,
     snapshot: &Snapshot,
     session: &str,
     approved: bool,
     config: &RuntimeConfig,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     authorize_policy(snapshot, session, approved, config)?;
-    runtime::check_shared(snapshot, session)
+    runtime::launch_available(snapshot, session, &waiting_sessions(connection)?)
+}
+
+/// Sessions whose queues wait for a shared workspace.
+pub(super) fn waiting_sessions(
+    connection: &Connection,
+) -> Result<std::collections::HashSet<String>, Error> {
+    let mut query = connection
+        .prepare("SELECT session_id FROM workspace_waits")
+        .map_err(Error::internal)?;
+    query
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(Error::internal)?
+        .collect::<Result<_, _>>()
+        .map_err(Error::internal)
 }
 
 fn authorize_policy(
@@ -365,13 +383,7 @@ fn authorize_policy(
     if session.fixture || session.worker.is_none() {
         return Err(Error::invalid("This session cannot run agent turns"));
     }
-    let worker = session.worker.as_ref().unwrap();
-    if !runtime::active(&worker.status)
-        && ((worker.thread_id.is_none()
-            && session.conversations.is_empty()
-            && !session.awaiting_first_message)
-            || worker.worktree.is_none())
-    {
+    if !snapshot.can_continue(&session) {
         return Err(Error::invalid(
             "This worker has no resumable thread; start a new linked worker",
         ));
@@ -396,13 +408,14 @@ fn authorize_queued(
     approved: bool,
     config: &RuntimeConfig,
     sender: &Sender,
+    waiting: &std::collections::HashSet<String>,
 ) -> Result<bool, Error> {
     authorize_policy(snapshot, session, approved, config)?;
     authorize_sender(snapshot, session, sender)?;
-    runtime::shared_available(snapshot, session)
+    runtime::launch_available(snapshot, session, waiting)
 }
 
-fn wait_for_workspace(
+pub(super) fn wait_for_workspace(
     connection: &Connection,
     snapshot: &mut Snapshot,
     session: &str,
@@ -486,15 +499,15 @@ pub(super) fn apply(
             if !has_content(&parts) {
                 return Err(Error::invalid("Write a message first"));
             }
-            let available = if matches!(sender, Sender::Agent { .. }) {
-                // message_agent already rechecks the sender under this writer
-                // lock. Keep mention validation's normal rejection below.
-                authorize_policy(snapshot, &session_id, approve_implementation, config)?;
-                runtime::shared_available(snapshot, &session_id)?
-            } else {
-                authorize(snapshot, &session_id, approve_implementation, config)?;
-                true
-            };
+            // message_agent already rechecks an agent sender under this writer
+            // lock. Keep mention validation's normal rejection below.
+            let available = authorize(
+                transaction,
+                snapshot,
+                &session_id,
+                approve_implementation,
+                config,
+            )?;
             let previous = draft(transaction, &session_id)?;
             if previous.revision != draft_revision || previous.parts != parts {
                 return Err(Error::new(
@@ -511,21 +524,13 @@ pub(super) fn apply(
                 .worker
                 .as_ref()
                 .unwrap();
-            if !snapshot
-                .sessions
-                .iter()
-                .find(|s| s.id == session_id)
-                .unwrap()
-                .awaiting_first_message
-                && !runtime::active(&worker.status)
-                && ((worker.thread_id.is_none()
-                    && snapshot
-                        .sessions
-                        .iter()
-                        .find(|s| s.id == session_id)
-                        .is_none_or(|s| s.conversations.is_empty()))
-                    || worker.worktree.is_none())
-            {
+            if !snapshot.can_continue(
+                snapshot
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .unwrap(),
+            ) {
                 return Err(Error::invalid(
                     "This worker has no resumable thread; start a new linked worker",
                 ));
@@ -585,12 +590,29 @@ pub(super) fn apply(
                 })
                 .ok_or_else(|| Error::invalid("Message is no longer queued"))?;
             let session_id = snapshot.submissions[index].session_id.clone();
-            authorize(
+            let available = authorize(
+                transaction,
                 snapshot,
                 &session_id,
                 snapshot.submissions[index].approve_implementation,
                 config,
             )?;
+            // A later message cannot start the thread ahead of the session's
+            // waiting first turn; it stays queued behind it.
+            if snapshot
+                .waiting_first_turn(
+                    snapshot
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == session_id)
+                        .unwrap(),
+                )
+                .is_some_and(|first| first.id != submission_id)
+            {
+                return Err(Error::invalid(
+                    "This agent's first turn runs before other queued messages",
+                ));
+            }
             let worker = snapshot
                 .sessions
                 .iter()
@@ -631,6 +653,12 @@ pub(super) fn apply(
             snapshot.submissions.insert(index, submission);
             if runtime::active(&worker.status) {
                 return Ok(Some(Action::Promote(session_id)));
+            }
+            if !available {
+                // First in the queue, it launches once the workspace is free.
+                wait_for_workspace(transaction, snapshot, &session_id)?;
+                snapshot.revision += 1;
+                return Ok(None);
             }
             snapshot
                 .submissions
@@ -677,6 +705,24 @@ pub(super) fn apply(
                         && matches!(s.state, SubmissionState::Queued | SubmissionState::Paused)
                 })
                 .ok_or_else(|| Error::invalid("Message already launching or missing"))?;
+            // A waiting fork launches from its receipt, not from editable text.
+            if transaction
+                .query_row(
+                    "SELECT request FROM receipts WHERE request_id=?1",
+                    [&submission_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(Error::internal)?
+                .and_then(|request| serde_json::from_str::<CommandEnvelope>(&request).ok())
+                .is_some_and(|envelope| {
+                    matches!(envelope.command, Command::ConversationCommand { name, .. } if name == "fork")
+                })
+            {
+                return Err(Error::invalid(
+                    "A waiting fork cannot be edited; cancel it instead",
+                ));
+            }
             validate(transaction, snapshot, &submission.session_id, &parts)?;
             let previous = draft(transaction, &submission.session_id)?;
             if previous.revision != draft_revision || previous.parts != parts {
@@ -763,7 +809,13 @@ pub(super) fn apply(
             if runtime::active(&worker.status) {
                 return Err(Error::invalid("Agent is already running"));
             }
-            authorize(snapshot, &session_id, next.approve_implementation, config)?;
+            let available = authorize(
+                transaction,
+                snapshot,
+                &session_id,
+                next.approve_implementation,
+                config,
+            )?;
             for item in snapshot
                 .submissions
                 .iter_mut()
@@ -771,6 +823,11 @@ pub(super) fn apply(
             {
                 item.state = SubmissionState::Queued;
                 item.error = None;
+            }
+            if !available {
+                wait_for_workspace(transaction, snapshot, &session_id)?;
+                snapshot.revision += 1;
+                return Ok(None);
             }
             snapshot
                 .submissions
@@ -915,6 +972,7 @@ pub(super) fn advance(workspace: &Workspace, session: &str, run: &str) -> Result
             next.approve_implementation,
             &workspace.config,
             &next.sender,
+            &waiting_sessions(&store.connection)?,
         );
         if let Err(error) = authorization {
             pause(&mut snapshot, session, &error.to_string());
@@ -972,13 +1030,16 @@ pub(super) fn advance(workspace: &Workspace, session: &str, run: &str) -> Result
     Ok(())
 }
 
-/// Return an agent message rejected by the final launch guard to its durable
-/// queue. A reservation is not delivery, and reserve keeps the prompt identity
-/// stable when this turn is eventually launched again.
+/// Return a turn rejected by the final launch guard to its durable queue. A
+/// reservation is not delivery, and reserve keeps the prompt identity stable
+/// when this turn is eventually launched again. A turn started by a command
+/// without a durable submission (a new or continued worker) gets one with the
+/// command's request ID, prompt and approval, ahead of the session's queue.
 pub(super) fn defer_launch(
     workspace: &Workspace,
     session: &str,
     run: &str,
+    prompt: &str,
     stop: &watch::Receiver<bool>,
 ) -> Result<bool, Error> {
     let mut store = workspace.store.lock().map_err(Error::internal)?;
@@ -989,15 +1050,71 @@ pub(super) fn defer_launch(
         return Ok(false);
     }
     let mut snapshot = store.snapshot()?;
-    let Some(submission) = snapshot.submissions.iter_mut().find(|s| {
-        s.id == run
-            && s.state == SubmissionState::Launching
-            && matches!(s.sender, Sender::Agent { .. })
-    }) else {
-        return Ok(false);
-    };
-    submission.state = SubmissionState::Queued;
-    submission.interrupts_run = None;
+    if let Some(submission) = snapshot.submissions.iter_mut().find(|s| s.id == run) {
+        if submission.state != SubmissionState::Launching {
+            return Ok(false);
+        }
+        submission.state = SubmissionState::Queued;
+        submission.interrupts_run = None;
+    } else {
+        let request: Option<String> = store
+            .connection
+            .query_row(
+                "SELECT request FROM receipts WHERE request_id=?1",
+                [run],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(Error::internal)?;
+        let approved = match request
+            .and_then(|request| serde_json::from_str::<CommandEnvelope>(&request).ok())
+            .map(|envelope| envelope.command)
+        {
+            Some(
+                Command::StartWorker {
+                    approve_implementation,
+                    ..
+                }
+                | Command::SendWorker {
+                    approve_implementation,
+                    ..
+                }
+                | Command::StartRootAgent {
+                    approve_implementation,
+                    ..
+                }
+                | Command::StartSession {
+                    approve_implementation,
+                    ..
+                },
+            ) => approve_implementation,
+            // A fork waits as its "/fork" turn and launches from its receipt.
+            Some(Command::ConversationCommand { name, .. }) if name == "fork" => true,
+            _ => return Ok(false),
+        };
+        let position = snapshot
+            .submissions
+            .iter()
+            .position(|s| {
+                s.session_id == session
+                    && matches!(s.state, SubmissionState::Queued | SubmissionState::Paused)
+            })
+            .unwrap_or(snapshot.submissions.len());
+        snapshot.submissions.insert(
+            position,
+            Submission {
+                id: run.into(),
+                session_id: session.into(),
+                parts: vec![Part::text(prompt)],
+                state: SubmissionState::Queued,
+                approve_implementation: approved,
+                error: None,
+                interrupts_run: None,
+                last_edit_request: None,
+                sender: Sender::User,
+            },
+        );
+    }
     let worker = snapshot
         .sessions
         .iter_mut()
@@ -1032,20 +1149,13 @@ pub(super) fn drain_workspace_waits(workspace: &Workspace) -> Result<(), Error> 
     if store.closing {
         return Ok(());
     }
-    let mut waiting = {
-        let mut query = store
-            .connection
-            .prepare("SELECT session_id FROM workspace_waits")
-            .map_err(Error::internal)?;
-        query
-            .query_map([], |r| r.get::<_, String>(0))
-            .map_err(Error::internal)?
-            .collect::<Result<std::collections::HashSet<_>, _>>()
-            .map_err(Error::internal)?
-    };
+    let mut waiting = waiting_sessions(&store.connection)?;
     if waiting.is_empty() {
         return Ok(());
     }
+    // Every waiting queue, launched or not in this pass, keeps its place
+    // ahead of later turns of other sessions.
+    let waiters = waiting.clone();
     let mut snapshot = store.snapshot()?;
     let next: Vec<_> = snapshot
         .submissions
@@ -1089,6 +1199,7 @@ pub(super) fn drain_workspace_waits(workspace: &Workspace) -> Result<(), Error> 
             next.approve_implementation,
             &workspace.config,
             &next.sender,
+            &waiters,
         )
         .and_then(|available| {
             validate(&transaction, &snapshot, session, &next.parts)?;

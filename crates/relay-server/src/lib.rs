@@ -788,11 +788,28 @@ impl Store {
                 argument,
             } => {
                 if name == "fork" {
-                    commands::reserve_fork(&mut snapshot, &session_id)?;
-                    action = Some(Action::Run {
-                        session_id,
-                        prompt: "/fork".into(),
-                    });
+                    let waiting = conversation::waiting_sessions(&transaction)?;
+                    if commands::reserve_fork(&mut snapshot, &session_id, &waiting)? {
+                        action = Some(Action::Run {
+                            session_id,
+                            prompt: "/fork".into(),
+                        });
+                    } else {
+                        // The fork waits in the queue under this request's
+                        // identity and launches from it as any queued turn.
+                        snapshot.submissions.push(Submission {
+                            id: envelope.request_id.clone(),
+                            session_id: session_id.clone(),
+                            parts: vec![Part::text("/fork")],
+                            state: SubmissionState::Queued,
+                            approve_implementation: true,
+                            error: None,
+                            interrupts_run: None,
+                            last_edit_request: None,
+                            sender: Sender::User,
+                        });
+                        conversation::wait_for_workspace(&transaction, &mut snapshot, &session_id)?;
+                    }
                 } else {
                     commands::conversation(
                         &mut snapshot,
@@ -1681,17 +1698,29 @@ pub fn router_with_browser(
             changed = true;
         }
     }
+    // A turn that waited for a shared workspace was never delivered; it keeps
+    // its place and identity and, like any queued turn, runs after a resume.
+    let waiting = conversation::waiting_sessions(&store.connection)?;
     for submission in &mut initial.submissions {
         if matches!(
             submission.state,
             SubmissionState::Queued | SubmissionState::Launching | SubmissionState::Running
         ) {
+            submission.error = Some(
+                if submission.state == SubmissionState::Queued
+                    && waiting.contains(&submission.session_id)
+                {
+                    "Server restarted while this turn waited for a shared workspace; it was not delivered and runs after an explicit resume"
+                } else {
+                    "Server restarted; delivered turns are never replayed, queued turns require explicit resume"
+                }
+                .into(),
+            );
             submission.state = if submission.state == SubmissionState::Queued {
                 SubmissionState::Paused
             } else {
                 SubmissionState::Interrupted
             };
-            submission.error = Some("Server restarted; delivered turns are never replayed, queued turns require explicit resume".into());
             submission.interrupts_run = None;
             changed = true;
         }
@@ -2183,6 +2212,7 @@ async fn command(
                 Ok::<_, Error>(commands::ForkResources {
                     workspace: resource_workspace,
                     session,
+                    armed: true,
                 })
             })
             .await
@@ -2191,6 +2221,7 @@ async fn command(
     } else {
         None
     };
+    let wake = workspace.clone();
     let handle = tokio::runtime::Handle::current();
     let result = tokio::task::spawn_blocking(move || {
         let mut store = workspace.store.lock().map_err(Error::internal)?;
@@ -2271,6 +2302,13 @@ async fn command(
     })
     .await
     .map_err(Error::internal)??;
+    // A command can end a wait that kept later waiting turns behind it, such
+    // as a cancelled, paused or archived turn; let them launch now.
+    if let Ok(Err(error)) =
+        tokio::task::spawn_blocking(move || conversation::drain_workspace_waits(&wake)).await
+    {
+        eprintln!("Shared workspace queue advancement failed: {error}");
+    }
     Ok(Json(result))
 }
 

@@ -14,8 +14,18 @@ fn pending(permission: &ToolPermission) -> bool {
 /// A session's own state. A pending permission request on the session
 /// means it waits for you; otherwise its worker run decides. A session
 /// that never ran is queued while a turn waits for it and done otherwise.
+/// A turn waiting to launch, such as one waiting for a shared workspace or
+/// a new agent's first turn, keeps the session queued whatever its last
+/// turn's outcome.
 pub fn session_status(snapshot: &Snapshot, session: &Session) -> AgentStatus {
-    if session.awaiting_first_message {
+    let waiting = snapshot.submissions.iter().any(|s| {
+        s.session_id == session.id
+            && matches!(
+                s.state,
+                SubmissionState::Queued | SubmissionState::Launching
+            )
+    }) || snapshot.waiting_first_turn(session).is_some();
+    if session.awaiting_first_message && !waiting {
         return AgentStatus::Idle;
     }
     if snapshot
@@ -27,6 +37,7 @@ pub fn session_status(snapshot: &Snapshot, session: &Session) -> AgentStatus {
     }
     match session.worker.as_ref().map(|w| &w.status) {
         Some(WorkerStatus::Running) => AgentStatus::Working,
+        Some(_) if waiting => AgentStatus::Queued,
         Some(WorkerStatus::Queued) => AgentStatus::Queued,
         Some(WorkerStatus::Completed | WorkerStatus::Stopped) => AgentStatus::Done,
         Some(WorkerStatus::Failed | WorkerStatus::Interrupted) => AgentStatus::Failed,

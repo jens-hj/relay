@@ -1760,14 +1760,9 @@ pub fn Conversation(model: Model) -> Element {
     let warning = Derived::new(move || {
         removed.get()
             || session.get().is_some_and(|s| {
-                s.worker.as_ref().is_some_and(|w| {
-                    w.error.is_some()
-                        || (!matches!(w.status, WorkerStatus::Queued | WorkerStatus::Running)
-                            && ((w.thread_id.is_none()
-                                && s.conversations.is_empty()
-                                && !s.awaiting_first_message)
-                                || w.worktree.is_none()))
-                })
+                s.worker
+                    .as_ref()
+                    .is_some_and(|w| w.error.is_some() || !model.snapshot.get().can_continue(&s))
             })
     });
     // Auxiliary disclosures share a height budget. Even several open panels
@@ -2186,7 +2181,7 @@ pub fn Conversation(model: Model) -> Element {
                                 "Issue no longer on this board. New turns require restoration and sync."
                         }
                     }
-                    if session.get().is_some_and(|s|s.worker.as_ref().is_some_and(|w|!matches!(w.status,WorkerStatus::Queued|WorkerStatus::Running) && ((w.thread_id.is_none() && s.conversations.is_empty() && !s.awaiting_first_message) || w.worktree.is_none()))) {
+                    if session.get().is_some_and(|s|s.worker.is_some() && !model.snapshot.get().can_continue(&s)) {
                         grid height:min-content gap:{px(8.0)}px
                             cols:{if compact.get() {GridTracks::new([GridTrack::fr(1.0)])} else {GridTracks::new([GridTrack::fr(1.0), GridTrack::MaxContent])}}
                             pad:(horizontal:{px(24.0)}px vertical:0px) shrink:0 {

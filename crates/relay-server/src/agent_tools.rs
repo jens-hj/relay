@@ -517,7 +517,27 @@ pub(super) async fn route(
         .await
         .map(Json)
 }
+/// Run one Relay tool. A committed tool call can end a waiting turn's place in
+/// the queue (a stop, archive or deletion pauses or removes it), so one queue
+/// pass follows it once the tool has released every lock it took.
 async fn call(
+    workspace: &Workspace,
+    caller: &str,
+    run: &str,
+    tool: &str,
+    input: Value,
+    stop: &mut watch::Receiver<bool>,
+) -> Result<Value, Error> {
+    let result = dispatch(workspace, caller, run, tool, input, stop).await;
+    if result.is_ok()
+        && let Err(error) = conversation::drain_workspace_waits(workspace)
+    {
+        eprintln!("Shared workspace queue advancement failed: {error}");
+    }
+    result
+}
+
+async fn dispatch(
     workspace: &Workspace,
     caller: &str,
     run: &str,
@@ -1078,6 +1098,7 @@ async fn spawn(
         Ok::<_, Error>(commands::ForkResources {
             workspace: resource_workspace,
             session,
+            armed: true,
         })
     })
     .await
@@ -3709,7 +3730,7 @@ mod tests {
         );
         let path = Path::new(&child.workspaces[0].path);
         assert_eq!(child.workspaces[1].path, shared.display().to_string());
-        assert!(runtime::check_shared(&snapshot, &child.id).is_ok());
+        assert!(runtime::check_shared(&snapshot, &child.id, &Default::default()).is_ok());
         assert!(
             matches!(snapshot.messages.iter().find(|m|m.id == "native-spawn").unwrap().tool.as_ref().unwrap().detail,Some(ToolDetail::Spawn {child_session_id:Some(ref actual)}) if actual == id)
         );
@@ -6973,14 +6994,16 @@ mod tests {
     /// connected nonrepository directory (not an ancestor/descendant exemption).
     fn shared_peer(f: &Fixture) -> String {
         let id = "shared-peer".to_owned();
-        let shared = f._directory.path().join("connected-directory");
+        let shared = f._directory.path().join("shared-worktree");
         std::fs::create_dir_all(&shared).unwrap();
         f.change(|s| {
             let caller = s.sessions.iter_mut().find(|s| s.id == f.caller).unwrap();
+            // Both sessions record one repository worktree, as legacy sessions
+            // sharing a configured checkout do, so their harnesses cannot overlap.
             caller.workspaces = vec![SessionWorkspace {
-                connection_id: "shared-directory".into(),
+                connection_id: "shared-worktree".into(),
                 path: shared.display().to_string(),
-                repository: false,
+                repository: true,
                 branch: None,
                 base_commit: None,
                 changes: None,
@@ -7242,6 +7265,1353 @@ mod tests {
         f.finish().await;
     }
 
+    /// Gives the fixture's project its default `ROOT/workspace` directory and
+    /// adds it to the running caller, as every session of the project has it.
+    fn default_workspace(f: &Fixture) -> std::path::PathBuf {
+        let root = f._directory.path().join("project");
+        let directory = root.join("workspace");
+        std::fs::create_dir_all(&directory).unwrap();
+        f.change(|s| {
+            s.projects[0].root = Some(root.display().to_string());
+            let caller = s.sessions.iter_mut().find(|s| s.id == f.caller).unwrap();
+            caller.workspaces.push(SessionWorkspace {
+                connection_id: "workspace-live".into(),
+                path: directory.display().to_string(),
+                repository: false,
+                branch: None,
+                base_commit: None,
+                changes: None,
+            });
+        });
+        directory
+    }
+
+    /// A session with its own repository worktree and the project's default
+    /// directory, outside the fixture caller's tree unless given a parent.
+    fn worktree_session(
+        f: &Fixture,
+        id: &str,
+        parent: Option<&str>,
+        status: WorkerStatus,
+        default: &Path,
+    ) -> String {
+        let worktree = f._directory.path().join(format!("worktree-{id}"));
+        std::fs::create_dir_all(&worktree).unwrap();
+        f.change(|s| {
+            let mut session = s
+                .sessions
+                .iter()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .clone();
+            session.id = id.into();
+            session.title = id.into();
+            session.parent_session_id = parent.map(str::to_owned);
+            session.workspaces = vec![
+                SessionWorkspace {
+                    connection_id: "repository".into(),
+                    path: worktree.display().to_string(),
+                    repository: true,
+                    branch: Some(format!("relay/{id}")),
+                    base_commit: Some("HEAD".into()),
+                    changes: None,
+                },
+                SessionWorkspace {
+                    connection_id: "workspace-live".into(),
+                    path: default.display().to_string(),
+                    repository: false,
+                    branch: None,
+                    base_commit: None,
+                    changes: None,
+                },
+            ];
+            let worker = session.worker.as_mut().unwrap();
+            worker.status = status;
+            worker.thread_id = Some(format!("{id}-thread"));
+            worker.worktree = Some(worktree.display().to_string());
+            s.sessions.push(session);
+        });
+        id.into()
+    }
+
+    #[tokio::test]
+    async fn director_and_independent_agents_share_the_default_workspace_with_other_trees() {
+        let f = Fixture::new(Permission::Allow);
+        let default = default_workspace(&f);
+        // A director whose last turn failed, with a running worker of its own,
+        // while the caller's unrelated tree is running in the same project.
+        let lead = worktree_session(&f, "feature-lead", None, WorkerStatus::Failed, &default);
+        let worker = worktree_session(
+            &f,
+            "feature-worker",
+            Some(&lead),
+            WorkerStatus::Running,
+            &default,
+        );
+        let independent =
+            worktree_session(&f, "independent", None, WorkerStatus::Completed, &default);
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        for id in [&lead, &worker, &independent, &f.caller] {
+            assert!(runtime::shared_available(&snapshot, id).unwrap(), "{id}");
+        }
+        let snapshot = human_send(&f, &lead, vec![Part::text("Status?")]).unwrap();
+        let submission = snapshot
+            .submissions
+            .iter()
+            .find(|s| s.session_id == lead)
+            .unwrap();
+        assert_eq!(submission.state, SubmissionState::Launching);
+        assert_eq!(submission.error, None);
+        assert_eq!(workspace_wait_count(&f), 0);
+        settle(&f, &[&worker]);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn only_a_shared_repository_worktree_holds_execution() {
+        let f = Fixture::new(Permission::Allow);
+        let default = default_workspace(&f);
+        let lead = worktree_session(&f, "feature-lead", None, WorkerStatus::Failed, &default);
+        let worker = worktree_session(
+            &f,
+            "feature-worker",
+            Some(&lead),
+            WorkerStatus::Running,
+            &default,
+        );
+        let base = f.workspace.snapshots.borrow().clone();
+        let busy = |snapshot: &Snapshot| {
+            let error = runtime::check_shared(snapshot, &lead, &Default::default()).unwrap_err();
+            assert_eq!(
+                (error.code, error.message.as_str()),
+                (
+                    "workspace_busy",
+                    "Another agent is using a shared workspace; wait for its turn to finish"
+                )
+            );
+        };
+        let session = |snapshot: &Snapshot, id: &str| -> usize {
+            snapshot.sessions.iter().position(|s| s.id == id).unwrap()
+        };
+        // A repository worktree is held by one session, within a tree, across
+        // trees and across projects alike.
+        for (holder, project) in [
+            (&worker, None),
+            (&f.caller, None),
+            (&f.caller, Some("other")),
+        ] {
+            let mut snapshot = base.clone();
+            let (from, to) = (session(&snapshot, holder), session(&snapshot, &lead));
+            snapshot.sessions[to].workspaces[0] = snapshot.sessions[from].workspaces[0].clone();
+            if let Some(project) = project {
+                snapshot.sessions[from].project_id = project.into();
+            }
+            busy(&snapshot);
+            // A fork would copy the worktree while the holder edits it, so it
+            // is not reserved; its caller queues it instead.
+            let mut forked = snapshot.clone();
+            assert!(
+                !crate::commands::reserve_fork(&mut forked, &lead, &Default::default()).unwrap()
+            );
+            assert_eq!(
+                forked.sessions[to].worker.as_ref().unwrap().status,
+                WorkerStatus::Failed
+            );
+        }
+        // Either side recording a path as a repository holds it, whatever
+        // alias each side uses for it.
+        let holder = base.sessions[session(&base, &f.caller)].workspaces[0].clone();
+        let alias = f._directory.path().join("worktree-alias");
+        std::os::unix::fs::symlink(&holder.path, &alias).unwrap();
+        for (target, holder_repository) in [
+            (holder.path.clone(), true),
+            (holder.path.clone(), false),
+            (alias.display().to_string(), true),
+        ] {
+            for target_repository in [true, false] {
+                if !target_repository && !holder_repository {
+                    continue;
+                }
+                let mut snapshot = base.clone();
+                let (from, to) = (session(&snapshot, &f.caller), session(&snapshot, &lead));
+                snapshot.sessions[from].workspaces[0].repository = holder_repository;
+                let mut space = holder.clone();
+                space.path = target.clone();
+                space.repository = target_repository;
+                snapshot.sessions[to].workspaces.push(space);
+                busy(&snapshot);
+            }
+        }
+        // Two directory records of one path through an alias are shared.
+        let mut snapshot = base.clone();
+        let (from, to) = (session(&snapshot, &f.caller), session(&snapshot, &lead));
+        snapshot.sessions[from].workspaces[0].repository = false;
+        let mut space = holder.clone();
+        space.path = alias.display().to_string();
+        space.repository = false;
+        snapshot.sessions[to].workspaces.push(space);
+        assert!(runtime::check_shared(&snapshot, &lead, &Default::default()).is_ok());
+        // Connected directories, the default one included, are shared by every
+        // tree and project; nothing about the sessions' roles is assumed.
+        let explicit = f._directory.path().join("connected-directory");
+        std::fs::create_dir_all(&explicit).unwrap();
+        let space = SessionWorkspace {
+            connection_id: "connected-directory".into(),
+            path: explicit.display().to_string(),
+            repository: false,
+            branch: None,
+            base_commit: None,
+            changes: None,
+        };
+        for (holder, project) in [
+            (&worker, None),
+            (&f.caller, None),
+            (&f.caller, Some("other")),
+        ] {
+            let mut snapshot = base.clone();
+            for id in [holder, &lead] {
+                let index = session(&snapshot, id);
+                snapshot.sessions[index].workspaces.push(space.clone());
+                if id == holder
+                    && let Some(project) = project
+                {
+                    snapshot.sessions[index].project_id = project.into();
+                }
+            }
+            assert!(runtime::check_shared(&snapshot, &lead, &Default::default()).is_ok());
+            let mut forked = snapshot.clone();
+            crate::commands::reserve_fork(&mut forked, &lead, &Default::default()).unwrap();
+        }
+        // A fork of a held worktree is accepted and waits in the queue under
+        // its request, leaving the person's draft alone.
+        f.change(|s| {
+            let index = s.sessions.iter().position(|s| s.id == f.caller).unwrap();
+            let spaces = s.sessions[index].workspaces.clone();
+            let lead = s.sessions.iter_mut().find(|s| s.id == lead).unwrap();
+            lead.workspaces[0] = spaces[0].clone();
+        });
+        let parts = vec![Part::text("Status?")];
+        let revision = set_draft(&f, &lead, &parts);
+        let current = f.workspace.snapshots.borrow().revision;
+        let fork = crate::tests::env(
+            current,
+            Command::ConversationCommand {
+                session_id: lead.clone(),
+                name: "fork".into(),
+                argument: String::new(),
+            },
+        );
+        let fork_id = fork.request_id.clone();
+        let snapshot = human(&f, fork).unwrap();
+        let waiting = snapshot
+            .submissions
+            .iter()
+            .find(|s| s.id == fork_id)
+            .unwrap();
+        assert_eq!(
+            (
+                waiting.session_id.as_str(),
+                relay_core::plain_text(&waiting.parts),
+                &waiting.state,
+                waiting.error.as_deref()
+            ),
+            (
+                lead.as_str(),
+                "/fork".into(),
+                &SubmissionState::Queued,
+                Some("Waiting for a shared workspace")
+            )
+        );
+        assert_eq!(workspace_wait_count(&f), 1);
+        let lead_worker = snapshot.sessions.iter().find(|s| s.id == lead).unwrap();
+        assert_eq!(
+            lead_worker.worker.as_ref().unwrap().status,
+            WorkerStatus::Failed
+        );
+        assert!(!snapshot.sessions.iter().any(|s| s.id == fork_id));
+        let draft = conversation::read_drafts(&f.workspace.store.lock().unwrap().connection)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.session_id == lead)
+            .unwrap();
+        assert_eq!((draft.revision, &draft.parts), (revision, &parts));
+        // It launches from its receipt, so its text cannot be edited.
+        let current = f.workspace.snapshots.borrow().revision;
+        let error = human(
+            &f,
+            crate::tests::env(
+                current,
+                Command::EditQueuedTurn {
+                    submission_id: fork_id.clone(),
+                    draft_revision: revision,
+                    parts: parts.clone(),
+                    approve_implementation: true,
+                },
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.message,
+            "A waiting fork cannot be edited; cancel it instead"
+        );
+        // A message waits behind the fork.
+        let snapshot = human_send(&f, &lead, parts).unwrap();
+        assert_eq!(
+            snapshot
+                .queued_turns(&lead)
+                .iter()
+                .map(|t| (t.submission_id.as_str() == fork_id, t.state.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (true, SubmissionState::Queued),
+                (false, SubmissionState::Queued)
+            ]
+        );
+        assert_eq!(workspace_wait_count(&f), 1);
+        settle(&f, &[&worker]);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn agent_messages_do_not_wait_for_the_default_workspace() {
+        let f = Fixture::new(Permission::Allow);
+        let default = default_workspace(&f);
+        let lead = worktree_session(&f, "feature-lead", None, WorkerStatus::Running, &default);
+        f.change(|s| {
+            assert!(s.grant_peer(&f.caller, &lead, "accepted-human-mention", 1));
+        });
+        let id = message(&f, &f.caller, &f.run, &lead).await.unwrap()["submission"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let submission = snapshot.submissions.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(submission.state, SubmissionState::Queued);
+        assert_eq!(submission.error, None);
+        assert_eq!(workspace_wait_count(&f), 0);
+        settle(&f, &[&lead]);
+        f.finish().await;
+    }
+
+    fn human_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer test-token".parse().unwrap());
+        headers
+    }
+
+    fn submit_envelope(f: &Fixture, session: &str, text: &str) -> CommandEnvelope {
+        let parts = vec![Part::text(text)];
+        let revision = set_draft(f, session, &parts);
+        crate::tests::env(
+            f.workspace.snapshots.borrow().revision,
+            Command::SubmitTurn {
+                session_id: session.into(),
+                draft_revision: revision,
+                parts,
+                approve_implementation: true,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn human_queue_actions_and_notices_wait_for_a_busy_directory() {
+        let f = Fixture::new(Permission::Allow);
+        // The caller's unrelated tree holds a connected directory the peer uses.
+        let peer = shared_peer(&f);
+        let notice = format!("{}busy", crate::notices::PREFIX);
+        {
+            let mut store = f.workspace.store.lock().unwrap();
+            let snapshot = store.snapshot().unwrap();
+            crate::notices::enqueue(
+                &f.workspace,
+                &mut store,
+                snapshot,
+                &peer,
+                crate::notices::Delivery {
+                    text: "Worker ended".into(),
+                    id: notice.clone(),
+                    attempt: None,
+                    allow_launch: true,
+                },
+            )
+            .unwrap();
+        }
+        let queued = |f: &Fixture| -> Vec<(String, SubmissionState, Option<String>)> {
+            f.workspace
+                .snapshots
+                .borrow()
+                .submissions
+                .iter()
+                .filter(|s| s.session_id == peer)
+                .map(|s| (s.id.clone(), s.state.clone(), s.error.clone()))
+                .collect()
+        };
+        let waiting = Some("Waiting for a shared workspace".to_owned());
+        assert_eq!(
+            queued(&f),
+            vec![(notice.clone(), SubmissionState::Queued, waiting.clone())]
+        );
+        assert_eq!(workspace_wait_count(&f), 1);
+        let message = human(&f, submit_envelope(&f, &peer, "Status?"))
+            .unwrap()
+            .submissions
+            .last()
+            .unwrap()
+            .id
+            .clone();
+        let revision = f.workspace.snapshots.borrow().revision;
+        human(
+            &f,
+            crate::tests::env(
+                revision,
+                Command::PauseQueue {
+                    session_id: peer.clone(),
+                },
+            ),
+        )
+        .unwrap();
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        human(
+            &f,
+            crate::tests::env(
+                snapshot.revision,
+                Command::ResumeQueue {
+                    session_id: peer.clone(),
+                    queue: Some(snapshot.queued_turns(&peer)),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            queued(&f),
+            vec![
+                (notice.clone(), SubmissionState::Queued, waiting.clone()),
+                (message.clone(), SubmissionState::Queued, None),
+            ]
+        );
+        let revision = f.workspace.snapshots.borrow().revision;
+        human(
+            &f,
+            crate::tests::env(
+                revision,
+                Command::PromoteTurn {
+                    submission_id: message.clone(),
+                    active_run_id: None,
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            queued(&f),
+            vec![
+                (message, SubmissionState::Queued, waiting.clone()),
+                (notice, SubmissionState::Queued, waiting),
+            ]
+        );
+        assert_eq!(workspace_wait_count(&f), 1);
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        let receiver = snapshot.sessions.iter().find(|s| s.id == peer).unwrap();
+        assert_eq!(
+            receiver.worker.as_ref().unwrap().status,
+            WorkerStatus::Completed
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn human_http_messages_to_a_busy_directory_run_in_order_after_release() {
+        let f = Fixture::new(Permission::Allow);
+        let peer = shared_peer(&f);
+        let capture = f._directory.path().join("capture");
+        let release = f._directory.path().join("release-sender");
+        let native = crate::tests::command_tests::CODEX
+            .replace("@CAPTURE@", capture.to_str().unwrap())
+            .replace("test-model", "fixture-model")
+            .replace(
+                "    turn/start|review/start)",
+                &format!(
+                    "    turn/start|review/start)\n      if [ \"$(printf '%s' \"$line\" | jq -r '.params.threadId')\" = parent-thread ]; then\n        while [ ! -e '{}' ]; do sleep 0.01; done\n      fi",
+                    release.display()
+                ),
+            );
+        std::fs::write(&f.workspace.config.codex, format!("#!/bin/sh\n{native}")).unwrap();
+        // A real harness of the unrelated tree holds the connected directory.
+        let sender = tokio::spawn(runtime::run(
+            f.workspace.clone(),
+            f.caller.clone(),
+            f.run.clone(),
+            "Sender".into(),
+            f.stop.clone(),
+        ));
+        wait_native_turn(&capture).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!(
+            "http://{}/v1/conversation/commands",
+            listener.local_addr().unwrap()
+        );
+        let app = Router::new()
+            .route("/v1/conversation/commands", post(command))
+            .with_state(f.workspace.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut ids = vec![];
+        for text in ["First human message", "Second human message"] {
+            let envelope = submit_envelope(&f, &peer, text);
+            let response = reqwest::Client::new()
+                .post(&endpoint)
+                .headers(human_headers())
+                .json(&envelope)
+                .send()
+                .await
+                .unwrap();
+            assert!(
+                response.status().is_success(),
+                "message rejected: {}",
+                response.text().await.unwrap()
+            );
+            ids.push(envelope.request_id);
+        }
+        {
+            let snapshot = f.workspace.snapshots.borrow().clone();
+            let states: Vec<_> = ids
+                .iter()
+                .map(|id| {
+                    let s = snapshot.submissions.iter().find(|s| &s.id == id).unwrap();
+                    (s.state.clone(), s.error.clone())
+                })
+                .collect();
+            assert_eq!(
+                states,
+                vec![
+                    (
+                        SubmissionState::Queued,
+                        Some("Waiting for a shared workspace".into())
+                    ),
+                    (SubmissionState::Queued, None),
+                ]
+            );
+            let receiver = snapshot.sessions.iter().find(|s| s.id == peer).unwrap();
+            assert_eq!(
+                receiver.worker.as_ref().unwrap().status,
+                WorkerStatus::Completed
+            );
+            for id in &ids {
+                assert!(
+                    !snapshot
+                        .messages
+                        .iter()
+                        .any(|m| m.id == format!("prompt-{id}"))
+                );
+            }
+        }
+        assert_eq!(workspace_wait_count(&f), 1);
+        // Releasing the harness starts the queued turns in order.
+        std::fs::write(&release, "release").unwrap();
+        sender.await.unwrap();
+        wait_peer_submission(&f.workspace, &ids[1], SubmissionState::Completed).await;
+        let turns: Vec<Value> = std::fs::read_to_string(&capture)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .filter(|v| v["method"] == "turn/start")
+            .collect();
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[1]["params"]["threadId"], "receiver-thread");
+        assert!(turns[1].to_string().contains("First human message"));
+        assert!(turns[2].to_string().contains("Second human message"));
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        for id in &ids {
+            let prompts: Vec<_> = snapshot
+                .messages
+                .iter()
+                .filter(|m| m.id == format!("prompt-{id}"))
+                .collect();
+            assert_eq!(prompts.len(), 1);
+            assert_eq!(prompts[0].sender, Sender::User);
+            assert_eq!(
+                snapshot
+                    .submissions
+                    .iter()
+                    .find(|s| &s.id == id)
+                    .unwrap()
+                    .state,
+                SubmissionState::Completed
+            );
+        }
+        assert_eq!(workspace_wait_count(&f), 0);
+        server.abort();
+        f.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn human_turn_meeting_contention_at_launch_returns_to_its_queue() {
+        let f = Fixture::new(Permission::Allow);
+        let peer = shared_peer(&f);
+        let capture = install_peer_native(&f, false);
+        let launch = arm_runtime_gate(&f, &peer, "before_launch");
+        let spaces = f
+            .workspace
+            .snapshots
+            .borrow()
+            .sessions
+            .iter()
+            .find(|s| s.id == f.caller)
+            .unwrap()
+            .workspaces
+            .clone();
+        f.change(|s| {
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .workspaces
+                .clear()
+        });
+        let envelope = submit_envelope(&f, &peer, "Late human message");
+        let id = envelope.request_id.clone();
+        let _ = command(
+            State(f.workspace.clone()),
+            human_headers(),
+            Ok(Json(envelope)),
+        )
+        .await
+        .unwrap();
+        launch.entered().await;
+        // The unrelated tree takes the directory before the harness starts.
+        f.change(|s| {
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .workspaces = spaces;
+        });
+        launch.open();
+        wait_peer_submission(&f.workspace, &id, SubmissionState::Queued).await;
+        assert!(
+            !std::fs::read_to_string(&capture)
+                .unwrap_or_default()
+                .contains("turn/start")
+        );
+        assert_eq!(workspace_wait_count(&f), 1);
+        release_shared_owner(&f);
+        conversation::drain_workspace_waits(&f.workspace).unwrap();
+        wait_peer_submission(&f.workspace, &id, SubmissionState::Completed).await;
+        let turns = std::fs::read_to_string(&capture)
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains("turn/start") && l.contains("Late human message"))
+            .count();
+        assert_eq!(turns, 1);
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        assert_eq!(
+            snapshot
+                .messages
+                .iter()
+                .filter(|m| m.id == format!("prompt-{id}"))
+                .count(),
+            1
+        );
+        f.finish().await;
+    }
+
+    /// Send a command over HTTP while the fixture caller, an unrelated running
+    /// tree, takes the session's prepared workspaces as its repository
+    /// worktree just before the harness starts.
+    async fn launch_meeting_contention(f: &Fixture, session: &str, mut envelope: CommandEnvelope) {
+        let launch = arm_runtime_gate(f, session, "before_launch");
+        f.change(|s| {
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .workspaces
+                .clear()
+        });
+        envelope.expected_revision = f.workspace.snapshots.borrow().revision;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1/commands", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/v1/commands", post(command))
+            .with_state(f.workspace.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let response = reqwest::Client::new()
+            .post(endpoint)
+            .headers(human_headers())
+            .json(&envelope)
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "command rejected: {}",
+            response.text().await.unwrap()
+        );
+        server.abort();
+        launch.entered().await;
+        f.change(|s| {
+            let spaces: Vec<_> = s
+                .sessions
+                .iter()
+                .find(|s| s.id == session)
+                .unwrap()
+                .workspaces
+                .iter()
+                .cloned()
+                .map(|mut space| {
+                    space.repository = true;
+                    space
+                })
+                .collect();
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .workspaces = spaces;
+        });
+        launch.open();
+    }
+
+    fn turn_starts(capture: &Path, text: &str) -> usize {
+        std::fs::read_to_string(capture)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("\"turn/start\"") && l.contains(text))
+            .count()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn new_and_continued_workers_wait_at_launch_and_run_once_as_sent() {
+        // A board worker, a session, a person's new root agent with its first
+        // message, a continued worker, and a session across a restart.
+        for mode in ["start", "session", "root", "send", "restart"] {
+            let f = Fixture::new(Permission::Allow);
+            let peer = shared_peer(&f);
+            let capture = install_peer_native(&f, false);
+            let snapshot = f.workspace.snapshots.borrow().clone();
+            let agent_config_id = snapshot.agent_configs[0].id.clone();
+            let issue_id = Some(snapshot.issues[0].id.clone());
+            let prompt = "Original prompt".to_owned();
+            let (envelope, session) = if mode == "send" {
+                let envelope = crate::tests::env(
+                    snapshot.revision,
+                    Command::SendWorker {
+                        session_id: peer.clone(),
+                        prompt,
+                        approve_implementation: true,
+                    },
+                );
+                (envelope, peer.clone())
+            } else {
+                let command = match mode {
+                    "start" => {
+                        let mut start = crate::tests::start(&snapshot);
+                        if let Command::StartWorker { prompt: text, .. } = &mut start {
+                            *text = prompt;
+                        }
+                        start
+                    }
+                    "root" => Command::StartRootAgent {
+                        agent_config_id,
+                        issue_id,
+                        parts: vec![Part::text(&prompt)],
+                        prompt,
+                        approve_implementation: true,
+                    },
+                    _ => Command::StartSession {
+                        agent_config_id,
+                        issue_id,
+                        role: SessionRole::Worker,
+                        prompt,
+                        approve_implementation: true,
+                        connection_ids: None,
+                    },
+                };
+                let envelope = crate::tests::env(snapshot.revision, command);
+                let session = format!("session-{}", envelope.request_id);
+                (envelope, session)
+            };
+            let id = envelope.request_id.clone();
+            launch_meeting_contention(&f, &session, envelope).await;
+            wait_peer_submission(&f.workspace, &id, SubmissionState::Queued).await;
+            let snapshot = f.workspace.snapshots.borrow().clone();
+            let submission = snapshot.submissions.iter().find(|s| s.id == id).unwrap();
+            assert_eq!(submission.session_id, session);
+            assert_eq!(relay_core::plain_text(&submission.parts), "Original prompt");
+            assert!(submission.approve_implementation);
+            assert_eq!(submission.sender, Sender::User);
+            assert_eq!(
+                submission.error.as_deref(),
+                Some("Waiting for a shared workspace")
+            );
+            let waiting = snapshot.sessions.iter().find(|s| s.id == session).unwrap();
+            let config = waiting.agent_config_id.clone();
+            assert!(!runtime::active(&waiting.worker.as_ref().unwrap().status));
+            if mode != "send" {
+                assert!(waiting.worker.as_ref().unwrap().thread_id.is_none());
+                assert_eq!(
+                    snapshot.waiting_first_turn(waiting).map(|s| s.id.as_str()),
+                    Some(id.as_str())
+                );
+            }
+            assert_eq!(turn_starts(&capture, "Original prompt"), 0);
+            assert_eq!(workspace_wait_count(&f), 1);
+            // A message to the waiting agent queues behind its first turn,
+            // which a promotion cannot overtake.
+            let follow = human(&f, submit_envelope(&f, &session, "Follow-up"))
+                .unwrap()
+                .submissions
+                .last()
+                .unwrap()
+                .id
+                .clone();
+            if mode != "send" {
+                let revision = f.workspace.snapshots.borrow().revision;
+                let error = human(
+                    &f,
+                    crate::tests::env(
+                        revision,
+                        Command::PromoteTurn {
+                            submission_id: follow.clone(),
+                            active_run_id: None,
+                        },
+                    ),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.message,
+                    "This agent's first turn runs before other queued messages"
+                );
+            }
+            assert_eq!(
+                f.workspace
+                    .snapshots
+                    .borrow()
+                    .queued_turns(&session)
+                    .iter()
+                    .map(|t| t.submission_id.clone())
+                    .collect::<Vec<_>>(),
+                vec![id.clone(), follow.clone()]
+            );
+            let restarted = if mode == "restart" {
+                let (_router, shutdown) = router_with_shutdown(
+                    f._directory.path().join("db"),
+                    "restart-first-turn-test".into(),
+                    AgentProfile::default(),
+                    (*f.workspace.config).clone(),
+                )
+                .unwrap();
+                let snapshot = shutdown.workspace.snapshots.borrow().clone();
+                assert_eq!(
+                    snapshot
+                        .queued_turns(&session)
+                        .iter()
+                        .map(|t| t.state.clone())
+                        .collect::<Vec<_>>(),
+                    vec![SubmissionState::Paused, SubmissionState::Paused]
+                );
+                // The pause names its cause and the resume it needs; nothing ran.
+                for turn in snapshot.queued_turns(&session) {
+                    assert_eq!(
+                        turn.error.as_deref(),
+                        Some(
+                            "Server restarted while this turn waited for a shared workspace; it was not delivered and runs after an explicit resume"
+                        )
+                    );
+                }
+                assert_eq!(turn_starts(&capture, "Original prompt"), 0);
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    "authorization",
+                    "Bearer restart-first-turn-test".parse().unwrap(),
+                );
+                let _ = command(
+                    State(shutdown.workspace.clone()),
+                    headers,
+                    Ok(Json(crate::tests::env(
+                        snapshot.revision,
+                        Command::ResumeQueue {
+                            session_id: session.clone(),
+                            queue: Some(snapshot.queued_turns(&session)),
+                        },
+                    ))),
+                )
+                .await
+                .unwrap();
+                Some(shutdown)
+            } else {
+                release_shared_owner(&f);
+                conversation::drain_workspace_waits(&f.workspace).unwrap();
+                None
+            };
+            let workspace = restarted.as_ref().map_or(&f.workspace, |s| &s.workspace);
+            wait_peer_submission(workspace, &follow, SubmissionState::Completed).await;
+            assert_eq!(turn_starts(&capture, "Original prompt"), 1, "{mode}");
+            assert_eq!(turn_starts(&capture, "Follow-up"), 1, "{mode}");
+            let log = std::fs::read_to_string(&capture).unwrap();
+            assert!(log.find("Original prompt").unwrap() < log.find("Follow-up").unwrap());
+            let snapshot = workspace.snapshots.borrow().clone();
+            let session = snapshot.sessions.iter().find(|s| s.id == session).unwrap();
+            assert_eq!(session.agent_config_id, config);
+            for submission in [&id, &follow] {
+                assert_eq!(
+                    snapshot
+                        .submissions
+                        .iter()
+                        .find(|s| &s.id == submission)
+                        .unwrap()
+                        .state,
+                    SubmissionState::Completed
+                );
+                assert_eq!(
+                    snapshot
+                        .messages
+                        .iter()
+                        .filter(|m| m.id == format!("prompt-{submission}"))
+                        .count(),
+                    1
+                );
+            }
+            assert_eq!(
+                snapshot
+                    .messages
+                    .iter()
+                    .filter(|m| m.id == format!("issue-context-{id}"))
+                    .count(),
+                1
+            );
+            if let Some(shutdown) = restarted {
+                shutdown.shutdown().await.unwrap();
+            }
+            f.finish().await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn waiting_sessions_hold_nothing_and_launch_one_at_a_time() {
+        let f = Fixture::new(Permission::Allow);
+        let first = shared_peer(&f);
+        let capture = install_peer_native(&f, false);
+        let second = "second-peer".to_owned();
+        f.change(|s| {
+            let mut peer = s.sessions.iter().find(|s| s.id == first).unwrap().clone();
+            peer.id = second.clone();
+            s.sessions.push(peer);
+        });
+        let ids: Vec<String> = [(&first, "First waiting"), (&second, "Second waiting")]
+            .into_iter()
+            .map(|(session, text)| {
+                human(&f, submit_envelope(&f, session, text))
+                    .unwrap()
+                    .submissions
+                    .last()
+                    .unwrap()
+                    .id
+                    .clone()
+            })
+            .collect();
+        assert_eq!(workspace_wait_count(&f), 2);
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        for session in [&first, &second] {
+            let waiting = snapshot.sessions.iter().find(|s| &s.id == session).unwrap();
+            assert!(!runtime::active(&waiting.worker.as_ref().unwrap().status));
+        }
+        release_shared_owner(&f);
+        // Neither waiting session blocks the other: only active sessions hold.
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        for session in [&first, &second] {
+            assert!(runtime::shared_available(&snapshot, session).unwrap());
+        }
+        // One pass reserves the first; that reservation now holds the
+        // worktree, so the second keeps waiting with its wake-up.
+        let launch = arm_runtime_gate(&f, &first, "before_launch");
+        conversation::drain_workspace_waits(&f.workspace).unwrap();
+        launch.entered().await;
+        {
+            let snapshot = f.workspace.snapshots.borrow().clone();
+            let states: Vec<_> = ids
+                .iter()
+                .map(|id| {
+                    snapshot
+                        .submissions
+                        .iter()
+                        .find(|s| &s.id == id)
+                        .unwrap()
+                        .state
+                        .clone()
+                })
+                .collect();
+            assert_eq!(
+                states,
+                vec![SubmissionState::Launching, SubmissionState::Queued]
+            );
+            assert!(!runtime::shared_available(&snapshot, &second).unwrap());
+        }
+        assert_eq!(workspace_wait_count(&f), 1);
+        launch.open();
+        // The first run's release wakes the second without another trigger.
+        wait_peer_submission(&f.workspace, &ids[1], SubmissionState::Completed).await;
+        assert_eq!(turn_starts(&capture, "First waiting"), 1);
+        assert_eq!(turn_starts(&capture, "Second waiting"), 1);
+        let log = std::fs::read_to_string(&capture).unwrap();
+        assert!(log.find("First waiting").unwrap() < log.find("Second waiting").unwrap());
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        for id in &ids {
+            let submission = snapshot.submissions.iter().find(|s| &s.id == id).unwrap();
+            assert_eq!(submission.state, SubmissionState::Completed);
+            assert_eq!(submission.error, None);
+        }
+        for session in [&first, &second] {
+            let done = snapshot.sessions.iter().find(|s| &s.id == session).unwrap();
+            assert_eq!(
+                done.worker.as_ref().unwrap().status,
+                WorkerStatus::Completed
+            );
+        }
+        assert_eq!(workspace_wait_count(&f), 0);
+        f.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn newer_turns_wait_behind_older_waiting_turns() {
+        for mode in ["order", "cancel", "send"] {
+            let f = Fixture::new(Permission::Allow);
+            let older = shared_peer(&f);
+            let capture = install_peer_native(&f, false);
+            let newer = "newer-peer".to_owned();
+            f.change(|s| {
+                let mut peer = s.sessions.iter().find(|s| s.id == older).unwrap().clone();
+                peer.id = newer.clone();
+                s.sessions.push(peer);
+            });
+            let waiting = human(&f, submit_envelope(&f, &older, "Older waiting"))
+                .unwrap()
+                .submissions
+                .last()
+                .unwrap()
+                .id
+                .clone();
+            // The holder has ended but no wake-up has run yet: the worktree is
+            // free, and only the older waiting turn holds it for later turns.
+            release_shared_owner(&f);
+            {
+                let snapshot = f.workspace.snapshots.borrow().clone();
+                let store = f.workspace.store.lock().unwrap();
+                let waits = conversation::waiting_sessions(&store.connection).unwrap();
+                assert!(runtime::shared_available(&snapshot, &newer).unwrap());
+                assert!(!runtime::launch_available(&snapshot, &newer, &waits).unwrap());
+            }
+            let current = f.workspace.snapshots.borrow().revision;
+            let newer_id = if mode == "send" {
+                // A legacy continuation through the command endpoint, whose
+                // turn has no queue entry until its launch guard defers it.
+                let envelope = crate::tests::env(
+                    current,
+                    Command::SendWorker {
+                        session_id: newer.clone(),
+                        prompt: "Newer message".into(),
+                        approve_implementation: true,
+                    },
+                );
+                let id = envelope.request_id.clone();
+                let _ = command(
+                    State(f.workspace.clone()),
+                    human_headers(),
+                    Ok(Json(envelope)),
+                )
+                .await
+                .unwrap();
+                id
+            } else {
+                let snapshot = human(&f, submit_envelope(&f, &newer, "Newer message")).unwrap();
+                let submission = snapshot.submissions.last().unwrap().clone();
+                assert_eq!(
+                    (&submission.state, submission.error.as_deref()),
+                    (
+                        &SubmissionState::Queued,
+                        Some("Waiting for a shared workspace")
+                    )
+                );
+                submission.id
+            };
+            match mode {
+                "order" => conversation::drain_workspace_waits(&f.workspace).unwrap(),
+                "cancel" => {
+                    // Cancelling the older turn through the command endpoint
+                    // wakes the newer one without any run ending.
+                    let current = f.workspace.snapshots.borrow().revision;
+                    let _ = command(
+                        State(f.workspace.clone()),
+                        human_headers(),
+                        Ok(Json(crate::tests::env(
+                            current,
+                            Command::CancelTurn {
+                                submission_id: waiting.clone(),
+                            },
+                        ))),
+                    )
+                    .await
+                    .unwrap();
+                }
+                _ => {}
+            }
+            wait_peer_submission(&f.workspace, &newer_id, SubmissionState::Completed).await;
+            let log = std::fs::read_to_string(&capture).unwrap();
+            assert_eq!(turn_starts(&capture, "Newer message"), 1, "{mode}");
+            if mode == "cancel" {
+                assert_eq!(turn_starts(&capture, "Older waiting"), 0);
+            } else {
+                wait_peer_submission(&f.workspace, &waiting, SubmissionState::Completed).await;
+                assert_eq!(turn_starts(&capture, "Older waiting"), 1, "{mode}");
+                assert!(
+                    log.find("Older waiting").unwrap() < log.find("Newer message").unwrap(),
+                    "{mode}"
+                );
+            }
+            assert_eq!(workspace_wait_count(&f), 0);
+            f.finish().await;
+        }
+    }
+
+    /// A root or child session of the fixture caller's project that records
+    /// the given repository worktrees and has a thread to continue.
+    fn worktree_peer(
+        f: &Fixture,
+        id: &str,
+        parent: Option<&str>,
+        status: WorkerStatus,
+        paths: &[&Path],
+    ) {
+        f.change(|s| {
+            let mut session = s
+                .sessions
+                .iter()
+                .find(|s| s.id == f.caller)
+                .unwrap()
+                .clone();
+            session.id = id.into();
+            session.title = id.into();
+            session.parent_session_id = parent.map(str::to_owned);
+            session.workspaces = paths
+                .iter()
+                .map(|path| SessionWorkspace {
+                    connection_id: String::new(),
+                    path: path.display().to_string(),
+                    repository: true,
+                    branch: None,
+                    base_commit: None,
+                    changes: None,
+                })
+                .collect();
+            let worker = session.worker.as_mut().unwrap();
+            worker.status = status;
+            worker.thread_id = Some(format!("{id}-thread"));
+            worker.worktree = Some(paths[0].display().to_string());
+            s.sessions.push(session);
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ending_an_idle_waiting_agent_through_relay_tools_wakes_the_turn_behind_it() {
+        for tool in ["stop_agent", "archive_agent", "delete_agent"] {
+            let f = Fixture::new(Permission::Allow);
+            let capture = install_peer_native(&f, false);
+            let (p, q) = (
+                f._directory.path().join("p-worktree"),
+                f._directory.path().join("q-worktree"),
+            );
+            std::fs::create_dir_all(&p).unwrap();
+            std::fs::create_dir_all(&q).unwrap();
+            // A running holder of P; the caller's idle child waits for P and
+            // Q; an unrelated session needs only Q, which is free, but its turn
+            // was queued later, so it waits behind the child's.
+            worktree_peer(&f, "holder", None, WorkerStatus::Running, &[&p]);
+            worktree_peer(
+                &f,
+                "child",
+                Some(&f.caller),
+                WorkerStatus::Completed,
+                &[&p, &q],
+            );
+            worktree_peer(&f, "later", None, WorkerStatus::Completed, &[&q]);
+            let older = human(&f, submit_envelope(&f, "child", "Child message"))
+                .unwrap()
+                .submissions
+                .last()
+                .unwrap()
+                .id
+                .clone();
+            let newer = human(&f, submit_envelope(&f, "later", "Later message"))
+                .unwrap()
+                .submissions
+                .last()
+                .unwrap()
+                .id
+                .clone();
+            assert_eq!(workspace_wait_count(&f), 2);
+            if tool == "delete_agent" {
+                // Deletion needs an archived branch. Commit the archive
+                // without any queue pass, so only the deletion can wake the
+                // later turn.
+                let revision = f.workspace.snapshots.borrow().revision;
+                human(
+                    &f,
+                    crate::tests::env(
+                        revision,
+                        Command::SetSessionArchived {
+                            session_id: "child".into(),
+                            archived: true,
+                        },
+                    ),
+                )
+                .unwrap();
+                let snapshot = f.workspace.snapshots.borrow().clone();
+                assert_eq!(
+                    snapshot
+                        .submissions
+                        .iter()
+                        .find(|s| s.id == newer)
+                        .unwrap()
+                        .state,
+                    SubmissionState::Queued
+                );
+            }
+            // The caller ends its idle child through a Relay tool; the later
+            // turn starts without any run ending or client command.
+            f.call(tool, json!({"agent":"child"})).await.unwrap();
+            wait_peer_submission(&f.workspace, &newer, SubmissionState::Completed).await;
+            let snapshot = f.workspace.snapshots.borrow().clone();
+            let child = snapshot.submissions.iter().find(|s| s.id == older);
+            if tool == "delete_agent" {
+                assert!(child.is_none(), "{tool}");
+                assert!(!snapshot.sessions.iter().any(|s| s.id == "child"));
+            } else {
+                assert_eq!(child.unwrap().state, SubmissionState::Paused, "{tool}");
+            }
+            let holder = snapshot.sessions.iter().find(|s| s.id == "holder").unwrap();
+            assert_eq!(
+                holder.worker.as_ref().unwrap().status,
+                WorkerStatus::Running
+            );
+            assert_eq!(turn_starts(&capture, "Later message"), 1, "{tool}");
+            assert_eq!(turn_starts(&capture, "Child message"), 0, "{tool}");
+            settle(&f, &["holder"]);
+            f.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn waits_across_several_worktrees_follow_one_global_order() {
+        let f = Fixture::new(Permission::Allow);
+        let paths: Vec<_> = ["a", "b", "c"]
+            .iter()
+            .map(|name| {
+                let path = f._directory.path().join(format!("worktree-{name}"));
+                std::fs::create_dir_all(&path).unwrap();
+                path
+            })
+            .collect();
+        for (index, _) in paths.iter().enumerate() {
+            worktree_peer(
+                &f,
+                &format!("waiter-{index}"),
+                None,
+                WorkerStatus::Completed,
+                &[&paths[index]],
+            );
+        }
+        worktree_peer(&f, "legacy", None, WorkerStatus::Completed, &[&paths[0]]);
+        let base = f.workspace.snapshots.borrow().clone();
+        let waiting: std::collections::HashSet<String> =
+            (0..3).map(|index| format!("waiter-{index}")).collect();
+        let subset = |mask: usize| -> Vec<SessionWorkspace> {
+            (0..3)
+                .filter(|bit| mask & (1 << bit) != 0)
+                .map(|bit| SessionWorkspace {
+                    connection_id: String::new(),
+                    path: paths[bit].display().to_string(),
+                    repository: true,
+                    branch: None,
+                    base_commit: None,
+                    changes: None,
+                })
+                .collect()
+        };
+        // Every assignment of worktrees to three waiting sessions queued in
+        // order, plus a legacy launch with no queue entry.
+        for masks in
+            (0..7usize.pow(4)).map(|n| [n % 7 + 1, n / 7 % 7 + 1, n / 49 % 7 + 1, n / 343 + 1])
+        {
+            let mut snapshot = base.clone();
+            for (index, mask) in masks.iter().take(3).enumerate() {
+                let id = format!("waiter-{index}");
+                snapshot
+                    .sessions
+                    .iter_mut()
+                    .find(|s| s.id == id)
+                    .unwrap()
+                    .workspaces = subset(*mask);
+                snapshot.submissions.push(Submission {
+                    id: format!("turn-{index}"),
+                    session_id: id,
+                    parts: vec![Part::text("Waiting")],
+                    state: SubmissionState::Queued,
+                    approve_implementation: true,
+                    error: None,
+                    interrupts_run: None,
+                    last_edit_request: None,
+                    sender: Sender::User,
+                });
+            }
+            snapshot
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == "legacy")
+                .unwrap()
+                .workspaces = subset(masks[3]);
+            let available = |snapshot: &Snapshot, id: &str| {
+                runtime::launch_available(snapshot, id, &waiting).unwrap()
+            };
+            // Progress: with nothing running, the oldest waiting turn can start.
+            assert!(available(&snapshot, "waiter-0"), "{masks:?}");
+            for index in 1..3 {
+                // A waiting turn starts only when no older one shares a worktree.
+                let blocked = (0..index).any(|older| masks[older] & masks[index] != 0);
+                assert_eq!(
+                    available(&snapshot, &format!("waiter-{index}")),
+                    !blocked,
+                    "{masks:?}"
+                );
+            }
+            // A launch without a queue entry is newest and yields to all.
+            let blocked = (0..3).any(|older| masks[older] & masks[3] != 0);
+            assert_eq!(available(&snapshot, "legacy"), !blocked, "{masks:?}");
+            // Once the oldest starts it holds its worktrees; a later turn that
+            // shares one waits for it, and nothing else waits on a later turn.
+            snapshot
+                .sessions
+                .iter_mut()
+                .find(|s| s.id == "waiter-0")
+                .unwrap()
+                .worker
+                .as_mut()
+                .unwrap()
+                .status = WorkerStatus::Queued;
+            snapshot.submissions[base.submissions.len()].state = SubmissionState::Launching;
+            for index in 1..3 {
+                let blocked = (0..index).any(|older| masks[older] & masks[index] != 0);
+                assert_eq!(
+                    available(&snapshot, &format!("waiter-{index}")),
+                    !blocked,
+                    "{masks:?}"
+                );
+            }
+        }
+        f.finish().await;
+    }
+
     fn workspace_wait_count(f: &Fixture) -> u32 {
         f.workspace
             .store
@@ -7438,7 +8808,7 @@ mod tests {
                 .all(|s| s.state == SubmissionState::Queued)
         );
         assert_eq!(workspace_wait_count(&f), 1);
-        assert!(runtime::check_shared(&snapshot, &peer).is_err());
+        assert!(runtime::check_shared(&snapshot, &peer, &Default::default()).is_err());
         // Cancelling the head must not remove the next message's wakeup.
         human(
             &f,

@@ -360,9 +360,9 @@ pub fn execution_problem(model: Model) -> Option<String> {
     if session.archived {
         return Some("Unarchive this chat before continuing".into());
     }
-    let Some(worker) = session.worker.as_ref().filter(|_| !session.fixture) else {
+    if session.fixture || session.worker.is_none() {
         return Some("This transcript cannot execute turns".into());
-    };
+    }
     let Some(issue) = snapshot
         .issues
         .iter()
@@ -393,12 +393,7 @@ pub fn execution_problem(model: Model) -> Option<String> {
     if snapshot.worker_slot(session).is_err() {
         return Some("No worker slots available".into());
     }
-    if !matches!(worker.status, WorkerStatus::Queued | WorkerStatus::Running)
-        && ((worker.thread_id.is_none()
-            && session.conversations.is_empty()
-            && !session.awaiting_first_message)
-            || worker.worktree.is_none())
-    {
+    if !snapshot.can_continue(session) {
         return Some("This worker has no resumable thread; open its linked issue".into());
     }
     None

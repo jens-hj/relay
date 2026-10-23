@@ -155,6 +155,72 @@ fn statuses_map_runs_permissions_and_queued_turns() {
 }
 
 #[test]
+fn turns_waiting_to_launch_keep_sessions_queued() {
+    let mut snapshot = demo();
+    let status = |snapshot: &Snapshot, id: &str| {
+        session_status(
+            snapshot,
+            snapshot.sessions.iter().find(|s| s.id == id).unwrap(),
+        )
+    };
+    let turn = |id: &str, session: &str, state: SubmissionState| Submission {
+        id: id.into(),
+        session_id: session.into(),
+        parts: vec![],
+        state,
+        approve_implementation: false,
+        error: None,
+        interrupts_run: None,
+        last_edit_request: None,
+        sender: Sender::User,
+    };
+    // A message waiting for a shared workspace after a finished turn.
+    snapshot
+        .submissions
+        .push(turn("waiting", "session-worker", SubmissionState::Queued));
+    assert_eq!(status(&snapshot, "session-worker"), AgentStatus::Queued);
+    // A failed session whose queue is held still reports the failure.
+    snapshot
+        .sessions
+        .iter_mut()
+        .find(|s| s.id == "session-tests")
+        .unwrap()
+        .worker
+        .as_mut()
+        .unwrap()
+        .thread_id = Some("thread".into());
+    snapshot
+        .submissions
+        .push(turn("held", "session-tests", SubmissionState::Paused));
+    assert_eq!(status(&snapshot, "session-tests"), AgentStatus::Failed);
+    // A new agent whose first turn waits, even when held after a restart, is
+    // queued rather than done; once that turn ran it reports its outcome.
+    let index = snapshot
+        .sessions
+        .iter()
+        .position(|s| s.id == "session-worker")
+        .unwrap();
+    snapshot.sessions[index].conversations.clear();
+    snapshot.sessions[index].worker.as_mut().unwrap().thread_id = None;
+    snapshot
+        .submissions
+        .retain(|s| s.session_id != "session-worker");
+    snapshot
+        .submissions
+        .push(turn("first", "session-worker", SubmissionState::Paused));
+    assert_eq!(status(&snapshot, "session-worker"), AgentStatus::Queued);
+    snapshot.submissions.last_mut().unwrap().state = SubmissionState::Completed;
+    assert_eq!(status(&snapshot, "session-worker"), AgentStatus::Done);
+    // A first message deferred for a workspace is queued, not idle.
+    snapshot.sessions[index].awaiting_first_message = true;
+    assert_eq!(status(&snapshot, "session-worker"), AgentStatus::Idle);
+    snapshot
+        .submissions
+        .push(turn("deferred", "session-worker", SubmissionState::Queued));
+    assert_eq!(status(&snapshot, "session-worker"), AgentStatus::Queued);
+}
+
+#[test]
 fn deep_pending_permission_surfaces_on_collapsed_ancestors_and_in_needs_you() {
     let snapshot = demo();
     let collapsed = BTreeSet::from(["session-plan".to_string()]);

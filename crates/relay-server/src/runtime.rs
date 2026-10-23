@@ -524,8 +524,13 @@ pub(crate) fn configured_project(project: &Project, config: &RuntimeConfig) -> b
         })
 }
 
-pub(super) fn check_shared(snapshot: &Snapshot, id: &str) -> Result<(), Error> {
-    if shared_available(snapshot, id)? {
+/// The final launch guard: the typed error returns the turn to its queue.
+pub(super) fn check_shared(
+    snapshot: &Snapshot,
+    id: &str,
+    waiting: &std::collections::HashSet<String>,
+) -> Result<(), Error> {
+    if launch_available(snapshot, id, waiting)? {
         Ok(())
     } else {
         Err(Error::new(
@@ -538,40 +543,83 @@ pub(super) fn check_shared(snapshot: &Snapshot, id: &str) -> Result<(), Error> {
 
 /// Contention is transient; an unavailable workspace is an error even if a
 /// different recorded workspace is currently occupied.
+///
+/// Only a repository worktree is held: Relay owns it for one session, whose
+/// branch, base, review and harness thread describe its contents, so another
+/// active session's harness in the same worktree would corrupt that record.
+/// A path is held when either session records it as a repository, whatever
+/// alias each uses. Connected ordinary directories have no owner or review
+/// and are edited directly by every session that selects them, so they are
+/// shared by all sessions, whatever their tree, project or role.
 pub(super) fn shared_available(snapshot: &Snapshot, id: &str) -> Result<bool, Error> {
-    let session = snapshot
+    let paths = session_paths(snapshot, id)?;
+    Ok(!snapshot
+        .sessions
+        .iter()
+        .filter(|s| s.id != id && s.worker.as_ref().is_some_and(|w| active(&w.status)))
+        .any(|s| overlaps(&paths, s)))
+}
+
+/// Whether a turn of `id` may be admitted to launch now. Besides active
+/// sessions, a session in `waiting` whose queued turn came first holds the
+/// worktree for it, so a newer turn cannot pass an older waiting one.
+pub(super) fn launch_available(
+    snapshot: &Snapshot,
+    id: &str,
+    waiting: &std::collections::HashSet<String>,
+) -> Result<bool, Error> {
+    if !shared_available(snapshot, id)? {
+        return Ok(false);
+    }
+    let paths = session_paths(snapshot, id)?;
+    let head = |session: &str| {
+        snapshot.submissions.iter().position(|s| {
+            s.session_id == session
+                && matches!(
+                    s.state,
+                    SubmissionState::Queued | SubmissionState::Paused | SubmissionState::Launching
+                )
+        })
+    };
+    let own = head(id);
+    Ok(!snapshot
+        .sessions
+        .iter()
+        .filter(|s| s.id != id && waiting.contains(&s.id))
+        .filter(|s| !s.worker.as_ref().is_some_and(|w| active(&w.status)))
+        .filter(|s| {
+            head(&s.id).is_some_and(|first| {
+                snapshot.submissions[first].state == SubmissionState::Queued
+                    && own.is_none_or(|own| first < own)
+            })
+        })
+        .any(|s| overlaps(&paths, s)))
+}
+
+fn session_paths(snapshot: &Snapshot, id: &str) -> Result<Vec<(PathBuf, bool)>, Error> {
+    snapshot
         .sessions
         .iter()
         .find(|s| s.id == id)
-        .ok_or_else(|| Error::invalid("Session not found"))?;
-    let paths = session
+        .ok_or_else(|| Error::invalid("Session not found"))?
         .workspaces
         .iter()
         .map(|space| {
             std::fs::canonicalize(&space.path)
+                .map(|path| (path, space.repository))
                 .map_err(|_| Error::invalid("Session workspace unavailable"))
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    for (space, path) in session.workspaces.iter().zip(paths) {
-        if snapshot
-            .sessions
-            .iter()
-            .filter(|s| s.id != id && s.worker.as_ref().is_some_and(|w| active(&w.status)))
-            .filter(|s| {
-                space.repository
-                    || (snapshot
-                        .ancestors(&s.id)
-                        .last()
-                        .map_or(s.id.as_str(), |p| p.id.as_str())
-                        != snapshot.ancestors(id).last().map_or(id, |p| p.id.as_str()))
-            })
-            .flat_map(|s| &s.workspaces)
-            .any(|other| std::fs::canonicalize(&other.path).is_ok_and(|p| p == path))
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+        .collect()
+}
+
+fn overlaps(paths: &[(PathBuf, bool)], other: &Session) -> bool {
+    other.workspaces.iter().any(|space| {
+        std::fs::canonicalize(&space.path).is_ok_and(|path| {
+            paths
+                .iter()
+                .any(|(own, repository)| *own == path && (*repository || space.repository))
+        })
+    })
 }
 pub(crate) fn authorize_turn(
     snapshot: &Snapshot,
@@ -1293,7 +1341,7 @@ pub(crate) async fn run(
     if !*stop.borrow() && result.as_ref().is_err_and(|e| e.code == "workspace_busy") {
         #[cfg(test)]
         runtime_gate(&workspace, &session_id, "before_defer").await;
-        match crate::conversation::defer_launch(&workspace, &session_id, &run_id, &stop) {
+        match crate::conversation::defer_launch(&workspace, &session_id, &run_id, &prompt, &stop) {
             Ok(true) => {
                 // The original submission identity will be reused. This
                 // attempt relinquished ownership under the deferral lock, so
@@ -1526,6 +1574,17 @@ async fn execute(
         store.connection.query_row("SELECT request FROM receipts WHERE request_id=?1",[run_id],|r|r.get::<_,String>(0)).optional().map_err(Error::internal)?.and_then(|request|serde_json::from_str::<CommandEnvelope>(&request).ok()).is_some_and(|envelope|matches!(envelope.command,Command::ConversationCommand{name,..} if name=="fork"))
     };
     let fork = if fork_requested {
+        // A fork copies the worktrees in several steps, so it starts only
+        // while no other session can edit them; otherwise it waits in its queue
+        // before anything is copied.
+        {
+            let store = workspace.store.lock().map_err(Error::internal)?;
+            check_shared(
+                &store.snapshot()?,
+                session_id,
+                &crate::conversation::waiting_sessions(&store.connection)?,
+            )?;
+        }
         let mut source = session.clone();
         source.workspaces = spaces.clone();
         let id = run_id.to_owned();
@@ -1542,9 +1601,10 @@ async fn execute(
     } else {
         None
     };
-    let _fork_resources = fork.clone().map(|session| crate::commands::ForkResources {
+    let mut fork_resources = fork.clone().map(|session| crate::commands::ForkResources {
         workspace: workspace.clone(),
         session,
+        armed: true,
     });
     let path = fork
         .as_ref()
@@ -1829,7 +1889,7 @@ async fn execute(
     // Launch and stop reservation are serialized by the same store lock.
     #[cfg(test)]
     runtime_gate(workspace, session_id, "before_launch").await;
-    let mut child = {
+    let launched = 'launch: {
         let mut store = workspace.store.lock().map_err(Error::internal)?;
         if *stop.borrow() {
             return Ok(());
@@ -1933,7 +1993,13 @@ async fn execute(
         if let Some(submission) = current.submissions.iter().find(|s| s.id == run_id) {
             crate::conversation::authorize_sender(&current, session_id, &submission.sender)?;
         }
-        check_shared(&current, session_id)?;
+        if let Err(error) = check_shared(
+            &current,
+            session_id,
+            &crate::conversation::waiting_sessions(&store.connection)?,
+        ) {
+            break 'launch Err(error);
+        }
         let launched_network_policy =
             LaunchedNetworkPolicy::new(worker.harness, mode, network_access);
         let child = crate::process::spawn(&mut cmd).map_err(|_| {
@@ -1983,7 +2049,21 @@ async fn execute(
             let _ = child.start_kill();
             return Err(error);
         }
-        child
+        Ok(child)
+    };
+    let mut child = match launched {
+        Ok(child) => child,
+        Err(error) => {
+            // A copied fork is removed before its turn returns to the queue,
+            // so a retry under the same identity copies afresh and no later
+            // cleanup can remove that copy.
+            if let Some(resources) = fork_resources.take() {
+                tokio::task::spawn_blocking(move || resources.discard())
+                    .await
+                    .map_err(Error::internal)?;
+            }
+            return Err(error);
+        }
     };
     let cgroup = match child.id() {
         Some(pid) => crate::process::worker_cgroup(pid, &workspace.config.worker).await,
