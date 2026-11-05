@@ -1584,6 +1584,39 @@ fn tools(
     }
     json!({ "tools": tools })
 }
+// Discovery is read-only and has a static fallback. Bound the entire HTTP and
+// JSON operation so a peer withholding headers or body cannot hold up stdio.
+// Do not set a client-wide timeout: tool calls can await human approval.
+const CATALOG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
+async fn catalog(client: &reqwest::Client, endpoint: &str, secret: &str) -> Value {
+    let fetch = async {
+        let response = client
+            .post(format!("{endpoint}/v1/agent-tools/tools"))
+            .bearer_auth(secret)
+            .json(&json!({}))
+            .send()
+            .await
+            .map_err(|_| "transport")?;
+        if !response.status().is_success() {
+            return Err("http_status");
+        }
+        let value = response.json::<Value>().await.map_err(|_| "json")?;
+        if !value["tools"].is_array() {
+            return Err("catalog_shape");
+        }
+        Ok(value)
+    };
+    let reason = match tokio::time::timeout(CATALOG_DEADLINE, fetch).await {
+        Ok(Ok(value)) => return value,
+        Ok(Err(reason)) => reason,
+        Err(_) => "deadline",
+    };
+    // Fixed categories only: request errors may include private URLs or data.
+    eprintln!("Relay catalog fallback: {reason}");
+    tools(&WorkerModelPolicy::default(), Permission::Deny, None)
+}
+
 /// Newline-delimited JSON-RPC over stdio. stdout contains protocol messages only.
 pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = std::env::var("RELAY_AGENT_URL").map_err(|_| "Missing Relay agent endpoint")?;
@@ -1622,25 +1655,7 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
                 Some("ping") => Ok(json!({})),
                 // The server describes spawn_agent with this run's worker model
                 // policy; the generic list remains if it cannot be reached.
-                Some("tools/list") => Ok(
-                    match client
-                        .post(format!("{endpoint}/v1/agent-tools/tools"))
-                        .bearer_auth(&secret)
-                        .json(&json!({}))
-                        .send()
-                        .await
-                    {
-                        Ok(response) if response.status().is_success() => response
-                            .json::<Value>()
-                            .await
-                            .ok()
-                            .filter(|v| v["tools"].is_array())
-                            .unwrap_or_else(|| {
-                                tools(&WorkerModelPolicy::default(), Permission::Deny, None)
-                            }),
-                        _ => tools(&WorkerModelPolicy::default(), Permission::Deny, None),
-                    },
-                ),
+                Some("tools/list") => Ok(catalog(&client, &endpoint, &secret).await),
                 Some("tools/call") => {
                     let name = request["params"]["name"].as_str().unwrap_or("");
                     if ![
@@ -2332,6 +2347,94 @@ mod tests {
             assert_eq!(notices[0].state, SubmissionState::Paused);
             shutdown.shutdown().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn normal_parent_end_cancels_pending_http_approval_and_revokes_run() {
+        let f = Fixture::new(Permission::Ask);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!(
+            "http://{}/v1/agent-tools/spawn_agent",
+            listener.local_addr().unwrap()
+        );
+        let app = Router::new()
+            .route("/v1/agent-tools/{tool}", post(route))
+            .with_state(f.workspace.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let headers = durable_headers(&f, "parent-end");
+        let stale_headers = headers.clone();
+        let stale_endpoint = endpoint.clone();
+        let request = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(endpoint)
+                .headers(headers)
+                .json(&json!({"title":"Pending","task":"Verify"}))
+                .send()
+                .await
+                .unwrap()
+        });
+        let mut events = f.workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !events
+                .borrow()
+                .tool_permissions
+                .iter()
+                .any(|p| p.decision.is_none())
+            {
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        // Hold future work explicitly. Ending the run must cancel the old
+        // approval, without clearing a human hold or replaying the spawn.
+        f.change(|s| {
+            s.submissions.push(Submission {
+                id: "human-hold".into(),
+                session_id: f.caller.clone(),
+                parts: vec![Part::text("Held work")],
+                state: SubmissionState::Paused,
+                approve_implementation: false,
+                error: Some("Human pause".into()),
+                interrupts_run: None,
+                last_edit_request: None,
+                sender: Sender::User,
+            });
+        });
+        f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
+        let response = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .expect("Normal parent end left HTTP approval pending")
+            .unwrap();
+        let response: Value = response.json().await.unwrap();
+        assert_eq!(response["phase"], "cancelled");
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert!(snapshot.tool_permissions.iter().all(|p| p.expired));
+        assert_eq!(
+            snapshot
+                .submissions
+                .iter()
+                .find(|s| s.id == "human-hold")
+                .unwrap()
+                .state,
+            SubmissionState::Paused
+        );
+        assert_eq!(spawn_notices(&f).len(), 1);
+        assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Paused);
+        let stale = reqwest::Client::new()
+            .post(stale_endpoint)
+            .headers(stale_headers)
+            .json(&json!({"title":"Pending","task":"Verify"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
+        server.abort();
+        f.finish().await;
     }
 
     #[tokio::test]

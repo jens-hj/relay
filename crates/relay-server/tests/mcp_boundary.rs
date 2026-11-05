@@ -4,6 +4,120 @@ use serde_json::{Value, json};
 use std::{process::Stdio, time::Duration};
 use tokio::io::AsyncWriteExt;
 
+/// Exercise the actual sequential stdio bridge against a disposable HTTP peer.
+/// A stalled catalog must release both tools/list and the following ping.
+async fn catalog_peer(mode: &'static str) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut byte = [0];
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            socket.read_exact(&mut byte).await.unwrap();
+            headers.push(byte[0]);
+        }
+        match mode {
+            "headers" => std::future::pending::<()>().await,
+            "body" => {
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 200\r\n\r\n{\"tools\":")
+                    .await
+                    .unwrap();
+                std::future::pending::<()>().await;
+            }
+            _ => {
+                let (status, body) = match mode {
+                    "unauthorized" => ("401 Unauthorized", "{}"),
+                    "malformed" => ("200 OK", "{"),
+                    "catalog" => ("200 OK", "{\"tools\":[{\"name\":\"policy-specific\"}]}"),
+                    "call" => {
+                        // tools/call may legitimately await a human longer than
+                        // the catalog budget. It must retain its own lifetime.
+                        tokio::time::sleep(Duration::from_millis(3500)).await;
+                        ("200 OK", "{\"approved\":true}")
+                    }
+                    _ => unreachable!(),
+                };
+                socket.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        }
+    });
+    let mut bridge = tokio::process::Command::new(env!("CARGO_BIN_EXE_relay-server"))
+        .arg("mcp")
+        .env("RELAY_AGENT_URL", format!("http://{address}"))
+        .env("RELAY_AGENT_CAPABILITY", "disposable-fixture-only")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let method = if mode == "call" {
+        "tools/call"
+    } else {
+        "tools/list"
+    };
+    let request = json!({"jsonrpc":"2.0","id":1,"method":method,"params":{"name":"list_agents","arguments":{}}});
+    let mut stdin = bridge.stdin.take().unwrap();
+    stdin
+        .write_all(
+            format!("{request}\n{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}}\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+    drop(stdin);
+    let mut lines = BufReader::new(bridge.stdout.take().unwrap()).lines();
+    let responses = tokio::time::timeout(Duration::from_secs(8), async {
+        let first: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let ping: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        (first, ping)
+    })
+    .await;
+    peer.abort();
+    bridge.kill().await.ok();
+    bridge.wait().await.ok();
+    let (first, ping) = responses.expect("Catalog blocked the stdio bridge and following ping");
+    assert_eq!(ping["id"], 2);
+    assert_eq!(ping["result"], json!({}));
+    if mode == "call" {
+        assert_eq!(first["result"]["isError"], false);
+        let content: Value =
+            serde_json::from_str(first["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(content["approved"], true);
+    } else {
+        let tools = first["result"]["tools"].as_array().unwrap();
+        if mode == "catalog" {
+            assert_eq!(tools[0]["name"], "policy-specific");
+        } else {
+            for name in ["report_result", "list_agents", "spawn_agent"] {
+                assert!(tools.iter().any(|t| t["name"] == name));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn catalog_stalled_headers_release_ping() {
+    catalog_peer("headers").await;
+}
+#[tokio::test]
+async fn catalog_stalled_body_release_ping() {
+    catalog_peer("body").await;
+}
+#[tokio::test]
+async fn catalog_fast_fallback_and_policy_success() {
+    for mode in ["unauthorized", "malformed", "catalog"] {
+        catalog_peer(mode).await;
+    }
+}
+#[tokio::test]
+async fn catalog_budget_does_not_limit_tool_calls() {
+    catalog_peer("call").await;
+}
+
 struct Server {
     child: tokio::process::Child,
     endpoint: String,
