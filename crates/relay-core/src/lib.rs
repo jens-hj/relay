@@ -567,6 +567,16 @@ pub enum Command {
         #[serde(default)]
         include_descendants: bool,
     },
+    /// Stop only the exact active runs the human saw. Any changed subtree/run
+    /// requires review; unrelated workspace revisions are immaterial.
+    StopWorkerRuns {
+        session_id: String,
+        #[serde(default)]
+        include_descendants: bool,
+        runs: std::collections::BTreeMap<String, String>,
+        /// Sorted IDs of the affected branch, including inactive members.
+        branch: Vec<String>,
+    },
     UpdateProjectDefaults {
         project_id: String,
         profile: AgentProfile,
@@ -597,6 +607,17 @@ pub enum Command {
 pub struct ApiError {
     pub code: String,
     pub message: String,
+}
+
+impl Command {
+    /// Request/run-bound controls can be in flight independently of a form save.
+    /// This does not authorize execution or weaken their server-side guards.
+    pub fn is_run_control(&self) -> bool {
+        matches!(
+            self,
+            Self::RespondPermission { .. } | Self::StopWorkerRuns { .. }
+        )
+    }
 }
 
 impl Snapshot {
@@ -840,7 +861,8 @@ impl Snapshot {
             | Command::EditQueuedTurn { .. }
             | Command::ResumeQueue { .. }
             | Command::PauseQueue { .. }
-            | Command::StopWorker { .. } => {
+            | Command::StopWorker { .. }
+            | Command::StopWorkerRuns { .. } => {
                 return Err("This command requires the server runtime".into());
             }
             Command::SaveAgentTemplate {

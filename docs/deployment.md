@@ -33,6 +33,16 @@ A deployment must not roll back another deployment's active bundle. It also must
 
 ## Run the Workflow
 
+### Lifecycle Outbox Migration: Schema 29 to 30
+
+The lifecycle notice outbox tracked by [#156](https://github.com/jens-hj/relay/issues/156) and [#151](https://github.com/jens-hj/relay/issues/151) adds `lifecycle_events` and `lifecycle_holds`. The migration preserves existing snapshots, runs, drafts, receipts, and spawn outcomes. It starts an empty lifecycle ledger: historical terminal sessions are not scanned to recreate old notifications. Active runs interrupted by this startup get terminal events as part of their interruption transaction. The wire protocol stays at 17; server and clients retain the run-bound controls.
+
+Terminal events and stop suppression commit with their corresponding snapshot changes. Unbound events recovered at startup become paused notices for explicit review. A bound notice keeps its submission identity across restarts, even if launch or native output was not acknowledged. Deployment never releases a human hold, replays an interrupted notice, or retries its tool effects. A stopped parent also retains future notices for review when its queue was empty at the time of the stop.
+
+Treat this as a separate migration release from the schema 29 catalog deadline fix. After review, build matching immutable server/browser packages and a unit bundle, retain the previous bundle as a GC root, and take a consistent SQLite backup before activation. In the protected helper manifest set `previous_schema_version` to `29` and `schema_version` to `30`; use the candidate's actual unchanged protocol version rather than example numbers. Verify schema, running revision, executable/package identity, history/drafts, and recovered notice identities locally before public verification. Keep all credentials, snapshots, and transcript contents out of logs.
+
+Schema 29 servers reject schema 30 databases. Once migration commits, switching only the old binary back is not a valid rollback. The helper's schema fence must refuse that downgrade and must not automatically restore a backup over newer user data. If recovery is needed, prefer a compatible schema 30 fix. Restoring the pre-migration database and old bundle requires an explicit, separately reviewed recovery decision covering all writes since the backup; preserve the current database and WAL before any approved restore. Do not lower `user_version` or drop the ledger to make an older binary start. Public transport failure after successful local migration retries verification only, without another activation.
+
 The helper takes a protected JSON manifest and provides three commands:
 
 ```sh

@@ -150,22 +150,7 @@ fn historical_submissions(
 }
 
 pub(crate) fn metadata(snapshot: &Snapshot) -> Snapshot {
-    let mut result = snapshot.clone();
-    result.messages.clear();
-    result.comments.clear();
-    result.submissions.retain(pending);
-    result
-        .tool_permissions
-        .retain(|p| p.decision.is_none() && !p.expired);
-    for session in &mut result.sessions {
-        for workspace in &mut session.workspaces {
-            workspace.changes = None;
-        }
-        if let Some(worker) = &mut session.worker {
-            worker.changes = None;
-        }
-    }
-    result
+    crate::snapshot_views::metadata(snapshot)
 }
 
 pub(crate) fn history_page(
@@ -1487,7 +1472,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            29
+            30
         );
     }
 
@@ -1560,7 +1545,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            29
+            30
         );
     }
 

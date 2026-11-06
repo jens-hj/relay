@@ -674,6 +674,7 @@ pub(super) fn apply(
                     params![session_id, id],
                 )
                 .map_err(Error::internal)?;
+            crate::notices::superseded(transaction)?;
             return Ok(Some(Action::Run {
                 session_id,
                 prompt: plain_text(&parts),
@@ -842,6 +843,7 @@ pub(super) fn apply(
                     params![session_id, next.id],
                 )
                 .map_err(Error::internal)?;
+            crate::notices::superseded(transaction)?;
             return Ok(Some(Action::Run {
                 session_id,
                 prompt: plain_text(&next.parts),
@@ -1003,6 +1005,7 @@ pub(super) fn advance(workspace: &Workspace, session: &str, run: &str) -> Result
                     params![session, next.id],
                 )
                 .map_err(Error::internal)?;
+            crate::notices::superseded(&transaction)?;
             snapshot.revision += 1;
             transaction
                 .execute(
@@ -1223,6 +1226,7 @@ pub(super) fn drain_workspace_waits(workspace: &Workspace) -> Result<(), Error> 
                         params![session, next.id],
                     )
                     .map_err(Error::internal)?;
+                crate::notices::superseded(&transaction)?;
                 launches.push(next.clone());
             }
         }

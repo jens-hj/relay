@@ -1393,7 +1393,10 @@ mod tests {
     #[test]
     fn connection_updates_rename_only_validate_and_keep_receipts() {
         let dir = tempfile::tempdir().unwrap();
-        let mut original = Snapshot::default();
+        let mut original = Snapshot {
+            protocol_version: PROTOCOL_VERSION,
+            ..Snapshot::default()
+        };
         create(&mut original, &dir.path().join("root"), "Connections");
         let slot = original
             .connections

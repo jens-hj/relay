@@ -59,46 +59,47 @@ pub fn start(
     spawn_local(async move {
         let client = reqwest::Client::new();
         while let Some(command) = receiver.recv().await {
-            let path = if matches!(
-                command.command,
-                relay_core::Command::SubmitTurn { .. } | relay_core::Command::EditQueuedTurn { .. }
-            ) {
-                "v1/conversation/commands"
-            } else {
-                "v1/commands"
-            };
-            let (result, conflict, ambiguous) = tokio::select! {
-                result=async {
-                match browser::send(&config, client.post(config.url(path)).json(&command)).await {
-                    Ok(response) => {
-                        let status = response.status();
-                        let result = decode_ack(response).await.and_then(|ack| {
-                            if ack.request_id == command.request_id {
-                                Ok(ack)
-                            } else {
-                                Err("Invalid command acknowledgement".into())
-                            }
-                        });
-                        let ambiguous =
-                            result.is_err() && (status.is_success() || status.is_server_error());
-                        (result, status == reqwest::StatusCode::CONFLICT, ambiguous)
+            let config = config.clone();
+            let client = client.clone();
+            let events = events.clone();
+            spawn_local(async move {
+                let path = if matches!(
+                    command.command,
+                    relay_core::Command::SubmitTurn { .. }
+                        | relay_core::Command::EditQueuedTurn { .. }
+                ) {
+                    "v1/conversation/commands"
+                } else {
+                    "v1/commands"
+                };
+                let (result, conflict, ambiguous) = tokio::select! {
+                    result=async {
+                    match browser::send(&config, client.post(config.url(path)).json(&command)).await {
+                        Ok(response) => {
+                            let status = response.status();
+                            let result = decode_ack(response).await.and_then(|ack| {
+                                if ack.request_id == command.request_id {
+                                    Ok(ack)
+                                } else {
+                                    Err("Invalid command acknowledgement".into())
+                                }
+                            });
+                            let ambiguous =
+                                result.is_err() && (status.is_success() || status.is_server_error());
+                            (result, status == reqwest::StatusCode::CONFLICT, ambiguous)
+                        }
+                        Err(error) => (Err(error), false, true),
                     }
-                    Err(error) => (Err(error), false, true),
-                }
-                }=>result,
-                _=browser::sleep(30_000)=>(Err("Acknowledgement timed out; exact retry preserves its ID".into()),false,true),
-            };
-            if events
-                .send(Event::Outcome(
+                    }=>result,
+                    _=browser::sleep(30_000)=>(Err("Acknowledgement timed out; exact retry preserves its ID".into()),false,true),
+                };
+                let _ = events.send(Event::Outcome(
                     command.request_id,
                     result,
                     conflict,
                     ambiguous,
-                ))
-                .is_err()
-            {
-                break;
-            }
+                ));
+            });
         }
     });
     spawn_local(async move {

@@ -80,6 +80,18 @@ pub struct NetworkState {
     pub outcome_serial: u64,
     pub outcome_conflict: bool,
     pub outcome_ambiguous: bool,
+    /// Keep concurrent control replies through latest-value UI coalescing.
+    /// Model permits at most 16 outstanding controls and one ordinary request.
+    pub outcomes: Vec<CommandOutcome>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CommandOutcome {
+    pub serial: u64,
+    pub id: String,
+    pub result: Result<(), String>,
+    pub conflict: bool,
+    pub ambiguous: bool,
 }
 
 enum Event {
@@ -259,6 +271,17 @@ fn receive_event(state: &mut NetworkState, event: Event) {
                     Ok(())
                 }),
             ));
+            let (id, result) = state.outcome.as_ref().unwrap();
+            state.outcomes.push(CommandOutcome {
+                serial: state.outcome_serial,
+                id: id.clone(),
+                result: result.clone(),
+                conflict,
+                ambiguous,
+            });
+            if state.outcomes.len() > 64 {
+                state.outcomes.remove(0);
+            }
         }
     }
 }
@@ -380,15 +403,19 @@ async fn write(
     events: mpsc::UnboundedSender<Event>,
 ) {
     while let Some(command) = commands.recv().await {
-        let endpoint = if matches!(
-            command.command,
-            relay_core::Command::SubmitTurn { .. } | relay_core::Command::EditQueuedTurn { .. }
-        ) {
-            "v1/conversation/commands"
-        } else {
-            "v1/commands"
-        };
-        let (result, conflict, ambiguous) = match client.post(config.url(endpoint)).bearer_auth(&config.token).header("X-Relay-Protocol", relay_core::PROTOCOL_VERSION.to_string()).json(&command).send().await {
+        let config = config.clone();
+        let client = client.clone();
+        let events = events.clone();
+        tokio::spawn(async move {
+            let endpoint = if matches!(
+                command.command,
+                relay_core::Command::SubmitTurn { .. } | relay_core::Command::EditQueuedTurn { .. }
+            ) {
+                "v1/conversation/commands"
+            } else {
+                "v1/commands"
+            };
+            let (result, conflict, ambiguous) = match client.post(config.url(endpoint)).bearer_auth(&config.token).header("X-Relay-Protocol", relay_core::PROTOCOL_VERSION.to_string()).json(&command).send().await {
             Ok(response) => {
                 let status = response.status();
                 let result = decode_ack(response).await.and_then(|ack|if ack.request_id==command.request_id {Ok(ack)} else {Err("Invalid command acknowledgement".into())});
@@ -397,17 +424,13 @@ async fn write(
             }
             Err(_) => (Err("Request could not be confirmed. Your draft is retained; exact retry preserves the original request ID and revision.".into()), false, true),
         };
-        if events
-            .send(Event::Outcome(
+            let _ = events.send(Event::Outcome(
                 command.request_id,
                 result,
                 conflict,
                 ambiguous,
-            ))
-            .is_err()
-        {
-            break;
-        }
+            ));
+        });
     }
 }
 
@@ -695,5 +718,136 @@ mod connection_telemetry_tests {
         receive_event(&mut state, Event::Status(true, "Connected".into()));
         assert_eq!(state.retry_at, None);
         assert_eq!(state.offline_since, None);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod independent_control_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    fn read_request(socket: &mut std::net::TcpStream) {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        loop {
+            let mut part = [0; 1024];
+            let n = socket.read(&mut part).unwrap();
+            assert_ne!(n, 0);
+            bytes.extend_from_slice(&part[..n]);
+            if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                let length = String::from_utf8_lossy(&bytes[..end])
+                    .lines()
+                    .find_map(|l| {
+                        l.split_once(':')
+                            .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, v)| v.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                if bytes.len() >= end + 4 + length {
+                    return;
+                }
+            }
+        }
+    }
+    fn reply(socket: &mut std::net::TcpStream, id: &str) {
+        let body = serde_json::to_string(&CommandAck {
+            request_id: id.into(),
+            committed_revision: 2,
+        })
+        .unwrap();
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    }
+    #[tokio::test]
+    async fn control_request_is_dispatched_while_a_form_ack_is_held() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (seen, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut form, _) = listener.accept().unwrap();
+            read_request(&mut form);
+            seen.send(()).unwrap();
+            let (mut control, _) = listener.accept().unwrap();
+            read_request(&mut control);
+            reply(&mut control, "control");
+            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+            reply(&mut form, "form");
+        });
+        let (commands, receiver) = mpsc::unbounded_channel();
+        let (events, mut outcomes) = mpsc::unbounded_channel();
+        let writer = tokio::spawn(write(
+            Config {
+                endpoint: format!("http://{address}/").parse().unwrap(),
+                token: "test-only".into(),
+            },
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            receiver,
+            events,
+        ));
+        commands
+            .send(CommandEnvelope {
+                request_id: "form".into(),
+                expected_revision: 1,
+                command: relay_core::Command::RenameProject {
+                    project_id: "p".into(),
+                    name: "form".into(),
+                },
+            })
+            .unwrap();
+        ready.await.unwrap();
+        commands
+            .send(CommandEnvelope {
+                request_id: "control".into(),
+                expected_revision: 1,
+                command: relay_core::Command::RespondPermission {
+                    permission_id: "permission".into(),
+                    run_id: "run".into(),
+                    allow: true,
+                },
+            })
+            .unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(5), outcomes.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(first, Event::Outcome(id, Ok(_), false, false) if id == "control"));
+        release.send(()).unwrap();
+        assert!(
+            matches!(outcomes.recv().await.unwrap(), Event::Outcome(id, Ok(_), false, false) if id == "form")
+        );
+        drop(commands);
+        writer.await.unwrap();
+        server.join().unwrap();
+    }
+    #[test]
+    fn latest_state_contains_each_coalesced_control_outcome() {
+        let mut state = NetworkState::default();
+        for id in ["one", "two", "three"] {
+            receive_event(
+                &mut state,
+                Event::Outcome(
+                    id.into(),
+                    Ok(CommandAck {
+                        request_id: id.into(),
+                        committed_revision: 2,
+                    }),
+                    false,
+                    false,
+                ),
+            );
+        }
+        assert_eq!(
+            state
+                .clone()
+                .outcomes
+                .iter()
+                .map(|o| o.id.as_str())
+                .collect::<Vec<_>>(),
+            ["one", "two", "three"]
+        );
     }
 }

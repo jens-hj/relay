@@ -399,7 +399,7 @@ pub fn execution_problem(model: Model) -> Option<String> {
     None
 }
 
-fn active_run_id(model: Model, snapshot: &Snapshot, session: &str) -> Option<String> {
+pub(crate) fn active_run_id(model: Model, snapshot: &Snapshot, session: &str) -> Option<String> {
     model
         .active_run_ids
         .get_untracked()
@@ -627,6 +627,9 @@ pub fn send(model: Model) {
             .set("Reconnect before sending. Your draft is retained.".into());
         return;
     }
+    if model.retry_buffer(&session_id) {
+        return;
+    }
     let doc = state
         .documents
         .entry(session_id.clone())
@@ -647,12 +650,6 @@ pub fn send(model: Model) {
             doc.force_after_submit = true;
             commit(model, state);
         }
-        return;
-    }
-    if model.busy.get_untracked() || model.can_retry() {
-        model
-            .notice
-            .set("Resolve the previous request before sending another message".into());
         return;
     }
     if let Some(Ok(catalog)) = model.catalogs.get_untracked().get(&session_id) {
@@ -906,8 +903,9 @@ pub fn flush(model: Model) {
             model.buffer.set(state.clone());
         }
     }
-    if !model.busy.get_untracked()
-        && !model.syncing.get_untracked()
+    // Promotion needs the acknowledged submission to have arrived in the
+    // stream. A form request in flight does not invalidate that identity.
+    if !model.syncing.get_untracked()
         && let Some((session, id)) = state
             .promote_after_ack
             .iter()
@@ -958,12 +956,7 @@ pub fn flush(model: Model) {
         {
             continue;
         }
-        if doc.finalize.is_some()
-            && *target == doc.remote.parts
-            && !model.busy.get_untracked()
-            && !model.syncing.get_untracked()
-            && !model.can_retry()
-        {
+        if doc.finalize.is_some() && *target == doc.remote.parts {
             let parts = target.clone();
             clear_stale_queue_edit(doc, &snapshot);
             submit = Some((

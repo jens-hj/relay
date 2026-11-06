@@ -395,6 +395,8 @@ pub(super) fn flush(workspace: &Workspace, caller: &str, allow_launch: bool) -> 
             snapshot,
             caller,
             notices::Delivery {
+                lifecycle: &[],
+                eligible_at: None,
                 text,
                 id: notice,
                 attempt: Some(&id),

@@ -133,6 +133,9 @@ pub(super) fn configure(
                     .into(),
                 "mcp_servers.relay.default_tools_approval_mode=\"approve\"".into(),
                 "mcp_servers.relay.tool_timeout_sec=660".into(),
+                // Relay's run-scoped management tools belong in the first
+                // model input, not an optional server's later grace window.
+                "mcp_servers.relay.required=true".into(),
             ] {
                 command.arg("-c").arg(setting);
             }
@@ -442,6 +445,98 @@ fn deletion_scope(snapshot: &Snapshot, agent: &str) -> Result<Vec<Session>, Erro
     Ok(sessions)
 }
 
+/// The existing lifecycle command addresses a whole branch. Bind approval to that
+/// exact inactive branch and its effective policies, without authorizing execution.
+fn unarchive_plan(snapshot: &Snapshot, agent: &str) -> Result<Vec<(Session, AgentProfile)>, Error> {
+    if !snapshot.can_archive_session(agent) {
+        return Err(Error::invalid(
+            "Stop this agent and its children before unarchiving",
+        ));
+    }
+    let ids = snapshot.session_branch_ids(agent);
+    if snapshot
+        .submissions
+        .iter()
+        .any(|s| ids.contains(&s.session_id) && s.state == SubmissionState::Queued)
+    {
+        return Err(Error::invalid(
+            "Pause queued turns before unarchiving this branch",
+        ));
+    }
+    let mut branch = snapshot
+        .sessions
+        .iter()
+        .filter(|s| ids.contains(&s.id))
+        .map(|s| Ok((s.clone(), profile(snapshot, s)?)))
+        .collect::<Result<Vec<_>, Error>>()?;
+    branch.sort_by(|a, b| a.0.id.cmp(&b.0.id));
+    Ok(branch)
+}
+
+async fn unarchive_agent(
+    workspace: &Workspace,
+    caller: &str,
+    run: &str,
+    input: Value,
+    stop: &mut watch::Receiver<bool>,
+) -> Result<Value, Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Unarchive {
+        agent: String,
+    }
+    let args: Unarchive = parse(input)?;
+    let (delegate, plan) = {
+        let snapshot = workspace.snapshots.borrow().clone();
+        archive_scope(&snapshot, caller, &args.agent)?;
+        let parent = snapshot.sessions.iter().find(|s| s.id == caller).unwrap();
+        if parent.archived {
+            return Err(unauthorized());
+        }
+        (
+            profile(&snapshot, parent)?.permissions[&Task::Delegate],
+            unarchive_plan(&snapshot, &args.agent)?,
+        )
+    };
+    match delegate {
+        Permission::Deny => return Err(Error::invalid("Profile denies managing subagents")),
+        Permission::Ask => approval(
+            workspace, caller, run, "mcp__relay__unarchive_agent",
+            &format!("Unarchive subagent {} and its entire inactive descendant branch, retaining history, workspaces and policy. Paused turns stay paused; no execution starts.", args.agent), stop,
+        ).await?,
+        Permission::Allow => {}
+    }
+    let mut store = workspace.store.lock().map_err(Error::internal)?;
+    let current = store.snapshot()?;
+    active_caller(&store, &current, caller, run)?;
+    archive_scope(&current, caller, &args.agent)?;
+    let parent = current.sessions.iter().find(|s| s.id == caller).unwrap();
+    if parent.archived {
+        return Err(unauthorized());
+    }
+    if profile(&current, parent)?.permissions[&Task::Delegate] != delegate {
+        return Err(Error::invalid("Agent policy changed; retry"));
+    }
+    if unarchive_plan(&current, &args.agent)? != plan {
+        return Err(Error::invalid(
+            "Unarchive branch or policy changed; review and retry",
+        ));
+    }
+    let (snapshot, _) = store.apply(
+        CommandEnvelope {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            expected_revision: current.revision,
+            command: Command::SetSessionArchived {
+                session_id: args.agent.clone(),
+                archived: false,
+            },
+        },
+        &workspace.config,
+    )?;
+    workspace.snapshots.send_replace(snapshot);
+    Ok(json!({"agent":args.agent,"archived":false}))
+}
+
 pub(super) async fn route(
     State(workspace): State<Workspace>,
     headers: HeaderMap,
@@ -530,6 +625,9 @@ async fn call(
 ) -> Result<Value, Error> {
     let result = dispatch(workspace, caller, run, tool, input, stop).await;
     if result.is_ok()
+        // Restoring availability must not start queued work, including unrelated
+        // workspace waiters. Messaging/resuming is a separate explicit operation.
+        && tool != "unarchive_agent"
         && let Err(error) = conversation::drain_workspace_waits(workspace)
     {
         eprintln!("Shared workspace queue advancement failed: {error}");
@@ -681,7 +779,15 @@ async fn dispatch(
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-            store.save(&current)?;
+            let transaction = store.connection.transaction().map_err(Error::internal)?;
+            crate::notices::suppress(&transaction, &current, &args.agent, true, "ancestor_stop")?;
+            transaction
+                .execute(
+                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                    [serde_json::to_string(&current).map_err(Error::internal)?],
+                )
+                .map_err(Error::internal)?;
+            transaction.commit().map_err(Error::internal)?;
             store.mark_ancestor_stop(&args.agent);
             store.held.remove(&args.agent);
             store.stop_controls(&current, &args.agent);
@@ -689,6 +795,7 @@ async fn dispatch(
             Ok(json!({"agent":args.agent,"stop_requested":true}))
         }
         "archive_agent" => manage_agent(workspace, caller, run, input, stop, false).await,
+        "unarchive_agent" => unarchive_agent(workspace, caller, run, input, stop).await,
         "delete_agent" => manage_agent(workspace, caller, run, input, stop, true).await,
         "message_agent" => message_agent(workspace, caller, run, parse(input)?, stop).await,
         "wait_for_agents" => {
@@ -1401,6 +1508,7 @@ async fn message_agent(
                     params![args.agent, id],
                 )
                 .map_err(Error::internal)?;
+            crate::notices::superseded(&transaction)?;
         }
         transaction
             .execute(
@@ -1548,6 +1656,12 @@ fn tools(
             vec!["agent"],
         ),
         (
+            "unarchive_agent",
+            "Unarchive your own inactive descendant and its entire inactive subtree, retaining history, workspaces and effective policy. Requires delegation permission. Restores availability only: paused turns stay paused and no execution starts. Use message_agent explicitly for follow-up; self, ancestors, unrelated agents and active branches are forbidden.",
+            json!({"agent":string}),
+            vec!["agent"],
+        ),
+        (
             "delete_agent",
             "Permanently delete your own inactive descendant branch, only after the entire branch is archived. Requires delegation permission. Irreversibly removes chat contents, drafts, unshared attachments and owned isolated workspaces; retain needed handoff and evidence elsewhere first. Prefer archive_agent for useful history; never delete active or follow-up work.",
             json!({"agent":string}),
@@ -1584,6 +1698,164 @@ fn tools(
     }
     json!({ "tools": tools })
 }
+// Discovery is read-only and has a static fallback. Bound the entire HTTP and
+// JSON operation so a peer withholding headers or body cannot hold up stdio.
+// Do not set a client-wide timeout: tool calls can await human approval.
+const CATALOG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
+async fn catalog(client: &reqwest::Client, endpoint: &str, secret: &str) -> Value {
+    let fetch = async {
+        let response = client
+            .post(format!("{endpoint}/v1/agent-tools/tools"))
+            .bearer_auth(secret)
+            .json(&json!({}))
+            .send()
+            .await
+            .map_err(|_| "transport")?;
+        if !response.status().is_success() {
+            return Err("http_status");
+        }
+        let value = response.json::<Value>().await.map_err(|_| "json")?;
+        if !value["tools"].is_array() {
+            return Err("catalog_shape");
+        }
+        Ok(value)
+    };
+    let reason = match tokio::time::timeout(CATALOG_DEADLINE, fetch).await {
+        Ok(Ok(value)) => return value,
+        Ok(Err(reason)) => reason,
+        Err(_) => "deadline",
+    };
+    // Fixed categories only: request errors may include private URLs or data.
+    eprintln!("Relay catalog fallback: {reason}");
+    tools(&WorkerModelPolicy::default(), Permission::Deny, None)
+}
+
+// Long approval/wait calls must not own the stdio reader. Each operation
+// keeps its existing lifetime; only the number of outstanding requests is bounded.
+const BRIDGE_CALLS: usize = 32;
+const BRIDGE_CATALOGS: usize = 4;
+struct BridgeReply {
+    call: bool,
+    key: String,
+    value: Value,
+}
+#[derive(Default)]
+struct BridgePending {
+    calls: usize,
+    catalogs: usize,
+    ids: std::collections::HashSet<String>,
+}
+
+fn rpc_error(id: Value, code: i32, message: &str) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
+}
+async fn stdio_write(
+    writer: &mut tokio::io::Stdout,
+    value: Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = serde_json::to_vec(&value)?;
+    bytes.push(b'\n');
+    writer.write_all(&bytes).await?;
+    writer.flush().await?;
+    Ok(())
+}
+async fn stdio_completed(
+    reply: Result<BridgeReply, tokio::task::JoinError>,
+    pending: &mut BridgePending,
+    writer: &mut tokio::io::Stdout,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let reply = reply.map_err(|_| "Relay bridge request task failed")?;
+    pending.ids.remove(&reply.key);
+    if reply.call {
+        pending.calls -= 1;
+    } else {
+        pending.catalogs -= 1;
+    }
+    stdio_write(writer, reply.value).await
+}
+async fn stdio_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    secret: &str,
+    bridge: uuid::Uuid,
+    request: &Value,
+) -> Value {
+    let id = &request["id"];
+    let result = if request["jsonrpc"] != "2.0"
+        || !request["method"].is_string()
+        || !(id.is_string() || id.is_number() || id.is_null())
+    {
+        Err((-32600, "Invalid JSON-RPC request"))
+    } else {
+        match request["method"].as_str() {
+            Some("initialize") => Ok(
+                json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"relay","version":env!("CARGO_PKG_VERSION")}}),
+            ),
+            Some("ping") => Ok(json!({})),
+            // The server describes spawn_agent with this run's worker model
+            // policy; the generic list remains if it cannot be reached.
+            Some("tools/list") => Ok(catalog(client, endpoint, secret).await),
+            Some("tools/call") => {
+                let name = request["params"]["name"].as_str().unwrap_or("");
+                if ![
+                    "spawn_agent",
+                    "stop_agent",
+                    "archive_agent",
+                    "unarchive_agent",
+                    "delete_agent",
+                    "message_agent",
+                    "wait_for_agents",
+                    "report_result",
+                    "list_agents",
+                    crate::nix::TOOL,
+                ]
+                .contains(&name)
+                {
+                    Err((-32602, "Unknown Relay tool"))
+                } else {
+                    let response = client
+                        .post(format!("{endpoint}/v1/agent-tools/{name}"))
+                        .bearer_auth(secret)
+                        .header(crate::spawn_attempts::REQUEST, format!("{bridge}:{id}"))
+                        .json(
+                            &request["params"]
+                                .get("arguments")
+                                .cloned()
+                                .unwrap_or(json!({})),
+                        )
+                        .send()
+                        .await;
+                    let (value, error) = match response {
+                        Ok(response) => {
+                            let error = !response.status().is_success();
+                            (
+                                response
+                                    .json::<Value>()
+                                    .await
+                                    .unwrap_or(json!({"message":"Relay response unavailable"})),
+                                error,
+                            )
+                        }
+                        Err(_) => (json!({"message":"Relay server unavailable"}), true),
+                    };
+                    let error = error || value["isError"] == true;
+                    Ok(
+                        json!({"content":[{"type":"text","text":value.to_string()}],"isError":error}),
+                    )
+                }
+            }
+            _ => Err((-32601, "Method not found")),
+        }
+    };
+    match result {
+        Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+        Err((code, message)) => {
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
+        }
+    }
+}
+
 /// Newline-delimited JSON-RPC over stdio. stdout contains protocol messages only.
 pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = std::env::var("RELAY_AGENT_URL").map_err(|_| "Missing Relay agent endpoint")?;
@@ -1595,113 +1867,92 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let mut reader = BufReader::new(tokio::io::stdin());
     let mut writer = tokio::io::stdout();
-    // MCP request numbers can restart when a harness reconnects its bridge.
-    // Exact same-run argument retries still deduplicate across bridge instances.
+    // Preserve one same-run retry identity across concurrent bridge requests.
     let bridge = uuid::Uuid::new_v4();
-    while let Some(bytes) = runtime::line(&mut reader).await? {
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut pending = BridgePending::default();
+    loop {
+        // runtime::line consumes partial input. Keep this future pinned across
+        // completions; recreating it in select! would lose fragmented frames.
+        let bytes = {
+            let next = runtime::line(&mut reader);
+            tokio::pin!(next);
+            loop {
+                tokio::select! {
+                    bytes=&mut next => break bytes?,
+                    reply=tasks.join_next(), if !tasks.is_empty() => {
+                        stdio_completed(reply.expect("Pending bridge request"),&mut pending,&mut writer).await?;
+                    }
+                }
+            }
+        };
+        let Some(bytes) = bytes else {
+            break;
+        };
         let request: Value = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
             Err(_) => {
-                writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Invalid JSON\"}}\n").await?;
+                stdio_write(&mut writer, rpc_error(Value::Null, -32700, "Invalid JSON")).await?;
                 continue;
             }
         };
         let Some(id) = request.get("id") else {
             continue;
         };
-        let result = if request["jsonrpc"] != "2.0"
-            || !request["method"].is_string()
-            || !(id.is_string() || id.is_number() || id.is_null())
-        {
-            Err((-32600, "Invalid JSON-RPC request"))
+        let key = id.to_string();
+        if pending.ids.contains(&key) {
+            // A conflicting duplicate must not resend a possibly started tool.
+            stdio_write(
+                &mut writer,
+                rpc_error(Value::Null, -32600, "Duplicate active Relay request ID"),
+            )
+            .await?;
+            continue;
+        }
+        let valid = request["jsonrpc"] == "2.0"
+            && request["method"].is_string()
+            && (id.is_string() || id.is_number() || id.is_null());
+        let call = valid && request["method"] == "tools/call";
+        let catalog_request = valid && request["method"] == "tools/list";
+        if call && pending.calls >= BRIDGE_CALLS {
+            stdio_write(
+                &mut writer,
+                rpc_error(
+                    id.clone(),
+                    -32000,
+                    "Relay bridge busy; request was not sent",
+                ),
+            )
+            .await?;
+            continue;
+        }
+        if catalog_request && pending.catalogs >= BRIDGE_CATALOGS {
+            stdio_write(&mut writer,json!({"jsonrpc":"2.0","id":id,"result":tools(&WorkerModelPolicy::default(),Permission::Deny,None)})).await?;
+            continue;
+        }
+        if call || catalog_request {
+            pending.ids.insert(key.clone());
+            if call {
+                pending.calls += 1;
+            } else {
+                pending.catalogs += 1;
+            }
+            let client = client.clone();
+            let endpoint = endpoint.clone();
+            let secret = secret.clone();
+            tasks.spawn(async move {
+                let value = stdio_request(&client, &endpoint, &secret, bridge, &request).await;
+                BridgeReply { call, key, value }
+            });
         } else {
-            match request["method"].as_str() {
-                Some("initialize") => Ok(
-                    json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"relay","version":env!("CARGO_PKG_VERSION")}}),
-                ),
-                Some("ping") => Ok(json!({})),
-                // The server describes spawn_agent with this run's worker model
-                // policy; the generic list remains if it cannot be reached.
-                Some("tools/list") => Ok(
-                    match client
-                        .post(format!("{endpoint}/v1/agent-tools/tools"))
-                        .bearer_auth(&secret)
-                        .json(&json!({}))
-                        .send()
-                        .await
-                    {
-                        Ok(response) if response.status().is_success() => response
-                            .json::<Value>()
-                            .await
-                            .ok()
-                            .filter(|v| v["tools"].is_array())
-                            .unwrap_or_else(|| {
-                                tools(&WorkerModelPolicy::default(), Permission::Deny, None)
-                            }),
-                        _ => tools(&WorkerModelPolicy::default(), Permission::Deny, None),
-                    },
-                ),
-                Some("tools/call") => {
-                    let name = request["params"]["name"].as_str().unwrap_or("");
-                    if ![
-                        "spawn_agent",
-                        "stop_agent",
-                        "archive_agent",
-                        "delete_agent",
-                        "message_agent",
-                        "wait_for_agents",
-                        "report_result",
-                        "list_agents",
-                        crate::nix::TOOL,
-                    ]
-                    .contains(&name)
-                    {
-                        Err((-32602, "Unknown Relay tool"))
-                    } else {
-                        let response = client
-                            .post(format!("{endpoint}/v1/agent-tools/{name}"))
-                            .bearer_auth(&secret)
-                            .header(crate::spawn_attempts::REQUEST, format!("{bridge}:{id}"))
-                            .json(
-                                &request["params"]
-                                    .get("arguments")
-                                    .cloned()
-                                    .unwrap_or(json!({})),
-                            )
-                            .send()
-                            .await;
-                        let (value, error) = match response {
-                            Ok(response) => {
-                                let error = !response.status().is_success();
-                                (
-                                    response
-                                        .json::<Value>()
-                                        .await
-                                        .unwrap_or(json!({"message":"Relay response unavailable"})),
-                                    error,
-                                )
-                            }
-                            Err(_) => (json!({"message":"Relay server unavailable"}), true),
-                        };
-                        let error = error || value["isError"] == true;
-                        Ok(
-                            json!({"content":[{"type":"text","text":value.to_string()}],"isError":error}),
-                        )
-                    }
-                }
-                _ => Err((-32601, "Method not found")),
-            }
-        };
-        let response = match result {
-            Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-            Err((code, message)) => {
-                json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
-            }
-        };
-        let mut bytes = serde_json::to_vec(&response)?;
-        bytes.push(b'\n');
-        writer.write_all(&bytes).await?;
-        writer.flush().await?;
+            let value = stdio_request(&client, &endpoint, &secret, bridge, &request).await;
+            stdio_write(&mut writer, value).await?;
+        }
+    }
+    // Shell/CLI callers may close stdin immediately after sending a request.
+    // EOF is not cancellation or permission to replay it: drain its one result.
+    while let Some(reply) = tasks.join_next().await {
+        stdio_completed(reply, &mut pending, &mut writer).await?;
     }
     Ok(())
 }
@@ -2332,6 +2583,94 @@ mod tests {
             assert_eq!(notices[0].state, SubmissionState::Paused);
             shutdown.shutdown().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn normal_parent_end_cancels_pending_http_approval_and_revokes_run() {
+        let f = Fixture::new(Permission::Ask);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!(
+            "http://{}/v1/agent-tools/spawn_agent",
+            listener.local_addr().unwrap()
+        );
+        let app = Router::new()
+            .route("/v1/agent-tools/{tool}", post(route))
+            .with_state(f.workspace.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let headers = durable_headers(&f, "parent-end");
+        let stale_headers = headers.clone();
+        let stale_endpoint = endpoint.clone();
+        let request = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(endpoint)
+                .headers(headers)
+                .json(&json!({"title":"Pending","task":"Verify"}))
+                .send()
+                .await
+                .unwrap()
+        });
+        let mut events = f.workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !events
+                .borrow()
+                .tool_permissions
+                .iter()
+                .any(|p| p.decision.is_none())
+            {
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        // Hold future work explicitly. Ending the run must cancel the old
+        // approval, without clearing a human hold or replaying the spawn.
+        f.change(|s| {
+            s.submissions.push(Submission {
+                id: "human-hold".into(),
+                session_id: f.caller.clone(),
+                parts: vec![Part::text("Held work")],
+                state: SubmissionState::Paused,
+                approve_implementation: false,
+                error: Some("Human pause".into()),
+                interrupts_run: None,
+                last_edit_request: None,
+                sender: Sender::User,
+            });
+        });
+        f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
+        let response = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .expect("Normal parent end left HTTP approval pending")
+            .unwrap();
+        let response: Value = response.json().await.unwrap();
+        assert_eq!(response["phase"], "cancelled");
+        let snapshot = f.workspace.snapshots.borrow().clone();
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert!(snapshot.tool_permissions.iter().all(|p| p.expired));
+        assert_eq!(
+            snapshot
+                .submissions
+                .iter()
+                .find(|s| s.id == "human-hold")
+                .unwrap()
+                .state,
+            SubmissionState::Paused
+        );
+        assert_eq!(spawn_notices(&f).len(), 1);
+        assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Paused);
+        let stale = reqwest::Client::new()
+            .post(stale_endpoint)
+            .headers(stale_headers)
+            .json(&json!({"title":"Pending","task":"Verify"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
+        server.abort();
+        f.finish().await;
     }
 
     #[tokio::test]
@@ -3225,18 +3564,313 @@ mod tests {
     #[test]
     fn archive_tool_schema_is_discoverable() {
         let tools = tools(&WorkerModelPolicy::default(), Permission::Deny, None);
-        let tool = tools["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t["name"] == "archive_agent")
+        for name in ["archive_agent", "unarchive_agent"] {
+            let tool = tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap();
+            assert_eq!(tool["inputSchema"]["required"], json!(["agent"]));
+            assert_eq!(
+                tool["inputSchema"]["properties"],
+                json!({"agent":{"type":"string"}})
+            );
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        }
+    }
+
+    #[tokio::test]
+    async fn unarchive_preserves_branch_policy_history_workspaces_and_paused_turns() {
+        let f = Fixture::new(Permission::Allow);
+        let capture = install_peer_native(&f, false);
+        archive_fixture(&f);
+        f.change(|s| {
+            let mut worker = s.sessions[0].worker.clone().unwrap();
+            worker.status = WorkerStatus::Stopped;
+            worker.thread_id = Some("retained-child-thread".into());
+            s.sessions[1].worker = Some(worker);
+            s.submissions.push(Submission {
+                id: "unarchive-paused".into(),
+                session_id: "archive-grandchild".into(),
+                parts: vec![Part::text("Continue only explicitly")],
+                state: SubmissionState::Queued,
+                approve_implementation: false,
+                error: None,
+                interrupts_run: None,
+                last_edit_request: None,
+                sender: Sender::User,
+            });
+            let mut sibling = s.sessions[2].clone();
+            sibling.id = "archived-sibling".into();
+            sibling.parent_session_id = Some(f.caller.clone());
+            sibling.archived = true;
+            s.sessions.push(sibling);
+        });
+        f.call("archive_agent", json!({"agent":"archive-child"}))
+            .await
             .unwrap();
-        assert_eq!(tool["inputSchema"]["required"], json!(["agent"]));
+        let before = f.workspace.store.lock().unwrap().snapshot().unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                f.call("unarchive_agent", json!({"agent":"archive-child"}))
+                    .await
+                    .unwrap(),
+                json!({"agent":"archive-child","archived":false})
+            );
+        }
+        let after = f.workspace.store.lock().unwrap().snapshot().unwrap();
+        for original in &before.sessions {
+            let mut expected = original.clone();
+            if matches!(expected.id.as_str(), "archive-child" | "archive-grandchild") {
+                expected.archived = false;
+            }
+            let actual = after.sessions.iter().find(|s| s.id == expected.id).unwrap();
+            assert_eq!(actual, &expected); // includes threads, selection, settings, workspace identities
+            assert_eq!(
+                profile(&before, original).unwrap(),
+                profile(&after, actual).unwrap()
+            );
+            for workspace in &actual.workspaces {
+                assert!(Path::new(&workspace.path).exists());
+            }
+        }
+        assert_eq!(before.messages, after.messages);
+        assert_eq!(before.submissions, after.submissions);
         assert_eq!(
-            tool["inputSchema"]["properties"],
-            json!({"agent":{"type":"string"}})
+            after
+                .submissions
+                .iter()
+                .find(|s| s.id == "unarchive-paused")
+                .unwrap()
+                .state,
+            SubmissionState::Paused
         );
-        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        assert!(
+            f.call("list_agents", json!({})).await.unwrap()["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["id"] == "archive-child" && s["archived"] == false)
+        );
+        assert_eq!(turn_starts(&capture, "Continue only explicitly"), 0);
+        f.call(
+            "message_agent",
+            json!({"agent":"archive-child","text":"Explicit follow-up"}),
+        )
+        .await
+        .unwrap();
+        let queued = f.workspace.snapshots.borrow().clone();
+        assert!(
+            queued
+                .submissions
+                .iter()
+                .any(|s| s.session_id == "archive-child"
+                    && matches!(&s.sender,Sender::Agent{session_id} if session_id==&f.caller))
+        );
+        assert_eq!(
+            queued
+                .submissions
+                .iter()
+                .find(|s| s.id == "unarchive-paused")
+                .unwrap()
+                .state,
+            SubmissionState::Paused
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn unarchive_rejects_active_queued_invalid_and_unowned_branches() {
+        let f = Fixture::new(Permission::Allow);
+        archive_fixture(&f);
+        f.call("archive_agent", json!({"agent":"archive-child"}))
+            .await
+            .unwrap();
+        let original = f.workspace.snapshots.borrow().clone();
+        let mut stop = f.stop.clone();
+        assert!(
+            call(
+                &f.workspace,
+                &f.caller,
+                "expired-run",
+                "unarchive_agent",
+                json!({"agent":"archive-child"}),
+                &mut stop
+            )
+            .await
+            .is_err()
+        );
+        for target in ["archive-child", "archive-grandchild"] {
+            for status in [WorkerStatus::Queued, WorkerStatus::Running] {
+                f.change(|s| {
+                    let mut worker = s.sessions[0].worker.clone().unwrap();
+                    worker.status = status;
+                    s.sessions
+                        .iter_mut()
+                        .find(|s| s.id == target)
+                        .unwrap()
+                        .worker = Some(worker);
+                });
+                assert!(
+                    f.call("unarchive_agent", json!({"agent":"archive-child"}))
+                        .await
+                        .is_err()
+                );
+                f.change(|s| s.sessions = original.sessions.clone());
+            }
+        }
+        f.change(|s| {
+            s.submissions.push(Submission {
+                id: "unexpected-queued".into(),
+                session_id: "archive-grandchild".into(),
+                parts: vec![Part::text("Unexpected queued turn")],
+                state: SubmissionState::Queued,
+                approve_implementation: false,
+                error: None,
+                interrupts_run: None,
+                last_edit_request: None,
+                sender: Sender::User,
+            })
+        });
+        assert!(
+            f.call("unarchive_agent", json!({"agent":"archive-child"}))
+                .await
+                .is_err()
+        );
+        f.change(|s| s.submissions = original.submissions.clone());
+        for args in [
+            json!({}),
+            json!({"agent":42}),
+            json!({"agent":"archive-child","subtree":false}),
+            json!({"agent":f.caller}),
+            json!({"agent":"missing"}),
+        ] {
+            assert!(f.call("unarchive_agent", args).await.is_err());
+        }
+        for mutation in [
+            "sibling",
+            "ancestor",
+            "cross-project",
+            "cross-project-child",
+            "cycle",
+        ] {
+            f.change(|s| match mutation {
+                "sibling" => s.sessions[1].parent_session_id = None,
+                "ancestor" => {
+                    s.sessions[0].parent_session_id = Some("archive-child".into());
+                    s.sessions[1].parent_session_id = None;
+                }
+                "cross-project" => s.sessions[1].project_id = "other-project".into(),
+                "cross-project-child" => s.sessions[2].project_id = "other-project".into(),
+                "cycle" => s.sessions[1].parent_session_id = Some("archive-grandchild".into()),
+                _ => unreachable!(),
+            });
+            assert!(
+                f.call("unarchive_agent", json!({"agent":"archive-child"}))
+                    .await
+                    .is_err(),
+                "{mutation}"
+            );
+            f.change(|s| s.sessions = original.sessions.clone());
+        }
+        assert!(f.workspace.snapshots.borrow().sessions[1].archived);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn unarchive_denies_and_rechecks_approval_branch_policy_and_caller_races() {
+        let f = Fixture::new(Permission::Deny);
+        archive_fixture(&f);
+        f.change(|s| {
+            s.sessions[1].archived = true;
+            s.sessions[2].archived = true;
+        });
+        assert!(
+            f.call("unarchive_agent", json!({"agent":"archive-child"}))
+                .await
+                .is_err()
+        );
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Delegate, Permission::Ask);
+        });
+        let (result, ()) = tokio::join!(
+            f.call("unarchive_agent", json!({"agent":"archive-child"})),
+            decide(&f.workspace, &f.caller, &f.run, false, "Unarchive subagent")
+        );
+        assert!(result.is_err());
+        for mutation in [
+            "policy",
+            "child-policy",
+            "branch",
+            "workspace",
+            "scope",
+            "active",
+        ] {
+            let before = f.workspace.snapshots.borrow().clone();
+            let (result, ()) = tokio::join!(
+                f.call("unarchive_agent", json!({"agent":"archive-child"})),
+                async {
+                    decide(&f.workspace, &f.caller, &f.run, true, "Unarchive subagent").await;
+                    f.change(|s| match mutation {
+                        "policy" => {
+                            s.projects[0]
+                                .defaults
+                                .permissions
+                                .insert(Task::Delegate, Permission::Deny);
+                        }
+                        "child-policy" => {
+                            let mut p = profile(s, &s.sessions[2]).unwrap();
+                            p.model = "changed-model".into();
+                            s.sessions[2].profile = Some(p);
+                        }
+                        "branch" => {
+                            let mut child = s.sessions[2].clone();
+                            child.id = "new-inactive-child".into();
+                            s.sessions.push(child);
+                        }
+                        "workspace" => s.sessions[2].workspaces[0].path.push_str("-changed"),
+                        "scope" => s.sessions[1].parent_session_id = None,
+                        "active" => s.sessions[2].worker = s.sessions[0].worker.clone(),
+                        _ => unreachable!(),
+                    });
+                }
+            );
+            assert!(result.is_err(), "{mutation}");
+            assert!(f.workspace.snapshots.borrow().sessions[1].archived);
+            f.change(|s| {
+                s.sessions = before.sessions;
+                s.projects = before.projects;
+            });
+        }
+        let (result, ()) = tokio::join!(
+            f.call("unarchive_agent", json!({"agent":"archive-child"})),
+            decide(&f.workspace, &f.caller, &f.run, true, "Unarchive subagent")
+        );
+        assert!(result.is_ok());
+        f.finish().await;
+
+        let f = Fixture::new(Permission::Ask);
+        archive_fixture(&f);
+        f.change(|s| {
+            s.sessions[1].archived = true;
+            s.sessions[2].archived = true;
+        });
+        let (result, ()) = tokio::join!(
+            f.call("unarchive_agent", json!({"agent":"archive-child"})),
+            async {
+                decide(&f.workspace, &f.caller, &f.run, true, "Unarchive subagent").await;
+                f.change(|s| {
+                    s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed
+                });
+            }
+        );
+        assert!(result.is_err());
+        assert!(f.workspace.snapshots.borrow().sessions[1].archived);
+        f.finish().await;
     }
 
     #[tokio::test]
@@ -3756,7 +4390,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 29);
+        assert_eq!(schema, 30);
         f.finish().await;
     }
     #[tokio::test]
@@ -5372,6 +6006,12 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", format!("Bearer {secret}").parse().unwrap());
         assert!(authenticate(&f.workspace, &headers).is_ok());
+        assert!(
+            command
+                .as_std()
+                .get_args()
+                .any(|a| a == "mcp_servers.relay.required=true")
+        );
         assert!(!format!("{:?}", command.as_std().get_args()).contains(secret));
         assert!(
             !serde_json::to_string(&*f.workspace.snapshots.borrow())
@@ -7628,6 +8268,8 @@ mod tests {
                 snapshot,
                 &peer,
                 crate::notices::Delivery {
+                    lifecycle: &[],
+                    eligible_at: None,
                     text: "Worker ended".into(),
                     id: notice.clone(),
                     attempt: None,
@@ -9897,6 +10539,7 @@ fi
             ("wait_for_agents", json!({"agents":[target],"timeout_s":0})),
             ("stop_agent", json!({"agent":target})),
             ("archive_agent", json!({"agent":target})),
+            ("unarchive_agent", json!({"agent":target})),
         ] {
             assert!(f.call(tool, args).await.is_err(), "{tool}");
         }

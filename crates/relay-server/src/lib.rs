@@ -30,6 +30,8 @@ mod process;
 mod projects;
 mod providers;
 mod runtime;
+mod snapshot_cache;
+mod snapshot_views;
 mod spawn_attempts;
 mod window_start;
 pub use agent_tools::stdio as mcp_stdio;
@@ -89,7 +91,14 @@ fn accepts_stale_workspace_revision(command: &Command, snapshot: &Snapshot) -> b
         | Command::AddConnection { .. }
         | Command::StartRootAgent { .. }
         | Command::StartSession { .. }
-        | Command::SubmitTurn { .. } => true,
+        | Command::SubmitTurn { .. }
+        // These name an immutable request/submission/run or consume a draft
+        // version. Their handlers still validate that target in this transaction.
+        | Command::RespondPermission { .. }
+        | Command::StopWorkerRuns { .. }
+        | Command::SendWorker { .. }
+        | Command::EditQueuedTurn { .. }
+        | Command::PromoteTurn { .. } => true,
         // The handler refuses while the board's connection is removed or any
         // operation on the board is queued or running, so it queues one sync.
         Command::SyncBoard { .. } => true,
@@ -189,6 +198,7 @@ struct Store {
     agent_capabilities: HashMap<String, agent_tools::Capability>,
     defaults: AgentProfile,
     connection: Connection,
+    snapshot_cache: snapshot_cache::SnapshotCache,
     controls: HashMap<String, watch::Sender<bool>>,
     closing: bool,
     /// Runs stopped by an ancestor's stop; their parents get no notice.
@@ -197,6 +207,7 @@ struct Store {
     notices: HashMap<String, Vec<notices::Notice>>,
     /// Ended runs whose notice waits for their own workers, keyed by session.
     held: HashMap<String, String>,
+    notice_dispatcher: bool,
     /// Sessions with a Nix command running; one at a time per session.
     nix_runs: std::collections::HashSet<String>,
     #[cfg(test)]
@@ -264,7 +275,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 29 {
+        if version > 30 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -291,7 +302,10 @@ impl Store {
              CREATE TABLE IF NOT EXISTS spawn_notice_consumption(notice_id TEXT PRIMARY KEY, caller TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS spawn_requests(id TEXT PRIMARY KEY, attempt TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS workspace_waits(session_id TEXT PRIMARY KEY);
-             PRAGMA user_version = 29;"
+             CREATE TABLE IF NOT EXISTS lifecycle_events(child_session TEXT NOT NULL,child_run TEXT NOT NULL,parent_session TEXT NOT NULL,disposition TEXT NOT NULL,notice_id TEXT,hold_reason TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,held INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(child_session,child_run,parent_session));
+             CREATE INDEX IF NOT EXISTS lifecycle_pending ON lifecycle_events(parent_session,disposition);
+             CREATE TABLE IF NOT EXISTS lifecycle_holds(session_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,reason TEXT NOT NULL);
+             PRAGMA user_version = 30;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -416,6 +430,28 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
+        // Protocol 17 adds run-bound stop commands. No stored fields/schema
+        // change; keep the persisted transport version aligned on an upgrade.
+        let json: String = connection
+            .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .map_err(Error::internal)?;
+        let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
+        if snapshot.protocol_version > PROTOCOL_VERSION {
+            return Err(Error::invalid(
+                "Stored protocol is newer than this Relay server",
+            ));
+        }
+        if snapshot.protocol_version != PROTOCOL_VERSION {
+            snapshot.protocol_version = PROTOCOL_VERSION;
+            connection
+                .execute(
+                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                    [serde_json::to_string(&snapshot).map_err(Error::internal)?],
+                )
+                .map_err(Error::internal)?;
+        }
         connection
             .execute_batch("COMMIT;")
             .map_err(Error::internal)?;
@@ -423,29 +459,22 @@ impl Store {
             agent_capabilities: HashMap::new(),
             defaults,
             connection,
+            snapshot_cache: snapshot_cache::SnapshotCache::default(),
             controls: HashMap::new(),
             closing: false,
             ancestor_stops: HashMap::new(),
             notices: HashMap::new(),
             held: HashMap::new(),
+            notice_dispatcher: false,
             nix_runs: std::collections::HashSet::new(),
             #[cfg(test)]
             runtime_gates: HashMap::new(),
         })
     }
     fn snapshot(&self) -> Result<Snapshot, Error> {
-        let started = std::time::Instant::now();
-        let json: String = self
-            .connection
-            .query_row("SELECT snapshot FROM workspace WHERE id = 1", [], |r| {
-                r.get(0)
-            })
-            .map_err(Error::internal)?;
-        slow_store_phase("load", started, json.len());
-        let started = std::time::Instant::now();
-        let result = serde_json::from_str(&json).map_err(Error::internal);
-        slow_store_phase("deserialize", started, json.len());
-        result
+        self.snapshot_cache
+            .read(&self.connection, slow_store_phase)
+            .map_err(Error::internal)
     }
     fn save(&mut self, snapshot: &Snapshot) -> Result<(), Error> {
         let started = std::time::Instant::now();
@@ -490,12 +519,10 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(Error::internal)?;
-        let json: String = transaction
-            .query_row("SELECT snapshot FROM workspace WHERE id = 1", [], |r| {
-                r.get(0)
-            })
+        let mut snapshot = self
+            .snapshot_cache
+            .read(&transaction, slow_store_phase)
             .map_err(Error::internal)?;
-        let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
         let receipt: Option<String> = transaction
             .query_row(
                 "SELECT request FROM receipts WHERE request_id = ?1",
@@ -522,7 +549,63 @@ impl Store {
                 "Workspace changed. Refresh and review your draft before saving again.",
             ));
         }
-        let continuation = match &envelope.command {
+        let command = match envelope.command {
+            Command::StopWorkerRuns {
+                session_id,
+                include_descendants,
+                runs,
+                branch,
+            } => {
+                let mut expected = std::collections::BTreeMap::new();
+                let scope = if include_descendants {
+                    snapshot.session_branch_ids(&session_id)
+                } else {
+                    std::collections::HashSet::from([session_id.clone()])
+                };
+                let targets = snapshot
+                    .sessions
+                    .iter()
+                    .filter(|s| scope.contains(&s.id))
+                    .collect::<Vec<_>>();
+                let mut expected_branch = targets.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+                expected_branch.sort();
+                for session in targets {
+                    if session
+                        .worker
+                        .as_ref()
+                        .is_some_and(|w| runtime::active(&w.status))
+                    {
+                        let run: Option<String> = transaction
+                            .query_row(
+                                "SELECT run_id FROM runs WHERE session_id=?1",
+                                [&session.id],
+                                |r| r.get(0),
+                            )
+                            .optional()
+                            .map_err(Error::internal)?;
+                        // Queued is also used for launch reservations. A missing
+                        // durable identity cannot safely name a turn to cancel.
+                        let run = run.ok_or_else(|| {
+                            Error::invalid(
+                                "Active turn identity is unavailable; refresh before stopping",
+                            )
+                        })?;
+                        expected.insert(session.id.clone(), run);
+                    }
+                }
+                if runs.is_empty() || runs != expected || branch != expected_branch {
+                    return Err(Error::invalid(
+                        "Active turns changed; review before stopping",
+                    ));
+                }
+                Command::StopWorker {
+                    session_id,
+                    include_descendants,
+                }
+            }
+            command => command,
+        };
+        let continuation = match &command {
             Command::SendWorker { session_id, .. }
             | Command::SubmitTurn { session_id, .. }
             | Command::ResumeQueue { session_id, .. }
@@ -541,15 +624,18 @@ impl Store {
         {
             return Err(Error::invalid("Unarchive this chat before continuing"));
         }
-        let archived = match &envelope.command {
+        let archived = match &command {
             Command::SetSessionArchived {
                 session_id,
                 archived: true,
             } => Some(session_id.clone()),
             _ => None,
         };
+        // Run-bound stops have been validated and normalized above; retain the
+        // original envelope only for receipt identity, not lifecycle dispatch.
+        notices::command(&transaction, &snapshot, &command)?;
         let mut action = None;
-        match envelope.command {
+        match command {
             Command::DeleteSessionBranch { session_id } => {
                 deletion::delete(
                     &transaction,
@@ -1112,6 +1198,12 @@ impl Store {
                 .ok_or_else(|| Error::invalid("Revision exhausted"))?;
         }
         if let Some(Action::Run { session_id, .. }) = &action {
+            transaction
+                .execute(
+                    "DELETE FROM lifecycle_holds WHERE session_id=?1",
+                    [session_id],
+                )
+                .map_err(Error::internal)?;
             let identity = snapshot
                 .submissions
                 .iter()
@@ -1123,6 +1215,7 @@ impl Store {
         if let Some(Action::Sync(project_id)) = &action {
             transaction.execute("INSERT INTO syncs(project_id,request_id) VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET request_id=excluded.request_id",params![project_id,envelope.request_id]).map_err(Error::internal)?;
         }
+        notices::superseded(&transaction)?;
         transaction
             .execute(
                 "UPDATE workspace SET snapshot = ?1 WHERE id = 1",
@@ -1282,7 +1375,15 @@ impl Workspace {
             .revision
             .checked_add(1)
             .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-        store.save(&snapshot)?;
+        let transaction = store.connection.transaction().map_err(Error::internal)?;
+        notices::record(&transaction, &snapshot, session, run)?;
+        transaction
+            .execute(
+                "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                [serde_json::to_string(&snapshot).map_err(Error::internal)?],
+            )
+            .map_err(Error::internal)?;
+        transaction.commit().map_err(Error::internal)?;
         store.controls.remove(session);
         store.agent_capabilities.remove(session);
         self.snapshots.send_replace(snapshot);
@@ -1321,12 +1422,9 @@ impl Workspace {
         {
             return Err(Error::invalid("Run is no longer active"));
         }
-        let started = std::time::Instant::now();
-        let previous = snapshot.clone();
-        slow_store_phase("clone", started, 0);
         update(&mut snapshot)?;
         let started = std::time::Instant::now();
-        let unchanged = snapshot == previous;
+        let unchanged = store.snapshot_cache.unchanged(&snapshot);
         slow_store_phase("compare", started, 0);
         if unchanged {
             return Ok(());
@@ -1335,19 +1433,18 @@ impl Workspace {
             .revision
             .checked_add(1)
             .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-        if snapshot
+        let terminal = snapshot
             .sessions
             .iter()
             .find(|s| s.id == session)
             .and_then(|s| s.worker.as_ref())
-            .is_some_and(|w| !runtime::active(&w.status))
-        {
-            store.controls.remove(session);
-            store.agent_capabilities.remove(session);
+            .is_some_and(|w| !runtime::active(&w.status));
+        if terminal {
             interrupt_tools(&mut snapshot, session, Some(run));
             harness::expire(&mut snapshot, session, run);
         }
         let transaction = store.connection.transaction().map_err(Error::internal)?;
+        notices::record(&transaction, &snapshot, session, run)?;
         spawn_attempts::settle(&transaction, &mut snapshot, session, run)?;
         transaction
             .execute(
@@ -1356,6 +1453,10 @@ impl Workspace {
             )
             .map_err(Error::internal)?;
         transaction.commit().map_err(Error::internal)?;
+        if terminal {
+            store.controls.remove(session);
+            store.agent_capabilities.remove(session);
+        }
         self.snapshots.send_replace(snapshot);
         Ok(())
     }
@@ -1678,11 +1779,15 @@ pub fn router_with_browser(
         .filter(|s| s.fixture)
         .map(|s| s.id.clone())
         .collect();
+    let mut interrupted_lifecycle = Vec::new();
     for session in &mut initial.sessions {
         if let Some(w) = &mut session.worker
             && !session.fixture
             && runtime::active(&w.status)
         {
+            if let Some(run) = store.run_id(&session.id)? {
+                interrupted_lifecycle.push((session.id.clone(), run));
+            }
             w.status = WorkerStatus::Interrupted;
             w.error =
                 Some("Server restarted before the turn ended; continuation is explicit".into());
@@ -1857,7 +1962,17 @@ pub fn router_with_browser(
             .revision
             .checked_add(1)
             .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-        store.save(&initial)?;
+        let transaction = store.connection.transaction().map_err(Error::internal)?;
+        for (session, run) in interrupted_lifecycle {
+            notices::record(&transaction, &initial, &session, &run)?;
+        }
+        transaction
+            .execute(
+                "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                [serde_json::to_string(&initial).map_err(Error::internal)?],
+            )
+            .map_err(Error::internal)?;
+        transaction.commit().map_err(Error::internal)?;
     }
     let (snapshots, _) = watch::channel(initial);
     let workspace = Workspace {
@@ -1880,6 +1995,7 @@ pub fn router_with_browser(
         workspace: workspace.clone(),
     };
     spawn_attempts::recover_notices(&workspace)?;
+    notices::recover(&workspace)?;
     Ok((
         Router::new()
             .route("/v1/boards/discover", post(discover_board))
@@ -2221,6 +2337,11 @@ async fn command(
     } else {
         None
     };
+    // Permission decisions cannot free a workspace waiter. Do not delay their
+    // acknowledgement behind another full workspace queue scan/store acquisition.
+    let advance_waiters =
+        !already_applied && !matches!(envelope.command, Command::RespondPermission { .. });
+    let independent_control = envelope.command.is_run_control();
     let wake = workspace.clone();
     let handle = tokio::runtime::Handle::current();
     let result = tokio::task::spawn_blocking(move || {
@@ -2304,10 +2425,19 @@ async fn command(
     .map_err(Error::internal)??;
     // A command can end a wait that kept later waiting turns behind it, such
     // as a cancelled, paused or archived turn; let them launch now.
-    if let Ok(Err(error)) =
-        tokio::task::spawn_blocking(move || conversation::drain_workspace_waits(&wake)).await
-    {
-        eprintln!("Shared workspace queue advancement failed: {error}");
+    if advance_waiters {
+        let advance = tokio::task::spawn_blocking(move || {
+            if let Err(error) = conversation::drain_workspace_waits(&wake) {
+                eprintln!("Shared workspace queue advancement failed: {error}");
+            }
+        });
+        // A run-bound stop is committed and its cancellation signal has been
+        // sent. Acknowledging it need not wait for unrelated queue advancement.
+        // The existing durable wait table and closing guard still govern that
+        // work. Ordinary command sequencing retains its previous behavior.
+        if !independent_control {
+            let _ = advance.await;
+        }
     }
     Ok(Json(result))
 }

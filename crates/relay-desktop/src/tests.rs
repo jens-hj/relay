@@ -2552,10 +2552,11 @@ fn worker_running_stop_completed_review_and_continue_use_recorded_session() {
     mounted.model.open_session(session_id.clone());
     mounted.settle();
     mounted.focus("Stop");
+    seed_stop_targets(&mounted);
     mounted.click("Stop");
     let stop = mounted.commands.try_recv().unwrap();
     assert!(
-        matches!(stop.command, Command::StopWorker { session_id: id, include_descendants: false } if id == session_id)
+        matches!(stop.command, Command::StopWorkerRuns { session_id: id, include_descendants: false, .. } if id == session_id)
     );
     let mut snapshot = mounted.model.snapshot.get_untracked();
     snapshot.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed;
@@ -2767,10 +2768,11 @@ fn removed_board_items_keep_history_but_block_new_turns_until_restored() {
         .update(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Running);
     mounted.settle();
     mounted.focus("Stop");
+    seed_stop_targets(&mounted);
     mounted.click("Stop");
     assert!(matches!(
         mounted.commands.try_recv().unwrap().command,
-        Command::StopWorker { .. }
+        Command::StopWorkerRuns { .. }
     ));
     mounted.model.busy.set(false);
     mounted.model.snapshot.update(|s| {
@@ -3525,13 +3527,12 @@ fn rapid_second_send_waits_for_ack_then_promotes_exact_queue_and_keeps_newer_dra
             ..Default::default()
         },
     );
-    assert!(mounted.commands.try_recv().is_err());
-    let document = mounted.model.buffer.get_untracked().documents["session-plan"].clone();
-    assert!(document.finalize.is_some());
-    assert!(!document.submitting);
-    mounted.model.syncing.set(false);
-    buffer::flush(mounted.model);
+    // The saved draft version is sufficient; unrelated workspace stream lag
+    // cannot delay submission of this exact message.
     let submitted = mounted.commands.try_recv().unwrap();
+    let document = mounted.model.buffer.get_untracked().documents["session-plan"].clone();
+    assert!(document.finalize.is_none());
+    assert!(document.submitting);
     let Command::SubmitTurn { parts, .. } = &submitted.command else {
         panic!()
     };
@@ -10257,20 +10258,37 @@ fn stop_all_is_a_separate_session_action_that_stops_descendants() {
     mounted.model.open_session("session-plan".into());
     mounted.settle();
     // The header stop only stops this session's turn.
+    seed_stop_targets(&mounted);
+    mounted.model.submit(
+        Command::RenameProject {
+            project_id: "demo".into(),
+            name: "pending form".into(),
+        },
+        mounted.model.snapshot.get_untracked().revision,
+        crate::model::Saved::Action,
+    );
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::RenameProject { .. }
+    ));
+    assert!(mounted.model.busy.get_untracked());
     mounted.click("Stop");
     assert!(matches!(
         mounted.commands.try_recv().unwrap().command,
-        Command::StopWorker { ref session_id, include_descendants: false } if session_id == "session-plan"
+        Command::StopWorkerRuns { ref session_id, include_descendants: false, .. } if session_id == "session-plan"
     ));
     assert!(mounted.commands.try_recv().is_err());
-    mounted.model.busy.set(false);
+    assert!(
+        mounted.model.busy.get_untracked(),
+        "stop must preserve the pending form"
+    );
     mounted.click("Session actions");
     mounted.settle();
     assert!(has_label(&mounted, "Stop this agent and all its subagents"));
     mounted.click("Stop this agent and all its subagents");
     assert!(matches!(
         mounted.commands.try_recv().unwrap().command,
-        Command::StopWorker { ref session_id, include_descendants: true } if session_id == "session-plan"
+        Command::StopWorkerRuns { ref session_id, include_descendants: true, .. } if session_id == "session-plan"
     ));
     // Without active descendants the action is not offered.
     mounted.model.busy.set(false);
@@ -10317,10 +10335,11 @@ fn session_header_shows_context_controls_and_agents_below() {
             .as_deref()
             .is_some_and(|l| l.starts_with("Working. 7 agents below"))
     }));
+    seed_stop_targets(&mounted);
     mounted.click("Stop");
     assert!(matches!(
         mounted.commands.try_recv().unwrap().command,
-        Command::StopWorker { ref session_id, include_descendants: false } if session_id == "session-plan"
+        Command::StopWorkerRuns { ref session_id, include_descendants: false, .. } if session_id == "session-plan"
     ));
     // A session without measured context shows no gauge.
     mounted.model.open_session("session-worker".into());
@@ -14463,4 +14482,181 @@ fn click_suggestion(mounted: &Mounted, label: &str, index: usize) {
         });
     }
     mounted.settle();
+}
+
+fn seed_stop_targets(mounted: &Mounted) {
+    let snapshot = mounted.model.snapshot.get_untracked();
+    mounted.model.active_run_ids.set(
+        snapshot
+            .sessions
+            .iter()
+            .filter(|s| {
+                s.worker.as_ref().is_some_and(|w| {
+                    matches!(w.status, WorkerStatus::Running | WorkerStatus::Queued)
+                })
+            })
+            .map(|s| (s.id.clone(), format!("test-run-{}", s.id)))
+            .collect(),
+    );
+}
+
+#[test]
+fn independent_controls_retain_exact_retry_and_form_conflict_through_coalesced_replies() {
+    let mut mounted = mount(false, 1380.0);
+    let model = mounted.model;
+    // An unresolved form save must not prevent responding to a run's approval.
+    model.submit(
+        Command::RenameProject {
+            project_id: "demo".into(),
+            name: "form edit".into(),
+        },
+        model.snapshot.get_untracked().revision,
+        crate::model::Saved::Action,
+    );
+    let form = mounted.commands.try_recv().unwrap();
+    assert!(model.busy.get_untracked());
+    let request = Command::RespondPermission {
+        permission_id: "permission-control".into(),
+        run_id: "run-control".into(),
+        allow: true,
+    };
+    model.submit(request.clone(), 3, crate::model::Saved::Action);
+    let first = mounted.commands.try_recv().unwrap();
+    assert_eq!(first.expected_revision, 3);
+    let mut snapshot = model.snapshot.get_untracked();
+    snapshot.revision += 100;
+    let outcome = |serial, result, ambiguous| crate::network::CommandOutcome {
+        serial,
+        id: first.request_id.clone(),
+        result,
+        conflict: false,
+        ambiguous,
+    };
+    model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        outcome_serial: 1,
+        outcomes: vec![outcome(1, Err("unknown control outcome".into()), true)],
+        ..Default::default()
+    });
+    model.submit(request, snapshot.revision, crate::model::Saved::Action);
+    let retry = mounted.commands.try_recv().unwrap();
+    assert_eq!(
+        serde_json::to_value(&retry).unwrap(),
+        serde_json::to_value(&first).unwrap()
+    );
+    model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        outcome_serial: 3,
+        outcomes: vec![
+            outcome(2, Ok(()), false),
+            crate::network::CommandOutcome {
+                serial: 3,
+                id: form.request_id,
+                result: Err("genuine form conflict".into()),
+                conflict: true,
+                ambiguous: false,
+            },
+        ],
+        ..Default::default()
+    });
+    assert!(!model.busy.get_untracked());
+    assert!(
+        model.can_rebase(),
+        "coalesced control acknowledgement must retain the genuine form conflict"
+    );
+}
+
+#[test]
+fn independent_controls_send_during_pending_form_and_retry_original_message() {
+    use crate::{buffer, model::Saved};
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let model = mounted.model;
+    let (requests, _receive) = tokio::sync::mpsc::unbounded_channel();
+    model.buffer_requests.set(Some(requests));
+    model.submit(
+        Command::RenameProject {
+            project_id: "demo".into(),
+            name: "pending form".into(),
+        },
+        model.snapshot.get_untracked().revision,
+        Saved::Action,
+    );
+    let form = mounted.commands.try_recv().unwrap();
+    let parts = vec![Part::text("Message while form is pending")];
+    buffer::edit(model, "session-plan", parts.clone());
+    model.buffer.update(|state| {
+        let doc = state.documents.get_mut("session-plan").unwrap();
+        // The independently versioned shared draft has already been saved.
+        doc.remote.parts = parts.clone();
+        doc.remote.revision = 7;
+    });
+    model.syncing.set(true);
+    buffer::send(model);
+    let message = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(&message.command, Command::SubmitTurn { draft_revision: 7, parts: sent, .. } if sent == &parts)
+    );
+    assert!(
+        model.busy.get_untracked(),
+        "message must retain the form's pending state"
+    );
+    assert!(model.submission_pending());
+    let mut snapshot = model.snapshot.get_untracked();
+    snapshot.revision += 100;
+    model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        outcome_serial: 1,
+        outcome: Some((
+            message.request_id.clone(),
+            Err("Message acknowledgement timed out".into()),
+        )),
+        outcome_ambiguous: true,
+        ..Default::default()
+    });
+    assert!(
+        !model.submission_pending(),
+        "unknown outcome enables explicit Send retry"
+    );
+    buffer::edit(model, "session-plan", vec![Part::text("Newer local draft")]);
+    buffer::send(model);
+    let retry = mounted.commands.try_recv().unwrap();
+    assert_eq!(
+        serde_json::to_value(&retry).unwrap(),
+        serde_json::to_value(&message).unwrap()
+    );
+    assert!(mounted.commands.try_recv().is_err());
+    model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        outcome_serial: 3,
+        outcomes: vec![
+            crate::network::CommandOutcome {
+                serial: 2,
+                id: message.request_id,
+                result: Ok(()),
+                conflict: false,
+                ambiguous: false,
+            },
+            crate::network::CommandOutcome {
+                serial: 3,
+                id: form.request_id,
+                result: Err("genuine form conflict".into()),
+                conflict: true,
+                ambiguous: false,
+            },
+        ],
+        ..Default::default()
+    });
+    assert!(
+        model.can_rebase(),
+        "message acknowledgement must preserve the form conflict"
+    );
+    let state = model.buffer.get_untracked();
+    let document = &state.documents["session-plan"];
+    assert!(!document.submitting);
+    assert_eq!(plain_text(&document.parts), "Newer local draft");
 }

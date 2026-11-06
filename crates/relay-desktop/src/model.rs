@@ -139,6 +139,7 @@ pub struct Model {
     pub ui: State<Ui>,
     commands: State<UnboundedSender<CommandEnvelope>>,
     pending: State<Option<Pending>>,
+    control_pending: State<std::collections::BTreeMap<String, (Pending, bool)>>,
     pending_conflict: State<bool>,
     pending_ambiguous: State<bool>,
     search_serial: State<u64>,
@@ -242,6 +243,7 @@ impl Model {
             ui: State::new(ui.clone()),
             commands: State::new(commands),
             pending: State::new(None),
+            control_pending: State::new(Default::default()),
             pending_conflict: State::new(false),
             pending_ambiguous: State::new(false),
             search_serial: State::new(0),
@@ -404,13 +406,68 @@ impl Model {
             update.retry_at,
         ));
         self.reconcile_pending();
-        if update.outcome_serial <= self.outcome_serial.get_untracked() {
+        let previous_serial = self.outcome_serial.get_untracked();
+        if update.outcome_serial <= previous_serial {
             return;
         }
         self.outcome_serial.set(update.outcome_serial);
+        if !update.outcomes.is_empty() {
+            for outcome in update
+                .outcomes
+                .into_iter()
+                .filter(|o| o.serial > previous_serial)
+            {
+                self.receive_command_outcome(
+                    outcome.id,
+                    outcome.result,
+                    outcome.conflict,
+                    outcome.ambiguous,
+                );
+            }
+            return;
+        }
         let Some((id, result)) = update.outcome else {
             return;
         };
+        self.receive_command_outcome(
+            id,
+            result,
+            update.outcome_conflict,
+            update.outcome_ambiguous,
+        );
+    }
+    fn receive_command_outcome(
+        &self,
+        id: String,
+        result: Result<(), String>,
+        conflict: bool,
+        ambiguous: bool,
+    ) {
+        if let Some((pending, _)) = self.control_pending.get_untracked().get(&id).cloned() {
+            self.control_pending.update(|pending| {
+                if ambiguous {
+                    if let Some((_, in_flight)) = pending.get_mut(&id) {
+                        *in_flight = false;
+                    }
+                } else {
+                    pending.remove(&id);
+                }
+            });
+            match result {
+                Ok(()) => match pending.saved {
+                    Saved::Buffer(draft) => crate::buffer::acknowledge(*self, &draft, &id),
+                    Saved::Send(body) => self.clear_worker_draft(&body),
+                    _ => {}
+                },
+                Err(message) => {
+                    if !ambiguous && let Saved::Buffer(draft) = pending.saved {
+                        crate::buffer::rejected(*self, &draft, &message);
+                    }
+                    self.notice.set(message);
+                }
+            }
+            return;
+        }
         let pending = self.pending.get_untracked();
         let Some(pending) = pending.filter(|p| p.envelope.request_id == id) else {
             return;
@@ -426,16 +483,14 @@ impl Model {
             }
             Err(message) => {
                 self.busy.set(false);
-                if !update.outcome_ambiguous
-                    && let Saved::Buffer(draft) = &pending.saved
-                {
+                if !ambiguous && let Saved::Buffer(draft) = &pending.saved {
                     crate::buffer::rejected(*self, draft, &message);
                 }
-                self.pending_conflict.set(update.outcome_conflict);
-                self.pending_ambiguous.set(update.outcome_ambiguous);
+                self.pending_conflict.set(conflict);
+                self.pending_ambiguous.set(ambiguous);
                 // A confirmed rejection cannot be fixed by replaying its envelope.
                 // Keep conflicts for explicit review and uncertain writes for exact retry.
-                if !update.outcome_conflict && !update.outcome_ambiguous {
+                if !conflict && !ambiguous {
                     self.pending.set(None);
                 }
                 self.notice.set(message);
@@ -534,11 +589,39 @@ impl Model {
         self.busy.set(false);
     }
     fn reconcile_pending(&self) {
+        let snapshot = self.snapshot.get_untracked();
+        // Request-owned submission/prompt IDs also confirm message delivery
+        // when its HTTP acknowledgement was lost. Another client's permission
+        // decision cannot confirm one of our control envelopes.
+        let confirmed =
+            self.control_pending
+                .get_untracked()
+                .into_iter()
+                .filter(|(id, (p, _))| match &p.saved {
+                    Saved::Buffer(_) => snapshot.submissions.iter().any(|s| {
+                        s.id == *id || s.last_edit_request.as_deref() == Some(id.as_str())
+                    }),
+                    Saved::Send(_) => snapshot
+                        .messages
+                        .iter()
+                        .any(|m| m.id == format!("prompt-{id}")),
+                    _ => false,
+                })
+                .collect::<Vec<_>>();
+        for (id, (pending, _)) in confirmed {
+            self.control_pending.update(|p| {
+                p.remove(&id);
+            });
+            match pending.saved {
+                Saved::Buffer(draft) => crate::buffer::acknowledge(*self, &draft, &id),
+                Saved::Send(body) => self.clear_worker_draft(&body),
+                _ => {}
+            }
+        }
         let Some(pending) = self.pending.get_untracked() else {
             return;
         };
         let id = pending.envelope.request_id.clone();
-        let snapshot = self.snapshot.get_untracked();
         let applied = match &pending.saved {
             Saved::CreatedProject(_) => snapshot
                 .projects
@@ -600,6 +683,18 @@ impl Model {
         })
     }
     pub fn submit(&self, command: Command, revision: u64, saved: Saved) {
+        if command.is_run_control()
+            || matches!(
+                command,
+                Command::SubmitTurn { .. }
+                    | Command::EditQueuedTurn { .. }
+                    | Command::SendWorker { .. }
+                    | Command::PromoteTurn { .. }
+            )
+        {
+            self.submit_control(command, revision, saved);
+            return;
+        }
         if self.busy.get_untracked() {
             return;
         }
@@ -647,6 +742,117 @@ impl Model {
             self.notice
                 .set("Network worker stopped. Your draft is retained.".into());
         }
+    }
+    fn submit_control(&self, command: Command, revision: u64, saved: Saved) {
+        // A delayed stream after another acknowledgement does not invalidate
+        // this reviewed run/request identity. The server rechecks that target.
+        if !self.connected.get_untracked() {
+            self.notice
+                .set("Reconnect before sending. Your draft is retained.".into());
+            if let Saved::Buffer(draft) = saved {
+                crate::buffer::rejected(*self, &draft, "Reconnect before sending");
+            }
+            return;
+        }
+        let pending = self.control_pending.get_untracked();
+        let encoded = serde_json::to_string(&command).unwrap();
+        let existing = pending
+            .values()
+            .find(|(p, _)| serde_json::to_string(&p.envelope.command).unwrap() == encoded);
+        // A changed message cannot replace an uncertain message for that chat.
+        // The composer retries the stored envelope before accepting new text.
+        fn message_session<'a>(command: &'a Command, saved: &'a Saved) -> Option<&'a str> {
+            match saved {
+                Saved::Buffer(draft) => Some(&draft.session_id),
+                _ => match command {
+                    Command::SendWorker { session_id, .. }
+                    | Command::SubmitTurn { session_id, .. } => Some(session_id),
+                    _ => None,
+                },
+            }
+        }
+        let same_chat = |p: &Pending| {
+            message_session(&command, &saved).is_some_and(|session| {
+                message_session(&p.envelope.command, &p.saved) == Some(session)
+            })
+        };
+        if existing.is_none() && pending.values().any(|(p, _)| same_chat(p)) {
+            self.notice
+                .set("Retry the unconfirmed message before sending another in this chat.".into());
+            if let Saved::Buffer(draft) = saved {
+                crate::buffer::rejected(*self, &draft, "An earlier message is unconfirmed");
+            }
+            return;
+        }
+        let envelope = if let Some((pending, in_flight)) = existing {
+            if *in_flight {
+                return;
+            }
+            // Unknown outcome: retain the exact original ID, revision and target.
+            pending.envelope.clone()
+        } else {
+            if pending
+                .values()
+                .filter(|(p, _)| p.envelope.command.is_run_control() == command.is_run_control())
+                .count()
+                >= 16
+            {
+                self.notice
+                    .set("Too many unconfirmed actions; retry an existing action.".into());
+                if let Saved::Buffer(draft) = saved {
+                    crate::buffer::rejected(*self, &draft, "Too many unconfirmed actions");
+                }
+                return;
+            }
+            CommandEnvelope {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                expected_revision: revision,
+                command,
+            }
+        };
+        let saved = existing.map(|(p, _)| p.saved.clone()).unwrap_or(saved);
+        let id = envelope.request_id.clone();
+        self.control_pending.update(|p| {
+            p.insert(
+                id.clone(),
+                (
+                    Pending {
+                        envelope: envelope.clone(),
+                        saved,
+                    },
+                    true,
+                ),
+            );
+        });
+        if self.commands.get_untracked().send(envelope).is_err() {
+            self.control_pending.update(|p| {
+                if let Some((_, active)) = p.get_mut(&id) {
+                    *active = false;
+                }
+            });
+            self.notice
+                .set("Acknowledgement unavailable; retry preserves its ID.".into());
+        }
+    }
+    /// An uncertain message must be retried with its original envelope, even
+    /// after the shared draft or the workspace revision advances.
+    pub(crate) fn retry_buffer(&self, session: &str) -> bool {
+        let pending = self.control_pending.get_untracked();
+        let Some((pending, in_flight)) = pending
+            .values()
+            .find(|(p, _)| matches!(&p.saved, Saved::Buffer(draft) if draft.session_id == session))
+        else {
+            return false;
+        };
+        if *in_flight {
+            return false;
+        }
+        self.submit_control(
+            pending.envelope.command.clone(),
+            pending.envelope.expected_revision,
+            pending.saved.clone(),
+        );
+        true
     }
     /// The requested effort of an in-flight selection command for this chat.
     pub fn pending_effort(&self, session: &str) -> Option<String> {
@@ -730,6 +936,12 @@ impl Model {
                 }))
     }
     pub fn submission_pending(&self) -> bool {
+        if let Some((_, in_flight)) = self.control_pending.get().values().find(|(p, _)| {
+            matches!(&p.saved, Saved::Buffer(draft) if draft.session_id == self.session.get())
+        }) {
+            // An uncertain result enables an explicit exact-envelope retry.
+            return *in_flight;
+        }
         (self.busy.get()
             && self
                 .pending
@@ -1639,14 +1851,7 @@ impl Model {
             return;
         }
         // Only this session's turn stops; its descendants keep running.
-        self.submit(
-            Command::StopWorker {
-                session_id: self.session.get_untracked(),
-                include_descendants: false,
-            },
-            self.snapshot.get_untracked().revision,
-            Saved::Action,
-        );
+        self.stop_runs(false);
     }
     /// Stops the selected session and every descendant, pausing their queues.
     pub fn stop_all(&self) {
@@ -1657,10 +1862,40 @@ impl Model {
                 .set("Select an agent with active work to stop.".into());
             return;
         }
+        self.stop_runs(true);
+    }
+    fn stop_runs(&self, include_descendants: bool) {
+        let snapshot = self.snapshot.get_untracked();
+        let session_id = self.session.get_untracked();
+        let mut branch = Vec::new();
+        let mut runs = std::collections::BTreeMap::new();
+        let scope = if include_descendants {
+            snapshot.session_branch_ids(&session_id)
+        } else {
+            std::collections::HashSet::from([session_id.clone()])
+        };
+        for session in snapshot.sessions.iter().filter(|s| scope.contains(&s.id)) {
+            branch.push(session.id.clone());
+            if session
+                .worker
+                .as_ref()
+                .is_some_and(|w| matches!(w.status, WorkerStatus::Running | WorkerStatus::Queued))
+            {
+                let Some(run) = crate::buffer::active_run_id(*self, &snapshot, &session.id) else {
+                    self.notice
+                        .set("Wait for active turn identities before stopping.".into());
+                    return;
+                };
+                runs.insert(session.id.clone(), run);
+            }
+        }
+        branch.sort();
         self.submit(
-            Command::StopWorker {
+            Command::StopWorkerRuns {
                 session_id,
-                include_descendants: true,
+                include_descendants,
+                runs,
+                branch,
             },
             snapshot.revision,
             Saved::Action,
