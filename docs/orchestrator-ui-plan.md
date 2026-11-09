@@ -138,6 +138,7 @@ Adapters:
   - The first turn is the task.
   - The call respects `max_workers` across the director's whole tree, and the `Delegate` permission (Deny blocks, Ask asks the human).
 - `message_agent { agent, text }`: delivers to a parent, child or sibling as a queued submission, and reports "read" once consumed.
+- `view_agent_queue`, `edit_queued_message`, `cancel_queued_message`, `send_queued_message_now`, `resume_agent_queue`: an ancestor's equivalents of the human queue controls on a descendant.
 - `wait_for_agents { agents, timeout_s }`: a bounded long-poll that returns statuses and results.
 - `report_result { summary, attachments }`:
   - Child to parent. It records a Result message in the parent's transcript and stores it on the child.

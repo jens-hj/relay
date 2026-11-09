@@ -1323,7 +1323,16 @@ async fn stdio_http_run_capability_boundary() {
     assert_eq!(values.len(), 7);
     assert_eq!(values[0]["result"]["capabilities"]["tools"], json!({}));
     let tools = values[1]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 9);
+    assert_eq!(tools.len(), 14);
+    for name in [
+        "view_agent_queue",
+        "edit_queued_message",
+        "cancel_queued_message",
+        "send_queued_message_now",
+        "resume_agent_queue",
+    ] {
+        assert!(tools.iter().any(|tool| tool["name"] == name), "{name}");
+    }
     assert!(tools.iter().any(|tool| tool["name"] == "stop_agent"));
     assert!(tools.iter().any(|tool| tool["name"] == "archive_agent"));
     assert!(tools.iter().any(|tool| tool["name"] == "unarchive_agent"));

@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use tokio::io::{AsyncWriteExt, BufReader};
 
+mod queue;
+
 pub(super) struct Capability {
     hash: [u8; 32],
     run: String,
@@ -261,7 +263,7 @@ fn reported_result(workspace: &Workspace, id: &str) -> Option<Value> {
 fn state(workspace: &Workspace, snapshot: &Snapshot, id: &str) -> Value {
     let session = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
     let result = reported_result(workspace, id);
-    json!({"id":id,"title":session.title,"parent_session_id":session.parent_session_id,"status":session.worker.as_ref().map(|w| &w.status),"archived":session.archived,"worktree":session.worker.as_ref().and_then(|w| w.worktree.as_ref()),"result":result})
+    json!({"id":id,"title":session.title,"parent_session_id":session.parent_session_id,"status":session.worker.as_ref().map(|w| &w.status),"archived":session.archived,"worktree":session.worker.as_ref().and_then(|w| w.worktree.as_ref()),"result":result,"queue":queue::summary(snapshot, id)})
 }
 fn rank(permission: Permission) -> u8 {
     match permission {
@@ -823,6 +825,9 @@ async fn dispatch(
         "unarchive_agent" => unarchive_agent(workspace, caller, run, input, stop).await,
         "delete_agent" => manage_agent(workspace, caller, run, input, stop, true).await,
         "message_agent" => message_agent(workspace, caller, run, parse(input)?, stop).await,
+        tool if queue::TOOLS.contains(&tool) => {
+            queue::call(workspace, caller, run, tool, input, stop).await
+        }
         "wait_for_agents" => {
             let args: Wait = parse(input)?;
             if args.timeout_s > 600 || args.agents.is_empty() || args.agents.len() > 64 {
@@ -1434,7 +1439,7 @@ async fn message_agent(
     let id = uuid::Uuid::new_v4().to_string();
     let tool_id = format!("agent-message-{id}");
     // Submit through the same queue machinery, preserving the user's shared draft.
-    let (action, next, next_run) = {
+    let (action, next, next_run, mut queue) = {
         let mut store = workspace.store.lock().map_err(Error::internal)?;
         if *stop.borrow() {
             return Err(unauthorized());
@@ -1564,9 +1569,14 @@ async fn message_agent(
         } else {
             None
         };
+        let mut queue = queue::summary(&current, &args.agent);
+        if let Some(hint) = queue::message_hint(&current, &args.agent) {
+            queue["hint"] = json!(hint);
+        }
         workspace.snapshots.send_replace(current);
-        (action, receiver, id.clone())
+        (action, receiver, id.clone(), queue)
     };
+    queue["started"] = json!(matches!(action, Some(Action::Run { .. })));
     if let (Some(Action::Run { session_id, prompt }), Some(receiver)) = (action, next) {
         tokio::spawn(runtime::run(
             workspace.clone(),
@@ -1576,7 +1586,7 @@ async fn message_agent(
             receiver,
         ));
     }
-    Ok(json!({"submission":id,"queued":true}))
+    Ok(json!({"submission":id,"queued":true,"queue":queue}))
 }
 
 pub(super) fn mark_read(snapshot: &mut Snapshot, run: &str) {
@@ -1697,7 +1707,7 @@ fn tools(
         ),
         (
             "unarchive_agent",
-            "Unarchive your own inactive descendant and its entire inactive subtree, retaining history, workspaces and effective policy. Requires delegation permission. Restores availability only: paused turns stay paused and no execution starts. Use message_agent explicitly for follow-up; self, ancestors, unrelated agents and active branches are forbidden.",
+            "Unarchive your own inactive descendant and its entire inactive subtree, retaining history, workspaces and effective policy. Requires delegation permission. Restores availability only: paused turns stay paused and no execution starts. Use resume_agent_queue or message_agent explicitly for follow-up; self, ancestors, unrelated agents and active branches are forbidden.",
             json!({"agent":string}),
             vec!["agent"],
         ),
@@ -1709,7 +1719,7 @@ fn tools(
         ),
         (
             "message_agent",
-            "Queue a turn for an agent in this tree, or for a session a human mentioned in a message with you (a peer from list_agents, possibly in another project). Messaging a peer gives no other access to it.",
+            "Queue a turn for an agent in this tree, or for a session a human mentioned in a message with you (a peer from list_agents, possibly in another project). Messaging a peer gives no other access to it. The result's queue shows whether the turn started; behind a paused queue it waits until the queue is resumed (resume_agent_queue, for a descendant).",
             json!({"agent":string,"text":string}),
             vec!["agent", "text"],
         ),
@@ -1727,12 +1737,12 @@ fn tools(
         ),
         (
             "list_agents",
-            "List your subtree and parent with current statuses and archived flags, your caller-scoped durable spawn attempts and their phases, sessions a human mentioned with you (relationship \"peer\": ID, title, project and status only; message them with message_agent), and your worker model policy with remaining usage when it applies. A pending spawn is not a created child; inspect its outcome before retrying.",
+            "List your subtree and parent with current statuses and archived flags, your caller-scoped durable spawn attempts and their phases, sessions a human mentioned with you (relationship \"peer\": ID, title, project and status only; message them with message_agent), and your worker model policy with remaining usage when it applies. Each agent's queue reports waiting turns and whether it is paused; inspect a descendant's with view_agent_queue. A pending spawn is not a created child; inspect its outcome before retrying.",
             json!({}),
             vec![],
         ),
     ];
-    let mut tools = specs.into_iter().map(|(name,description,properties,required)|json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})).collect::<Vec<_>>();
+    let mut tools = specs.into_iter().chain(queue::specs()).map(|(name,description,properties,required)|json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})).collect::<Vec<_>>();
     if nix != Permission::Deny {
         tools.push(crate::nix::spec(nix));
     }
@@ -1851,6 +1861,7 @@ async fn stdio_request(
                     crate::nix::TOOL,
                 ]
                 .contains(&name)
+                    && !queue::TOOLS.contains(&name)
                 {
                     Err((-32602, "Unknown Relay tool"))
                 } else {
@@ -10744,6 +10755,20 @@ fi
             ("stop_agent", json!({"agent":target})),
             ("archive_agent", json!({"agent":target})),
             ("unarchive_agent", json!({"agent":target})),
+            ("view_agent_queue", json!({"agent":target})),
+            ("resume_agent_queue", json!({"agent":target})),
+            (
+                "cancel_queued_message",
+                json!({"agent":target,"submission":"x"}),
+            ),
+            (
+                "send_queued_message_now",
+                json!({"agent":target,"submission":"x"}),
+            ),
+            (
+                "edit_queued_message",
+                json!({"agent":target,"submission":"x","text":"x"}),
+            ),
         ] {
             assert!(f.call(tool, args).await.is_err(), "{tool}");
         }
@@ -11058,5 +11083,466 @@ fi
         assert_eq!(turn.parts, parts);
         settle(&f, &["peer-agent", "third-agent"]);
         f.finish().await;
+    }
+
+    /// A paused child with a retained thread, as a server restart leaves it.
+    fn paused_child(f: &Fixture, turns: &[(&str, &str)]) {
+        archive_fixture(f);
+        // Its own directory, so a resumed turn need not wait for the parent's.
+        let own = f._directory.path().join("child");
+        std::fs::create_dir(&own).unwrap();
+        let repo = crate::tests::review_repo(&own).display().to_string();
+        f.change(|s| {
+            let mut worker = s.sessions[0].worker.clone().unwrap();
+            worker.status = WorkerStatus::Interrupted;
+            worker.thread_id = Some("paused-child-thread".into());
+            worker.worktree = Some(repo.clone());
+            s.sessions[1].worker = Some(worker);
+            for workspace in &mut s.sessions[1].workspaces {
+                workspace.path = repo.clone();
+            }
+            for (id, text) in turns {
+                s.submissions.push(Submission {
+                    id: (*id).into(),
+                    session_id: "archive-child".into(),
+                    parts: vec![Part::text(*text)],
+                    state: SubmissionState::Paused,
+                    approve_implementation: false,
+                    error: Some("Server restarted; delivered turns are never replayed, queued turns require explicit resume".into()),
+                    interrupts_run: None,
+                    last_edit_request: None,
+                    sender: Sender::Agent {
+                        session_id: f.caller.clone(),
+                    },
+                });
+            }
+        });
+        // Each was accepted with a receipt, which authorizes its launch.
+        let store = f.workspace.store.lock().unwrap();
+        for (id, text) in turns {
+            let envelope = CommandEnvelope {
+                request_id: (*id).into(),
+                expected_revision: 0,
+                command: Command::SubmitTurn {
+                    session_id: "archive-child".into(),
+                    draft_revision: 0,
+                    parts: vec![Part::text(*text)],
+                    approve_implementation: false,
+                },
+            };
+            store
+                .connection
+                .execute(
+                    "INSERT INTO receipts(request_id,request) VALUES(?1,?2)",
+                    params![id, serde_json::to_string(&envelope).unwrap()],
+                )
+                .unwrap();
+        }
+    }
+    fn submission_state(f: &Fixture, id: &str) -> SubmissionState {
+        f.workspace
+            .full()
+            .submissions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .state
+            .clone()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ancestors_view_edit_cancel_and_resume_a_paused_descendant_queue() {
+        let f = Fixture::new(Permission::Allow);
+        let capture = install_peer_native(&f, false);
+        paused_child(
+            &f,
+            &[("q-first", "Queued first"), ("q-second", "Queued second")],
+        );
+        let human_draft = vec![Part::text("The human's unsent draft")];
+        let draft_revision = set_draft(&f, "archive-child", &human_draft);
+
+        // A message only queues behind a paused queue, and says so.
+        let sent = f
+            .call(
+                "message_agent",
+                json!({"agent":"archive-child","text":"Queued third"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["queue"]["paused"], true);
+        assert_eq!(sent["queue"]["queued"], 3);
+        assert_eq!(sent["queue"]["started"], false);
+        assert!(
+            sent["queue"]["hint"]
+                .as_str()
+                .unwrap()
+                .contains("resume_agent_queue")
+        );
+        let third = sent["submission"].as_str().unwrap().to_owned();
+        let listed = f.call("list_agents", json!({})).await.unwrap();
+        let child = listed["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == "archive-child")
+            .unwrap();
+        assert_eq!(child["queue"], json!({"queued":3,"paused":true}));
+
+        let view = f
+            .call("view_agent_queue", json!({"agent":"archive-child"}))
+            .await
+            .unwrap();
+        assert_eq!(view["paused"], true);
+        let turns = view["turns"].as_array().unwrap();
+        assert_eq!(
+            turns
+                .iter()
+                .map(|t| (
+                    t["submission"].as_str().unwrap(),
+                    t["state"].as_str().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("q-first", "paused"),
+                ("q-second", "paused"),
+                (third.as_str(), "queued")
+            ]
+        );
+        assert_eq!(turns[0]["text"], "Queued first");
+        assert_eq!(turns[0]["sender"], f.caller.as_str());
+        assert!(
+            turns[0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("Server restarted")
+        );
+
+        // Edit keeps the place and state, and leaves the human's draft alone.
+        let edited = f
+            .call(
+                "edit_queued_message",
+                json!({"agent":"archive-child","submission":"q-second","text":"Edited second"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited["turns"][1]["text"], "Edited second");
+        assert_eq!(edited["turns"][1]["state"], "paused");
+        assert_eq!(edited["started"], false);
+        let drafts =
+            conversation::read_drafts(&f.workspace.store.lock().unwrap().connection).unwrap();
+        let draft = drafts
+            .iter()
+            .find(|d| d.session_id == "archive-child")
+            .unwrap();
+        assert_eq!(
+            (draft.revision, &draft.parts),
+            (draft_revision, &human_draft)
+        );
+        assert!(
+            f.workspace
+                .full()
+                .submissions
+                .iter()
+                .find(|s| s.id == "q-second")
+                .unwrap()
+                .last_edit_request
+                .is_some()
+        );
+
+        f.call(
+            "cancel_queued_message",
+            json!({"agent":"archive-child","submission":third}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(submission_state(&f, &third), SubmissionState::Cancelled);
+
+        // Resume starts the oldest turn, then the rest follow in order.
+        let resumed = f
+            .call("resume_agent_queue", json!({"agent":"archive-child"}))
+            .await
+            .unwrap();
+        assert_eq!(resumed["started"], true);
+        assert_eq!(resumed["paused"], false);
+        wait_peer_submission(&f.workspace, "q-first", SubmissionState::Completed).await;
+        wait_peer_submission(&f.workspace, "q-second", SubmissionState::Completed).await;
+        assert_eq!(turn_starts(&capture, "Queued first"), 1);
+        assert_eq!(turn_starts(&capture, "Edited second"), 1);
+        assert_eq!(turn_starts(&capture, "Queued second"), 0);
+        assert_eq!(turn_starts(&capture, "Queued third"), 0);
+        assert!(
+            f.workspace
+                .full()
+                .messages
+                .iter()
+                .any(|m| m.session_id == f.caller
+                    && m.kind == "agent_control"
+                    && m.body == "Resumed the queue of archive-child")
+        );
+        assert!(
+            f.call("resume_agent_queue", json!({"agent":"archive-child"}))
+                .await
+                .is_err(),
+            "an empty queue has nothing to resume"
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn send_now_starts_one_paused_turn_ahead_and_leaves_the_rest_paused() {
+        let f = Fixture::new(Permission::Allow);
+        let capture = install_peer_native(&f, false);
+        paused_child(
+            &f,
+            &[("p-first", "Paused first"), ("p-second", "Paused second")],
+        );
+        let sent = f
+            .call(
+                "send_queued_message_now",
+                json!({"agent":"archive-child","submission":"p-second"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["started"], true);
+        wait_peer_submission(&f.workspace, "p-second", SubmissionState::Completed).await;
+        assert_eq!(turn_starts(&capture, "Paused second"), 1);
+        assert_eq!(turn_starts(&capture, "Paused first"), 0);
+        assert_eq!(submission_state(&f, "p-first"), SubmissionState::Paused);
+        f.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn send_now_interrupts_a_running_descendant_turn() {
+        let f = Fixture::new(Permission::Allow);
+        let _capture = install_peer_native(&f, true);
+        paused_child(&f, &[("r-first", "Running first")]);
+        f.call("resume_agent_queue", json!({"agent":"archive-child"}))
+            .await
+            .unwrap();
+        wait_peer_submission(&f.workspace, "r-first", SubmissionState::Running).await;
+        let next = f
+            .call(
+                "message_agent",
+                json!({"agent":"archive-child","text":"Interrupting next"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next["queue"]["paused"], false);
+        let next = next["submission"].as_str().unwrap().to_owned();
+        let sent = f
+            .call(
+                "send_queued_message_now",
+                json!({"agent":"archive-child","submission":next}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["interrupting_current_turn"], true);
+        assert_eq!(
+            f.workspace
+                .full()
+                .submissions
+                .iter()
+                .find(|s| s.id == next)
+                .unwrap()
+                .interrupts_run
+                .as_deref(),
+            Some("r-first")
+        );
+        std::fs::write(f._directory.path().join("release-receiver"), "").unwrap();
+        wait_peer_submission(&f.workspace, &next, SubmissionState::Completed).await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn queue_controls_stay_within_descendants_and_follow_delegation_policy() {
+        let f = Fixture::new(Permission::Allow);
+        paused_child(&f, &[("s-first", "Scoped first")]);
+        f.change(|s| {
+            s.submissions.push(Submission {
+                id: "grandchild-turn".into(),
+                session_id: "archive-grandchild".into(),
+                parts: vec![Part::text("Grandchild")],
+                state: SubmissionState::Paused,
+                approve_implementation: false,
+                error: None,
+                interrupts_run: None,
+                last_edit_request: None,
+                sender: Sender::User,
+            });
+        });
+        // Only descendants, and only the named agent's own submissions.
+        for agent in [f.caller.as_str(), "missing-agent"] {
+            for tool in queue::TOOLS {
+                let error = f
+                    .call(
+                        tool,
+                        json!({"agent":agent,"submission":"s-first","text":"x"}),
+                    )
+                    .await;
+                assert!(error.is_err(), "{tool} on {agent}");
+            }
+        }
+        for tool in ["cancel_queued_message", "send_queued_message_now"] {
+            let error = f
+                .call(
+                    tool,
+                    json!({"agent":"archive-child","submission":"grandchild-turn"}),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error.message.contains("not in this agent's queue"),
+                "{tool}"
+            );
+        }
+        assert!(
+            f.call(
+                "view_agent_queue",
+                json!({"agent":"archive-child","extra":true})
+            )
+            .await
+            .is_err()
+        );
+        // Delegation Deny refuses every change but still allows viewing.
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Delegate, Permission::Deny);
+        });
+        assert!(
+            f.call("view_agent_queue", json!({"agent":"archive-child"}))
+                .await
+                .is_ok()
+        );
+        let error = f
+            .call("resume_agent_queue", json!({"agent":"archive-child"}))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("denies managing subagents"));
+        // Ask needs a human decision; a denial changes nothing.
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Delegate, Permission::Ask);
+        });
+        let (result, _) = tokio::join!(
+            f.call(
+                "cancel_queued_message",
+                json!({"agent":"archive-child","submission":"s-first"})
+            ),
+            decide(
+                &f.workspace,
+                &f.caller,
+                &f.run,
+                false,
+                "Cancel queued message s-first"
+            )
+        );
+        assert!(result.is_err());
+        assert_eq!(submission_state(&f, "s-first"), SubmissionState::Paused);
+        let (result, _) = tokio::join!(
+            f.call(
+                "cancel_queued_message",
+                json!({"agent":"archive-child","submission":"s-first"})
+            ),
+            decide(
+                &f.workspace,
+                &f.caller,
+                &f.run,
+                true,
+                "Cancel queued message s-first"
+            )
+        );
+        result.unwrap();
+        assert_eq!(submission_state(&f, "s-first"), SubmissionState::Cancelled);
+        // An archived descendant must be unarchived first.
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Delegate, Permission::Allow);
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == "archive-grandchild")
+                .unwrap()
+                .archived = true;
+        });
+        let error = f
+            .call(
+                "cancel_queued_message",
+                json!({"agent":"archive-grandchild","submission":"grandchild-turn"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("Unarchive"));
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn editing_a_queued_turn_follows_the_targets_implementation_policy() {
+        let f = Fixture::new(Permission::Allow);
+        paused_child(&f, &[("e-first", "Edit me")]);
+        f.change(|s| {
+            s.submissions[0].approve_implementation = true;
+            s.submissions[0].sender = Sender::User;
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Implement, Permission::Deny);
+        });
+        let error = f
+            .call(
+                "edit_queued_message",
+                json!({"agent":"archive-child","submission":"e-first","text":"Changed"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("denies implementation"));
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Implement, Permission::Allow);
+        });
+        f.call(
+            "edit_queued_message",
+            json!({"agent":"archive-child","submission":"e-first","text":"Changed"}),
+        )
+        .await
+        .unwrap();
+        let turn = f
+            .workspace
+            .full()
+            .submissions
+            .into_iter()
+            .find(|s| s.id == "e-first")
+            .unwrap();
+        // The agent's text never inherits the human's earlier approval.
+        assert_eq!(plain_text(&turn.parts), "Changed");
+        assert!(!turn.approve_implementation);
+        assert_eq!(turn.state, SubmissionState::Paused);
+        f.finish().await;
+    }
+
+    #[test]
+    fn queue_tool_schemas_are_discoverable() {
+        let tools = tools(&WorkerModelPolicy::default(), Permission::Deny, None);
+        for name in queue::TOOLS {
+            let tool = tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+            assert!(
+                tool["inputSchema"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("agent"))
+            );
+        }
     }
 }
