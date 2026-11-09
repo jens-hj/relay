@@ -47,7 +47,16 @@ pub(super) fn validate(
     if !snapshot.sessions.iter().any(|s| s.id == session) {
         return Err(Error::invalid("Session not found"));
     }
-    validate_parts(snapshot, session, parts).map_err(Error::invalid)?;
+    // Reply sources live in the messages table; an unsaved outbox entry wins.
+    validate_parts_with(session, parts, &|id| {
+        snapshot
+            .messages
+            .iter()
+            .find(|m| m.id == id)
+            .cloned()
+            .or_else(|| crate::messages::get(connection, id).ok().flatten())
+    })
+    .map_err(Error::invalid)?;
     for asset in assets(parts) {
         let value: Option<String> = connection
             .query_row(
@@ -97,6 +106,7 @@ fn persist_draft(
         return Err(Error::invalid("Server is shutting down"));
     }
     let snapshot = store.snapshot()?;
+    let store = &mut *store;
     let transaction = store
         .connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -995,6 +1005,7 @@ pub(super) fn advance(workspace: &Workspace, session: &str, run: &str) -> Result
                 .unwrap()
                 .error = None;
             reserve(&mut snapshot, session, &next.id, &next.parts);
+            let store = &mut *store;
             let transaction = store
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1007,12 +1018,12 @@ pub(super) fn advance(workspace: &Workspace, session: &str, run: &str) -> Result
                 .map_err(Error::internal)?;
             crate::notices::superseded(&transaction)?;
             snapshot.revision += 1;
-            transaction
-                .execute(
-                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
-                    [serde_json::to_string(&snapshot).map_err(Error::internal)?],
-                )
-                .map_err(Error::internal)?;
+            let snapshot = crate::persist(
+                &store.snapshot_cache,
+                &store.transcripts,
+                &transaction,
+                snapshot,
+            )?;
             transaction.commit().map_err(Error::internal)?;
             workspace.snapshots.send_replace(snapshot);
             let (sender, receiver) = watch::channel(false);
@@ -1028,7 +1039,7 @@ pub(super) fn advance(workspace: &Workspace, session: &str, run: &str) -> Result
         }
     }
     snapshot.revision += 1;
-    store.save(&snapshot)?;
+    let snapshot = store.commit(snapshot)?;
     workspace.snapshots.send_replace(snapshot);
     Ok(())
 }
@@ -1127,15 +1138,16 @@ pub(super) fn defer_launch(
     // The reservation never launched a harness and must no longer hold a lock.
     worker.status = WorkerStatus::Completed;
     worker.error = None;
+    let store = &mut *store;
     let transaction = store.connection.transaction().map_err(Error::internal)?;
     wait_for_workspace(&transaction, &mut snapshot, session)?;
     snapshot.revision += 1;
-    transaction
-        .execute(
-            "UPDATE workspace SET snapshot=?1 WHERE id=1",
-            [serde_json::to_string(&snapshot).map_err(Error::internal)?],
-        )
-        .map_err(Error::internal)?;
+    let snapshot = crate::persist(
+        &store.snapshot_cache,
+        &store.transcripts,
+        &transaction,
+        snapshot,
+    )?;
     transaction.commit().map_err(Error::internal)?;
     store.controls.remove(session);
     store.agent_capabilities.remove(session);
@@ -1166,6 +1178,7 @@ pub(super) fn drain_workspace_waits(workspace: &Workspace) -> Result<(), Error> 
         .filter(|s| s.state == SubmissionState::Queued && waiting.remove(&s.session_id))
         .cloned()
         .collect();
+    let store = &mut *store;
     let transaction = store.connection.transaction().map_err(Error::internal)?;
     // Deleted sessions and queues with no queued turns have nothing to wake.
     for id in waiting {
@@ -1238,17 +1251,19 @@ pub(super) fn drain_workspace_waits(workspace: &Workspace) -> Result<(), Error> 
             )
             .map_err(Error::internal)?;
     }
-    if changed {
+    let published = if changed {
         snapshot.revision += 1;
-        transaction
-            .execute(
-                "UPDATE workspace SET snapshot=?1 WHERE id=1",
-                [serde_json::to_string(&snapshot).map_err(Error::internal)?],
-            )
-            .map_err(Error::internal)?;
-    }
+        Some(crate::persist(
+            &store.snapshot_cache,
+            &store.transcripts,
+            &transaction,
+            snapshot,
+        )?)
+    } else {
+        None
+    };
     transaction.commit().map_err(Error::internal)?;
-    if changed {
+    if let Some(snapshot) = published {
         workspace.snapshots.send_replace(snapshot);
     }
     for next in launches {

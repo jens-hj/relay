@@ -1,8 +1,29 @@
 use relay_core::AgentProfile;
 use std::{env, path::PathBuf};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// glibc gives each thread that allocates its own arena. Store sections run on
+/// whichever runtime worker `block_in_place` lands on, so large transient
+/// allocations scatter across up to 8×cores arenas that are rarely returned to
+/// the OS. Two arenas keep RSS close to live memory. Set in-process rather than
+/// via `MALLOC_ARENA_MAX` so harness processes do not inherit it.
+fn limit_malloc_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: called before the runtime starts any thread; mallopt only
+    // adjusts allocator tuning.
+    unsafe {
+        libc::mallopt(libc::M_ARENA_MAX, 2);
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    limit_malloc_arenas();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = env::args_os().skip(1).collect();
     if args.len() == 1 && args[0] == "mcp" {
         return relay_server::mcp_stdio().await;

@@ -42,7 +42,7 @@ fn guarded_config_rename_transaction_guards_legacy_receipts_and_deletion() {
     streamed.agent_configs[0].overrides.network_access = Some(false);
     streamed.agent_configs[0].draft_selection.model = Some("synthetic-model".into());
     store.save(&streamed).unwrap();
-    let (saved, action) = store.apply(first.clone(), &c).unwrap();
+    let (saved, action) = store.apply_owned(first.clone(), &c).unwrap();
     assert!(action.is_none());
     assert_eq!(saved.agent_configs[0].name, "First");
     assert_eq!(
@@ -54,17 +54,20 @@ fn guarded_config_rename_transaction_guards_legacy_receipts_and_deletion() {
         streamed.agent_configs[0].draft_selection
     );
     assert_eq!(
-        store.apply(second.clone(), &c).err().unwrap().code,
+        store.apply_owned(second.clone(), &c).err().unwrap().code,
         "agent_name_conflict"
     );
     let mut exact_stale = second;
     exact_stale.expected_revision = saved.revision;
     assert_eq!(
-        store.apply(exact_stale, &c).err().unwrap().code,
+        store.apply_owned(exact_stale, &c).err().unwrap().code,
         "agent_name_conflict"
     );
     let future = rename(&saved, &id, "Future", saved.revision + 1);
-    assert_eq!(store.apply(future, &c).err().unwrap().code, "conflict");
+    assert_eq!(
+        store.apply_owned(future, &c).err().unwrap().code,
+        "conflict"
+    );
     let old = env(
         initial.revision,
         Command::UpdateAgentConfig {
@@ -73,7 +76,7 @@ fn guarded_config_rename_transaction_guards_legacy_receipts_and_deletion() {
             overrides: ProfileOverrides::default(),
         },
     );
-    assert_eq!(store.apply(old, &c).err().unwrap().code, "conflict");
+    assert_eq!(store.apply_owned(old, &c).err().unwrap().code, "conflict");
     let legacy_exact = env(
         saved.revision,
         Command::UpdateAgentConfig {
@@ -83,7 +86,7 @@ fn guarded_config_rename_transaction_guards_legacy_receipts_and_deletion() {
         },
     );
     let legacy_json = serde_json::to_string(&legacy_exact).unwrap();
-    let (saved, _) = store.apply(legacy_exact.clone(), &c).unwrap();
+    let (saved, _) = store.apply_owned(legacy_exact.clone(), &c).unwrap();
     let stored: String = store
         .connection
         .query_row(
@@ -93,17 +96,20 @@ fn guarded_config_rename_transaction_guards_legacy_receipts_and_deletion() {
         )
         .unwrap();
     assert_eq!(stored, legacy_json);
-    assert_eq!(store.apply(legacy_exact, &c).unwrap().0, saved);
+    assert_eq!(store.apply_owned(legacy_exact, &c).unwrap().0, saved);
     let later = rename(&saved, &id, "Later", saved.revision);
-    let (later, _) = store.apply(later, &c).unwrap();
-    let (replayed, action) = store.apply(first.clone(), &c).unwrap();
+    let (later, _) = store.apply_owned(later, &c).unwrap();
+    let (replayed, action) = store.apply_owned(first.clone(), &c).unwrap();
     assert_eq!(replayed, later);
     assert!(action.is_none());
     let mut changed = first.clone();
     if let Command::RenameAgentConfig { expected, .. } = &mut changed.command {
         expected.automatic_name = !expected.automatic_name;
     }
-    assert_eq!(store.apply(changed, &c).err().unwrap().code, "invalid");
+    assert_eq!(
+        store.apply_owned(changed, &c).err().unwrap().code,
+        "invalid"
+    );
     // Use the existing deletion-redacted receipt representation, without weakening replay.
     let original = serde_json::to_string(&first).unwrap();
     store
@@ -117,10 +123,10 @@ fn guarded_config_rename_transaction_guards_legacy_receipts_and_deletion() {
     removed.agent_configs.retain(|config| config.id != id);
     removed.revision += 1;
     store.save(&removed).unwrap();
-    assert_eq!(store.apply(first.clone(), &c).unwrap().0, removed);
+    assert_eq!(store.apply_owned(first.clone(), &c).unwrap().0, removed);
     let fresh = env(removed.revision, first.command);
-    assert_eq!(store.apply(fresh, &c).err().unwrap().code, "invalid");
-    assert_eq!(store.snapshot().unwrap(), removed);
+    assert_eq!(store.apply_owned(fresh, &c).err().unwrap().code, "invalid");
+    assert_eq!(store.full(), removed);
     let count: u64 = store
         .connection
         .query_row("SELECT count(*) FROM receipts", [], |r| r.get(0))
@@ -151,7 +157,7 @@ async fn guarded_config_rename_production_router_preserves_stream_and_policy() {
     let w = shutdown.workspace.clone();
     let (captured, id, worker, run) = {
         let mut store = w.store.lock().unwrap();
-        let initial = store.snapshot().unwrap();
+        let initial = store.full();
         let create = env(
             initial.revision,
             Command::CreateAgentConfig {
@@ -161,7 +167,7 @@ async fn guarded_config_rename_production_router_preserves_stream_and_policy() {
                 overrides: ProfileOverrides::default(),
             },
         );
-        let (created, _) = store.apply(create, &w.config).unwrap();
+        let (created, _) = store.apply_owned(create, &w.config).unwrap();
         let id = created.agent_configs.last().unwrap().id.clone();
         // Isolated synthetic run metadata only: no Start command, Action or harness process.
         let mut running = created.clone();
@@ -195,7 +201,7 @@ async fn guarded_config_rename_production_router_preserves_stream_and_policy() {
             )
             .unwrap();
         store.save(&running).unwrap();
-        w.snapshots.send_replace(running);
+        w.snapshots.send_replace((running).into());
         (created, id, worker, run)
     };
     let request = rename(&captured, &id, "Renamed", captured.revision);
@@ -215,7 +221,7 @@ async fn guarded_config_rename_production_router_preserves_stream_and_policy() {
     .unwrap();
     {
         let mut store = w.store.lock().unwrap();
-        let current = store.snapshot().unwrap();
+        let current = store.full();
         let mut overrides = current
             .agent_configs
             .iter()
@@ -225,7 +231,7 @@ async fn guarded_config_rename_production_router_preserves_stream_and_policy() {
             .clone();
         overrides.network_access = Some(false);
         let (edited, _) = store
-            .apply(
+            .apply_owned(
                 env(
                     current.revision,
                     Command::UpdateAgentConfig {
@@ -237,7 +243,7 @@ async fn guarded_config_rename_production_router_preserves_stream_and_policy() {
                 &w.config,
             )
             .unwrap();
-        w.snapshots.send_replace(edited);
+        w.snapshots.send_replace((edited).into());
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/v1/commands", listener.local_addr().unwrap());
@@ -253,7 +259,7 @@ async fn guarded_config_rename_production_router_preserves_stream_and_policy() {
     let response = post(&request).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let ack: CommandAck = response.json().await.unwrap();
-    let current = w.store.lock().unwrap().snapshot().unwrap();
+    let current = w.store.lock().unwrap().full();
     assert_eq!(ack.committed_revision, current.revision);
     assert!(current.messages.iter().any(|m| m.id == "synthetic-output"));
     let config = current.agent_configs.iter().find(|c| c.id == id).unwrap();
@@ -318,7 +324,7 @@ async fn guarded_config_rename_production_router_preserves_stream_and_policy() {
     ];
     statuses.sort();
     assert_eq!(statuses, [200, 409]);
-    let current = w.store.lock().unwrap().snapshot().unwrap();
+    let current = w.store.lock().unwrap().full();
     assert_eq!(
         post(&request).send().await.unwrap().status(),
         StatusCode::OK

@@ -480,7 +480,7 @@ impl Workspace {
     /// Applies `update` to the stored snapshot and publishes it if the
     /// window-start setting or the usage windows changed.
     fn update_window_start(&self, update: impl FnOnce(&mut Snapshot)) -> Result<(), Error> {
-        let mut store = self.store.lock().map_err(Error::internal)?;
+        let store = self.store.lock().map_err(Error::internal)?;
         let mut snapshot = store.snapshot()?;
         let before = (
             snapshot.claude_window_start.clone(),
@@ -494,7 +494,7 @@ impl Workspace {
             .revision
             .checked_add(1)
             .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-        store.save(&snapshot)?;
+        let snapshot = store.commit(snapshot)?;
         self.snapshots.send_replace(snapshot);
         Ok(())
     }
@@ -1373,7 +1373,7 @@ echo "prompt $prompt" >> '{log}'
         // Both reported windows replaced the expired one, the next due time
         // follows the five-hour reset, and the outcome is visible.
         assert!(wake.is_some());
-        let saved = workspace.store.lock().unwrap().snapshot().unwrap();
+        let saved = workspace.store.lock().unwrap().full();
         assert!(saved.usage_limits.iter().any(|l| {
             l.window == UsageWindow::Weekly && l.resets_at == Some(next + 6 * 86_400)
         }));
@@ -1730,7 +1730,7 @@ echo "prompt $prompt" >> '{log}'
         let task =
             tokio::spawn(async move { running.attempt_window_start(attempt_key, SHORT).await });
         fake.wait_for("catalog ").await;
-        let mut stored = workspace.store.lock().unwrap().snapshot().unwrap();
+        let mut stored = workspace.store.lock().unwrap().full();
         stored.record_usage(work_entry(now() - 5), now());
         workspace.store.lock().unwrap().save(&stored).unwrap();
         fake.open_gate();
@@ -1795,7 +1795,7 @@ echo "prompt $prompt" >> '{log}'
             })
         ));
         // The report read before the timeout was kept.
-        let saved = workspace.store.lock().unwrap().snapshot().unwrap();
+        let saved = workspace.store.lock().unwrap().full();
         assert!(
             saved
                 .usage_limits

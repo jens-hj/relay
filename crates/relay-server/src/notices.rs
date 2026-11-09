@@ -155,7 +155,7 @@ fn refresh(store: &mut Store, eligible_at: Option<u64>) -> Result<(), Error> {
             s.worker
                 .as_ref()
                 .is_some_and(|w| !runtime::active(&w.status))
-        }) && due(&snapshot, &session, &run).is_none()
+        }) && due(&store.connection, &snapshot, &session, &run).is_none()
         {
             Some("reported_non_director")
         } else {
@@ -315,7 +315,7 @@ fn finished_persisted(workspace: &Workspace, session: &str, run: &str) -> Result
 /// The parent to notify about a child's ended run, and whether the run reported
 /// a result. Results are announced only to directors, which do not block on
 /// their workers; other parents await them with `wait_for_agents`.
-fn due(snapshot: &Snapshot, session: &str, run: &str) -> Option<(String, bool)> {
+fn due(db: &Connection, snapshot: &Snapshot, session: &str, run: &str) -> Option<(String, bool)> {
     let child = find(snapshot, session)?;
     let parent = find(snapshot, child.parent_session_id.as_deref()?)?;
     if child.archived
@@ -326,7 +326,7 @@ fn due(snapshot: &Snapshot, session: &str, run: &str) -> Option<(String, bool)> 
     {
         return None;
     }
-    let reported = result(snapshot, session, run).is_some();
+    let reported = result(db, session, run).is_some();
     (!reported || director(snapshot, parent)).then(|| (parent.id.clone(), reported))
 }
 
@@ -351,23 +351,19 @@ fn director(snapshot: &Snapshot, session: &Session) -> bool {
 }
 
 /// The summary a child reported during `run`, if it reported.
-fn result<'a>(snapshot: &'a Snapshot, session: &str, run: &str) -> Option<&'a str> {
-    snapshot
-        .messages
-        .iter()
-        .rev()
-        .find(|m| {
-            m.session_id == session
-                && m.kind == "agent_result"
-                && m.tool.as_ref().is_some_and(|t| t.run_id == run)
-        })
-        .map(|m| match m.tool.as_ref().and_then(|t| t.detail.as_ref()) {
-            Some(ToolDetail::Result {
-                summary: Some(summary),
-                ..
-            }) => summary.as_str(),
-            _ => "",
-        })
+fn result(db: &Connection, session: &str, run: &str) -> Option<String> {
+    crate::messages::newest_matching(db, session, "agent_result", None, |m| {
+        m.tool.as_ref().is_some_and(|t| t.run_id == run)
+    })
+    .ok()
+    .flatten()
+    .map(|m| match m.tool.and_then(|t| t.detail) {
+        Some(ToolDetail::Result {
+            summary: Some(summary),
+            ..
+        }) => summary,
+        _ => String::new(),
+    })
 }
 
 fn bounded(text: &str) -> &str {
@@ -378,7 +374,7 @@ fn bounded(text: &str) -> &str {
     &text[..end]
 }
 
-fn line(snapshot: &Snapshot, session: &Session, notice: &Notice) -> String {
+fn line(db: &Connection, session: &Session, notice: &Notice) -> String {
     let worker = session.worker.as_ref().unwrap();
     let status = match worker.status {
         WorkerStatus::Completed => "completed",
@@ -387,7 +383,7 @@ fn line(snapshot: &Snapshot, session: &Session, notice: &Notice) -> String {
         WorkerStatus::Interrupted => "interrupted",
         _ => "ended",
     };
-    let summary = result(snapshot, &session.id, &notice.run);
+    let summary = result(db, &session.id, &notice.run);
     let outcome = if summary.is_some() {
         "reported a result"
     } else {
@@ -398,7 +394,7 @@ fn line(snapshot: &Snapshot, session: &Session, notice: &Notice) -> String {
         text.push_str("; its workers have since ended");
     }
     if let Some(summary) = summary.filter(|s| !s.is_empty()) {
-        text.push_str(&format!("\n  Summary: {}", bounded(summary)));
+        text.push_str(&format!("\n  Summary: {}", bounded(&summary)));
     }
     if let Some(error) = &worker.error {
         text.push_str(&format!("\n  Error: {}", bounded(error)));
@@ -485,10 +481,11 @@ fn flush_batch(
         if store.run_id(&notice.session)?.as_deref() != Some(notice.run.as_str()) {
             continue;
         }
-        if let Some((_, reported)) = due(&snapshot, &notice.session, &notice.run) {
+        if let Some((_, reported)) = due(&store.connection, &snapshot, &notice.session, &notice.run)
+        {
             reports += usize::from(reported);
             let child = find(&snapshot, &notice.session).unwrap();
-            lines.push(line(&snapshot, child, notice));
+            lines.push(line(&store.connection, child, notice));
         }
     }
     if lines.is_empty() {
@@ -674,12 +671,12 @@ pub(super) fn enqueue(
             .map_err(Error::internal)?;
     }
     superseded(&transaction)?;
-    transaction
-        .execute(
-            "UPDATE workspace SET snapshot=?1 WHERE id=1",
-            [serde_json::to_string(&snapshot).map_err(Error::internal)?],
-        )
-        .map_err(Error::internal)?;
+    let snapshot = crate::persist(
+        &store.snapshot_cache,
+        &store.transcripts,
+        &transaction,
+        snapshot,
+    )?;
     transaction.commit().map_err(Error::internal)?;
     store.notices.remove(parent);
     workspace.snapshots.send_replace(snapshot);
@@ -881,10 +878,10 @@ mod outbox_follow_on_regressions {
         let (sender, _receiver) = watch::channel(false);
         {
             let mut store = workspace.store.lock().unwrap();
-            let mut snapshot = store.snapshot().unwrap();
+            let mut snapshot = store.full();
             snapshot.sessions[1].worker.as_mut().unwrap().status = WorkerStatus::Running;
             store.save(&snapshot).unwrap();
-            workspace.snapshots.send_replace(snapshot);
+            workspace.snapshots.send_replace((snapshot).into());
             store.controls.insert("outbox-child".into(), sender);
             store.connection.execute_batch("DELETE FROM lifecycle_events; CREATE TRIGGER reject_terminal BEFORE UPDATE ON workspace BEGIN SELECT RAISE(ABORT,'synthetic terminal failure'); END;").unwrap();
         }
@@ -907,11 +904,7 @@ mod outbox_follow_on_regressions {
             );
             assert!(store.controls.contains_key("outbox-child"));
             assert_eq!(
-                store.snapshot().unwrap().sessions[1]
-                    .worker
-                    .as_ref()
-                    .unwrap()
-                    .status,
+                store.full().sessions[1].worker.as_ref().unwrap().status,
                 WorkerStatus::Running
             );
             store
@@ -951,9 +944,9 @@ mod outbox_follow_on_regressions {
         assert_eq!(notice_turns(&workspace.snapshots.borrow()).len(), 1);
         {
             let mut store = workspace.store.lock().unwrap();
-            let snapshot = store.snapshot().unwrap();
+            let snapshot = store.full();
             let (snapshot, _) = store
-                .apply(
+                .apply_owned(
                     crate::tests::env(
                         snapshot.revision,
                         Command::CancelTurn {
@@ -963,7 +956,7 @@ mod outbox_follow_on_regressions {
                     &RuntimeConfig::default(),
                 )
                 .unwrap();
-            workspace.snapshots.send_replace(snapshot);
+            workspace.snapshots.send_replace((snapshot).into());
         }
         recover(&workspace).unwrap();
         let snapshot = workspace.snapshots.borrow().clone();
@@ -978,7 +971,7 @@ mod outbox_follow_on_regressions {
             let directory = tempfile::tempdir().unwrap();
             let workspace = fixture(&directory.path().join("db"));
             let mut store = workspace.store.lock().unwrap();
-            let before = store.snapshot().unwrap(); // Prime the autocommit cache.
+            let before = store.full(); // Prime the autocommit cache.
             let (sender, _receiver) = watch::channel(false);
             store.controls.insert("outbox-parent".into(), sender);
             let command = Command::StopWorkerRuns {
@@ -999,7 +992,7 @@ mod outbox_follow_on_regressions {
             if let Command::StopWorkerRuns { runs, .. } = &mut stale.command {
                 runs.insert("outbox-parent".into(), "replaced-run".into());
             }
-            assert!(store.apply(stale, &RuntimeConfig::default()).is_err());
+            assert!(store.apply_owned(stale, &RuntimeConfig::default()).is_err());
             assert_eq!(
                 store
                     .connection
@@ -1012,11 +1005,11 @@ mod outbox_follow_on_regressions {
             store.connection.execute_batch("CREATE TRIGGER reject_stop BEFORE UPDATE ON workspace BEGIN SELECT RAISE(ABORT,'synthetic stop failure'); END;").unwrap();
             assert!(
                 store
-                    .apply(request.clone(), &RuntimeConfig::default())
+                    .apply_owned(request.clone(), &RuntimeConfig::default())
                     .is_err()
             );
             assert_eq!(
-                store.snapshot().unwrap(),
+                store.full(),
                 before,
                 "rolled-back raw writes must not poison the snapshot cache"
             );
@@ -1043,12 +1036,12 @@ mod outbox_follow_on_regressions {
                 .unwrap();
             let serialized_original = serde_json::to_string(&request).unwrap();
             let (after, _) = store
-                .apply(request.clone(), &RuntimeConfig::default())
+                .apply_owned(request.clone(), &RuntimeConfig::default())
                 .unwrap();
             assert_eq!(after.protocol_version, 17);
             assert_ne!(after, before);
             assert_eq!(
-                store.snapshot().unwrap(),
+                store.full(),
                 after,
                 "committed raw lifecycle writes must invalidate the cache"
             );
@@ -1081,7 +1074,7 @@ mod outbox_follow_on_regressions {
             let changes = store.connection.total_changes();
             assert_eq!(
                 store
-                    .apply(request.clone(), &RuntimeConfig::default())
+                    .apply_owned(request.clone(), &RuntimeConfig::default())
                     .unwrap()
                     .0,
                 after
@@ -1096,7 +1089,9 @@ mod outbox_follow_on_regressions {
                 include_descendants: cascade,
             };
             assert!(
-                store.apply(request, &RuntimeConfig::default()).is_err(),
+                store
+                    .apply_owned(request, &RuntimeConfig::default())
+                    .is_err(),
                 "normalized command must not replace original receipt identity"
             );
         }
@@ -1108,7 +1103,7 @@ mod outbox_follow_on_regressions {
             let directory = tempfile::tempdir().unwrap();
             let workspace = fixture(&directory.path().join("db"));
             let mut store = workspace.store.lock().unwrap();
-            let mut snapshot = store.snapshot().unwrap();
+            let mut snapshot = store.full();
             if mode == "stop" || mode == "cascade" {
                 let (sender, _receiver) = watch::channel(false);
                 store.controls.insert("outbox-parent".into(), sender);
@@ -1130,7 +1125,7 @@ mod outbox_follow_on_regressions {
             store.connection.execute_batch("CREATE TRIGGER reject_command BEFORE UPDATE ON workspace BEGIN SELECT RAISE(ABORT,'synthetic command failure'); END;").unwrap();
             assert!(
                 store
-                    .apply(
+                    .apply_owned(
                         crate::tests::env(snapshot.revision, cmd.clone()),
                         &RuntimeConfig::default()
                     )
@@ -1149,7 +1144,7 @@ mod outbox_follow_on_regressions {
                 .execute_batch("DROP TRIGGER reject_command")
                 .unwrap();
             let (mut snapshot, _) = store
-                .apply(
+                .apply_owned(
                     crate::tests::env(snapshot.revision, cmd),
                     &RuntimeConfig::default(),
                 )
@@ -1166,13 +1161,13 @@ mod outbox_follow_on_regressions {
                     }
                 };
                 (snapshot, _) = store
-                    .apply(
+                    .apply_owned(
                         crate::tests::env(snapshot.revision, cmd),
                         &RuntimeConfig::default(),
                     )
                     .unwrap();
             }
-            workspace.snapshots.send_replace(snapshot);
+            workspace.snapshots.send_replace((snapshot).into());
             assert_eq!(
                 store
                     .connection
@@ -1207,7 +1202,7 @@ mod outbox_follow_on_regressions {
             workspace.config = Arc::new(crate::tests::config());
             {
                 let mut store = workspace.store.lock().unwrap();
-                let mut snapshot = store.snapshot().unwrap();
+                let mut snapshot = store.full();
                 snapshot.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed;
                 snapshot.sessions[0].worker.as_mut().unwrap().worktree =
                     Some(directory.path().display().to_string());
@@ -1235,7 +1230,7 @@ mod outbox_follow_on_regressions {
                 );
                 snapshot.sessions[0].profile = Some(profile);
                 store.save(&snapshot).unwrap();
-                workspace.snapshots.send_replace(snapshot);
+                workspace.snapshots.send_replace((snapshot).into());
                 if mode == "supersede" {
                     let tx = store.connection.transaction().unwrap();
                     tx.execute(
@@ -1285,20 +1280,20 @@ mod outbox_follow_on_regressions {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("db");
         let workspace = fixture(&path);
-        let snapshot = workspace.store.lock().unwrap().snapshot().unwrap();
+        let snapshot = workspace.store.lock().unwrap().full();
         {
             let store = workspace.store.lock().unwrap();
             store.connection.execute_batch("DROP TABLE lifecycle_events; DROP TABLE lifecycle_holds; PRAGMA user_version=29; INSERT INTO drafts(session_id,draft) VALUES('synthetic-owner','{\"revision\":7,\"parts\":[]}');").unwrap();
         }
         drop(workspace);
         let store = Store::open(&path, AgentProfile::default()).unwrap();
-        assert_eq!(store.snapshot().unwrap(), snapshot);
+        assert_eq!(store.full(), snapshot);
         assert_eq!(
             store
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            30
+            31
         );
         assert_eq!(
             store
@@ -1325,7 +1320,7 @@ mod outbox_follow_on_regressions {
         );
         store
             .connection
-            .pragma_update(None, "user_version", 31)
+            .pragma_update(None, "user_version", 32)
             .unwrap();
         drop(store);
         assert!(Store::open(&path, AgentProfile::default()).is_err());
@@ -1342,7 +1337,7 @@ mod outbox_follow_on_regressions {
         // representing loss after commit and before native task spawn.
         {
             let mut store = workspace.store.lock().unwrap();
-            let mut snapshot = store.snapshot().unwrap();
+            let mut snapshot = store.full();
             snapshot.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Queued;
             snapshot
                 .submissions
@@ -1390,7 +1385,7 @@ mod outbox_follow_on_regressions {
         let workspace = fixture(&directory.path().join("db"));
         {
             let mut store = workspace.store.lock().unwrap();
-            let mut snapshot = store.snapshot().unwrap();
+            let mut snapshot = store.full();
             for index in 1..33 {
                 let mut parent = snapshot.sessions[0].clone();
                 parent.id = format!("extra-parent-{index}");
@@ -1409,7 +1404,7 @@ mod outbox_follow_on_regressions {
                 record(&store.connection, &snapshot, &child.id, "child-run").unwrap();
             }
             store.save(&snapshot).unwrap();
-            workspace.snapshots.send_replace(snapshot);
+            workspace.snapshots.send_replace((snapshot).into());
         }
         assert!(dispatch(&workspace).unwrap());
         assert_eq!(workspace.snapshots.borrow().submissions.len(), 32);
@@ -1487,7 +1482,7 @@ mod outbox_follow_on_regressions {
     fn mixed_siblings(path: &std::path::Path, exhausted: bool) -> Workspace {
         let workspace = fixture(path);
         let mut store = workspace.store.lock().unwrap();
-        let mut snapshot = store.snapshot().unwrap();
+        let mut snapshot = store.full();
         let mut child = snapshot.sessions[1].clone();
         child.id = "due-sibling".into();
         snapshot.sessions.push(child.clone());
@@ -1501,7 +1496,7 @@ mod outbox_follow_on_regressions {
         record(&store.connection, &snapshot, &child.id, "sibling-run").unwrap();
         store.connection.execute("UPDATE lifecycle_events SET attempts=?1,next_attempt=?2,hold_reason=?3 WHERE child_session='outbox-child'", params![if exhausted {4} else {1}, if exhausted {0} else {now()+3600},if exhausted {"retry_exhausted"} else {"storage_retry"}]).unwrap();
         store.save(&snapshot).unwrap();
-        workspace.snapshots.send_replace(snapshot);
+        workspace.snapshots.send_replace((snapshot).into());
         drop(store);
         workspace
     }
@@ -1611,7 +1606,7 @@ mod outbox_follow_on_regressions {
                 },
             ];
             let mut store = workspace.store.lock().unwrap();
-            let snapshot = store.snapshot().unwrap();
+            let snapshot = store.full();
             assert!(
                 enqueue(
                     &workspace,
@@ -1640,7 +1635,7 @@ mod outbox_follow_on_regressions {
                     .unwrap(),
                 0
             );
-            assert!(store.snapshot().unwrap().submissions.is_empty());
+            assert!(store.full().submissions.is_empty());
             drop(store);
             assert_eq!(held_sibling(&workspace), before);
         }

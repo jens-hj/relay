@@ -493,8 +493,11 @@ fn finalize(
     id: &str,
     update: impl FnOnce(&mut Message),
 ) -> Result<(), Error> {
-    let mut store = workspace.store.lock().map_err(Error::internal)?;
+    let store = workspace.store.lock().map_err(Error::internal)?;
     let mut snapshot = store.snapshot()?;
+    snapshot
+        .messages
+        .extend(crate::messages::get(&store.connection, id).map_err(Error::internal)?);
     let Some(message) = snapshot.messages.iter_mut().find(|m| {
         m.id == id
             && m.session_id == session
@@ -509,7 +512,7 @@ fn finalize(
         .revision
         .checked_add(1)
         .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-    store.save(&snapshot)?;
+    let snapshot = store.commit(snapshot)?;
     workspace.snapshots.send_replace(snapshot);
     Ok(())
 }
@@ -681,7 +684,7 @@ pub(crate) async fn run(
             .revision
             .checked_add(1)
             .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-        store.save(&current)?;
+        let saved = store.commit(current.clone())?;
         let child = match crate::process::spawn(&mut command) {
             Ok(child) => child,
             Err(_) => {
@@ -693,14 +696,14 @@ pub(crate) async fn run(
                     }
                 }
                 current.revision += 1;
-                store.save(&current)?;
+                let current = store.commit(current)?;
                 workspace.snapshots.send_replace(current);
                 return Err(Error::invalid(
                     "Cannot run nix; check the server's Nix installation or RELAY_NIX_BIN",
                 ));
             }
         };
-        workspace.snapshots.send_replace(current);
+        workspace.snapshots.send_replace(saved);
         store.nix_runs.insert(caller.to_owned());
         (
             Reservation {

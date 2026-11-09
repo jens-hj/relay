@@ -1426,7 +1426,7 @@ mod tests {
                 name: "  Source workspace  ".into(),
             },
         );
-        let (renamed, action) = store.apply(request.clone(), &w.config).unwrap();
+        let (renamed, action) = store.apply_owned(request.clone(), &w.config).unwrap();
         assert!(action.is_none());
         let mut expected = original.clone();
         expected.connections[slot].name = "Source workspace".into();
@@ -1435,7 +1435,7 @@ mod tests {
             renamed, expected,
             "only the display name and revision change"
         );
-        let (retried, action) = store.apply(request.clone(), &w.config).unwrap();
+        let (retried, action) = store.apply_owned(request.clone(), &w.config).unwrap();
         assert_eq!(retried, renamed);
         assert!(action.is_none());
         let mut changed = request;
@@ -1443,7 +1443,7 @@ mod tests {
             connection_id: id.clone(),
             name: "Different".into(),
         };
-        assert!(store.apply(changed, &w.config).is_err());
+        assert!(store.apply_owned(changed, &w.config).is_err());
         for (connection_id, name) in [
             (id.clone(), String::new()),
             (id.clone(), " ".into()),
@@ -1453,7 +1453,7 @@ mod tests {
         ] {
             assert!(
                 store
-                    .apply(
+                    .apply_owned(
                         env(
                             renamed.revision,
                             Command::UpdateConnection {
@@ -2223,7 +2223,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("db");
         let mut store = crate::Store::open(&db, AgentProfile::default()).unwrap();
-        let before = store.snapshot().unwrap();
+        let before = store.full();
         let request = env(
             before.revision,
             Command::CreateProject {
@@ -2233,11 +2233,13 @@ mod tests {
             },
         );
         let (s, _) = store
-            .apply(request.clone(), &RuntimeConfig::default())
+            .apply_owned(request.clone(), &RuntimeConfig::default())
             .unwrap();
         drop(store);
         let mut store = crate::Store::open(&db, AgentProfile::default()).unwrap();
-        let (retry, action) = store.apply(request, &RuntimeConfig::default()).unwrap();
+        let (retry, action) = store
+            .apply_owned(request, &RuntimeConfig::default())
+            .unwrap();
         assert_eq!(s, retry);
         assert!(action.is_none());
         assert_eq!(
@@ -2275,7 +2277,7 @@ mod tests {
         )
         .unwrap();
         let store = crate::Store::open(&db, AgentProfile::default()).unwrap();
-        let next = store.snapshot().unwrap();
+        let next = store.full();
         assert_eq!(next.projects, s.projects);
         assert_eq!(next.operations[0].state, OperationState::Interrupted);
         assert_eq!(

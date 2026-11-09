@@ -400,7 +400,7 @@ pub(super) fn flush(workspace: &Workspace, caller: &str, allow_launch: bool) -> 
                     .revision
                     .checked_add(1)
                     .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-                store.save(&snapshot)?;
+                let snapshot = store.commit(snapshot)?;
                 workspace.snapshots.send_replace(snapshot);
             }
             // An explicit cancellation stays cancelled. Live, queued and

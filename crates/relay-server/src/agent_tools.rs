@@ -61,7 +61,7 @@ pub(super) fn authenticate(
     }
     let control = store.controls.get(session).ok_or_else(unauthorized)?;
     if *control.borrow()
-        || !store.snapshot()?.sessions.iter().any(|s| {
+        || !store.shared()?.sessions.iter().any(|s| {
             s.id == *session
                 && s.worker
                     .as_ref()
@@ -246,14 +246,21 @@ fn peer_state(snapshot: &Snapshot, session: &Session) -> Value {
         .map(|p| p.name.as_str());
     json!({"id":session.id,"title":session.title,"project":project,"status":session.worker.as_ref().map(|w| &w.status),"relationship":"peer"})
 }
-fn state(snapshot: &Snapshot, id: &str) -> Value {
+/// The newest result `id` reported about itself, from the messages table.
+fn reported_result(workspace: &Workspace, id: &str) -> Option<Value> {
+    let message = crate::blocking(|| {
+        let store = workspace.store.lock().ok()?;
+        crate::messages::newest_matching(&store.connection, id, "agent_result", None, |m| {
+            matches!(m.tool.as_ref().and_then(|t|t.detail.as_ref()),Some(ToolDetail::Result {from_session_id:Some(from),..}) if from == id)
+        })
+        .ok()
+        .flatten()
+    })?;
+    serde_json::from_str::<Value>(&message.body).ok()
+}
+fn state(workspace: &Workspace, snapshot: &Snapshot, id: &str) -> Value {
     let session = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
-    let result = snapshot
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.session_id == id && m.kind == "agent_result" && matches!(m.tool.as_ref().and_then(|t|t.detail.as_ref()),Some(ToolDetail::Result {from_session_id:Some(from),..}) if from == id));
-    let result = result.and_then(|m| serde_json::from_str::<Value>(&m.body).ok());
+    let result = reported_result(workspace, id);
     json!({"id":id,"title":session.title,"parent_session_id":session.parent_session_id,"status":session.worker.as_ref().map(|w| &w.status),"archived":session.archived,"worktree":session.worker.as_ref().and_then(|w| w.worktree.as_ref()),"result":result})
 }
 fn rank(permission: Permission) -> u8 {
@@ -669,12 +676,12 @@ async fn dispatch(
                 return Err(Error::invalid("list_agents takes no arguments"));
             }
             let snapshot = workspace.snapshots.borrow().clone();
-            let mut agents = vec![state(&snapshot, caller)];
+            let mut agents = vec![state(workspace, &snapshot, caller)];
             agents.extend(
                 snapshot
                     .descendants(caller)
                     .iter()
-                    .map(|s| state(&snapshot, &s.id)),
+                    .map(|s| state(workspace, &snapshot, &s.id)),
             );
             if let Some(parent) = snapshot
                 .sessions
@@ -682,7 +689,7 @@ async fn dispatch(
                 .find(|s| s.id == caller)
                 .and_then(|s| s.parent_session_id.as_ref())
             {
-                agents.push(state(&snapshot, parent));
+                agents.push(state(workspace, &snapshot, parent));
             }
             for peer in snapshot.peers_of(caller) {
                 if !agents.iter().any(|a| a["id"] == peer.id.as_str()) {
@@ -796,14 +803,15 @@ async fn dispatch(
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| Error::invalid("Revision exhausted"))?;
+            let store = &mut *store;
             let transaction = store.connection.transaction().map_err(Error::internal)?;
             crate::notices::suppress(&transaction, &current, &args.agent, true, "ancestor_stop")?;
-            transaction
-                .execute(
-                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
-                    [serde_json::to_string(&current).map_err(Error::internal)?],
-                )
-                .map_err(Error::internal)?;
+            let current = crate::persist(
+                &store.snapshot_cache,
+                &store.transcripts,
+                &transaction,
+                current,
+            )?;
             transaction.commit().map_err(Error::internal)?;
             store.mark_ancestor_stop(&args.agent);
             store.held.remove(&args.agent);
@@ -842,7 +850,7 @@ async fn dispatch(
                         .is_some_and(|w| !runtime::active(&w.status))
                 });
                 if done || tokio::time::Instant::now() >= deadline {
-                    let result = json!({"agents":args.agents.iter().map(|id|state(&snapshot,id)).collect::<Vec<_>>(),"timed_out":!done});
+                    let result = json!({"agents":args.agents.iter().map(|id|state(workspace,&snapshot,id)).collect::<Vec<_>>(),"timed_out":!done});
                     record(
                         workspace,
                         caller,
@@ -1278,24 +1286,31 @@ async fn spawn(
         // Enrich the harness's calling tool when it has already been observed.
         // A separate server receipt also survives clients/harnesses that omit it.
         let grant = child.spawn.as_ref().unwrap();
-        if let Some(tool) = current
-            .messages
+        // Only the caller's running tools can be the calling tool; the one
+        // enriched below goes back through the outbox.
+        let mut running =
+            crate::messages::running_tools(&store.connection, Some(caller), Some(run))
+                .map_err(Error::internal)?;
+        if let Some(message) = running
             .iter_mut()
             .filter(|m| m.session_id == caller)
-            .filter_map(|m| m.tool.as_mut())
-            .find(|t| {
-                t.run_id == run
-                    && t.kind == ToolKind::Spawn
-                    && t.state == ToolState::Running
-                    && t.detail.is_none()
-                    && serde_json::from_str::<Value>(&t.input).is_ok_and(|input| {
-                        input["title"] == child.title && input["task"] == grant.task
-                    })
+            .find(|m| {
+                m.tool.as_ref().is_some_and(|t| {
+                    t.run_id == run
+                        && t.kind == ToolKind::Spawn
+                        && t.state == ToolState::Running
+                        && t.detail.is_none()
+                        && serde_json::from_str::<Value>(&t.input).is_ok_and(|input| {
+                            input["title"] == child.title && input["task"] == grant.task
+                        })
+                })
             })
+            && let Some(tool) = message.tool.as_mut()
         {
             tool.detail = Some(ToolDetail::Spawn {
                 child_session_id: Some(id.clone()),
             });
+            current.messages.push(message.clone());
         }
         let from_caller = Sender::Agent {
             session_id: caller.into(),
@@ -1341,6 +1356,7 @@ async fn spawn(
                 approve_implementation: true,
             },
         };
+        let store = &mut *store;
         let transaction = store
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1361,12 +1377,12 @@ async fn spawn(
                 ],
             )
             .map_err(Error::internal)?;
-        transaction
-            .execute(
-                "UPDATE workspace SET snapshot=?1 WHERE id=1",
-                [serde_json::to_string(&current).map_err(Error::internal)?],
-            )
-            .map_err(Error::internal)?;
+        let current = crate::persist(
+            &store.snapshot_cache,
+            &store.transcripts,
+            &transaction,
+            current,
+        )?;
         transaction.commit().map_err(Error::internal)?;
         store.controls.insert(id.clone(), sender);
         workspace.snapshots.send_replace(current);
@@ -1435,6 +1451,7 @@ async fn message_agent(
         if profile(&current, target)?.permissions != permissions {
             return Err(Error::invalid("Target permissions changed; retry message"));
         }
+        let store = &mut *store;
         let transaction = store
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1533,12 +1550,12 @@ async fn message_agent(
                 .map_err(Error::internal)?;
             crate::notices::superseded(&transaction)?;
         }
-        transaction
-            .execute(
-                "UPDATE workspace SET snapshot=?1 WHERE id=1",
-                [serde_json::to_string(&current).map_err(Error::internal)?],
-            )
-            .map_err(Error::internal)?;
+        let current = crate::persist(
+            &store.snapshot_cache,
+            &store.transcripts,
+            &transaction,
+            current,
+        )?;
         transaction.commit().map_err(Error::internal)?;
         let receiver = if action.is_some() {
             let (sender, receiver) = watch::channel(false);
@@ -2040,7 +2057,7 @@ mod tests {
                 .store
                 .lock()
                 .unwrap()
-                .apply(envelope, &workspace.config)
+                .apply_owned(envelope, &workspace.config)
                 .unwrap();
             let parent = snapshot.sessions.last_mut().unwrap();
             let caller = parent.id.clone();
@@ -2062,7 +2079,7 @@ mod tests {
                 store.save(&snapshot).unwrap();
                 store.controls.insert(caller.clone(), sender);
             }
-            workspace.snapshots.send_replace(snapshot);
+            workspace.snapshots.send_replace((snapshot).into());
             Self {
                 _directory: directory,
                 workspace,
@@ -2095,7 +2112,7 @@ mod tests {
             // It may already be terminal (including after restart recovery).
             {
                 let mut store = self.workspace.store.lock().unwrap();
-                let mut snapshot = store.snapshot().unwrap();
+                let mut snapshot = store.full();
                 let worker = snapshot
                     .sessions
                     .iter_mut()
@@ -2108,7 +2125,7 @@ mod tests {
                     worker.status = WorkerStatus::Completed;
                     snapshot.revision += 1;
                     store.save(&snapshot).unwrap();
-                    self.workspace.snapshots.send_replace(snapshot);
+                    self.workspace.snapshots.send_replace((snapshot).into());
                 }
             }
             let shutdown = Shutdown {
@@ -2130,7 +2147,7 @@ mod tests {
                 if let Some(pending) = pending {
                     assert!(pending.description.contains(contains));
                     let mut store = workspace.store.lock().unwrap();
-                    let snapshot = store.snapshot().unwrap();
+                    let snapshot = store.full();
                     let envelope = crate::tests::env(
                         snapshot.revision,
                         Command::RespondPermission {
@@ -2139,8 +2156,8 @@ mod tests {
                             allow,
                         },
                     );
-                    let (snapshot, _) = store.apply(envelope, &workspace.config).unwrap();
-                    workspace.snapshots.send_replace(snapshot);
+                    let (snapshot, _) = store.apply_owned(envelope, &workspace.config).unwrap();
+                    workspace.snapshots.send_replace((snapshot).into());
                     break;
                 }
                 events.changed().await.unwrap();
@@ -2465,7 +2482,7 @@ mod tests {
             response["reason"].as_str(),
             Some("stopped" | "expired_or_run_ended")
         ));
-        let snapshot = workspace.snapshots.borrow().clone();
+        let snapshot = workspace.full();
         assert_eq!(snapshot.sessions.len(), 1);
         assert_eq!(snapshot.tool_permissions[0].decision, Some(true));
         assert_eq!(spawn_notices(&f).len(), 1);
@@ -2504,7 +2521,7 @@ mod tests {
             })
             .await
             .unwrap();
-            let mut stale = events.borrow().clone();
+            let mut stale = events.borrow().as_ref().clone();
             for permission in &mut stale.tool_permissions {
                 permission.decision = Some(true);
             }
@@ -2514,7 +2531,7 @@ mod tests {
             let caller = f.caller.clone();
             let holder = tokio::task::spawn_blocking(move || {
                 let mut store = workspace.store.lock().unwrap();
-                let mut current = store.snapshot().unwrap();
+                let mut current = store.full();
                 for permission in &mut current.tool_permissions {
                     permission.decision = Some(mode != "denied");
                     permission.expired = mode == "expired";
@@ -2541,7 +2558,7 @@ mod tests {
             ready_rx.await.unwrap();
             // Both waiters are woken with a stale apparent approval while the
             // authoritative store differs and its mutex is still held.
-            f.workspace.snapshots.send_replace(stale);
+            f.workspace.snapshots.send_replace((stale).into());
             let heartbeat = tokio::spawn(async {
                 tokio::time::sleep(Duration::from_millis(40)).await;
                 1
@@ -2759,7 +2776,7 @@ mod tests {
             assert_eq!(outcomes.len(), 1);
             assert_eq!(outcomes[0]["phase"], "cancelled");
             assert_eq!(outcomes[0]["agent"], Value::Null);
-            let snapshot = restored.snapshots.borrow().clone();
+            let snapshot = restored.full();
             assert_eq!(snapshot.sessions.len(), 1);
             assert!(snapshot.tool_permissions.is_empty());
             assert!(restored.store.lock().unwrap().controls.is_empty());
@@ -2835,7 +2852,7 @@ mod tests {
             .unwrap();
         let response: Value = response.json().await.unwrap();
         assert_eq!(response["phase"], "cancelled");
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert_eq!(snapshot.sessions.len(), 1);
         assert!(snapshot.tool_permissions.iter().all(|p| p.expired));
         assert_eq!(
@@ -3120,7 +3137,7 @@ mod tests {
         .await
         .unwrap();
         crate::spawn_attempts::flush(&f.workspace, &f.caller, true).unwrap();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert_eq!(spawn_notices(&f).len(), 1);
         assert_eq!(snapshot.sessions.len(), 1);
         assert_eq!(
@@ -3186,7 +3203,7 @@ mod tests {
             )
             .unwrap();
             let workspace = &shutdown.workspace;
-            let snapshot = workspace.snapshots.borrow().clone();
+            let snapshot = workspace.full();
             let turns: Vec<_> = snapshot
                 .submissions
                 .iter()
@@ -3264,7 +3281,7 @@ mod tests {
         }
         assert_eq!(spawn_notices(&f).len(), 1);
         assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Paused);
-        assert_one_prompt(&f.workspace.snapshots.borrow(), &notice);
+        assert_one_prompt(&f.workspace.full(), &notice);
         assert_eq!(
             crate::spawn_attempts::view(&f.workspace, &f.caller).unwrap()[0]["notice_consumed"],
             false
@@ -3285,7 +3302,7 @@ mod tests {
                 (*f.workspace.config).clone(),
             )
             .unwrap();
-            let snapshot = shutdown.workspace.snapshots.borrow().clone();
+            let snapshot = shutdown.workspace.full();
             assert_eq!(
                 snapshot
                     .submissions
@@ -3341,7 +3358,7 @@ mod tests {
             })
             .await
             .unwrap();
-            assert_one_prompt(&workspace.snapshots.borrow(), &notice);
+            assert_one_prompt(&workspace.full(), &notice);
             assert_eq!(
                 workspace
                     .snapshots
@@ -3443,7 +3460,7 @@ mod tests {
                     && !s.approve_implementation)
         );
         assert!(workspace.snapshots.borrow().tool_permissions.is_empty());
-        assert_one_prompt(&workspace.snapshots.borrow(), &notice);
+        assert_one_prompt(&workspace.full(), &notice);
         shutdown.shutdown().await.unwrap();
     }
 
@@ -3485,7 +3502,7 @@ mod tests {
     #[tokio::test]
     async fn scoped_root_profiles_start_on_the_selected_task_without_creating_another() {
         let f = Fixture::new(Permission::Allow);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let parent = snapshot.sessions[0].clone();
         let task = parent.issue_id.clone().unwrap();
         let before = snapshot.issues.len();
@@ -3499,7 +3516,7 @@ mod tests {
                 issue_ids: vec![task.clone()],
             });
         });
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let envelope = crate::tests::env(
             snapshot.revision,
             Command::StartRootAgent {
@@ -3515,7 +3532,7 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .apply(envelope, &f.workspace.config)
+            .apply_owned(envelope, &f.workspace.config)
             .unwrap();
         assert!(matches!(action, Some(Action::Run { .. })));
         assert_eq!(
@@ -3527,7 +3544,7 @@ mod tests {
             snapshot.agent_configs[0].name
         );
         assert_eq!(snapshot.issues.len(), before);
-        f.workspace.snapshots.send_replace(snapshot);
+        f.workspace.snapshots.send_replace((snapshot).into());
         f.finish().await;
     }
 
@@ -3541,7 +3558,7 @@ mod tests {
         f.change(|s| {
             s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed;
         });
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let profile =
             AgentProfile::worker(&snapshot.session_profile(&snapshot.sessions[0]).unwrap());
         let envelope = crate::tests::env(
@@ -3567,7 +3584,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let current = f.workspace.snapshots.borrow().clone();
+        let current = f.workspace.full();
         let child = current.sessions.iter().find(|s| s.id == id).unwrap();
         assert_eq!(child.parent_session_id.as_deref(), Some(f.caller.as_str()));
         assert_eq!(child.issue_id, snapshot.sessions[0].issue_id);
@@ -3605,7 +3622,7 @@ mod tests {
         for name in ["", "Static name"] {
             let f = Fixture::new(Permission::Allow);
             f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let mut profile =
                 AgentProfile::worker(&snapshot.session_profile(&snapshot.sessions[0]).unwrap());
             profile.permissions.insert(Task::Implement, Permission::Ask);
@@ -3629,7 +3646,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let before = f.workspace.snapshots.borrow().clone();
+            let before = f.workspace.full();
             let child = before.sessions.iter().find(|s| s.id == id).unwrap();
             assert!(child.awaiting_first_message);
             assert_eq!(child.automatic_name, name.is_empty());
@@ -3665,7 +3682,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let rejected = f.workspace.store.lock().unwrap().apply(
+            let rejected = f.workspace.store.lock().unwrap().apply_owned(
                 crate::tests::env(
                     before.revision,
                     Command::SubmitTurn {
@@ -3696,7 +3713,7 @@ mod tests {
                 .store
                 .lock()
                 .unwrap()
-                .apply(
+                .apply_owned(
                     crate::tests::env(
                         before.revision,
                         Command::SubmitTurn {
@@ -3726,7 +3743,7 @@ mod tests {
                 "Review the sidebar borders"
             );
             assert_eq!(child.worker.as_ref().unwrap().status, WorkerStatus::Queued);
-            let persisted = f.workspace.store.lock().unwrap().snapshot().unwrap();
+            let persisted = f.workspace.store.lock().unwrap().full();
             assert_eq!(persisted.sessions.iter().find(|s| s.id == id), Some(child));
             Shutdown {
                 workspace: f.workspace.clone(),
@@ -3799,7 +3816,7 @@ mod tests {
         f.call("archive_agent", json!({"agent":"archive-child"}))
             .await
             .unwrap();
-        let before = f.workspace.store.lock().unwrap().snapshot().unwrap();
+        let before = f.workspace.store.lock().unwrap().full();
         for _ in 0..2 {
             assert_eq!(
                 f.call("unarchive_agent", json!({"agent":"archive-child"}))
@@ -3808,7 +3825,7 @@ mod tests {
                 json!({"agent":"archive-child","archived":false})
             );
         }
-        let after = f.workspace.store.lock().unwrap().snapshot().unwrap();
+        let after = f.workspace.store.lock().unwrap().full();
         for original in &before.sessions {
             let mut expected = original.clone();
             if matches!(expected.id.as_str(), "archive-child" | "archive-grandchild") {
@@ -3849,7 +3866,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let queued = f.workspace.snapshots.borrow().clone();
+        let queued = f.workspace.full();
         assert!(
             queued
                 .submissions
@@ -3876,7 +3893,7 @@ mod tests {
         f.call("archive_agent", json!({"agent":"archive-child"}))
             .await
             .unwrap();
-        let original = f.workspace.snapshots.borrow().clone();
+        let original = f.workspace.full();
         let mut stop = f.stop.clone();
         assert!(
             call(
@@ -3999,7 +4016,7 @@ mod tests {
             "scope",
             "active",
         ] {
-            let before = f.workspace.snapshots.borrow().clone();
+            let before = f.workspace.full();
             let (result, ()) = tokio::join!(
                 f.call("unarchive_agent", json!({"agent":"archive-child"})),
                 async {
@@ -4154,7 +4171,7 @@ mod tests {
                     .is_err()
             );
         }
-        let original = f.workspace.snapshots.borrow().clone();
+        let original = f.workspace.full();
         for (id, parent, project) in [
             (
                 "archive-child",
@@ -4196,7 +4213,7 @@ mod tests {
             "branch",
             "workspace",
         ] {
-            let before = f.workspace.snapshots.borrow().clone();
+            let before = f.workspace.full();
             let (result, ()) = tokio::join!(
                 f.call("delete_agent", json!({"agent":"archive-child"})),
                 async {
@@ -4256,7 +4273,7 @@ mod tests {
                 sender: Sender::User,
             });
         });
-        let before = f.workspace.snapshots.borrow().clone();
+        let before = f.workspace.full();
         for status in [
             None,
             Some(WorkerStatus::Completed),
@@ -4284,7 +4301,7 @@ mod tests {
                 );
             }
         }
-        let after = f.workspace.store.lock().unwrap().snapshot().unwrap();
+        let after = f.workspace.store.lock().unwrap().full();
         assert!(!after.sessions[0].archived);
         assert!(
             after
@@ -4371,7 +4388,7 @@ mod tests {
                     .is_err()
             );
         }
-        let original = f.workspace.snapshots.borrow().clone();
+        let original = f.workspace.full();
         for (id, parent, project) in [
             (
                 "archive-child",
@@ -4421,7 +4438,7 @@ mod tests {
         );
         assert!(result.is_err());
         for change in ["policy", "scope", "active"] {
-            let before = f.workspace.snapshots.borrow().clone();
+            let before = f.workspace.full();
             let (result, ()) = tokio::join!(
                 f.call("archive_agent", json!({"agent":"archive-child"})),
                 async {
@@ -4542,7 +4559,7 @@ mod tests {
             .await
             .unwrap();
         let id = value["agent"].as_str().unwrap();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let child = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
         assert_eq!(child.parent_session_id.as_deref(), Some(f.caller.as_str()));
         assert_eq!(child.agent_config_id, snapshot.sessions[0].agent_config_id);
@@ -4579,7 +4596,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 30);
+        assert_eq!(schema, 31);
         f.finish().await;
     }
     #[tokio::test]
@@ -4619,7 +4636,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let selection = |id: &str| {
             snapshot
                 .sessions
@@ -4664,7 +4681,7 @@ mod tests {
         }
     }
     fn spawned_selection(f: &Fixture, value: &Value) -> (Harness, HarnessSelection) {
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let child = snapshot
             .sessions
             .iter()
@@ -4691,7 +4708,7 @@ mod tests {
             .clone()
     }
     fn spawn_grant(f: &Fixture, value: &Value) -> SpawnGrant {
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let child = snapshot
             .sessions
             .iter()
@@ -5216,7 +5233,7 @@ mod tests {
             );
             assert_eq!(result.is_ok(), allow);
             if let Ok(result) = result {
-                let snapshot = f.workspace.snapshots.borrow().clone();
+                let snapshot = f.workspace.full();
                 let child = snapshot
                     .sessions
                     .iter()
@@ -5254,7 +5271,7 @@ mod tests {
     /// The execution mode a spawned child's launches and resumes use. Every
     /// spawned child holds it as its own setting, named or inherited.
     fn child_mode(f: &Fixture, value: &Value) -> ApprovalMode {
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let id = value["agent"].as_str().unwrap();
         let mode = crate::harness::mode(&snapshot, id).unwrap();
         let child = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
@@ -5356,7 +5373,7 @@ mod tests {
                         spawn_grant(&f, &value).execution_approval,
                         Some(ApprovalMode::Automatic)
                     );
-                    let snapshot = f.workspace.snapshots.borrow().clone();
+                    let snapshot = f.workspace.full();
                     let child = snapshot
                         .sessions
                         .iter()
@@ -5395,7 +5412,7 @@ mod tests {
         // The profile's own mode is inherited the same way.
         let f = Fixture::new(Permission::Allow);
         let parent_profile_mode = {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             crate::harness::mode(&snapshot, &f.caller).unwrap()
         };
         assert_eq!(parent_profile_mode, ApprovalMode::Automatic);
@@ -5505,10 +5522,10 @@ mod tests {
         // The owner sets it with a workspace command; unknown projects fail.
         {
             let mut store = f.workspace.store.lock().unwrap();
-            let revision = store.snapshot().unwrap().revision;
+            let revision = store.full().revision;
             assert!(
                 store
-                    .apply(
+                    .apply_owned(
                         crate::tests::env(
                             revision,
                             Command::SetSpawnExecutionApproval {
@@ -5521,7 +5538,7 @@ mod tests {
                     .is_err()
             );
             let (snapshot, _) = store
-                .apply(
+                .apply_owned(
                     crate::tests::env(
                         revision,
                         Command::SetSpawnExecutionApproval {
@@ -5536,7 +5553,7 @@ mod tests {
                 snapshot.projects[0].spawn_execution_approval,
                 SpawnExecutionApproval::Strict
             );
-            f.workspace.snapshots.send_replace(snapshot);
+            f.workspace.snapshots.send_replace((snapshot).into());
         }
         f.finish().await;
     }
@@ -5593,7 +5610,7 @@ mod tests {
         );
         let value = result.unwrap();
         assert_eq!(permission_requests(&f), before + 1);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let request = snapshot.tool_permissions.last().unwrap();
         assert_eq!(request.tool, "mcp__relay__spawn_agent");
         for line in [
@@ -5752,7 +5769,7 @@ mod tests {
         // The parent has no execution setting of its own and runs its
         // profile's Automatic mode.
         {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let parent = snapshot.sessions.iter().find(|s| s.id == f.caller).unwrap();
             assert_eq!(parent.worker.as_ref().unwrap().execution, None);
             assert_eq!(
@@ -5781,7 +5798,7 @@ mod tests {
             }
         });
         {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             assert_eq!(
                 crate::harness::mode(&snapshot, &f.caller).unwrap(),
                 ApprovalMode::Unrestricted
@@ -5791,7 +5808,7 @@ mod tests {
         std::fs::write(&gate, "").unwrap();
         await_ended(&f, &[&child]).await;
         let worker = {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             snapshot
                 .sessions
                 .iter()
@@ -5888,7 +5905,7 @@ mod tests {
         .await;
         let child = value["agent"].as_str().unwrap().to_owned();
         await_ended(&f, &[&child]).await;
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let worker = snapshot
             .sessions
             .iter()
@@ -5934,7 +5951,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert_eq!(snapshot.ancestors(&caller).len(), 6);
         assert_eq!(
             profile(&snapshot, snapshot.sessions.last().unwrap())
@@ -5983,7 +6000,7 @@ mod tests {
         });
     }
     fn turn_allowed(f: &Fixture, id: &str) -> bool {
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let session = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
         authorize_session(&snapshot, session, true, &f.workspace.config).is_ok()
     }
@@ -6037,7 +6054,7 @@ mod tests {
         // The nested director's own slot is full, yet its turn may run.
         assert!(turn_allowed(&f, "nested"));
         assert!(turn_allowed(&f, "grandchild"));
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert!(snapshot.child_slot("nested", None).is_err());
         assert!(snapshot.child_slot(&f.caller, None).is_ok());
         // With one sibling the parent's three slots are full: the nested
@@ -6085,7 +6102,7 @@ mod tests {
             .await
             .unwrap();
         let submission = queued["submission"].as_str().unwrap();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert!(
             snapshot
                 .submissions
@@ -6103,7 +6120,7 @@ mod tests {
                     ))
         );
         f.change(|s| mark_read(s, submission));
-        assert!(f.workspace.snapshots.borrow().messages.iter().any(|m| m.id
+        assert!(f.workspace.full().messages.iter().any(|m| m.id
             == format!("agent-message-{submission}")
             && matches!(
                 m.tool.as_ref().unwrap().detail,
@@ -6126,8 +6143,7 @@ mod tests {
         .unwrap();
         assert!(
             f.workspace
-                .snapshots
-                .borrow()
+                .full()
                 .messages
                 .iter()
                 .any(|m| m.session_id == f.caller
@@ -6203,7 +6219,7 @@ mod tests {
         );
         assert!(!format!("{:?}", command.as_std().get_args()).contains(secret));
         assert!(
-            !serde_json::to_string(&*f.workspace.snapshots.borrow())
+            !serde_json::to_string(&f.workspace.full())
                 .unwrap()
                 .contains(secret)
         );
@@ -6277,7 +6293,7 @@ mod tests {
         let mut events = f.workspace.snapshots.subscribe();
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let snapshot = events.borrow().clone();
+                let snapshot = f.workspace.full();
                 let read = snapshot.messages.iter().any(|m| {
                     m.id == format!("agent-message-{submission}")
                         && matches!(
@@ -6298,7 +6314,7 @@ mod tests {
         .await
         .unwrap();
         // Both the spawned task and the queued message keep their sending agent.
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let sent_by_caller = Sender::Agent {
             session_id: f.caller.clone(),
         };
@@ -6495,7 +6511,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let envelope = crate::tests::env(
             snapshot.revision,
             Command::StopWorker {
@@ -6555,7 +6571,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let envelope = crate::tests::env(
             snapshot.revision,
             Command::StopWorker {
@@ -6590,7 +6606,7 @@ mod tests {
                 .get(&child)
                 .is_some_and(|c| !*c.borrow())
         );
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert!(crate::runtime::active(
             &snapshot
                 .sessions
@@ -6621,7 +6637,7 @@ mod tests {
                 .status = WorkerStatus::Completed
         });
         let stop = |include_descendants| {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             command(
                 State(f.workspace.clone()),
                 {
@@ -6709,7 +6725,7 @@ mod tests {
     async fn stop_worker(f: &Fixture, session: &str, include_descendants: bool) {
         // Children publish their own launch progress, so retry a stale revision.
         for _ in 0..20 {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let envelope = crate::tests::env(
                 snapshot.revision,
                 Command::StopWorker {
@@ -6837,7 +6853,7 @@ mod tests {
             .to_owned();
         stop_worker(&f, &f.caller, true).await;
         await_ended(&f, &[&child, &grandchild]).await;
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert!(
             !snapshot
                 .submissions
@@ -6868,7 +6884,7 @@ mod tests {
         let notices = notices(&f);
         assert_eq!(notices.len(), 1);
         assert_ne!(notices[0].state, SubmissionState::Queued);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let prompt = snapshot
             .messages
             .iter()
@@ -6980,7 +6996,7 @@ mod tests {
         await_ended(&f, &[&middle]).await;
         stop_worker(&f, &f.caller, true).await;
         await_ended(&f, &[&grandchild]).await;
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert!(
             !snapshot
                 .submissions
@@ -7001,7 +7017,7 @@ mod tests {
         stop_worker(&f, &grandchild, false).await;
         await_ended(&f, &[&grandchild]).await;
         assert!(notices(&f).is_empty());
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let woken = snapshot
             .submissions
             .iter()
@@ -7098,8 +7114,7 @@ mod tests {
     }
     fn nix_records(f: &Fixture) -> Vec<Message> {
         f.workspace
-            .snapshots
-            .borrow()
+            .full()
             .messages
             .iter()
             .filter(|m| m.id.starts_with("nix-command-"))
@@ -7128,10 +7143,10 @@ mod tests {
         // The setting is a project command; unknown projects are rejected.
         {
             let mut store = f.workspace.store.lock().unwrap();
-            let revision = store.snapshot().unwrap().revision;
+            let revision = store.full().revision;
             assert!(
                 store
-                    .apply(
+                    .apply_owned(
                         crate::tests::env(
                             revision,
                             Command::SetNixCommands {
@@ -7144,7 +7159,7 @@ mod tests {
                     .is_err()
             );
             let (snapshot, _) = store
-                .apply(
+                .apply_owned(
                     crate::tests::env(
                         revision,
                         Command::SetNixCommands {
@@ -7156,7 +7171,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(snapshot.projects[0].nix_commands, NixCommands::Allow);
-            f.workspace.snapshots.send_replace(snapshot);
+            f.workspace.snapshots.send_replace((snapshot).into());
         }
         assert!(lists_nix(&f).await);
         f.finish().await;
@@ -7654,7 +7669,7 @@ mod tests {
             records[0].body
         );
         // The ended run still accepts no ordinary transcript updates.
-        let messages = f.workspace.snapshots.borrow().messages.len();
+        let messages = f.workspace.full().messages.len();
         assert!(
             f.workspace
                 .update_run(&f.caller, &f.run, |s| {
@@ -7663,7 +7678,7 @@ mod tests {
                 })
                 .is_err()
         );
-        assert_eq!(f.workspace.snapshots.borrow().messages.len(), messages);
+        assert_eq!(f.workspace.full().messages.len(), messages);
         Shutdown {
             workspace: f.workspace.clone(),
         }
@@ -7889,7 +7904,7 @@ mod tests {
                 .unwrap_or_default()
                 .contains("turn/start")
             {
-                let snapshot = f.workspace.snapshots.borrow().clone();
+                let snapshot = f.workspace.full();
                 let worker = snapshot
                     .sessions
                     .iter()
@@ -7961,7 +7976,7 @@ mod tests {
             .to_owned();
         {
             let store = f.workspace.store.lock().unwrap();
-            let snapshot = store.snapshot().unwrap();
+            let snapshot = store.full();
             for id in [&first, &second] {
                 assert_eq!(
                     snapshot
@@ -8058,7 +8073,7 @@ mod tests {
         assert_eq!(turns.len(), 3);
         assert!(turns[1].to_string().contains("First peer message"));
         assert!(turns[2].to_string().contains("Second peer message"));
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         for id in [&first, &second] {
             let prompts: Vec<_> = snapshot
                 .messages
@@ -8179,7 +8194,7 @@ mod tests {
         );
         let independent =
             worktree_session(&f, "independent", None, WorkerStatus::Completed, &default);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         for id in [&lead, &worker, &independent, &f.caller] {
             assert!(runtime::shared_available(&snapshot, id).unwrap(), "{id}");
         }
@@ -8208,7 +8223,7 @@ mod tests {
             WorkerStatus::Running,
             &default,
         );
-        let base = f.workspace.snapshots.borrow().clone();
+        let base = f.workspace.full();
         let busy = |snapshot: &Snapshot| {
             let error = runtime::check_shared(snapshot, &lead, &Default::default()).unwrap_err();
             assert_eq!(
@@ -8413,7 +8428,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let submission = snapshot.submissions.iter().find(|s| s.id == id).unwrap();
         assert_eq!(submission.state, SubmissionState::Queued);
         assert_eq!(submission.error, None);
@@ -8450,7 +8465,7 @@ mod tests {
         let notice = format!("{}busy", crate::notices::PREFIX);
         {
             let mut store = f.workspace.store.lock().unwrap();
-            let snapshot = store.snapshot().unwrap();
+            let snapshot = store.full();
             crate::notices::enqueue(
                 &f.workspace,
                 &mut store,
@@ -8501,7 +8516,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         human(
             &f,
             crate::tests::env(
@@ -8540,7 +8555,7 @@ mod tests {
             ]
         );
         assert_eq!(workspace_wait_count(&f), 1);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let receiver = snapshot.sessions.iter().find(|s| s.id == peer).unwrap();
         assert_eq!(
             receiver.worker.as_ref().unwrap().status,
@@ -8604,7 +8619,7 @@ mod tests {
             ids.push(envelope.request_id);
         }
         {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let states: Vec<_> = ids
                 .iter()
                 .map(|id| {
@@ -8651,7 +8666,7 @@ mod tests {
         assert_eq!(turns[1]["params"]["threadId"], "receiver-thread");
         assert!(turns[1].to_string().contains("First human message"));
         assert!(turns[2].to_string().contains("Second human message"));
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         for id in &ids {
             let prompts: Vec<_> = snapshot
                 .messages
@@ -8734,7 +8749,7 @@ mod tests {
             .filter(|l| l.contains("turn/start") && l.contains("Late human message"))
             .count();
         assert_eq!(turns, 1);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert_eq!(
             snapshot
                 .messages
@@ -8821,7 +8836,7 @@ mod tests {
             let f = Fixture::new(Permission::Allow);
             let peer = shared_peer(&f);
             let capture = install_peer_native(&f, false);
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let agent_config_id = snapshot.agent_configs[0].id.clone();
             let issue_id = Some(snapshot.issues[0].id.clone());
             let prompt = "Original prompt".to_owned();
@@ -8867,7 +8882,7 @@ mod tests {
             let id = envelope.request_id.clone();
             launch_meeting_contention(&f, &session, envelope).await;
             wait_peer_submission(&f.workspace, &id, SubmissionState::Queued).await;
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let submission = snapshot.submissions.iter().find(|s| s.id == id).unwrap();
             assert_eq!(submission.session_id, session);
             assert_eq!(relay_core::plain_text(&submission.parts), "Original prompt");
@@ -8934,7 +8949,7 @@ mod tests {
                     (*f.workspace.config).clone(),
                 )
                 .unwrap();
-                let snapshot = shutdown.workspace.snapshots.borrow().clone();
+                let snapshot = shutdown.workspace.full();
                 assert_eq!(
                     snapshot
                         .queued_turns(&session)
@@ -8983,7 +8998,7 @@ mod tests {
             assert_eq!(turn_starts(&capture, "Follow-up"), 1, "{mode}");
             let log = std::fs::read_to_string(&capture).unwrap();
             assert!(log.find("Original prompt").unwrap() < log.find("Follow-up").unwrap());
-            let snapshot = workspace.snapshots.borrow().clone();
+            let snapshot = workspace.full();
             let session = snapshot.sessions.iter().find(|s| s.id == session).unwrap();
             assert_eq!(session.agent_config_id, config);
             for submission in [&id, &follow] {
@@ -9044,14 +9059,14 @@ mod tests {
             })
             .collect();
         assert_eq!(workspace_wait_count(&f), 2);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         for session in [&first, &second] {
             let waiting = snapshot.sessions.iter().find(|s| &s.id == session).unwrap();
             assert!(!runtime::active(&waiting.worker.as_ref().unwrap().status));
         }
         release_shared_owner(&f);
         // Neither waiting session blocks the other: only active sessions hold.
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         for session in [&first, &second] {
             assert!(runtime::shared_available(&snapshot, session).unwrap());
         }
@@ -9061,7 +9076,7 @@ mod tests {
         conversation::drain_workspace_waits(&f.workspace).unwrap();
         launch.entered().await;
         {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let states: Vec<_> = ids
                 .iter()
                 .map(|id| {
@@ -9088,7 +9103,7 @@ mod tests {
         assert_eq!(turn_starts(&capture, "Second waiting"), 1);
         let log = std::fs::read_to_string(&capture).unwrap();
         assert!(log.find("First waiting").unwrap() < log.find("Second waiting").unwrap());
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         for id in &ids {
             let submission = snapshot.submissions.iter().find(|s| &s.id == id).unwrap();
             assert_eq!(submission.state, SubmissionState::Completed);
@@ -9128,7 +9143,7 @@ mod tests {
             // free, and only the older waiting turn holds it for later turns.
             release_shared_owner(&f);
             {
-                let snapshot = f.workspace.snapshots.borrow().clone();
+                let snapshot = f.workspace.full();
                 let store = f.workspace.store.lock().unwrap();
                 let waits = conversation::waiting_sessions(&store.connection).unwrap();
                 assert!(runtime::shared_available(&snapshot, &newer).unwrap());
@@ -9298,7 +9313,7 @@ mod tests {
                     ),
                 )
                 .unwrap();
-                let snapshot = f.workspace.snapshots.borrow().clone();
+                let snapshot = f.workspace.full();
                 assert_eq!(
                     snapshot
                         .submissions
@@ -9313,7 +9328,7 @@ mod tests {
             // turn starts without any run ending or client command.
             f.call(tool, json!({"agent":"child"})).await.unwrap();
             wait_peer_submission(&f.workspace, &newer, SubmissionState::Completed).await;
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let child = snapshot.submissions.iter().find(|s| s.id == older);
             if tool == "delete_agent" {
                 assert!(child.is_none(), "{tool}");
@@ -9354,7 +9369,7 @@ mod tests {
             );
         }
         worktree_peer(&f, "legacy", None, WorkerStatus::Completed, &[&paths[0]]);
-        let base = f.workspace.snapshots.borrow().clone();
+        let base = f.workspace.full();
         let waiting: std::collections::HashSet<String> =
             (0..3).map(|index| format!("waiter-{index}")).collect();
         let subset = |mask: usize| -> Vec<SessionWorkspace> {
@@ -9539,7 +9554,7 @@ mod tests {
             settle(&f, &[&f.caller]);
             conversation::drain_workspace_waits(&f.workspace).unwrap();
             assert_eq!(workspace_wait_count(&f), 0, "{change}");
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             if change != "delete" {
                 let submission = snapshot
                     .submissions
@@ -9623,7 +9638,7 @@ mod tests {
         let second = second.unwrap()["submission"].as_str().unwrap().to_owned();
         settle(&f, &[&f.caller]);
         conversation::drain_workspace_waits(&f.workspace).unwrap();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert_eq!(
             snapshot
                 .submissions
@@ -9658,7 +9673,7 @@ mod tests {
         std::fs::write(&f.workspace.config.codex, format!("#!/bin/sh\n{native}")).unwrap();
         {
             let mut store = f.workspace.store.lock().unwrap();
-            let mut snapshot = store.snapshot().unwrap();
+            let mut snapshot = store.full();
             snapshot
                 .sessions
                 .iter_mut()
@@ -9670,7 +9685,7 @@ mod tests {
                 .status = WorkerStatus::Completed;
             snapshot.revision += 1;
             store.save(&snapshot).unwrap();
-            f.workspace.snapshots.send_replace(snapshot);
+            f.workspace.snapshots.send_replace((snapshot).into());
         }
         conversation::drain_workspace_waits(&f.workspace).unwrap();
         let mut events = f.workspace.snapshots.subscribe();
@@ -9718,8 +9733,7 @@ mod tests {
         let store = Store::open(&f._directory.path().join("db"), AgentProfile::default()).unwrap();
         assert_eq!(
             store
-                .snapshot()
-                .unwrap()
+                .full()
                 .submissions
                 .iter()
                 .find(|s| s.id == queued)
@@ -9743,7 +9757,7 @@ mod tests {
             (*f.workspace.config).clone(),
         )
         .unwrap();
-        let snapshot = shutdown.workspace.snapshots.borrow().clone();
+        let snapshot = shutdown.workspace.full();
         let submission = snapshot
             .submissions
             .iter()
@@ -9866,8 +9880,8 @@ mod tests {
             1
         );
         assert_eq!(
-            events
-                .borrow()
+            f.workspace
+                .full()
                 .messages
                 .iter()
                 .filter(|m| m.id == format!("prompt-{queued}"))
@@ -9928,11 +9942,11 @@ mod tests {
     }
     fn change_shared_fixture(f: &Fixture, change: impl FnOnce(&mut Snapshot)) {
         let mut store = f.workspace.store.lock().unwrap();
-        let mut snapshot = store.snapshot().unwrap();
+        let mut snapshot = store.full();
         change(&mut snapshot);
         snapshot.revision += 1;
         store.save(&snapshot).unwrap();
-        f.workspace.snapshots.send_replace(snapshot);
+        f.workspace.snapshots.send_replace((snapshot).into());
     }
     fn release_shared_owner(f: &Fixture) {
         change_shared_fixture(f, |s| {
@@ -10033,8 +10047,7 @@ mod tests {
             assert!(store.agent_capabilities.contains_key(&peer));
             assert_eq!(
                 store
-                    .snapshot()
-                    .unwrap()
+                    .full()
                     .sessions
                     .iter()
                     .find(|s| s.id == peer)
@@ -10098,7 +10111,7 @@ mod tests {
             wait_peer_submission(&f.workspace, &id, SubmissionState::Interrupted).await;
             release_shared_owner(&f);
             conversation::drain_workspace_waits(&f.workspace).unwrap();
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             assert_eq!(
                 snapshot
                     .submissions
@@ -10153,7 +10166,7 @@ mod tests {
             let dropped = arm_runtime_gate(&f, &peer, "after_guard");
             let id = late_peer_message(&f, &peer).await;
             deferred.entered().await;
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let receiver = snapshot.sessions.iter().find(|s| s.id == peer).unwrap();
             assert!(receiver.awaiting_first_message);
             assert!(receiver.worker.as_ref().unwrap().thread_id.is_none());
@@ -10193,7 +10206,7 @@ mod tests {
                         .unwrap_or_default()
                         .contains("turn/start")
                 );
-                let snapshot = workspace.snapshots.borrow().clone();
+                let snapshot = workspace.full();
                 assert!(
                     snapshot
                         .sessions
@@ -10238,7 +10251,7 @@ mod tests {
             }
             dropped.open();
             wait_peer_submission(workspace, &id, SubmissionState::Completed).await;
-            let snapshot = workspace.snapshots.borrow().clone();
+            let snapshot = workspace.full();
             assert!(
                 !snapshot
                     .sessions
@@ -10511,8 +10524,10 @@ fi
     /// Apply a workspace client's command through the normal command path.
     fn human(f: &Fixture, envelope: CommandEnvelope) -> Result<Snapshot, Error> {
         let mut store = f.workspace.store.lock().unwrap();
-        let (snapshot, _) = store.apply(envelope, &f.workspace.config)?;
-        f.workspace.snapshots.send_replace(snapshot.clone());
+        let (snapshot, _) = store.apply_owned(envelope, &f.workspace.config)?;
+        f.workspace
+            .snapshots
+            .send_replace((snapshot.clone()).into());
         Ok(snapshot)
     }
     fn human_send(f: &Fixture, session: &str, parts: Vec<Part>) -> Result<Snapshot, Error> {
@@ -10645,7 +10660,7 @@ fi
         // An agent-sent turn can never carry a mention.
         {
             let mut store = f.workspace.store.lock().unwrap();
-            let mut snapshot = store.snapshot().unwrap();
+            let mut snapshot = store.full();
             let transaction = store.connection.transaction().unwrap();
             let parts = vec![mention(target)];
             let draft = Draft {
@@ -10704,7 +10719,7 @@ fi
         assert_eq!(granted[0].sessions, pair);
         assert!(message(&f, &f.caller, &f.run, target).await.is_ok());
         assert!(message(&f, target, &other_run, &f.caller).await.is_ok());
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert!(snapshot.submissions.iter().any(|s| s.session_id == target
             && s.sender
                 == Sender::Agent {
@@ -10920,7 +10935,7 @@ fi
         let root = f._directory.path().join("root");
         std::fs::create_dir_all(&root).unwrap();
         f.change(|s| s.projects[0].root = Some(root.display().to_string()));
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let parts = vec![Part::text("Coordinate with "), mention(target)];
         let envelope = crate::tests::env(
             snapshot.revision,
@@ -10975,7 +10990,7 @@ fi
             .as_str()
             .unwrap()
             .to_owned();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let turn = snapshot
             .submissions
             .iter()
@@ -10999,7 +11014,7 @@ fi
         {
             let revision = set_draft(&f, &f.caller, &parts);
             let mut store = f.workspace.store.lock().unwrap();
-            let mut snapshot = store.snapshot().unwrap();
+            let mut snapshot = store.full();
             let transaction = store.connection.transaction().unwrap();
             let error = conversation::apply(
                 &transaction,

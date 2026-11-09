@@ -125,7 +125,7 @@ pub(super) async fn permission_outcome(
         // section. Watch notifications only wake us; they do not grant approval.
         let outcome = crate::blocking(|| -> Result<Option<PermissionOutcome>, Error> {
             let store = workspace.store.lock().map_err(Error::internal)?;
-            let current = store.snapshot()?;
+            let current = store.shared()?;
             let active = current
                 .sessions
                 .iter()

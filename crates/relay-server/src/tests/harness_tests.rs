@@ -344,18 +344,18 @@ async fn claude_multiple_repositories_and_directories_keep_isolation_and_resume_
 }
 fn apply(w: &Workspace, command: Command) -> Snapshot {
     let mut store = w.store.lock().unwrap();
-    let snapshot = store.snapshot().unwrap();
+    let snapshot = store.full();
     let (snapshot, action) = store
-        .apply(env(snapshot.revision, command), &w.config)
+        .apply_owned(env(snapshot.revision, command), &w.config)
         .unwrap();
     if let Some(Action::Stop { session_id: id, .. }) = action {
         store.controls.get(&id).unwrap().send_replace(true);
     }
-    w.snapshots.send_replace(snapshot.clone());
+    w.snapshots.send_replace((snapshot.clone()).into());
     snapshot
 }
 async fn launch(w: &Workspace) -> (String, Snapshot) {
-    let s = w.snapshots.borrow().clone();
+    let s = w.full();
     let (id, run, rx, prompt) = reserve(w, env(s.revision, start(&s)));
     runtime::run(w.clone(), id.clone(), run, prompt, rx).await;
     let snapshot = finished(w, &id).await;
@@ -373,7 +373,7 @@ async fn harness_killed_by_sigkill_without_oom_evidence_reports_signal() {
     let dir = tempfile::tempdir().unwrap();
     // SIGKILL mid-turn does not establish that an OOM killer sent it.
     let w = claude_workspace(dir.path(), "read line\nkill -9 $$");
-    let s = w.snapshots.borrow().clone();
+    let s = w.full();
     let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
     runtime::run(w.clone(), id.clone(), run, prompt, rx).await;
     let snapshot = finished(&w, &id).await;
@@ -440,7 +440,7 @@ async fn claude_first_turn_resume_modes_and_bound_harness() {
     s.projects[0].defaults.harness = Harness::Codex;
     s.projects[0].defaults.execution.approval = ApprovalMode::Ask;
     w.store.lock().unwrap().save(&s).unwrap();
-    w.snapshots.send_replace(s.clone());
+    w.snapshots.send_replace((s.clone()).into());
     assert_eq!(harness::mode(&s, &id).unwrap(), ApprovalMode::Ask);
     s = apply(
         &w,
@@ -612,10 +612,10 @@ async fn claude_permission_allow_deny_exact_receipt_and_stop() {
             "touch permission\nprintf '%s\\n' \"$@\" >> claude-argv",
         );
         let w = claude_workspace(dir.path(), &source);
-        let mut s = w.snapshots.borrow().clone();
+        let mut s = w.full();
         s.projects[0].defaults.execution.approval = ApprovalMode::Ask;
         w.store.lock().unwrap().save(&s).unwrap();
-        w.snapshots.send_replace(s.clone());
+        w.snapshots.send_replace((s.clone()).into());
         let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
         let task = tokio::spawn(runtime::run(w.clone(), id.clone(), run.clone(), prompt, rx));
         let request = tokio::time::timeout(Duration::from_secs(5), async {
@@ -630,7 +630,7 @@ async fn claude_permission_allow_deny_exact_receipt_and_stop() {
         .unwrap();
         assert_eq!(request.tool, "Write");
         assert_eq!(request.run_id, run);
-        let current = w.snapshots.borrow().clone();
+        let current = w.full();
         let bad = env(
             current.revision,
             Command::RespondPermission {
@@ -639,7 +639,7 @@ async fn claude_permission_allow_deny_exact_receipt_and_stop() {
                 allow: true,
             },
         );
-        assert!(w.store.lock().unwrap().apply(bad, &w.config).is_err());
+        assert!(w.store.lock().unwrap().apply_owned(bad, &w.config).is_err());
         if let Some(allow) = choice {
             let envelope = env(
                 current.revision,
@@ -650,11 +650,11 @@ async fn claude_permission_allow_deny_exact_receipt_and_stop() {
                 },
             );
             let mut store = w.store.lock().unwrap();
-            let (snapshot, _) = store.apply(envelope.clone(), &w.config).unwrap();
-            let (retry, action) = store.apply(envelope, &w.config).unwrap();
+            let (snapshot, _) = store.apply_owned(envelope.clone(), &w.config).unwrap();
+            let (retry, action) = store.apply_owned(envelope, &w.config).unwrap();
             assert_eq!(snapshot, retry);
             assert!(action.is_none());
-            w.snapshots.send_replace(snapshot);
+            w.snapshots.send_replace((snapshot).into());
             drop(store);
         } else {
             apply(
@@ -709,7 +709,7 @@ async fn claude_permission_allow_deny_exact_receipt_and_stop() {
             w.store
                 .lock()
                 .unwrap()
-                .apply(
+                .apply_owned(
                     env(
                         s.revision,
                         Command::RespondPermission {
@@ -731,7 +731,7 @@ async fn claude_interrupt_and_error_are_truthful() {
         let dir = tempfile::tempdir().unwrap();
         let source = format!("touch {mode}\n{CLAUDE_FAKE}");
         let w = claude_workspace(dir.path(), &source);
-        let s = w.snapshots.borrow().clone();
+        let s = w.full();
         let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
         let task = tokio::spawn(runtime::run(w.clone(), id.clone(), run, prompt, rx));
         if mode == "hold" {
@@ -839,7 +839,7 @@ fn schema_four_updates_only_inherited_bundled_defaults_and_keeps_old_threads() {
         .unwrap();
     drop(store);
     let store = Store::open(&db, AgentProfile::default()).unwrap();
-    let next = store.snapshot().unwrap();
+    let next = store.full();
     assert_eq!(
         next.projects[0].defaults.permissions[&Task::Implement],
         Permission::Allow
@@ -855,10 +855,7 @@ fn schema_four_updates_only_inherited_bundled_defaults_and_keeps_old_threads() {
     assert!(next.bindings.is_empty());
     drop(store);
     assert_eq!(
-        Store::open(&db, AgentProfile::default())
-            .unwrap()
-            .snapshot()
-            .unwrap(),
+        Store::open(&db, AgentProfile::default()).unwrap().full(),
         next
     );
 }
@@ -878,11 +875,11 @@ fn registered_project_and_harness_configuration_persist_without_environment() {
     );
     let db = dir.path().join("db");
     let mut store = Store::open(&db, AgentProfile::default()).unwrap();
-    let demo = store.snapshot().unwrap();
+    let demo = store.full();
     let mut s = demo.clone();
     for number in [5, 6] {
         let (next, action) = store
-            .apply(
+            .apply_owned(
                 env(
                     s.revision,
                     Command::ConfigureProject {
@@ -901,7 +898,7 @@ fn registered_project_and_harness_configuration_persist_without_environment() {
         s = next;
     }
     let (s, _) = store
-        .apply(
+        .apply_owned(
             env(
                 s.revision,
                 Command::ConfigureHarness {
@@ -933,18 +930,12 @@ fn registered_project_and_harness_configuration_persist_without_environment() {
     };
     assert!(
         store
-            .apply(env(s.revision, invalid), &RuntimeConfig::default())
+            .apply_owned(env(s.revision, invalid), &RuntimeConfig::default())
             .is_err()
     );
-    assert_eq!(store.snapshot().unwrap(), s);
+    assert_eq!(store.full(), s);
     drop(store);
-    assert_eq!(
-        Store::open(&db, AgentProfile::default())
-            .unwrap()
-            .snapshot()
-            .unwrap(),
-        s
-    );
+    assert_eq!(Store::open(&db, AgentProfile::default()).unwrap().full(), s);
 }
 
 #[tokio::test]
@@ -985,7 +976,7 @@ async fn harness_probes_are_read_only_cached_independent_and_credential_safe() {
     assert!(!encoded.contains("secret-login-detail"));
     let _ = harness::refresh(State(w.clone())).await.unwrap();
     assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 6);
-    assert_eq!(w.store.lock().unwrap().snapshot().unwrap(), s);
+    assert_eq!(w.store.lock().unwrap().full(), s);
 }
 
 #[tokio::test]
@@ -1047,7 +1038,7 @@ done
         let task = tokio::spawn(runtime::run(w.clone(), id.clone(), run.clone(), prompt, rx));
         let worktree = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let current = w.snapshots.borrow().clone();
+                let current = w.full();
                 let worker = worker(&current, &id);
                 if let Some(path) = &worker.worktree {
                     let path = PathBuf::from(path);
@@ -1099,7 +1090,7 @@ done
         assert_eq!(worker(&edited, &id).harness, Harness::Codex);
         // Check the durable snapshot as well as publication.
         assert_eq!(
-            worker(&w.store.lock().unwrap().snapshot().unwrap(), &id).launched_network_policy,
+            worker(&w.store.lock().unwrap().full(), &id).launched_network_policy,
             Some(launched)
         );
         apply(
@@ -1258,7 +1249,7 @@ done
                 .network_access,
             Some(!network_access)
         );
-        let next = w.snapshots.borrow().clone();
+        let next = w.full();
         let (_, next_run, rx, prompt) = reserve(
             &w,
             env(
@@ -1388,7 +1379,7 @@ async fn claude_keeps_control_input_open_until_native_background_work_is_idle() 
         &CLAUDE_FAKE[CLAUDE_FAKE.find("    control_response)").unwrap()..]
     );
     let w = claude_workspace(dir.path(), &source);
-    let s = w.snapshots.borrow().clone();
+    let s = w.full();
     let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
     let task = tokio::spawn(runtime::run(w.clone(), id.clone(), run.clone(), prompt, rx));
     let request = tokio::time::timeout(Duration::from_secs(5), async {
@@ -1474,7 +1465,7 @@ async fn background_run(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let w = claude_workspace_with(dir.path(), source, config);
-    let s = w.snapshots.borrow().clone();
+    let s = w.full();
     let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
     let task = tokio::spawn(runtime::run(w.clone(), id.clone(), run, prompt, rx));
     (dir, w, id, task)
@@ -1544,7 +1535,7 @@ async fn claude_stop_interrupts_while_waiting_for_background_task() {
     let (_dir, w, id, task) = background_run(&source, config()).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if transcript(&w.snapshots.borrow(), &id)
+            if transcript(&w.full(), &id)
                 .iter()
                 .any(|m| m == "I'll report when the tests finish.")
             {
@@ -1588,10 +1579,10 @@ async fn installed_claude_background_command_smoke() {
     let mut config = (*w.config).clone();
     config.claude = RuntimeConfig::default().claude;
     w.config = std::sync::Arc::new(config);
-    let mut s = w.snapshots.borrow().clone();
+    let mut s = w.full();
     s.projects[0].defaults.execution.approval = ApprovalMode::Unrestricted;
     w.store.lock().unwrap().save(&s).unwrap();
-    w.snapshots.send_replace(s.clone());
+    w.snapshots.send_replace((s.clone()).into());
     let Command::StartWorker {
         issue_id,
         agent_config_id,
@@ -1645,10 +1636,10 @@ fn fresh_workspace_and_project_respect_explicit_template_without_migrating_it() 
         .permissions
         .insert(Task::Implement, Permission::Ask);
     let mut store = Store::open(&dir.path().join("db"), defaults.clone()).unwrap();
-    let s = store.snapshot().unwrap();
+    let s = store.full();
     assert_eq!(s.projects[0].defaults, defaults);
     let (s, _) = store
-        .apply(
+        .apply_owned(
             env(
                 s.revision,
                 Command::ConfigureProject {
@@ -1827,13 +1818,13 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
         .unwrap();
     drop(store);
     let store = Store::open(&db, AgentProfile::default()).unwrap();
-    assert_eq!(store.snapshot().unwrap(), snapshot);
+    assert_eq!(store.full(), snapshot);
     assert_eq!(
         store
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        30
+        31
     );
     let worker = snapshot.sessions[0].worker.as_mut().unwrap();
     worker.model = Some("reported-model".into());
@@ -1848,10 +1839,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
         .unwrap();
     drop(store);
     assert_eq!(
-        Store::open(&db, AgentProfile::default())
-            .unwrap()
-            .snapshot()
-            .unwrap(),
+        Store::open(&db, AgentProfile::default()).unwrap().full(),
         snapshot
     );
 }
@@ -1892,13 +1880,14 @@ done
     config.repository = Some(repo);
     config.codex = bin;
     let w = workspace(&dir.path().join("db"), &live(), config);
-    let s = w.snapshots.borrow().clone();
+    let s = w.full();
     let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
     let mut events = w.snapshots.subscribe();
     let task = tokio::spawn(runtime::run(w.clone(), id.clone(), run.clone(), prompt, rx));
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let s = events.borrow_and_update().clone();
+            events.borrow_and_update();
+            let s = w.full();
             if let Some(m) = s.messages.iter().find(|m| {
                 m.tool
                     .as_ref()
@@ -1949,7 +1938,7 @@ done
             .contains("File not found")
     );
     let reopened = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
-    assert_eq!(reopened.snapshot().unwrap(), snapshot);
+    assert_eq!(reopened.full(), snapshot);
 }
 
 #[tokio::test]
@@ -2051,7 +2040,7 @@ async fn restart_interrupts_unfinished_tool_records_without_erasing_output() {
         RuntimeConfig::default(),
     )
     .unwrap();
-    let restarted = shutdown.workspace.snapshots.borrow().clone();
+    let restarted = shutdown.workspace.full();
     let message = restarted
         .messages
         .iter()
@@ -2071,10 +2060,7 @@ async fn restart_interrupts_unfinished_tool_records_without_erasing_output() {
             .as_ref()
             .is_some_and(|w| w.status == WorkerStatus::Running)
     }));
-    assert_eq!(
-        shutdown.workspace.store.lock().unwrap().snapshot().unwrap(),
-        restarted
-    );
+    assert_eq!(shutdown.workspace.store.lock().unwrap().full(), restarted);
 }
 
 #[tokio::test]
@@ -2120,7 +2106,7 @@ done
     config.repository = Some(repo);
     config.codex = bin;
     let w = workspace(&dir.path().join("db"), &live(), config);
-    let s = w.snapshots.borrow().clone();
+    let s = w.full();
     let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
     runtime::run(w.clone(), id.clone(), run.clone(), prompt, rx).await;
     let snapshot = finished(&w, &id).await;
@@ -2214,7 +2200,7 @@ done
         (250, 100, 50)
     );
     let reopened = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
-    assert_eq!(reopened.snapshot().unwrap(), snapshot);
+    assert_eq!(reopened.full(), snapshot);
 }
 
 #[tokio::test]

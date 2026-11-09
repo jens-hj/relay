@@ -2010,6 +2010,7 @@ async fn execute(
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| Error::invalid("Revision exhausted"))?;
+            let store = &mut *store;
             let transaction = store.connection.transaction().map_err(Error::internal)?;
             if let Some((pid, identity)) = &identity {
                 transaction
@@ -2019,12 +2020,12 @@ async fn execute(
                     )
                     .map_err(Error::internal)?;
             }
-            transaction
-                .execute(
-                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
-                    [serde_json::to_string(&current).map_err(Error::internal)?],
-                )
-                .map_err(Error::internal)?;
+            let current = crate::persist(
+                &store.snapshot_cache,
+                &store.transcripts,
+                &transaction,
+                current,
+            )?;
             transaction.commit().map_err(Error::internal)?;
             workspace.snapshots.send_replace(current);
             Ok(())

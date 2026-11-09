@@ -7,7 +7,7 @@ fn fixture(dir: &Path, mib: usize) -> (Workspace, String, String, usize) {
     let s = live();
     let w = workspace(&dir.join("db"), &s, config());
     let (id, run, _stop, _) = reserve(&w, env(s.revision, start(&s)));
-    let mut s = w.snapshots.borrow().clone();
+    let mut s = w.full();
     for n in 0..mib * 32 {
         s.messages.push(Message {
             id: format!("filler-{n}"),
@@ -22,7 +22,7 @@ fn fixture(dir: &Path, mib: usize) -> (Workspace, String, String, usize) {
     }
     let bytes = serde_json::to_vec(&s).unwrap().len();
     w.store.lock().unwrap().save(&s).unwrap();
-    w.snapshots.send_replace(s);
+    w.snapshots.send_replace((s).into());
     (w, id, run, bytes)
 }
 
@@ -237,8 +237,8 @@ done"#,
     let heartbeat = heartbeat.await.unwrap();
     cancel.await.unwrap();
     let cancel = cancellation.await.unwrap();
-    let saved = w.store.lock().unwrap().snapshot().unwrap();
-    assert!(saved == *w.snapshots.borrow());
+    let saved = w.store.lock().unwrap().full();
+    assert!(saved == w.full());
     assert_eq!(saved.revision, initial + 4 * rounds as u64);
     for writer in 0..4 {
         let expected: Vec<_> = (0..rounds)
@@ -327,9 +327,9 @@ async fn abort_during_update_finishes_one_durable_publication() {
     task.abort();
     release.send(()).unwrap();
     assert!(task.await.unwrap_err().is_cancelled());
-    let saved = w.store.lock().unwrap().snapshot().unwrap();
+    let saved = w.store.lock().unwrap().full();
     assert_eq!(saved.revision, initial + 1);
-    assert!(saved == *w.snapshots.borrow());
+    assert!(saved == w.full());
 }
 
 const TOKEN: &str = "mixed-load-fixture-token";
@@ -445,19 +445,19 @@ async fn mixed(mib: usize, rounds: usize, hold: Duration, baseline: bool) -> Mix
     let db = dir.path().join("db");
     drop(workspace(&db, &live(), config()));
     let (w, addr, server) = serve(&db).await;
-    let current = w.snapshots.borrow().clone();
+    let current = w.full();
     let started_a = env(current.revision, start(&current));
     let (a, a_run, _a_stop, _) = reserve(&w, started_a.clone());
-    let current = w.snapshots.borrow().clone();
+    let current = w.full();
     let (b, b_run, mut b_stop, _) = reserve(&w, env(current.revision, start(&current)));
-    let mut s = w.snapshots.borrow().clone();
+    let mut s = w.full();
     for n in 0..mib * 32 {
         s.messages
             .push(note(&a, format!("filler-{n}"), "x".repeat(32 * 1024)));
     }
     let bytes = serde_json::to_vec(&s).unwrap().len();
     w.store.lock().unwrap().save(&s).unwrap();
-    w.snapshots.send_replace(s);
+    w.snapshots.send_replace((s).into());
     let initial = w.snapshots.borrow().revision;
     let mut command = tokio::process::Command::new("unused");
     let capability = agent_tools::configure(&w, &a, &a_run, Harness::Codex, &mut command).unwrap();
@@ -700,8 +700,8 @@ async fn mixed(mib: usize, rounds: usize, hold: Duration, baseline: bool) -> Mix
     let seen = observer.await.unwrap();
 
     // Durable, published and ordered exactly once.
-    let saved = w.store.lock().unwrap().snapshot().unwrap();
-    assert!(saved == *w.snapshots.borrow());
+    let saved = w.store.lock().unwrap().full();
+    assert!(saved == w.full());
     assert!(seen.windows(2).all(|p| p[0] <= p[1]), "{seen:?}");
     assert!(seen.iter().all(|r| *r <= saved.revision));
     // Run updates, the stopped run's output and terminal update, and one stop.
@@ -747,7 +747,7 @@ async fn mixed(mib: usize, rounds: usize, hold: Duration, baseline: bool) -> Mix
     drop(w);
     let (w, addr, server) = serve(&db).await;
     let client = reqwest::Client::new();
-    let reopened = w.snapshots.borrow().clone();
+    let reopened = w.full();
     assert!(reopened.revision >= saved.revision);
     let ids = |s: &Snapshot| s.messages.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
     assert!(ids(&reopened).starts_with(&ids(&saved)));
@@ -769,7 +769,7 @@ async fn mixed(mib: usize, rounds: usize, hold: Duration, baseline: bool) -> Mix
         .unwrap();
     // The receipt replays nothing: no relaunch, new session or revision.
     assert_eq!(ack.committed_revision, reopened.revision);
-    assert!(w.store.lock().unwrap().snapshot().unwrap() == reopened);
+    assert!(w.store.lock().unwrap().full() == reopened);
     assert_eq!(
         reopened
             .sessions
@@ -854,7 +854,7 @@ async fn production_draft_reply_loss_replays_one_receipt_and_refuses_changed_ide
     let db = dir.path().join("db");
     drop(workspace(&db, &live(), config()));
     let (w, addr, server) = serve(&db).await;
-    let current = w.snapshots.borrow().clone();
+    let current = w.full();
     let (session, _, _, _) = reserve(&w, env(current.revision, start(&current)));
     let client = reqwest::Client::new();
     let request = SaveDraft {
@@ -957,7 +957,7 @@ async fn synthetic_draft_timing_with_one_and_three_stream_subscribers() {
         let db = dir.path().join("db");
         drop(workspace(&db, &live(), config()));
         let (w, addr, server) = serve(&db).await;
-        let current = w.snapshots.borrow().clone();
+        let current = w.full();
         let (session, run, _, _) = reserve(&w, env(current.revision, start(&current)));
         measure_phases(&w);
         let mut readers = vec![];
@@ -1045,4 +1045,305 @@ async fn synthetic_draft_timing_with_one_and_three_stream_subscribers() {
         }
         server.abort();
     }
+}
+
+/// Schema 31: an event that only changes messages writes just those rows. It
+/// neither loads nor rewrites the session's history or the workspace row, and
+/// its revision survives a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn message_only_events_touch_only_their_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (w, id, run, _) = fixture(dir.path(), 8);
+    let row = |w: &Workspace| -> String {
+        w.store
+            .lock()
+            .unwrap()
+            .connection
+            .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    };
+    let before = row(&w);
+    let revision = w.snapshots.borrow().revision;
+    let delta = |body: &'static str| {
+        let id = id.clone();
+        move |s: &mut Snapshot| {
+            if let Some(m) = s.messages.iter_mut().find(|m| m.id == "streamed") {
+                m.body.push_str(body);
+            } else {
+                s.messages.push(Message {
+                    id: "streamed".into(),
+                    session_id: id,
+                    author: "Codex".into(),
+                    sender: Sender::default(),
+                    kind: "agent_message".into(),
+                    body: body.into(),
+                    parts: vec![],
+                    tool: None,
+                });
+            }
+            Ok(())
+        }
+    };
+    w.update_run(&id, &run, delta("Hello")).unwrap();
+    w.update_run(&id, &run, delta(", world")).unwrap();
+    // Unchanged events publish nothing.
+    w.update_run(&id, &run, |_| Ok(())).unwrap();
+    assert_eq!(
+        row(&w),
+        before,
+        "message-only events must not rewrite the row"
+    );
+    assert_eq!(w.snapshots.borrow().revision, revision + 2);
+    assert!(w.snapshots.borrow().messages.is_empty());
+    {
+        let store = w.store.lock().unwrap();
+        // The 256 filler rows of this session are not part of the run's set.
+        assert!(store.transcripts.loaded(&id).unwrap() < 8);
+        let streamed = messages::get(&store.connection, "streamed")
+            .unwrap()
+            .unwrap();
+        assert_eq!(streamed.body, "Hello, world");
+    }
+    let full = w.full();
+    assert_eq!(full.messages.last().unwrap().id, "streamed");
+    assert_eq!(
+        full.messages
+            .iter()
+            .filter(|m| m.id.starts_with("filler-"))
+            .count(),
+        8 * 32
+    );
+    assert_eq!(
+        full.messages.iter().filter(|m| m.id == "streamed").count(),
+        1
+    );
+    drop(w);
+    let reopened = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
+    assert_eq!(reopened.snapshot().unwrap().revision, revision + 2);
+}
+
+/// A schema 30 database stores the transcript in the row; opening it moves the
+/// messages to their table in order and keeps everything else.
+#[test]
+fn schema_thirty_transcript_moves_to_the_messages_table_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let mut legacy = live();
+    let session = legacy.sessions[0].id.clone();
+    for n in 0..300 {
+        legacy.messages.push(Message {
+            id: format!("legacy-{n}"),
+            session_id: session.clone(),
+            author: "You".into(),
+            sender: Sender::default(),
+            kind: if n % 2 == 0 {
+                "prompt"
+            } else {
+                "agent_message"
+            }
+            .into(),
+            body: format!("message {n}"),
+            parts: vec![],
+            tool: None,
+        });
+    }
+    legacy.revision = 41;
+    {
+        let store = Store::open(&path, AgentProfile::default()).unwrap();
+        store
+            .connection
+            .execute_batch("DELETE FROM messages; PRAGMA user_version=30;")
+            .unwrap();
+        store
+            .connection
+            .execute(
+                "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                [serde_json::to_string(&legacy).unwrap()],
+            )
+            .unwrap();
+    }
+    let store = Store::open(&path, AgentProfile::default()).unwrap();
+    let row: Snapshot = serde_json::from_str(
+        &store
+            .connection
+            .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        row.messages.is_empty(),
+        "the row no longer holds the transcript"
+    );
+    let mut expected = legacy.clone();
+    expected.messages.clear();
+    assert_eq!(row, expected);
+    assert_eq!(store.full().messages, legacy.messages);
+    assert_eq!(
+        store
+            .connection
+            .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
+            .unwrap(),
+        31
+    );
+}
+
+fn memory() -> (u64, u64) {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let field = |name: &str| {
+        status
+            .lines()
+            .find(|l| l.starts_with(name))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+            / 1024
+    };
+    (field("VmRSS:"), field("VmHWM:"))
+}
+
+/// Measures a copy of a real database (`RELAY_STAGING_DB`, never the live
+/// file): migration, per-event cost and projection cost. Opens no router, so
+/// no process is reaped, no harness launched and no notice dispatched.
+#[test]
+#[ignore]
+fn staging_database_migrates_and_streams_with_bounded_memory() {
+    let Ok(path) = std::env::var("RELAY_STAGING_DB") else {
+        eprintln!("set RELAY_STAGING_DB to a copy of a workspace database");
+        return;
+    };
+    let path = PathBuf::from(path);
+    eprintln!("start rss/hwm MiB {:?}", memory());
+    let started = Instant::now();
+    let store = Store::open(&path, AgentProfile::default()).unwrap();
+    eprintln!(
+        "open+migrate {:?} rss/hwm MiB {:?}",
+        started.elapsed(),
+        memory()
+    );
+    let row: i64 = store
+        .connection
+        .query_row("SELECT length(snapshot) FROM workspace", [], |r| r.get(0))
+        .unwrap();
+    let (count, bytes): (i64, i64) = store
+        .connection
+        .query_row("SELECT COUNT(*),SUM(length(data)) FROM messages", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    eprintln!("row {row} bytes; messages {count} rows {bytes} bytes");
+    // The session with the longest transcript stands in for a busy run.
+    let session: String = store
+        .connection
+        .query_row(
+            "SELECT session_id FROM messages GROUP BY session_id ORDER BY COUNT(*) DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let run = format!("staging-{}", uuid::Uuid::new_v4());
+    let mut snapshot = store.snapshot().unwrap();
+    let worker = snapshot
+        .sessions
+        .iter_mut()
+        .find(|s| s.id == session)
+        .unwrap()
+        .worker
+        .as_mut()
+        .unwrap();
+    worker.status = WorkerStatus::Running;
+    snapshot.revision += 1;
+    store
+        .connection
+        .execute(
+            "INSERT OR REPLACE INTO runs(session_id,run_id) VALUES(?1,?2)",
+            params![session, run],
+        )
+        .unwrap();
+    let snapshot = store.commit(snapshot).unwrap();
+    let w = Workspace {
+        agent_endpoint: Arc::new(Mutex::new(None)),
+        browser: browser::BrowserAuth::initialize(
+            &mut Store::open(&path, AgentProfile::default()).unwrap(),
+            "staging-token",
+            BrowserConfig::default(),
+        )
+        .unwrap(),
+        harness_status: Arc::new(Mutex::new(vec![])),
+        harness_probe: Arc::new(tokio::sync::Mutex::new(())),
+        catalog_probes: Arc::new(Mutex::new(HashMap::new())),
+        catalogs: Arc::new(Mutex::new(HashMap::new())),
+        drafts: watch::channel(vec![]).0,
+        transport_shutdown: watch::channel(false).0,
+        transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        project_jobs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        store: Arc::new(Mutex::new(store)),
+        snapshots: watch::channel(snapshot).0,
+        transcripts: Arc::new(transport::Reader::open(&path).unwrap()),
+        token: "staging-token".into(),
+        config: Arc::new(config()),
+    };
+    eprintln!("ready rss/hwm MiB {:?}", memory());
+    let started = Instant::now();
+    let events = 2000;
+    for n in 0..events {
+        let session = session.clone();
+        w.update_run(&session.clone(), &run, move |s| {
+            if let Some(m) = s.messages.iter_mut().find(|m| m.id == "staging-stream") {
+                m.body.push_str(" token");
+            } else {
+                s.messages.push(Message {
+                    id: "staging-stream".into(),
+                    session_id: session,
+                    author: "Codex".into(),
+                    sender: Sender::default(),
+                    kind: "agent_message".into(),
+                    body: format!("event {n}"),
+                    parts: vec![],
+                    tool: None,
+                });
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+    let elapsed = started.elapsed();
+    eprintln!(
+        "{events} streamed events {:?} ({:?}/event) rss/hwm MiB {:?}",
+        elapsed,
+        elapsed / events,
+        memory()
+    );
+    let mut projection = transport::Projection::default();
+    let snapshot = w.snapshots.borrow().clone();
+    w.transcripts
+        .with(|t| {
+            projection
+                .request_with(
+                    &snapshot,
+                    StreamRequest::Subscribe {
+                        session_id: session.clone(),
+                        generation: 1,
+                    },
+                    t,
+                )
+                .unwrap()
+        })
+        .unwrap();
+    let started = Instant::now();
+    for _ in 0..100 {
+        let (view, _) = w
+            .transcripts
+            .with(|t| projection.view_with(&snapshot, t))
+            .unwrap();
+        assert!(!view.messages.is_empty());
+    }
+    eprintln!(
+        "100 projections {:?} rss/hwm MiB {:?}",
+        started.elapsed(),
+        memory()
+    );
 }

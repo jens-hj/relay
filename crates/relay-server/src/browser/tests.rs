@@ -604,20 +604,20 @@ async fn migration_rotation_restart_and_disabled_enrollment() {
     let s = Server::start().await;
     let (cookie, _) = s.enroll().await;
     let store = Store::open(&s.dir.path().join("db"), AgentProfile::default()).unwrap();
-    let before = store.snapshot().unwrap();
+    let before = store.full();
     store
         .connection
         .pragma_update(None, "user_version", 5)
         .unwrap();
     drop(store);
     let mut store = Store::open(&s.dir.path().join("db"), AgentProfile::default()).unwrap();
-    assert_eq!(store.snapshot().unwrap(), before);
+    assert_eq!(store.full(), before);
     assert_eq!(
         store
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        30
+        31
     );
     BrowserAuth::initialize(
         &mut store,
@@ -740,11 +740,11 @@ fn real_schema_five_migration_preserves_snapshot_receipts_and_assets() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let store = Store::open(&path, AgentProfile::default()).unwrap();
-    let snapshot = store.snapshot().unwrap();
+    let snapshot = store.full();
     store.connection.execute_batch("DROP TABLE browser_owner; DROP TABLE browser_setup; DROP TABLE browser_sessions; DROP TABLE browser_recovery; DROP TABLE browser_state; PRAGMA user_version=5; INSERT INTO assets VALUES('kept','metadata',X'0102'); INSERT INTO receipts VALUES('receipt','kept');").unwrap();
     drop(store);
     let store = Store::open(&path, AgentProfile::default()).unwrap();
-    assert_eq!(snapshot, store.snapshot().unwrap());
+    assert_eq!(snapshot, store.full());
     assert_eq!(
         store
             .connection
@@ -1109,7 +1109,7 @@ async fn approval_feedback_production_router_auth_replay_deny_and_expiry() {
     let session_count = w.snapshots.borrow().sessions.len();
     let (worker, run, revision) = {
         let mut store = w.store.lock().unwrap();
-        let mut snapshot = store.snapshot().unwrap();
+        let mut snapshot = store.full();
         let session = snapshot.sessions.first_mut().unwrap();
         session.fixture = false;
         session.worker = Some(WorkerRun {
@@ -1151,7 +1151,7 @@ async fn approval_feedback_production_router_auth_replay_deny_and_expiry() {
         }
         snapshot.revision += 1;
         store.save(&snapshot).unwrap();
-        w.snapshots.send_replace(snapshot.clone());
+        w.snapshots.send_replace((snapshot.clone()).into());
         (worker, run, snapshot.revision)
     };
     let url = format!("{}/v1/commands", s.url);
@@ -1272,7 +1272,7 @@ async fn approval_feedback_production_router_auth_replay_deny_and_expiry() {
         403
     );
     let store = w.store.lock().unwrap();
-    let snapshot = store.snapshot().unwrap();
+    let snapshot = store.full();
     assert_eq!(snapshot.sessions.len(), session_count);
     assert_eq!(
         snapshot

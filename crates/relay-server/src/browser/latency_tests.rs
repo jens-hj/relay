@@ -275,7 +275,7 @@ async fn latency_fixture_cookie_auth_and_postcommit_writer_gates() {
     // This is NOT a per-phase instrumented HTTP ACK; HTTP samples below are total/header/body.
     let (committed_revision, commit_us) = {
         let mut store = w.store.lock().unwrap();
-        let current = store.snapshot().unwrap();
+        let current = store.full();
         let config = &current.agent_configs[0];
         let envelope = crate::tests::env(
             current.revision,
@@ -290,10 +290,7 @@ async fn latency_fixture_cookie_auth_and_postcommit_writer_gates() {
         assert!(action.is_none());
         (saved.revision, start.elapsed().as_micros())
     };
-    assert_eq!(
-        w.store.lock().unwrap().snapshot().unwrap().revision,
-        committed_revision
-    );
+    assert_eq!(w.store.lock().unwrap().full().revision, committed_revision);
     let db = s.db();
     let receipts: u64 = db
         .query_row("SELECT count(*) FROM receipts", [], |r| r.get(0))
@@ -334,7 +331,7 @@ async fn latency_fixture_http_under_update_run_load() {
     let w = s.shutdown.workspace.clone();
     let (worker, run, target) = {
         let mut store = w.store.lock().unwrap();
-        let mut initial = store.snapshot().unwrap();
+        let mut initial = store.full();
         // Synthetic run metadata only; no Start/Action/harness dispatch.
         let source = 0;
         let session = &mut initial.sessions[source];
@@ -367,7 +364,7 @@ async fn latency_fixture_http_under_update_run_load() {
             )
             .unwrap();
         store.save(&initial).unwrap();
-        w.snapshots.send_replace(initial);
+        w.snapshots.send_replace((initial).into());
         (worker, run, target)
     };
     let draft_target = worker.clone();

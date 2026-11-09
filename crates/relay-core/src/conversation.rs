@@ -127,8 +127,20 @@ pub fn session_mentions(parts: &[Part]) -> Vec<&SessionMention> {
 }
 
 pub fn validate_parts(snapshot: &Snapshot, session: &str, parts: &[Part]) -> Result<(), String> {
+    validate_parts_with(session, parts, &|id| {
+        snapshot.messages.iter().find(|m| m.id == id).cloned()
+    })
+}
+
+/// Like [`validate_parts`], resolving reply sources through `message` (by id)
+/// for stores that keep the transcript outside the snapshot.
+pub fn validate_parts_with(
+    session: &str,
+    parts: &[Part],
+    message: &dyn Fn(&str) -> Option<crate::Message>,
+) -> Result<(), String> {
     fn validate(
-        snapshot: &Snapshot,
+        message_by_id: &dyn Fn(&str) -> Option<crate::Message>,
         session: &str,
         parts: &[Part],
         nested: bool,
@@ -176,16 +188,14 @@ pub fn validate_parts(snapshot: &Snapshot, session: &str, parts: &[Part]) -> Res
                     if nested {
                         return Err("Nested draft replies are not supported".into());
                     }
-                    let message = snapshot
-                        .messages
-                        .iter()
-                        .find(|m| m.id == anchor.message_id && m.session_id == session)
+                    let message = message_by_id(&anchor.message_id)
+                        .filter(|m| m.session_id == session)
                         .ok_or("Reply source not found in this session")?;
                     if message.body.get(anchor.start..anchor.end) != Some(anchor.quote.as_str()) {
                         return Err("Reply source range changed".into());
                     }
                     *text += anchor.quote.len();
-                    validate(snapshot, session, parts, true, ids, text)?;
+                    validate(message_by_id, session, parts, true, ids, text)?;
                 }
             }
         }
@@ -193,7 +203,7 @@ pub fn validate_parts(snapshot: &Snapshot, session: &str, parts: &[Part]) -> Res
     }
     let mut ids = std::collections::HashSet::new();
     let mut text = 0;
-    validate(snapshot, session, parts, false, &mut ids, &mut text)?;
+    validate(message, session, parts, false, &mut ids, &mut text)?;
     if ids.len() > 1024 || text > TEXT_LIMIT {
         return Err("Draft exceeds 64 KiB of text or 1024 parts".into());
     }
