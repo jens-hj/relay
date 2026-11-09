@@ -61,6 +61,10 @@ pub fn respond_first(model: Model, session_id: &str, allow: bool) {
         .find(|p| p.session_id == session_id)
     {
         respond(model, &pending.permission, allow);
+    } else {
+        model
+            .notice
+            .set("No pending permission remains for this session.".into());
     }
 }
 
@@ -88,7 +92,23 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     };
     let menu = State::new(false);
     let roots = Derived::new(move || {
-        let snapshot = model.snapshot.get();
+        let mut snapshot = model.snapshot.get();
+        // Presentation only: a matching ACK resolves this client's action
+        // before the stream necessarily catches up. Keep the real snapshot
+        // intact and retain the confirmation in the transcript.
+        for permission in &mut snapshot.tool_permissions {
+            if model.permission_response(permission).is_some()
+                || matches!(
+                    model.permission_status(permission),
+                    Some(
+                        crate::model::PermissionFeedback::Confirmed
+                            | crate::model::PermissionFeedback::ExpiredOrRunEnded
+                    )
+                )
+            {
+                permission.expired = true;
+            }
+        }
         let selected = if matches!(model.page.get(), Page::Sessions | Page::AgentStart) {
             model.session.get()
         } else {

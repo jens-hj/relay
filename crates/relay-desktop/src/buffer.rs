@@ -1,6 +1,6 @@
 use crate::platform::Instant;
 use crate::{
-    buffer_network::{Outcome, Request, Update},
+    buffer_network::{Outcome, Request, SaveFailure, Update},
     model::{Model, Saved},
 };
 use relay_core::*;
@@ -14,6 +14,13 @@ use std::{
     time::Duration,
 };
 
+// A valid file should not be permanently refused merely because its source Vec
+// reserved extra capacity. Admission accounts for actual retained allocations.
+fn asset_bytes(mut bytes: Vec<u8>) -> Arc<Vec<u8>> {
+    bytes.shrink_to_fit();
+    Arc::new(bytes)
+}
+
 #[derive(Clone)]
 pub struct Document {
     pub remote: Draft,
@@ -23,6 +30,11 @@ pub struct Document {
     pub conflict: bool,
     pub error: String,
     pub saving: Option<SaveDraft>,
+    pub save_generation: u64,
+    pub save_in_flight: bool,
+    pub save_attempts: u8,
+    pub save_retry_at: Option<Instant>,
+    pub save_blocked: bool,
     pub finalize: Option<Vec<Part>>,
     pub submitting: bool,
     pub changed: Instant,
@@ -39,6 +51,11 @@ impl Document {
             conflict: false,
             error: String::new(),
             saving: None,
+            save_generation: 0,
+            save_in_flight: false,
+            save_attempts: 0,
+            save_retry_at: None,
+            save_blocked: false,
             finalize: None,
             submitting: false,
             changed: Instant::now(),
@@ -76,6 +93,10 @@ struct JournalDocument {
     recovery_reviewed: bool,
     saving: Option<SaveDraft>,
     #[serde(default)]
+    save_attempts: u8,
+    #[serde(default)]
+    save_blocked: bool,
+    #[serde(default)]
     editing_queue: Option<String>,
 }
 
@@ -98,6 +119,13 @@ pub fn load_journal(model: Model, settings: &Path, config: &crate::network::Conf
                         doc.recovery = record.recovery;
                         doc.recovery_reviewed = record.recovery_reviewed;
                         doc.saving = record.saving;
+                        doc.save_attempts = record.save_attempts;
+                        doc.save_blocked = record.save_blocked;
+                        doc.save_retry_at = doc
+                            .saving
+                            .as_ref()
+                            .filter(|_| !doc.save_blocked && doc.save_attempts < 5)
+                            .map(|_| Instant::now());
                         if doc.saving.is_some() {
                             doc.error="Recovered save awaiting confirmation; retry preserves its original ID".into();
                         }
@@ -140,11 +168,14 @@ pub fn load_journal(model: Model, settings: &Path, config: &crate::network::Conf
                 .is_ok()
                 && bytes.len() as u64 == asset.size
             {
-                let bytes = Arc::new(bytes);
+                let bytes = asset_bytes(bytes);
                 state.blobs.insert(asset.id.clone(), bytes.clone());
                 state.uploads.insert(asset.id.clone(), asset.clone());
                 if let Some(requests) = model.buffer_requests.get_untracked() {
-                    let _ = requests.send(Request::Upload { asset, bytes });
+                    let id = asset.id.clone();
+                    if requests.send(Request::Upload { asset, bytes }).is_err() {
+                        state.failed_uploads.insert(id);
+                    }
                 }
             }
         }
@@ -229,6 +260,8 @@ fn journal(state: &BufferState) -> Result<(), String> {
                         && doc.finalize.is_none()
                         && !doc.submitting,
                     saving: doc.saving.clone(),
+                    save_attempts: doc.save_attempts,
+                    save_blocked: doc.save_blocked,
                     editing_queue: doc.editing_queue.clone(),
                 },
             )
@@ -622,9 +655,14 @@ pub fn send(model: Model) {
         return;
     }
     if !state.connected || !model.connected.get_untracked() {
-        model
-            .notice
-            .set("Reconnect before sending. Your draft is retained.".into());
+        model.notice.set(
+            if !model.connected.get_untracked() {
+                "Server connection recovering; draft retained. Send again when connected."
+            } else {
+                "Draft connection recovering; draft retained. Send again when synchronized."
+            }
+            .into(),
+        );
         return;
     }
     if model.retry_buffer(&session_id) {
@@ -639,7 +677,7 @@ pub fn send(model: Model) {
                 ..Default::default()
             })
         });
-    if doc.conflict || !doc.error.is_empty() {
+    if doc.conflict || (!doc.error.is_empty() && (doc.saving.is_none() || doc.save_blocked)) {
         model
             .notice
             .set("Resolve the draft save issue before sending".into());
@@ -765,14 +803,18 @@ pub fn receive(model: Model, update: Update) {
                 session,
                 request,
                 result,
+                generation,
             } => {
                 let Some(doc) = state.documents.get_mut(session).filter(|d| {
-                    d.saving
-                        .as_ref()
-                        .is_some_and(|r| r.request_id == request.request_id)
+                    d.save_in_flight
+                        && d.save_generation == *generation
+                        && d.saving
+                            .as_ref()
+                            .is_some_and(|r| r.request_id == request.request_id)
                 }) else {
                     continue;
                 };
+                doc.save_in_flight = false;
                 match result {
                     Ok(draft) => {
                         if draft.revision >= doc.remote.revision {
@@ -781,10 +823,18 @@ pub fn receive(model: Model, update: Update) {
                         doc.saving = None;
                         doc.error.clear();
                     }
-                    Err((conflict, error)) => {
+                    Err((kind, error)) => {
                         doc.error = error.clone();
-                        doc.conflict = *conflict;
-                        if *conflict {
+                        doc.conflict = *kind == SaveFailure::Conflict;
+                        doc.save_blocked = *kind != SaveFailure::Retryable;
+                        doc.save_retry_at = if !doc.save_blocked && doc.save_attempts < 5 {
+                            Some(
+                                Instant::now() + Duration::from_secs(1 << doc.save_attempts.min(4)),
+                            )
+                        } else {
+                            None
+                        };
+                        if doc.conflict {
                             doc.saving = None;
                             if let Some(parts) = doc.finalize.take() {
                                 doc.recovery.push(parts);
@@ -833,6 +883,10 @@ pub fn receive(model: Model, update: Update) {
         if own_save {
             doc.remote = remote.clone();
             doc.saving = None;
+            // The dispatcher owns the still-active HTTP lane. This document's
+            // acknowledged envelope is settled; old outcomes cannot settle its successor.
+            doc.save_in_flight = false;
+            doc.save_retry_at = None;
             doc.error.clear();
         } else if doc.parts == doc.remote.parts
             && doc.finalize.is_none()
@@ -894,11 +948,13 @@ pub fn flush(model: Model) {
                     .sessions
                     .iter()
                     .any(|s| s.id == id && !s.fixture && s.worker.is_some()))
+            && requests
+                .send(Request::Catalog {
+                    session: id,
+                    force: false,
+                })
+                .is_ok()
         {
-            let _ = requests.send(Request::Catalog {
-                session: id,
-                force: false,
-            });
             state.catalog_checked = Some(Instant::now());
             model.buffer.set(state.clone());
         }
@@ -946,6 +1002,32 @@ pub fn flush(model: Model) {
         if session.starts_with("agent-draft-") {
             continue;
         }
+        if doc.saving.is_some()
+            && !doc.save_in_flight
+            && !doc.save_blocked
+            && !doc.conflict
+            && doc.save_retry_at.is_some_and(|at| Instant::now() >= at)
+            && snapshot
+                .sessions
+                .iter()
+                .any(|s| s.id == *session && !s.archived)
+            && model.connected.get_untracked()
+        {
+            doc.save_generation += 1;
+            if requests
+                .send(Request::Save {
+                    session: session.clone(),
+                    request: doc.saving.clone().unwrap(),
+                    generation: doc.save_generation,
+                })
+                .is_ok()
+            {
+                doc.save_in_flight = true;
+                doc.save_attempts += 1;
+                doc.save_retry_at = None;
+                changed = true;
+            }
+        }
         if doc.conflict || !doc.error.is_empty() || doc.submitting || doc.saving.is_some() {
             continue;
         }
@@ -982,10 +1064,16 @@ pub fn flush(model: Model) {
                 .send(Request::Save {
                     session: session.clone(),
                     request: request.clone(),
+                    generation: doc.save_generation + 1,
                 })
                 .is_ok()
             {
                 doc.saving = Some(request);
+                doc.save_generation += 1;
+                doc.save_in_flight = true;
+                doc.save_attempts = 1;
+                doc.save_retry_at = None;
+                doc.save_blocked = false;
                 changed = true;
             }
         }
@@ -1153,13 +1241,15 @@ pub fn retry_save(model: Model) {
                 .set("Choose Load shared or Restore local to resolve the draft conflict".into());
             return;
         }
-        if let Some(request) = &doc.saving
-            && let Some(requests) = model.buffer_requests.get_untracked()
-        {
-            let _ = requests.send(Request::Save {
-                session: doc.remote.session_id.clone(),
-                request: request.clone(),
-            });
+        if doc.save_blocked {
+            model
+                .notice
+                .set("Draft save was refused; review the error before continuing".into());
+            return;
+        }
+        if doc.saving.is_some() && !doc.save_in_flight {
+            doc.save_attempts = 0;
+            doc.save_retry_at = Some(Instant::now());
             retrying = true;
         }
         doc.error.clear();
@@ -1171,11 +1261,19 @@ pub fn retry_save(model: Model) {
             && let Some(bytes) = state.blobs.get(id)
             && let Some(requests) = model.buffer_requests.get_untracked()
         {
-            let _ = requests.send(Request::Upload {
-                asset: asset.clone(),
-                bytes: bytes.clone(),
-            });
-            retrying = true;
+            if requests
+                .send(Request::Upload {
+                    asset: asset.clone(),
+                    bytes: bytes.clone(),
+                })
+                .is_ok()
+            {
+                retrying = true;
+            } else {
+                model
+                    .notice
+                    .set("Draft synchronization busy; file retained for retry".into());
+            }
         }
     }
     commit(model, state);
@@ -1193,8 +1291,16 @@ pub fn retry_save(model: Model) {
 pub fn fetch(model: Model, asset: &Asset) {
     let mut state = model.buffer.get_untracked();
     if !state.blobs.contains_key(&asset.id) && state.fetching.insert(asset.id.clone()) {
-        if let Some(requests) = model.buffer_requests.get_untracked() {
-            let _ = requests.send(Request::Fetch(asset.id.clone()));
+        if model
+            .buffer_requests
+            .get_untracked()
+            .is_none_or(|requests| requests.send(Request::Fetch(asset.id.clone())).is_err())
+        {
+            state.fetching.remove(&asset.id);
+            state.fetch_errors.insert(
+                asset.id.clone(),
+                "Draft synchronization busy; click preview to retry".into(),
+            );
         }
         model.buffer.set(state);
     }
@@ -1226,15 +1332,26 @@ pub fn insert_asset(
         media_type,
         size: bytes.len() as u64,
     };
-    let bytes = Arc::new(bytes);
+    let bytes = asset_bytes(bytes);
     let mut state = model.buffer.get_untracked();
     state.uploads.insert(asset.id.clone(), asset.clone());
     state.blobs.insert(asset.id.clone(), bytes.clone());
-    if let Some(requests) = model.buffer_requests.get_untracked() {
-        let _ = requests.send(Request::Upload {
-            asset: asset.clone(),
-            bytes,
-        });
+    if model
+        .buffer_requests
+        .get_untracked()
+        .is_none_or(|requests| {
+            requests
+                .send(Request::Upload {
+                    asset: asset.clone(),
+                    bytes,
+                })
+                .is_err()
+        })
+    {
+        state.failed_uploads.insert(asset.id.clone());
+        model
+            .notice
+            .set("Draft synchronization busy; file retained for retry".into());
     }
     commit(model, state);
     Ok(Part {
@@ -1369,6 +1486,13 @@ pub fn load_journal(model: Model, _settings: &Path, _config: &crate::network::Co
                 doc.recovery = record.recovery;
                 doc.recovery_reviewed = record.recovery_reviewed;
                 doc.saving = record.saving;
+                doc.save_attempts = record.save_attempts;
+                doc.save_blocked = record.save_blocked;
+                doc.save_retry_at = doc
+                    .saving
+                    .as_ref()
+                    .filter(|_| !doc.save_blocked && doc.save_attempts < 5)
+                    .map(|_| Instant::now());
                 doc.editing_queue = record.editing_queue;
                 if doc.saving.is_some() {
                     doc.error =
@@ -1381,7 +1505,7 @@ pub fn load_journal(model: Model, _settings: &Path, _config: &crate::network::Co
                 .blobs
                 .into_iter()
                 .filter(|(_, bytes)| bytes.len() <= ASSET_LIMIT)
-                .map(|(id, bytes)| (id, Arc::new(bytes)))
+                .map(|(id, bytes)| (id, asset_bytes(bytes)))
                 .collect();
             let referenced = state
                 .documents
@@ -1404,10 +1528,16 @@ pub fn load_journal(model: Model, _settings: &Path, _config: &crate::network::Co
                     state.uploads.insert(asset.id.clone(), asset.clone());
                     // Immutable uploads may be retried; execution commands are never replayed.
                     if let Some(requests) = model.buffer_requests.get_untracked() {
-                        let _ = requests.send(Request::Upload {
-                            asset,
-                            bytes: bytes.clone(),
-                        });
+                        let id = asset.id.clone();
+                        if requests
+                            .send(Request::Upload {
+                                asset,
+                                bytes: bytes.clone(),
+                            })
+                            .is_err()
+                        {
+                            state.failed_uploads.insert(id);
+                        }
                     }
                 }
             }
@@ -1441,6 +1571,8 @@ fn persist_browser(model: Model, state: &BufferState) {
                         && doc.finalize.is_none()
                         && !doc.submitting,
                     saving: doc.saving.clone(),
+                    save_attempts: doc.save_attempts,
+                    save_blocked: doc.save_blocked,
                     editing_queue: doc.editing_queue.clone(),
                 },
             )

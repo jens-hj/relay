@@ -232,24 +232,27 @@ impl Workspace {
         if raw.len() > 128 {
             return Err(denied());
         }
-        let store = self.store.lock().map_err(Error::internal)?;
-        let row: Option<(String,String,i64,i64)> = store.connection.query_row(
-            "SELECT o.username,s.csrf,s.created,s.seen FROM browser_sessions s CROSS JOIN browser_owner o WHERE s.session_hash=?1",
-            [hash(raw)], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(Error::internal)?;
-        let (username, csrf, created, seen) = row.ok_or_else(denied)?;
-        if seconds() >= created + ABSOLUTE || seconds() >= seen + IDLE {
-            return Err(denied());
-        }
-        if touch {
-            store
-                .connection
-                .execute(
-                    "UPDATE browser_sessions SET seen=?1 WHERE session_hash=?2",
-                    params![seconds(), hash(raw)],
-                )
-                .map_err(Error::internal)?;
-        }
-        Ok(Session { username, csrf })
+        // Include mutex wait, query and touch in one synchronous blocking section.
+        blocking(|| {
+            let store = self.store.lock().map_err(Error::internal)?;
+            let row: Option<(String,String,i64,i64)> = store.connection.query_row(
+                "SELECT o.username,s.csrf,s.created,s.seen FROM browser_sessions s CROSS JOIN browser_owner o WHERE s.session_hash=?1",
+                [hash(raw)], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(Error::internal)?;
+            let (username, csrf, created, seen) = row.ok_or_else(denied)?;
+            if seconds() >= created + ABSOLUTE || seconds() >= seen + IDLE {
+                return Err(denied());
+            }
+            if touch {
+                store
+                    .connection
+                    .execute(
+                        "UPDATE browser_sessions SET seen=?1 WHERE session_hash=?2",
+                        params![seconds(), hash(raw)],
+                    )
+                    .map_err(Error::internal)?;
+            }
+            Ok(Session { username, csrf })
+        })
     }
     pub(super) fn browser_request(
         &self,

@@ -101,6 +101,23 @@ pub(super) fn finish(
     cancelled: bool,
     denied: bool,
 ) -> Result<Value, Error> {
+    finish_with_reason(workspace, id, cancelled, denied, None)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum CancellationReason {
+    Stopped,
+    ExpiredOrRunEnded,
+    CapabilityChanged,
+}
+
+pub(super) fn finish_with_reason(
+    workspace: &Workspace,
+    id: &str,
+    cancelled: bool,
+    denied: bool,
+    reason: Option<CancellationReason>,
+) -> Result<Value, Error> {
     let store = workspace.store.lock().map_err(Error::internal)?;
     let (phase, response): (String, Option<String>) = store
         .connection
@@ -134,7 +151,20 @@ pub(super) fn finish(
             "Spawn rejected before a child was created; check model, scope and approval policy",
         )
     };
-    let value = json!({"spawn_attempt":id,"phase":outcome,"error":message,"isError":true});
+    let reason = if cancelled {
+        Some(match reason {
+            Some(CancellationReason::Stopped) => "stopped",
+            Some(CancellationReason::ExpiredOrRunEnded) => "expired_or_run_ended",
+            Some(CancellationReason::CapabilityChanged) => "capability_changed",
+            None => "cancelled",
+        })
+    } else if denied {
+        Some("denied")
+    } else {
+        None
+    };
+    let value =
+        json!({"spawn_attempt":id,"phase":outcome,"reason":reason,"error":message,"isError":true});
     store
         .connection
         .execute(

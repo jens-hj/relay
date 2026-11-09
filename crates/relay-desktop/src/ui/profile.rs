@@ -204,6 +204,31 @@ pub(crate) fn Profiles(model: Model) -> Element {
         col width:1fr gap:0px @layout:{move |rect: Rect| width.set(rect.size.width)} {
             ProfileHeader model:(model)
             Notice model:(model)
+            if matches!(model.editor.get(), EditTarget::Config(_)) {
+                row height:{px(40.0)}px gap:0px label:"Name Actions"
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                    CellButton label:"Rename agent"
+                        disabled:(relay_ui::Live::from(Derived::new(move || model.busy.get() || !model.connected.get())))
+                        on-press:(press(move || model.rename_agent_config())) {
+                        Label text:"Rename" role:(TextRole::Label)
+                    }
+                    CellButton label:"Load latest name"
+                        disabled:(relay_ui::Live::from(Derived::new(move || model.busy.get())))
+                        on-press:(press(move || model.load_latest_agent_name())) {
+                        Label text:"Load latest name" role:(TextRole::Label)
+                    }
+                    if model.retained_agent_name.get().is_some() {
+                        CellButton label:"Restore retained name"
+                            on-press:(press(move || model.restore_retained_agent_name())) {
+                            Label text:"Restore retained name" role:(TextRole::Label)
+                        }
+                        CellButton label:"Discard retained name"
+                            on-press:(press(move || model.retained_agent_name.set(None))) {
+                            Label text:"Discard retained name" role:(TextRole::Label)
+                        }
+                    }
+                }
+            }
             scroll {
                 col height:min-content gap:0px {
                     if model.editor.get() != EditTarget::Defaults {

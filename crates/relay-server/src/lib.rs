@@ -539,9 +539,38 @@ impl Store {
             }
             return Ok((snapshot, None));
         }
-        if envelope.expected_revision > snapshot.revision
-            || (snapshot.revision != envelope.expected_revision
-                && !accepts_stale_workspace_revision(&envelope.command, &snapshot))
+        if envelope.expected_revision > snapshot.revision {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                "conflict",
+                "Workspace changed. Refresh and review your draft before saving again.",
+            ));
+        }
+        // Receipt replay above precedes target comparison, including after later edits/deletion.
+        // This is a validated name-only exemption, never a whitelist for config replacement.
+        let guarded_rename = if let Command::RenameAgentConfig {
+            agent_config_id,
+            name,
+            expected,
+        } = &envelope.command
+        {
+            snapshot
+                .validate_agent_config_rename(agent_config_id, name, expected)
+                .map_err(|error| match error {
+                    AgentConfigRenameError::Changed => Error::new(
+                        StatusCode::CONFLICT,
+                        "agent_name_conflict",
+                        error.to_string(),
+                    ),
+                    AgentConfigRenameError::Invalid(message) => Error::invalid(message),
+                })?;
+            true
+        } else {
+            false
+        };
+        if snapshot.revision != envelope.expected_revision
+            && !guarded_rename
+            && !accepts_stale_workspace_revision(&envelope.command, &snapshot)
         {
             return Err(Error::new(
                 StatusCode::CONFLICT,

@@ -27,6 +27,9 @@ pub enum Saved {
     #[cfg(test)]
     Comment(String),
     Profile,
+    RenameConfig {
+        editor_epoch: u64,
+    },
     AgentTemplate,
     ChildAgent,
     Start(String),
@@ -41,6 +44,25 @@ pub enum Saved {
 struct Pending {
     envelope: CommandEnvelope,
     saved: Saved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PermissionFeedback {
+    Pending,
+    Confirmed,
+    RetryableError,
+    ExpiredOrRunEnded,
+}
+
+fn permission_key(command: &Command) -> Option<(String, String)> {
+    match command {
+        Command::RespondPermission {
+            permission_id,
+            run_id,
+            ..
+        } => Some((permission_id.clone(), run_id.clone())),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -72,7 +94,7 @@ pub struct Model {
     pub command_model: State<String>,
     pub buffer: State<crate::buffer::BufferState>,
     pub conversation_controller: State<Option<crate::conversation::Shared>>,
-    pub buffer_requests: State<Option<UnboundedSender<crate::buffer_network::Request>>>,
+    pub buffer_requests: State<Option<crate::buffer_network::RequestSender>>,
     pub preferences: State<crate::settings::Preferences>,
     pub collapsed_agents: State<BTreeSet<String>>,
     pub agent_focus: State<Option<String>>,
@@ -122,6 +144,9 @@ pub struct Model {
     pub author: State<String>,
     pub editor: State<EditTarget>,
     pub editor_name: State<String>,
+    pub editor_rename_guard: State<Option<AgentConfigRenameGuard>>,
+    pub editor_epoch: State<u64>,
+    pub retained_agent_name: State<Option<(String, String)>>,
     pub editor_base: State<AgentProfile>,
     pub editor_profile: State<AgentProfile>,
     pub editor_overrides: State<ProfileOverrides>,
@@ -140,6 +165,7 @@ pub struct Model {
     commands: State<UnboundedSender<CommandEnvelope>>,
     pending: State<Option<Pending>>,
     control_pending: State<std::collections::BTreeMap<String, (Pending, bool)>>,
+    permission_feedback: State<std::collections::BTreeMap<(String, String), PermissionFeedback>>,
     pending_conflict: State<bool>,
     pending_ambiguous: State<bool>,
     search_serial: State<u64>,
@@ -230,6 +256,9 @@ impl Model {
             editor_template_name: State::new(String::new()),
             editor_override_accepted: State::new(false),
             editor_name: State::new(String::new()),
+            editor_rename_guard: State::new(None),
+            editor_epoch: State::new(0),
+            retained_agent_name: State::new(None),
             editor_base: State::new(AgentProfile::default()),
             editor_profile: State::new(AgentProfile::default()),
             editor_overrides: State::new(ProfileOverrides::default()),
@@ -244,6 +273,7 @@ impl Model {
             commands: State::new(commands),
             pending: State::new(None),
             control_pending: State::new(Default::default()),
+            permission_feedback: State::new(Default::default()),
             pending_conflict: State::new(false),
             pending_ambiguous: State::new(false),
             search_serial: State::new(0),
@@ -341,6 +371,10 @@ impl Model {
             self.collapsed_agents.update(|ids| {
                 ids.remove(&format!("config:{id}"));
             });
+            if self.editor.get_untracked() == EditTarget::Config(id.clone()) {
+                self.editor_rename_guard.set(None);
+                self.editor_epoch.update(|e| *e += 1);
+            }
             if self.page.get_untracked() == Page::Profiles
                 && self.editor.get_untracked() == EditTarget::Config(id.clone())
             {
@@ -444,6 +478,26 @@ impl Model {
         ambiguous: bool,
     ) {
         if let Some((pending, _)) = self.control_pending.get_untracked().get(&id).cloned() {
+            if let Some(key) = permission_key(&pending.envelope.command) {
+                self.set_permission_feedback(
+                    key,
+                    if result.is_ok() {
+                        PermissionFeedback::Confirmed
+                    } else if ambiguous
+                        || !result.as_ref().is_err_and(|message| {
+                            matches!(
+                                message.as_str(),
+                                "Permission request is no longer pending"
+                                    | "Permission run is no longer active"
+                            )
+                        })
+                    {
+                        PermissionFeedback::RetryableError
+                    } else {
+                        PermissionFeedback::ExpiredOrRunEnded
+                    },
+                );
+            }
             self.control_pending.update(|pending| {
                 if ambiguous {
                     if let Some((_, in_flight)) = pending.get_mut(&id) {
@@ -532,6 +586,21 @@ impl Model {
                     self.project_draft.set(Default::default());
                 }
                 self.select_project(format!("project-{id}"));
+            }
+            Saved::RenameConfig { editor_epoch } => {
+                if let Command::RenameAgentConfig {
+                    agent_config_id,
+                    name,
+                    expected,
+                } = &pending.envelope.command
+                    && self.editor.get_untracked() == EditTarget::Config(agent_config_id.clone())
+                    && self.editor_epoch.get_untracked() == editor_epoch
+                    && let Ok(accepted) = expected.renamed(name)
+                {
+                    self.editor_rename_guard.set(Some(accepted));
+                }
+                // Do not refresh profile editor_revision: a concurrent policy edit may
+                // have been preserved by this name-only command and is not yet reviewed.
             }
             Saved::Profile => {
                 if self.editor.get_untracked() == EditTarget::New {
@@ -698,7 +767,9 @@ impl Model {
         if self.busy.get_untracked() {
             return;
         }
-        if self.syncing.get_untracked() {
+        // Name-only writes compare their immutable target guard transactionally;
+        // an ACK ahead of the unrelated metadata stream does not invalidate it.
+        if self.syncing.get_untracked() && !matches!(&command, Command::RenameAgentConfig { .. }) {
             return;
         }
         if !self.connected.get_untracked() {
@@ -744,9 +815,55 @@ impl Model {
         }
     }
     fn submit_control(&self, command: Command, revision: u64, saved: Saved) {
+        let key = permission_key(&command);
+        let pending = self.control_pending.get_untracked();
+        let encoded = serde_json::to_string(&command).unwrap();
+        let existing = pending.values().find(|(p, _)| {
+            key.as_ref()
+                .is_some_and(|key| permission_key(&p.envelope.command).as_ref() == Some(key))
+                || serde_json::to_string(&p.envelope.command).unwrap() == encoded
+        });
+        if key.is_some()
+            && existing.is_some_and(|(p, _)| {
+                serde_json::to_string(&p.envelope.command).unwrap() != encoded
+            })
+        {
+            self.notice
+                .set("An earlier response is unconfirmed. Retry the original response.".into());
+            return;
+        }
+        // An outstanding envelope is a receipt lookup, even after stream
+        // resolution or run end. Availability gates apply only to new decisions.
+        if existing.is_none()
+            && let Some(key) = &key
+        {
+            if matches!(
+                self.permission_feedback.get_untracked().get(key),
+                Some(PermissionFeedback::Confirmed | PermissionFeedback::ExpiredOrRunEnded)
+            ) {
+                self.notice
+                    .set("Permission already resolved or no longer available.".into());
+                return;
+            }
+            if self
+                .snapshot
+                .get_untracked()
+                .tool_permissions
+                .iter()
+                .any(|p| p.id == key.0 && (p.run_id != key.1 || p.expired || p.decision.is_some()))
+            {
+                self.set_permission_feedback(key.clone(), PermissionFeedback::ExpiredOrRunEnded);
+                self.notice
+                    .set("Permission expired, resolved or belongs to another run.".into());
+                return;
+            }
+        }
         // A delayed stream after another acknowledgement does not invalidate
         // this reviewed run/request identity. The server rechecks that target.
         if !self.connected.get_untracked() {
+            if let Some(key) = key {
+                self.set_permission_feedback(key, PermissionFeedback::RetryableError);
+            }
             self.notice
                 .set("Reconnect before sending. Your draft is retained.".into());
             if let Saved::Buffer(draft) = saved {
@@ -754,11 +871,6 @@ impl Model {
             }
             return;
         }
-        let pending = self.control_pending.get_untracked();
-        let encoded = serde_json::to_string(&command).unwrap();
-        let existing = pending
-            .values()
-            .find(|(p, _)| serde_json::to_string(&p.envelope.command).unwrap() == encoded);
         // A changed message cannot replace an uncertain message for that chat.
         // The composer retries the stored envelope before accepting new text.
         fn message_session<'a>(command: &'a Command, saved: &'a Saved) -> Option<&'a str> {
@@ -786,6 +898,7 @@ impl Model {
         }
         let envelope = if let Some((pending, in_flight)) = existing {
             if *in_flight {
+                self.notice.set("Action awaiting acknowledgement.".into());
                 return;
             }
             // Unknown outcome: retain the exact original ID, revision and target.
@@ -799,6 +912,9 @@ impl Model {
             {
                 self.notice
                     .set("Too many unconfirmed actions; retry an existing action.".into());
+                if let Some(key) = key {
+                    self.set_permission_feedback(key, PermissionFeedback::RetryableError);
+                }
                 if let Saved::Buffer(draft) = saved {
                     crate::buffer::rejected(*self, &draft, "Too many unconfirmed actions");
                 }
@@ -812,6 +928,9 @@ impl Model {
         };
         let saved = existing.map(|(p, _)| p.saved.clone()).unwrap_or(saved);
         let id = envelope.request_id.clone();
+        if let Some(key) = &key {
+            self.set_permission_feedback(key.clone(), PermissionFeedback::Pending);
+        }
         self.control_pending.update(|p| {
             p.insert(
                 id.clone(),
@@ -825,6 +944,9 @@ impl Model {
             );
         });
         if self.commands.get_untracked().send(envelope).is_err() {
+            if let Some(key) = key {
+                self.set_permission_feedback(key, PermissionFeedback::RetryableError);
+            }
             self.control_pending.update(|p| {
                 if let Some((_, active)) = p.get_mut(&id) {
                     *active = false;
@@ -833,6 +955,113 @@ impl Model {
             self.notice
                 .set("Acknowledgement unavailable; retry preserves its ID.".into());
         }
+    }
+    fn set_permission_feedback(&self, key: (String, String), value: PermissionFeedback) {
+        self.permission_feedback.update(|states| {
+            // Keep unresolved envelopes in control_pending, independently of this
+            // bounded presentation history. Never evict an in-flight command.
+            if states.len() >= 64 && !states.contains_key(&key) {
+                if let Some(old) = states
+                    .iter()
+                    .find(|(_, v)| {
+                        matches!(
+                            v,
+                            PermissionFeedback::Confirmed | PermissionFeedback::ExpiredOrRunEnded
+                        )
+                    })
+                    .map(|(k, _)| k.clone())
+                {
+                    states.remove(&old);
+                } else {
+                    return;
+                }
+            }
+            states.insert(key, value);
+        });
+    }
+    pub(crate) fn permission_status(
+        &self,
+        permission: &ToolPermission,
+    ) -> Option<PermissionFeedback> {
+        let key = (permission.id.clone(), permission.run_id.clone());
+        if let Some((_, in_flight)) = self.permission_response(permission) {
+            return Some(if in_flight {
+                PermissionFeedback::Pending
+            } else {
+                PermissionFeedback::RetryableError
+            });
+        }
+        let state = self.permission_feedback.get().get(&key).copied();
+        let snapshot = self.snapshot.get();
+        let current = snapshot
+            .tool_permissions
+            .iter()
+            .find(|p| p.id == permission.id && p.run_id == permission.run_id);
+        if state == Some(PermissionFeedback::Confirmed) {
+            return state;
+        }
+        if current.is_some_and(|p| p.expired || p.decision.is_some())
+            || (current.is_none()
+                && state.is_some()
+                && state != Some(PermissionFeedback::RetryableError))
+        {
+            return Some(PermissionFeedback::ExpiredOrRunEnded);
+        }
+        state
+    }
+    /// The immutable original decision and whether its receipt request is active.
+    pub(crate) fn permission_response(&self, permission: &ToolPermission) -> Option<(bool, bool)> {
+        self.control_pending
+            .get()
+            .values()
+            .find_map(|(p, active)| match &p.envelope.command {
+                Command::RespondPermission {
+                    permission_id,
+                    run_id,
+                    allow,
+                } if permission_id == &permission.id && run_id == &permission.run_id => {
+                    Some((*allow, *active))
+                }
+                _ => None,
+            })
+    }
+    pub(crate) fn retry_permission(&self, permission: &ToolPermission) {
+        let pending = self.control_pending.get_untracked();
+        let key = (permission.id.clone(), permission.run_id.clone());
+        if let Some((p, _)) = pending
+            .values()
+            .find(|(p, _)| permission_key(&p.envelope.command).as_ref() == Some(&key))
+        {
+            self.submit_control(
+                p.envelope.command.clone(),
+                p.envelope.expected_revision,
+                p.saved.clone(),
+            );
+        } else {
+            self.notice
+                .set("No unconfirmed response remains for this permission.".into());
+        }
+    }
+    pub(crate) fn visible_permissions(&self, session: &str) -> Vec<ToolPermission> {
+        let snapshot = self.snapshot.get();
+        let mut permissions = crate::adapt::transcript_permissions(&snapshot, session);
+        for p in &snapshot.tool_permissions {
+            if (p.session_id == session
+                || snapshot
+                    .ancestors(&p.session_id)
+                    .iter()
+                    .any(|s| s.id == session))
+                && (self.permission_response(p).is_some()
+                    || self
+                        .permission_feedback
+                        .get()
+                        .contains_key(&(p.id.clone(), p.run_id.clone())))
+                && !permissions.iter().any(|v| v.id == p.id)
+            {
+                permissions.push(p.clone());
+            }
+        }
+        permissions
     }
     /// An uncertain message must be retried with its original envelope, even
     /// after the shared draft or the workspace revision advances.
@@ -1024,7 +1253,12 @@ impl Model {
         );
     }
     pub fn can_rebase(&self) -> bool {
-        self.pending_conflict.get() && self.can_retry()
+        self.pending_conflict.get()
+            && self.can_retry()
+            && !self
+                .pending
+                .get()
+                .is_some_and(|p| matches!(p.envelope.command, Command::RenameAgentConfig { .. }))
     }
     pub fn rebase_conflict(&self) {
         if !self.can_rebase() {
@@ -1037,6 +1271,17 @@ impl Model {
         self.notice.set("Conflict reviewed. Draft retained; submit from the form to create a new request at the latest revision.".into());
     }
     pub fn review_latest(&self) {
+        if self
+            .pending
+            .get_untracked()
+            .is_some_and(|p| matches!(p.envelope.command, Command::RenameAgentConfig { .. }))
+        {
+            self.notice.set(
+                "Use Load latest name to review this rename; the retained request is unchanged"
+                    .into(),
+            );
+            return;
+        }
         if self.busy.get_untracked() {
             return;
         }
@@ -1099,6 +1344,15 @@ impl Model {
             EditTarget::New => (String::new(), ProfileOverrides::default()),
             EditTarget::Defaults => ("Project defaults".into(), ProfileOverrides::default()),
         };
+        self.editor_rename_guard.set(match &target {
+            EditTarget::Config(id) => snapshot
+                .agent_configs
+                .iter()
+                .find(|c| &c.id == id)
+                .map(AgentConfigRenameGuard::capture),
+            _ => None,
+        });
+        self.editor_epoch.update(|e| *e += 1);
         self.editor_profile.set(overrides.resolve(&base));
         self.editor_base.set(base);
         self.editor_overrides.set(overrides);
@@ -1991,6 +2245,135 @@ impl Model {
             Saved::Profile,
         );
     }
+    /// Explicit name-only intent. Never inferred from mutable profile fields or split from Save.
+    pub fn rename_agent_config(&self) {
+        if self.busy.get_untracked() || !self.connected.get_untracked() {
+            return;
+        }
+        if self.pending.get_untracked().is_some() {
+            self.notice.set(
+                "Resolve the retained request first; use Load latest name after a name conflict"
+                    .into(),
+            );
+            return;
+        }
+        let EditTarget::Config(id) = self.editor.get_untracked() else {
+            return;
+        };
+        let Some(expected) = self
+            .editor_rename_guard
+            .get_untracked()
+            .filter(|g| g.agent_config_id == id)
+        else {
+            self.notice
+                .set("Load the agent name before renaming".into());
+            return;
+        };
+        let accepted = match expected.renamed(&self.editor_name.get_untracked()) {
+            Ok(value) => value,
+            Err(error) => {
+                self.notice.set(error);
+                return;
+            }
+        };
+        let command = Command::RenameAgentConfig {
+            agent_config_id: id,
+            name: if accepted.automatic_name {
+                String::new()
+            } else {
+                accepted.name
+            },
+            expected,
+        };
+        // Existing legal input is normalized, never silently truncated. Account for the
+        // complete envelope and escaped UTF-8 before enqueueing under the unchanged limit.
+        let probe = CommandEnvelope {
+            request_id: "00000000-0000-4000-8000-000000000000".into(),
+            expected_revision: self.editor_revision.get_untracked(),
+            command: command.clone(),
+        };
+        if serde_json::to_vec(&probe).map_or(true, |bytes| bytes.len() > CONFIG_RENAME_BODY_LIMIT) {
+            self.notice
+                .set("Rename exceeds the command size limit; the name is retained".into());
+            return;
+        }
+        self.submit(
+            command,
+            self.editor_revision.get_untracked(),
+            Saved::RenameConfig {
+                editor_epoch: self.editor_epoch.get_untracked(),
+            },
+        );
+    }
+
+    pub fn load_latest_agent_name(&self) {
+        if self.busy.get_untracked() || self.pending_ambiguous.get_untracked() {
+            self.notice
+                .set("Confirm the original request before loading another name".into());
+            return;
+        }
+        let EditTarget::Config(id) = self.editor.get_untracked() else {
+            return;
+        };
+        if self.pending.get_untracked().is_some_and(|p| !matches!(p.saved, Saved::RenameConfig {editor_epoch} if editor_epoch == self.editor_epoch.get_untracked())
+            || !matches!(p.envelope.command, Command::RenameAgentConfig {agent_config_id,..} if agent_config_id == id)) {
+            self.notice.set("Resolve the earlier request in its editor first".into()); return;
+        }
+        let snapshot = self.snapshot.get_untracked();
+        let Some(config) = snapshot.agent_configs.iter().find(|c| c.id == id) else {
+            self.notice
+                .set("Agent no longer exists; the local name is retained".into());
+            return;
+        };
+        let latest = if config.automatic_name {
+            String::new()
+        } else {
+            config.name.clone()
+        };
+        let local = self.editor_name.get_untracked();
+        if local != latest {
+            if self
+                .retained_agent_name
+                .get_untracked()
+                .is_some_and(|saved| saved != (id.clone(), local.clone()))
+            {
+                self.notice
+                    .set("Restore or discard the retained name before loading another".into());
+                return;
+            }
+            self.retained_agent_name.set(Some((id, local)));
+        }
+        self.editor_name.set(latest);
+        self.editor_rename_guard
+            .set(Some(AgentConfigRenameGuard::capture(config)));
+        self.pending.set(None);
+        self.pending_conflict.set(false);
+        self.pending_ambiguous.set(false);
+        // Loading a name is not reviewing or rebasing the profile replacement draft.
+        self.notice.set(
+            "Latest name loaded; your local name is available in Restore retained name".into(),
+        );
+    }
+    pub fn restore_retained_agent_name(&self) {
+        if self.busy.get_untracked() || self.pending.get_untracked().is_some() {
+            return;
+        }
+        let Some((id, name)) = self.retained_agent_name.get_untracked() else {
+            return;
+        };
+        if self.editor.get_untracked() != EditTarget::Config(id) {
+            self.notice
+                .set("Open the original agent to restore its retained name".into());
+            return;
+        }
+        // Swap rather than discard any different draft already in this editor.
+        let current = self.editor_name.get_untracked();
+        self.editor_name.set(name);
+        if let EditTarget::Config(id) = self.editor.get_untracked() {
+            self.retained_agent_name.set(Some((id, current)));
+        }
+    }
+
     pub fn modify_profile(&self, field: &str, update: impl FnOnce(&mut AgentProfile)) {
         self.editor_override_accepted.set(false);
         let mut profile = self.editor_profile.get_untracked();

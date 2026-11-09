@@ -583,9 +583,14 @@ pub(super) async fn route(
                 Ok(args) => spawn(&workspace, &session, &run, args, &mut stop, Some(&id)).await,
                 Err(error) => Err(error),
             };
-            let permission_refused = result
-                .as_ref()
-                .is_err_and(|e| e.message == "Human denied agent tool permission");
+            let permission_refused = result.as_ref().is_err_and(|e| {
+                matches!(
+                    e.message.as_str(),
+                    "Human denied agent tool permission"
+                        | "Agent tool approval stopped"
+                        | "Agent tool approval expired or run ended"
+                )
+            });
             let denied = permission_refused
                 && workspace
                     .snapshots
@@ -602,7 +607,19 @@ pub(super) async fn route(
                 || stop.has_changed().is_err()
                 || (permission_refused && !denied)
                 || result.as_ref().is_err_and(|e| e.code == "agent_capability");
-            let value = crate::spawn_attempts::finish(&workspace, &id, cancelled, denied)?;
+            use crate::spawn_attempts::CancellationReason;
+            let reason = if *stop.borrow() || stop.has_changed().is_err() {
+                Some(CancellationReason::Stopped)
+            } else if result.as_ref().is_err_and(|e| e.code == "agent_capability") {
+                Some(CancellationReason::CapabilityChanged)
+            } else if permission_refused && !denied {
+                Some(CancellationReason::ExpiredOrRunEnded)
+            } else {
+                None
+            };
+            let value = crate::spawn_attempts::finish_with_reason(
+                &workspace, &id, cancelled, denied, reason,
+            )?;
             crate::spawn_attempts::flush(&workspace, &session, true)?;
             Ok::<_, Error>(value)
         });
@@ -921,10 +938,16 @@ async fn approval(
     description: &str,
     stop: &mut watch::Receiver<bool>,
 ) -> Result<(), Error> {
-    if crate::harness::permission(workspace, caller, run, tool, description, stop).await? {
-        Ok(())
-    } else {
-        Err(Error::invalid("Human denied agent tool permission"))
+    use crate::harness::PermissionOutcome;
+    match crate::harness::permission_outcome(workspace, caller, run, tool, description, stop)
+        .await?
+    {
+        PermissionOutcome::Approved => Ok(()),
+        PermissionOutcome::Denied => Err(Error::invalid("Human denied agent tool permission")),
+        PermissionOutcome::Stopped => Err(Error::invalid("Agent tool approval stopped")),
+        PermissionOutcome::ExpiredOrRunEnded => {
+            Err(Error::invalid("Agent tool approval expired or run ended"))
+        }
     }
 }
 /// What a spawn was decided, and any approval asked, under. It must still
@@ -1970,10 +1993,18 @@ mod tests {
     }
     impl Fixture {
         fn new(delegate: Permission) -> Self {
+            Self::with_missing_harness(delegate, false)
+        }
+        fn new_missing(delegate: Permission) -> Self {
+            Self::with_missing_harness(delegate, true)
+        }
+        fn with_missing_harness(delegate: Permission, missing: bool) -> Self {
             let directory = tempfile::tempdir().unwrap();
             let repo = crate::tests::review_repo(directory.path());
             let binary = directory.path().join("codex");
-            crate::tests::script(&binary, "sleep 30");
+            if !missing {
+                crate::tests::script(&binary, "sleep 30");
+            }
             let mut snapshot = crate::tests::live();
             snapshot.sessions.clear();
             snapshot.messages.clear();
@@ -2171,7 +2202,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_spawn_interrupted_transport_pending_denial_has_no_child_and_one_notice() {
-        let f = Fixture::new(Permission::Ask);
+        let f = Fixture::new_missing(Permission::Ask);
         let workspace = f.workspace.clone();
         let headers = durable_headers(&f, "lost-cell");
         let task = tokio::spawn(route(
@@ -2396,8 +2427,166 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn approval_feedback_approved_then_run_end_creates_no_child() {
+        let f = Fixture::new_missing(Permission::Ask);
+        let workspace = f.workspace.clone();
+        let headers = durable_headers(&f, "approved-end-race");
+        let task = tokio::spawn(route(
+            State(workspace.clone()),
+            headers,
+            axum::extract::Path("spawn_agent".into()),
+            Json(json!({"title":"Race", "task":"Verify"})),
+        ));
+        let mut events = workspace.snapshots.subscribe();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !events
+                .borrow()
+                .tool_permissions
+                .iter()
+                .any(|p| p.decision.is_none())
+            {
+                events.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        // Commit a genuine approval, then end this run before the waiting
+        // operation resumes on this single-threaded executor.
+        decide(&workspace, &f.caller, &f.run, true, "Spawn Race").await;
+        f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
+        let response = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .0;
+        assert_eq!(response["phase"], "cancelled");
+        assert!(matches!(
+            response["reason"].as_str(),
+            Some("stopped" | "expired_or_run_ended")
+        ));
+        let snapshot = workspace.snapshots.borrow().clone();
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.tool_permissions[0].decision, Some(true));
+        assert_eq!(spawn_notices(&f).len(), 1);
+        f.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn approval_feedback_contended_authoritative_read_keeps_worker_free() {
+        use crate::harness::PermissionOutcome;
+        for mode in ["denied", "expired", "replacement-run", "approved"] {
+            let f = Fixture::new_missing(Permission::Ask);
+            let mut events = f.workspace.snapshots.subscribe();
+            let mut tasks = Vec::new();
+            for _ in 0..2 {
+                let workspace = f.workspace.clone();
+                let caller = f.caller.clone();
+                let run = f.run.clone();
+                let mut stop = f.stop.clone();
+                tasks.push(tokio::spawn(async move {
+                    crate::harness::permission_outcome(
+                        &workspace,
+                        &caller,
+                        &run,
+                        "synthetic",
+                        "contention test",
+                        &mut stop,
+                    )
+                    .await
+                    .unwrap()
+                }));
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while events.borrow().tool_permissions.len() != 2 {
+                    events.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            let mut stale = events.borrow().clone();
+            for permission in &mut stale.tool_permissions {
+                permission.decision = Some(true);
+            }
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            let workspace = f.workspace.clone();
+            let caller = f.caller.clone();
+            let holder = tokio::task::spawn_blocking(move || {
+                let mut store = workspace.store.lock().unwrap();
+                let mut current = store.snapshot().unwrap();
+                for permission in &mut current.tool_permissions {
+                    permission.decision = Some(mode != "denied");
+                    permission.expired = mode == "expired";
+                }
+                if mode == "replacement-run" {
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE runs SET run_id='replacement' WHERE session_id=?1",
+                            [&caller],
+                        )
+                        .unwrap();
+                    // expire() intentionally leaves recorded decisions intact.
+                    let original_run = current.tool_permissions[0].run_id.clone();
+                    crate::harness::expire(&mut current, &caller, &original_run);
+                    assert!(current.tool_permissions.iter().all(|p| !p.expired));
+                }
+                store.save(&current).unwrap();
+                ready_tx.send(()).unwrap();
+                // Fallback prevents a broken scheduling implementation hanging
+                // the test runtime forever. The normal release is explicit.
+                release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            });
+            ready_rx.await.unwrap();
+            // Both waiters are woken with a stale apparent approval while the
+            // authoritative store differs and its mutex is still held.
+            f.workspace.snapshots.send_replace(stale);
+            let heartbeat = tokio::spawn(async {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                1
+            });
+            let progress = tokio::time::timeout(Duration::from_millis(750), heartbeat).await;
+            release_tx.send(()).unwrap();
+            holder.await.unwrap();
+            assert_eq!(
+                progress
+                    .expect("Approval store wait occupied the sole async worker")
+                    .unwrap(),
+                1
+            );
+            let expected = match mode {
+                "denied" => PermissionOutcome::Denied,
+                "approved" => PermissionOutcome::Approved,
+                _ => PermissionOutcome::ExpiredOrRunEnded,
+            };
+            for task in tasks {
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(5), task)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    expected
+                );
+            }
+            assert_eq!(
+                f.workspace
+                    .store
+                    .lock()
+                    .unwrap()
+                    .snapshot()
+                    .unwrap()
+                    .sessions
+                    .len(),
+                1
+            );
+            f.finish().await;
+        }
+    }
+
+    #[tokio::test]
     async fn durable_spawn_stop_cancels_approval_and_holds_recovery_without_wake() {
-        let f = Fixture::new(Permission::Ask);
+        let f = Fixture::new_missing(Permission::Ask);
         let workspace = f.workspace.clone();
         let headers = durable_headers(&f, "stopped-cell");
         let task = tokio::spawn(route(
@@ -2446,7 +2635,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_spawn_workspace_error_is_sanitized_and_created_retry_is_single_child() {
-        let f = Fixture::new(Permission::Allow);
+        let f = Fixture::new_missing(Permission::Allow);
         f.change(|s| {
             s.sessions[0].workspaces[0].path = "/nonexistent/fixture-private-value".into()
         });
@@ -2460,7 +2649,7 @@ mod tests {
         assert!(!value.to_string().contains("fixture-private-value"));
         assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
         f.finish().await;
-        let f = Fixture::new(Permission::Allow);
+        let f = Fixture::new_missing(Permission::Allow);
         let args = json!({"title":"One child", "task":"Verify"});
         let first = durable_spawn(&f, "original", args.clone()).await;
         assert_eq!(first["phase"], "created_queued");
@@ -2587,7 +2776,7 @@ mod tests {
 
     #[tokio::test]
     async fn normal_parent_end_cancels_pending_http_approval_and_revokes_run() {
-        let f = Fixture::new(Permission::Ask);
+        let f = Fixture::new_missing(Permission::Ask);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!(
             "http://{}/v1/agent-tools/spawn_agent",

@@ -303,13 +303,74 @@ pub(crate) fn PendingApproval(
         Rc::new(move || crate::sidebar::respond(model, &permission, false))
     };
     let requester = permission.session_id.clone();
+    let retry_permission = permission.clone();
+    let feedback = Derived::new(move || {
+        (
+            model.permission_status(&permission),
+            model.permission_response(&permission),
+        )
+    });
     let review: OnPress = Rc::new(move || on_review(requester.clone()));
+    let content = view! {
+        col height:min-content label:"Approval request" {}
+    };
+    content.switch(
+        move || feedback.get(),
+        move |parent, (state, response)| {
+            if response.is_none() && !matches!(
+                state,
+                Some(
+                    crate::model::PermissionFeedback::Confirmed
+                        | crate::model::PermissionFeedback::ExpiredOrRunEnded
+                )
+            ) {
+                parent.adopt(&view! {
+                    ApprovalBlock data:(relay_ui::Live::from(data)) on-approve:(approve.clone())
+                        on-reject:(reject.clone()) on-review-diff:(review.clone())
+                });
+            }
+            if let Some((allow, in_flight)) = response {
+                parent.adopt(&view! {
+                    Label
+                        text:(format!("Original Response: {}", if *allow { "Approve" } else { "Reject" }))
+                        role:(TextRole::Caption)
+                });
+                if !in_flight {
+                    let permission = retry_permission.clone();
+                    parent.adopt(&view! {
+                        CellButton label:"Retry original response"
+                            on-press:(press(move || model.retry_permission(&permission))) {
+                            Label text:"Retry Original Response" role:(TextRole::Label)
+                        }
+                    });
+                }
+            }
+            let text = match state {
+                None => "",
+                Some(crate::model::PermissionFeedback::Pending) => {
+                    "Pending · awaiting acknowledgement"
+                }
+                Some(crate::model::PermissionFeedback::Confirmed) => {
+                    "Confirmed · permission response acknowledged"
+                }
+                Some(crate::model::PermissionFeedback::RetryableError) if response.is_none() => {
+                    "Response failed · review the permission and try again"
+                }
+                Some(crate::model::PermissionFeedback::RetryableError) => {
+                    "Response unconfirmed · retry sends the original decision"
+                }
+                Some(crate::model::PermissionFeedback::ExpiredOrRunEnded) => {
+                    "Permission unavailable · expired, resolved or run ended"
+                }
+            };
+            parent.adopt(&view! {
+                Label text:(text.to_string()) role:(TextRole::Caption) tone:(Tone::Muted)
+            });
+        },
+    );
     view! {
         MessageRow speaker:"Needs you" {
-            col height:min-content label:"Approval request" {
-                ApprovalBlock data:(relay_ui::Live::from(data)) on-approve:(approve)
-                    on-reject:(reject) on-review-diff:(review)
-            }
+            { parent.adopt(&content); }
         }
     }
 }

@@ -1809,12 +1809,22 @@ pub fn Conversation(model: Model) -> Element {
         if !state.uploads.is_empty() {
             "Uploading inline files…"
         } else if let Some(doc) = state.documents.get(&model.session.get()) {
-            if doc.finalize.is_some() || doc.submitting {
+            if doc.submitting {
                 "Sending…"
+            } else if !state.connected {
+                "Draft connection recovering · retained locally"
+            } else if doc.saving.is_some() && !doc.error.is_empty() {
+                if doc.save_blocked {
+                    "Draft save refused · retained locally"
+                } else if doc.save_attempts >= 5 && !doc.save_in_flight {
+                    "Save unconfirmed · retry available"
+                } else {
+                    "Save unconfirmed · retrying"
+                }
             } else if doc.saving.is_some() {
                 "Saving draft…"
-            } else if !state.connected {
-                "Draft retained locally"
+            } else if doc.finalize.is_some() {
+                "Waiting for draft synchronization…"
             } else {
                 "Ctrl/Cmd+Enter sends · Enter adds a line"
             }
@@ -1888,9 +1898,7 @@ pub fn Conversation(model: Model) -> Element {
             &model.session.get(),
         )
     });
-    let approvals = Derived::new(move || {
-        crate::adapt::transcript_permissions(&model.snapshot.get(), &model.session.get())
-    });
+    let approvals = Derived::new(move || model.visible_permissions(&model.session.get()));
     let thinking = Derived::new(move || {
         let snapshot = model.snapshot.get();
         let id = model.session.get();

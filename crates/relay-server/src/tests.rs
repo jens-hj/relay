@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::{path::PathBuf, time::Duration};
 
 pub(crate) mod command_tests;
+mod config_name_tests;
 pub(crate) mod harness_tests;
 mod persistence_tests;
 pub(super) fn live() -> Snapshot {

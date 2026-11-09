@@ -1,5 +1,7 @@
 //! Relay's domain and versioned client/server contract. No UI or execution dependencies.
 
+mod config_name;
+pub use config_name::*;
 mod transport;
 pub use transport::*;
 mod build_info;
@@ -592,6 +594,12 @@ pub enum Command {
         name: String,
         overrides: ProfileOverrides,
     },
+    /// A guarded name-only edit; current profile and runtime selection are preserved.
+    RenameAgentConfig {
+        agent_config_id: String,
+        name: String,
+        expected: AgentConfigRenameGuard,
+    },
     RemoveAgentConfig {
         agent_config_id: String,
     },
@@ -948,9 +956,7 @@ impl Snapshot {
                 name,
                 overrides,
             } => {
-                if !name.trim().is_empty() {
-                    validate_text("Agent name", &name, 100)?;
-                }
+                let (name, automatic) = normalized_agent_config_name(&name)?;
                 let director = self
                     .agent_configs
                     .iter()
@@ -972,34 +978,18 @@ impl Snapshot {
                 {
                     director.draft_selection = HarnessSelection::default();
                 }
-                director.automatic_name = name.trim().is_empty();
-                director.name = if director.automatic_name {
-                    "New agent".into()
-                } else {
-                    name.trim().into()
-                };
                 director.overrides = overrides;
-                for session in self
-                    .sessions
-                    .iter_mut()
-                    .filter(|s| s.agent_config_id == agent_config_id && s.role == SessionRole::Root)
-                {
-                    session.automatic_name = name.trim().is_empty();
-                    if !session.automatic_name {
-                        session.title = name.trim().into();
-                    } else if let Some(message) = self.messages.iter().find(|m| {
-                        m.session_id == session.id && matches!(m.kind.as_str(), "user" | "prompt")
-                    }) {
-                        session.title = message
-                            .body
-                            .split_whitespace()
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                            .chars()
-                            .take(80)
-                            .collect();
-                    }
-                }
+                self.set_agent_config_name(&agent_config_id, name, automatic);
+            }
+            Command::RenameAgentConfig {
+                agent_config_id,
+                name,
+                expected,
+            } => {
+                self.validate_agent_config_rename(&agent_config_id, &name, &expected)
+                    .map_err(|e| e.to_string())?;
+                let (name, automatic) = normalized_agent_config_name(&name)?;
+                self.set_agent_config_name(&agent_config_id, name, automatic);
             }
             Command::RemoveAgentConfig { agent_config_id } => {
                 let index = self

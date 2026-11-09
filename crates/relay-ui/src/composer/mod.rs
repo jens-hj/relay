@@ -20,7 +20,7 @@ pub(crate) const MODEL_GLOW_OPEN_REACH: f32 = 0.85;
 pub(crate) const MODEL_GLOW_COLLAPSED_REACH: f32 = 2.3;
 pub(crate) const MODEL_GLOW_OPACITY: f32 = 0.8;
 /// The idle key hint's opacity; progress hints show at full strength.
-pub(crate) const HINT_IDLE_OPACITY: f32 = 0.8;
+pub(crate) const HINT_IDLE_OPACITY: f32 = 0.6;
 fn quiet_send(fill: bool) -> Color {
     let dark = mosaic::core::theme::color(ground.page).to_srgb8()[0] < 128;
     if dark {

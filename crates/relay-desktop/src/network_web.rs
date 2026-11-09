@@ -141,6 +141,9 @@ async fn stream(
     spawn_local(async move {
         let client = reqwest::Client::new();
         loop {
+            if probe_events.send(Event::ProbeUnavailable).is_err() {
+                break;
+            }
             let sent = crate::platform::Instant::now();
             let result = tokio::select! {
                 result=async {

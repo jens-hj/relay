@@ -100,6 +100,7 @@ enum Event {
     Stream(StreamEvent),
     Status(bool, String),
     RoundTrip(u64),
+    ProbeUnavailable,
     RetryAt(Option<u64>),
     Outcome(String, Result<CommandAck, String>, bool, bool),
 }
@@ -249,6 +250,7 @@ fn receive_event(state: &mut NetworkState, event: Event) {
             }
         }
         Event::RetryAt(deadline) => state.retry_at = deadline,
+        Event::ProbeUnavailable => state.round_trip_ms = None,
         Event::RoundTrip(ms) => {
             state.round_trip_ms = Some(ms);
             state.round_trip_samples.push(ms);
@@ -367,6 +369,7 @@ async fn stream(
                 _=heartbeat.tick()=>{
                     if ping_sent.is_some_and(|sent|sent.elapsed()>Duration::from_secs(30)) {return Err("Event connection stopped responding".into());}
                     if ping_sent.is_none() {
+                        events.send(Event::ProbeUnavailable).map_err(|_|"Client closed")?;
                         socket.send(Message::Ping(Vec::new().into())).await.map_err(|_|"Connection lost")?;
                         ping_sent=Some(tokio::time::Instant::now());
                     }
@@ -707,6 +710,10 @@ mod connection_telemetry_tests {
             receive_event(&mut state, Event::RoundTrip(ms));
         }
         assert_eq!(state.round_trip_samples, (6..=25).collect::<Vec<_>>());
+        receive_event(&mut state, Event::Status(true, "Connected".into()));
+        receive_event(&mut state, Event::ProbeUnavailable);
+        assert!(state.connected);
+        assert_eq!(state.round_trip_ms, None);
         receive_event(&mut state, Event::Status(false, "Connection lost".into()));
         let since = state.offline_since.unwrap();
         receive_event(&mut state, Event::Status(false, "Still offline".into()));

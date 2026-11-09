@@ -98,13 +98,17 @@ pub fn bind_discovery(model: Model) {
             if requested.get_untracked().contains(&session.id) {
                 continue;
             }
-            requested.update(|ids| {
-                ids.insert(session.id.clone());
-            });
-            let _ = sender.send(crate::buffer_network::Request::Catalog {
-                session: session.id.clone(),
-                force: false,
-            });
+            if sender
+                .send(crate::buffer_network::Request::Catalog {
+                    session: session.id.clone(),
+                    force: false,
+                })
+                .is_ok()
+            {
+                requested.update(|ids| {
+                    ids.insert(session.id.clone());
+                });
+            }
         }
     });
 }
