@@ -61,9 +61,11 @@ pub(super) fn mode(snapshot: &Snapshot, session: &str) -> Result<ApprovalMode, E
 }
 pub(super) fn expire(snapshot: &mut Snapshot, session: &str, run: &str) {
     for permission in &mut snapshot.tool_permissions {
+        // A detached spawn approval stays open after its run ends.
         if permission.session_id == session
             && permission.run_id == run
             && permission.decision.is_none()
+            && permission.spawn_attempt.is_none()
         {
             permission.expired = true;
         }
@@ -91,6 +93,30 @@ pub(super) async fn permission(
             == PermissionOutcome::Approved,
     )
 }
+/// A pending request, with its description and tool name bounded.
+pub(super) fn request(
+    id: &str,
+    session: &str,
+    run: &str,
+    tool: &str,
+    description: &str,
+    spawn_attempt: Option<&str>,
+) -> ToolPermission {
+    let mut end = description.len().min(DESCRIPTION_LIMIT);
+    while !description.is_char_boundary(end) {
+        end -= 1;
+    }
+    ToolPermission {
+        id: id.into(),
+        session_id: session.into(),
+        run_id: run.into(),
+        tool: tool.chars().take(256).collect(),
+        description: description[..end].into(),
+        decision: None,
+        expired: false,
+        spawn_attempt: spawn_attempt.map(str::to_owned),
+    }
+}
 pub(super) async fn permission_outcome(
     workspace: &Workspace,
     session: &str,
@@ -100,20 +126,9 @@ pub(super) async fn permission_outcome(
     stop: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<PermissionOutcome, Error> {
     let id = uuid::Uuid::new_v4().to_string();
-    let mut end = description.len().min(DESCRIPTION_LIMIT);
-    while !description.is_char_boundary(end) {
-        end -= 1;
-    }
+    let request = request(&id, session, run, tool, description, None);
     workspace.update_run(session, run, |snapshot| {
-        snapshot.tool_permissions.push(ToolPermission {
-            id: id.clone(),
-            session_id: session.into(),
-            run_id: run.into(),
-            tool: tool.chars().take(256).collect(),
-            description: description[..end].into(),
-            decision: None,
-            expired: false,
-        });
+        snapshot.tool_permissions.push(request);
         Ok(())
     })?;
     let mut events = workspace.snapshots.subscribe();

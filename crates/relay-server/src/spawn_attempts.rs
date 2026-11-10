@@ -1,4 +1,5 @@
-//! Durable pre-child outcomes. No prompts, credentials or raw errors are stored.
+//! Durable pre-child outcomes. No credentials or raw errors are stored; a
+//! spawn awaiting human approval keeps its arguments only until it ends.
 use super::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -74,6 +75,89 @@ pub(super) fn phase(workspace: &Workspace, id: Option<&str>, phase: &str) -> Res
     Ok(())
 }
 
+/// A spawn awaiting approval outside its run: keep what continues it once
+/// the human decides.
+pub(super) fn detach(workspace: &Workspace, id: &str, request: &Value) -> Result<(), Error> {
+    let changed = workspace
+        .store
+        .lock()
+        .map_err(Error::internal)?
+        .connection
+        .execute(
+            "UPDATE spawn_attempts SET phase='pending_approval',request=?1 WHERE id=?2 AND response IS NULL",
+            params![request.to_string(), id],
+        )
+        .map_err(Error::internal)?;
+    if changed != 1 {
+        return Err(Error::invalid("Spawn attempt already ended"));
+    }
+    Ok(())
+}
+
+/// A detached attempt still awaiting its continuation: caller, run and request.
+pub(super) fn detached(
+    workspace: &Workspace,
+    id: &str,
+) -> Result<Option<(String, String, Value)>, Error> {
+    let row: Option<(String, String, Option<String>)> = workspace
+        .store
+        .lock()
+        .map_err(Error::internal)?
+        .connection
+        .query_row(
+            "SELECT caller,run,request FROM spawn_attempts WHERE id=?1 AND response IS NULL",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(Error::internal)?;
+    let Some((caller, run, Some(request))) = row else {
+        return Ok(None);
+    };
+    Ok(Some((
+        caller,
+        run,
+        serde_json::from_str(&request).map_err(Error::internal)?,
+    )))
+}
+
+/// The caller of an attempt, for delivering its outcome.
+pub(super) fn caller(workspace: &Workspace, id: &str) -> Result<Option<String>, Error> {
+    workspace
+        .store
+        .lock()
+        .map_err(Error::internal)?
+        .connection
+        .query_row("SELECT caller FROM spawn_attempts WHERE id=?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()
+        .map_err(Error::internal)
+}
+
+/// Detached attempts whose request expired undecided (the requesting chat was
+/// archived) end with that outcome in the same transaction.
+pub(super) fn expire_detached(
+    transaction: &rusqlite::Transaction<'_>,
+    snapshot: &Snapshot,
+) -> Result<(), Error> {
+    for id in snapshot
+        .tool_permissions
+        .iter()
+        .filter(|p| p.expired && p.decision.is_none())
+        .filter_map(|p| p.spawn_attempt.as_ref())
+    {
+        let value = json!({"spawn_attempt":id,"phase":"cancelled","reason":"expired_or_run_ended","error":"Spawn approval expired before it was decided; no child was created","isError":true});
+        transaction
+            .execute(
+                "UPDATE spawn_attempts SET phase='cancelled',response=?1,request=NULL WHERE id=?2 AND response IS NULL",
+                params![value.to_string(), id],
+            )
+            .map_err(Error::internal)?;
+    }
+    Ok(())
+}
+
 /// Child identity and the created outcome commit with child storage, so restart
 /// never labels a committed child as a pre-child cancellation or forks it twice.
 pub(super) fn created(
@@ -85,7 +169,7 @@ pub(super) fn created(
         let response = json!({"spawn_attempt":id,"phase":"created_queued","agent":child});
         transaction
             .execute(
-                "UPDATE spawn_attempts SET phase='created_queued',child=?1,response=?2 WHERE id=?3",
+                "UPDATE spawn_attempts SET phase='created_queued',child=?1,response=?2,request=NULL WHERE id=?3",
                 params![child, response.to_string(), id],
             )
             .map_err(Error::internal)?;
@@ -168,7 +252,7 @@ pub(super) fn finish_with_reason(
     store
         .connection
         .execute(
-            "UPDATE spawn_attempts SET phase=?1,response=?2 WHERE id=?3 AND response IS NULL",
+            "UPDATE spawn_attempts SET phase=?1,response=?2,request=NULL WHERE id=?3 AND response IS NULL",
             params![outcome, value.to_string(), id],
         )
         .map_err(Error::internal)?;
@@ -285,10 +369,36 @@ fn codex_result(body: &Value, response: &Value) -> bool {
             .and_then(|text| serde_json::from_str::<Value>(text).ok())
             .is_some_and(|value| value == *response)
 }
-pub(super) fn recover(connection: &Connection) -> Result<(), Error> {
-    // Never replay workspace preparation, approval or child creation on restart.
-    connection.execute("UPDATE spawn_attempts SET phase='cancelled',response=json_object('spawn_attempt',id,'phase','cancelled','error','Server restarted before spawn completed; no child was created. Continuation requires a new authorized request.','isError',json('true')) WHERE response IS NULL", []).map_err(Error::internal)?;
-    Ok(())
+/// Never replay workspace preparation, approval or child creation on restart.
+/// Only a detached spawn still awaiting its undecided `pending` approval stays
+/// pending; deciding it later continues it. Returns the attempts kept.
+pub(super) fn recover(
+    connection: &Connection,
+    pending: &std::collections::HashSet<String>,
+) -> Result<std::collections::HashSet<String>, Error> {
+    let unfinished = connection
+        .prepare("SELECT id,phase,request IS NOT NULL FROM spawn_attempts WHERE response IS NULL")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, bool>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(Error::internal)?;
+    let mut kept = std::collections::HashSet::new();
+    for (id, phase, detached) in unfinished {
+        if detached && phase == "pending_approval" && pending.contains(&id) {
+            kept.insert(id);
+            continue;
+        }
+        connection.execute("UPDATE spawn_attempts SET phase='cancelled',request=NULL,response=json_object('spawn_attempt',id,'phase','cancelled','error','Server restarted before spawn completed; no child was created. Continuation requires a new authorized request.','isError',json('true')) WHERE id=?1 AND response IS NULL", [&id]).map_err(Error::internal)?;
+    }
+    Ok(kept)
 }
 
 /// A native harness has accepted the notice turn. Reservation and process

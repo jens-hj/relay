@@ -90,6 +90,7 @@ fn fixture() -> Snapshot {
         description: "explicit review".into(),
         decision: None,
         expired: false,
+        spawn_attempt: None,
     });
     source
 }

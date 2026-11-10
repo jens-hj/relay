@@ -221,6 +221,10 @@ pub struct ToolPermission {
     pub decision: Option<bool>,
     #[serde(default)]
     pub expired: bool,
+    /// The durable spawn attempt this request decides. Such a request
+    /// outlives the calling run; deciding it continues or ends the attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_attempt: Option<String>,
 }
 
 #[cfg(test)]

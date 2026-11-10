@@ -782,6 +782,14 @@ impl Snapshot {
                 if archived {
                     // Unarchiving never restores these grants.
                     self.prune_peers(&branch);
+                    // A spawn awaiting approval outlives its run, not its chat.
+                    for permission in self.tool_permissions.iter_mut().filter(|p| {
+                        branch.contains(&p.session_id)
+                            && p.spawn_attempt.is_some()
+                            && p.decision.is_none()
+                    }) {
+                        permission.expired = true;
+                    }
                     for turn in self.submissions.iter_mut().filter(|s| {
                         branch.contains(&s.session_id) && s.state == SubmissionState::Queued
                     }) {

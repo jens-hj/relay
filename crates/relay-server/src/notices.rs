@@ -1293,7 +1293,7 @@ mod outbox_follow_on_regressions {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            31
+            32
         );
         assert_eq!(
             store
@@ -1320,7 +1320,7 @@ mod outbox_follow_on_regressions {
         );
         store
             .connection
-            .pragma_update(None, "user_version", 32)
+            .pragma_update(None, "user_version", 33)
             .unwrap();
         drop(store);
         assert!(Store::open(&path, AgentProfile::default()).is_err());

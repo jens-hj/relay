@@ -4075,6 +4075,7 @@ fn inline_permission_answers_exact_run_and_disappears_when_expired() {
         description: "notes.txt".into(),
         decision: None,
         expired: false,
+        spawn_attempt: None,
     });
     mounted.model.receive(NetworkState {
         snapshot: snapshot.clone(),
@@ -6768,6 +6769,7 @@ fn issue_status_prefers_waiting_and_active_work_then_the_latest_outcome() {
         description: "notes.txt".into(),
         decision: None,
         expired: false,
+        spawn_attempt: None,
     });
     assert_eq!(
         issue_status(&snapshot, &[running, queued, newer_success]),
@@ -7987,6 +7989,7 @@ fn wide_sessions_turn_narrow_at_double_scale_without_rebuilding_the_draft() {
         description: "notes.txt".into(),
         decision: None,
         expired: false,
+        spawn_attempt: None,
     });
     mounted.model.receive(NetworkState {
         snapshot,
@@ -10693,6 +10696,7 @@ fn tool_activity_updates_in_place_and_opens_failures() {
                 description: "printf hello".into(),
                 decision: None,
                 expired: false,
+                spawn_attempt: None,
             })
         });
         mounted.settle();
@@ -15493,6 +15497,7 @@ fn approval_feedback_clicks_preserve_form_and_retry_exact_decision() {
         description: "synthetic.txt".into(),
         decision: None,
         expired: false,
+        spawn_attempt: None,
     };
     snapshot
         .messages
@@ -15643,6 +15648,7 @@ fn approval_feedback_expiry_and_wrong_run_prevent_click_replay() {
         description: "synthetic".into(),
         decision: None,
         expired: false,
+        spawn_attempt: None,
     };
     snapshot
         .messages
@@ -15725,6 +15731,7 @@ fn approval_feedback_queue_is_bounded_and_overflow_is_visible() {
         description: String::new(),
         decision: None,
         expired: false,
+        spawn_attempt: None,
     };
     assert_eq!(
         mounted.model.permission_status(&permission),
@@ -15750,6 +15757,7 @@ fn approval_feedback_committed_stream_keeps_exact_receipt_retry_reachable() {
             description: "Synthetic request".into(),
             decision: None,
             expired: false,
+            spawn_attempt: None,
         };
         snapshot.tool_permissions.push(permission.clone());
         model.receive(NetworkState {
@@ -15891,4 +15899,46 @@ fn approval_feedback_committed_stream_keeps_exact_receipt_retry_reachable() {
         model.retry_permission(&other);
         assert!(mounted.commands.try_recv().is_err());
     }
+}
+
+#[test]
+fn compact_navigation_counts_requests_waiting_for_an_answer() {
+    let mounted = mount(false, 390.0);
+    mounted.settle();
+    assert!(mounted.model.mobile_navigation.get_untracked());
+    assert!(has_label(&mounted, "Open navigation"));
+    let session = mounted.model.snapshot.get_untracked().sessions[0]
+        .id
+        .clone();
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot.revision += 1;
+    snapshot.tool_permissions.push(ToolPermission {
+        id: "spawn-approval".into(),
+        session_id: session,
+        run_id: "ended-run".into(),
+        tool: "mcp__relay__spawn_agent".into(),
+        description: "Spawn Fixer with:\nexecution mode Unrestricted Access".into(),
+        decision: None,
+        expired: false,
+        spawn_attempt: Some("attempt".into()),
+    });
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(has_label(&mounted, "Open navigation, 1 need you"));
+    mounted.click("Open navigation, 1 need you");
+    assert!(mounted.model.sidebar_open.get_untracked());
+    snapshot.revision += 1;
+    snapshot.tool_permissions[0].decision = Some(true);
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.sidebar_open.set(false);
+    mounted.settle();
+    assert!(has_label(&mounted, "Open navigation"));
 }

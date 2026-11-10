@@ -1828,7 +1828,7 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            31
+            32
         );
         drop(store);
         let mut reopened = Store::open(&db, AgentProfile::default()).unwrap();
@@ -1919,7 +1919,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 32)
+        .pragma_update(None, "user_version", 33)
         .unwrap();
     drop(store);
     let error = Store::open(&db, AgentProfile::default()).err().unwrap();
@@ -1929,7 +1929,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        32
+        33
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -1957,7 +1957,7 @@ fn schema_twenty_eight_adds_workspace_waits_without_changing_history() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        31
+        32
     );
     assert_eq!(
         store
@@ -2012,7 +2012,7 @@ fn schema_twenty_five_defaults_network_on_and_preserves_explicit_false_on_reopen
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 31);
+    assert_eq!(schema, 32);
     assert_eq!(store.full(), original);
 
     let mut disabled = original;
@@ -4359,7 +4359,7 @@ fn schema_twenty_one_adds_default_worker_model_policies_and_persists_changes() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 31);
+    assert_eq!(schema, 32);
     let stored: String = store
         .connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -4455,7 +4455,7 @@ fn schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 31);
+    assert_eq!(schema, 32);
     let upgraded = store.full();
     assert_eq!(upgraded, original);
     assert!(upgraded.projects.iter().all(|p| p.nix_commands.is_off()));
@@ -4528,7 +4528,7 @@ fn schema_twenty_one_upgrades_to_twenty_five_with_every_new_setting_off() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 31);
+    assert_eq!(schema, 32);
     let upgraded = store.full();
     assert_eq!(upgraded, original);
     assert!(upgraded.projects.iter().all(|p| p.nix_commands.is_off()));
@@ -4611,7 +4611,7 @@ fn schema_twenty_three_upgrades_with_claude_window_start_off_and_an_empty_claim_
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 31);
+    assert_eq!(schema, 32);
     let upgraded = store.full();
     assert_eq!(upgraded, original);
     assert!(!upgraded.claude_window_start.enabled);
@@ -4662,7 +4662,7 @@ fn schema_twenty_four_upgrades_with_standard_spawn_execution_approval() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 31);
+    assert_eq!(schema, 32);
     let upgraded = store.full();
     assert_eq!(upgraded, original);
     assert!(
@@ -4757,7 +4757,7 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 31);
+    assert_eq!(schema, 32);
 }
 
 #[test]
@@ -4808,7 +4808,7 @@ fn schema_nineteen_snapshots_load_prompt_senders_as_the_user() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 31);
+    assert_eq!(schema, 32);
 }
 
 #[test]
@@ -4873,7 +4873,7 @@ fn schema_twenty_five_databases_load_without_peer_grants_and_keep_their_data() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 31);
+    assert_eq!(schema, 32);
     let mut upgraded = store.full();
     assert_eq!(upgraded.protocol_version, PROTOCOL_VERSION);
     assert_eq!(upgraded, original);
@@ -4989,7 +4989,7 @@ fn schema_twenty_six_network_data_upgrades_and_accepts_human_peer_grants() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 31);
+    assert_eq!(schema, 32);
     let upgraded = store.full();
     assert_eq!(upgraded.protocol_version, PROTOCOL_VERSION);
     assert_eq!(upgraded, original);

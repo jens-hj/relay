@@ -272,7 +272,7 @@ fn rank(permission: Permission) -> u8 {
         Permission::Allow => 2,
     }
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct Spawn {
     /// Stable identity for this logical call; reuse only for an explicit retry.
@@ -576,22 +576,35 @@ pub(super) async fn route(
                 workspace: Workspace,
                 id: String,
                 caller: String,
+                /// Cleared once the attempt awaits a human decision instead.
+                armed: bool,
             }
             impl Drop for OutcomeGuard {
                 fn drop(&mut self) {
+                    if !self.armed {
+                        return;
+                    }
                     let _ = crate::spawn_attempts::finish(&self.workspace, &self.id, true, false);
                     let _ = crate::spawn_attempts::flush(&self.workspace, &self.caller, true);
                 }
             }
-            let _guard = OutcomeGuard {
+            let mut guard = OutcomeGuard {
                 workspace: workspace.clone(),
                 id: id.clone(),
                 caller: session.clone(),
+                armed: true,
             };
             let result = match parse(input) {
                 Ok(args) => spawn(&workspace, &session, &run, args, &mut stop, Some(&id)).await,
                 Err(error) => Err(error),
             };
+            // Left for a human: deciding it continues or ends the attempt.
+            if let Ok(value) = &result
+                && value == &awaiting_approval(&id)
+            {
+                guard.armed = false;
+                return Ok::<_, Error>(value.clone());
+            }
             let permission_refused = result.as_ref().is_err_and(|e| {
                 matches!(
                     e.message.as_str(),
@@ -973,10 +986,22 @@ struct SpawnDecision<'a> {
     effective: &'a AgentProfile,
     parent_mode: ApprovalMode,
     execution_policy: SpawnExecutionApproval,
+    /// Whether the caller's run is still the authority, as opposed to a
+    /// human approval decided after that run may have ended.
+    live: bool,
 }
 impl SpawnDecision<'_> {
     fn holds(&self, store: &Store, current: &Snapshot) -> Result<(), Error> {
-        active_caller(store, current, self.caller, self.run)?;
+        if self.live {
+            active_caller(store, current, self.caller, self.run)?;
+        } else if store.closing
+            || !current
+                .sessions
+                .iter()
+                .any(|s| s.id == self.caller && !s.archived)
+        {
+            return Err(Error::invalid("Requesting agent is archived or missing"));
+        }
         let parent = current
             .sessions
             .iter()
@@ -1006,6 +1031,32 @@ impl SpawnDecision<'_> {
         Ok(())
     }
 }
+/// A spawn resolved before any approval: the checked model choice, the modes
+/// and everything a human must approve.
+struct Prepared {
+    parent: Session,
+    effective: AgentProfile,
+    harness: Harness,
+    selection: HarnessSelection,
+    rationale: Option<String>,
+    prompt: String,
+    parent_mode: ApprovalMode,
+    requested_mode: Option<ApprovalMode>,
+    child_mode: ApprovalMode,
+    execution_policy: SpawnExecutionApproval,
+    reasons: Vec<String>,
+}
+/// The approval text, which is also what a later decision is checked against.
+fn describe(title: &str, reasons: &[String], attempt: Option<&str>) -> String {
+    format!(
+        "Spawn {} with:\n{}{}",
+        title,
+        reasons.join("\n"),
+        attempt
+            .map(|id| format!("\nSpawn attempt: {id}"))
+            .unwrap_or_default()
+    )
+}
 async fn spawn(
     workspace: &Workspace,
     caller: &str,
@@ -1014,6 +1065,113 @@ async fn spawn(
     stop: &mut watch::Receiver<bool>,
     attempt: Option<&str>,
 ) -> Result<Value, Error> {
+    let prepared = prepare(workspace, caller, &args, stop).await?;
+    if !prepared.reasons.is_empty() {
+        let description = describe(&args.title, &prepared.reasons, attempt);
+        // A durable request outlives this turn: the human decides it later,
+        // and the outcome reaches the caller as a notice.
+        if let Some(attempt) = attempt {
+            return detach(workspace, caller, run, &args, attempt, &description);
+        }
+        approval(
+            workspace,
+            caller,
+            run,
+            "mcp__relay__spawn_agent",
+            &description,
+            stop,
+        )
+        .await?;
+    }
+    create_child(workspace, caller, run, args, prepared, attempt, stop, true).await
+}
+/// The reply to a durable spawn left awaiting human approval.
+fn awaiting_approval(attempt: &str) -> Value {
+    json!({"spawn_attempt":attempt,"phase":"pending_approval","pending":true,"message":"Waiting for human approval. No child exists yet. The outcome reaches you later as a Relay notice; do not retry or wait for it."})
+}
+fn detach(
+    workspace: &Workspace,
+    caller: &str,
+    run: &str,
+    args: &Spawn,
+    attempt: &str,
+    description: &str,
+) -> Result<Value, Error> {
+    crate::spawn_attempts::detach(
+        workspace,
+        attempt,
+        &json!({"args":args,"description":description}),
+    )?;
+    let request = crate::harness::request(
+        &uuid::Uuid::new_v4().to_string(),
+        caller,
+        run,
+        "mcp__relay__spawn_agent",
+        description,
+        Some(attempt),
+    );
+    workspace.update_run(caller, run, |snapshot| {
+        snapshot.tool_permissions.push(request);
+        Ok(())
+    })?;
+    Ok(awaiting_approval(attempt))
+}
+/// A human decided a detached spawn: create the child or end the attempt,
+/// then deliver the outcome to the caller.
+pub(super) async fn decided(workspace: Workspace, attempt: String, allow: bool) {
+    let Ok(Some(caller)) = crate::spawn_attempts::caller(&workspace, &attempt) else {
+        return;
+    };
+    let ended = if allow {
+        match continue_spawn(&workspace, &attempt).await {
+            Ok(()) => Ok(()),
+            // Only the fixed outcome text is kept; raw errors may hold secrets.
+            Err(_) => crate::spawn_attempts::finish(&workspace, &attempt, false, false).map(|_| ()),
+        }
+    } else {
+        crate::spawn_attempts::finish(&workspace, &attempt, false, true).map(|_| ())
+    };
+    if ended
+        .and_then(|()| crate::spawn_attempts::flush(&workspace, &caller, true))
+        .is_err()
+    {
+        eprintln!("Spawn approval outcome could not be delivered");
+    }
+}
+async fn continue_spawn(workspace: &Workspace, attempt: &str) -> Result<(), Error> {
+    let Some((caller, run, request)) = crate::spawn_attempts::detached(workspace, attempt)? else {
+        return Ok(());
+    };
+    let args: Spawn = serde_json::from_value(request["args"].clone()).map_err(Error::internal)?;
+    // The approval covers the spawn only as it was described when asked.
+    let (_running, mut stop) = watch::channel(false);
+    let prepared = prepare(workspace, &caller, &args, &mut stop).await?;
+    if request["description"].as_str()
+        != Some(&describe(&args.title, &prepared.reasons, Some(attempt)))
+    {
+        return Err(Error::invalid(
+            "Policy changed while awaiting approval; retry spawn",
+        ));
+    }
+    create_child(
+        workspace,
+        &caller,
+        &run,
+        args,
+        prepared,
+        Some(attempt),
+        &stop,
+        false,
+    )
+    .await
+    .map(|_| ())
+}
+async fn prepare(
+    workspace: &Workspace,
+    caller: &str,
+    args: &Spawn,
+    stop: &mut watch::Receiver<bool>,
+) -> Result<Prepared, Error> {
     validate_prompt(&args.task)?;
     if args
         .call_id
@@ -1065,7 +1223,8 @@ async fn spawn(
         .rationale
         .as_deref()
         .map(str::trim)
-        .filter(|r| !r.is_empty());
+        .filter(|r| !r.is_empty())
+        .map(str::to_owned);
     // Use any discovered catalog for the requested harness; launch discovers it
     // again in the child workspace before executing the first turn.
     let harness = request.0.unwrap_or(effective.harness);
@@ -1097,7 +1256,7 @@ async fn spawn(
         Some(!model.efforts.is_empty())
     });
     policy
-        .check_selection(&request, rationale, offers_effort)
+        .check_selection(&request, rationale.as_deref(), offers_effort)
         .map_err(Error::invalid)?;
     let (_, model, effort) = request;
     let Some(selected_model) = model else {
@@ -1188,25 +1347,44 @@ async fn spawn(
     if permissions[&Task::Implement] == Permission::Ask {
         reasons.push("implementation for its first turn".to_string());
     }
-    if !reasons.is_empty() {
-        crate::spawn_attempts::phase(workspace, attempt, "pending_approval")?;
-        approval(
-            workspace,
-            caller,
-            run,
-            "mcp__relay__spawn_agent",
-            &format!(
-                "Spawn {} with:\n{}{}",
-                args.title,
-                reasons.join("\n"),
-                attempt
-                    .map(|id| format!("\nSpawn attempt: {id}"))
-                    .unwrap_or_default()
-            ),
-            stop,
-        )
-        .await?;
-    }
+    Ok(Prepared {
+        parent,
+        effective,
+        harness,
+        selection,
+        rationale,
+        prompt,
+        parent_mode,
+        requested_mode,
+        child_mode,
+        execution_policy,
+        reasons,
+    })
+}
+#[allow(clippy::too_many_arguments)]
+async fn create_child(
+    workspace: &Workspace,
+    caller: &str,
+    run: &str,
+    args: Spawn,
+    prepared: Prepared,
+    attempt: Option<&str>,
+    stop: &watch::Receiver<bool>,
+    live: bool,
+) -> Result<Value, Error> {
+    let Prepared {
+        parent,
+        effective,
+        harness,
+        selection,
+        rationale,
+        prompt,
+        parent_mode,
+        requested_mode,
+        child_mode,
+        execution_policy,
+        reasons: _,
+    } = prepared;
     let decision = SpawnDecision {
         caller,
         run,
@@ -1214,6 +1392,7 @@ async fn spawn(
         effective: &effective,
         parent_mode,
         execution_policy,
+        live,
     };
     // A stale approval never reaches the fork: recheck before preparing the
     // child's workspaces, and again below before the child is saved.
@@ -1261,7 +1440,7 @@ async fn spawn(
         context: args.context,
         permissions: args.permissions,
         requested_by_run: Some(run.into()),
-        selection_rationale: rationale.map(str::to_owned),
+        selection_rationale: rationale,
         execution_approval: requested_mode,
     });
     let worker = child.worker.as_mut().unwrap();
@@ -1293,9 +1472,12 @@ async fn spawn(
         let grant = child.spawn.as_ref().unwrap();
         // Only the caller's running tools can be the calling tool; the one
         // enriched below goes back through the outbox.
-        let mut running =
+        let mut running = if live {
             crate::messages::running_tools(&store.connection, Some(caller), Some(run))
-                .map_err(Error::internal)?;
+                .map_err(Error::internal)?
+        } else {
+            vec![]
+        };
         if let Some(message) = running
             .iter_mut()
             .filter(|m| m.session_id == caller)
@@ -1654,7 +1836,7 @@ fn spawn_spec(
     };
     (
         format!(
-            "Start a child Relay session. Give each intentional call a new call_id. For an explicit transport retry of that same logical call, reuse its call_id and exact arguments; never reuse a denied or failed call identity for a new attempt. Relay enforces delegation and human approval for wider permissions. {rule} {} {execution}",
+            "Start a child Relay session. Give each intentional call a new call_id. For an explicit transport retry of that same logical call, reuse its call_id and exact arguments; never reuse a denied or failed call identity for a new attempt. Relay enforces delegation and human approval for wider permissions. A spawn that needs human approval returns phase pending_approval at once and no child exists yet; do not retry or wait: end your turn, and the outcome (created child, denial or rejection) reaches you later as a Relay notice. {rule} {} {execution}",
             policy.allowed_summary()
         ),
         properties,
@@ -2147,7 +2329,7 @@ mod tests {
     }
     async fn decide(workspace: &Workspace, caller: &str, run: &str, allow: bool, contains: &str) {
         let mut events = workspace.snapshots.subscribe();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        let detached = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let pending = events
                     .borrow()
@@ -2167,25 +2349,67 @@ mod tests {
                             allow,
                         },
                     );
-                    let (snapshot, _) = store.apply_owned(envelope, &workspace.config).unwrap();
+                    let (snapshot, action) =
+                        store.apply_owned(envelope, &workspace.config).unwrap();
                     workspace.snapshots.send_replace((snapshot).into());
-                    break;
+                    // As the command endpoint does after committing.
+                    if let Some(Action::SpawnDecided { attempt, allow }) = action {
+                        tokio::spawn(decided(workspace.clone(), attempt, allow));
+                    }
+                    return pending.spawn_attempt.is_some();
                 }
                 events.changed().await.unwrap();
             }
         })
         .await
         .unwrap();
+        // A run-bound request is answered within its run.
         assert!(
-            workspace
-                .store
-                .lock()
-                .unwrap()
-                .run_id(caller)
-                .unwrap()
-                .as_deref()
-                == Some(run)
+            detached
+                || workspace
+                    .store
+                    .lock()
+                    .unwrap()
+                    .run_id(caller)
+                    .unwrap()
+                    .as_deref()
+                    == Some(run)
         );
+    }
+    /// The finished outcome of a durable spawn attempt.
+    async fn await_outcome(f: &Fixture, attempt: &str) -> Value {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let outcome = crate::spawn_attempts::view(&f.workspace, &f.caller)
+                    .unwrap()
+                    .into_iter()
+                    .find(|o| o["spawn_attempt"] == attempt)
+                    .unwrap();
+                if !matches!(
+                    outcome["phase"].as_str(),
+                    Some("pending_approval" | "preparing_workspace" | "validating")
+                ) {
+                    return outcome;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    /// A durable spawn needing approval, decided by the human, and its outcome.
+    async fn decided_spawn(
+        f: &Fixture,
+        request: &str,
+        args: Value,
+        allow: bool,
+        contains: &str,
+    ) -> Value {
+        let pending = durable_spawn(f, request, args.clone()).await;
+        assert_eq!(pending["phase"], "pending_approval");
+        decide(&f.workspace, &f.caller, &f.run, allow, contains).await;
+        await_outcome(f, pending["spawn_attempt"].as_str().unwrap()).await;
+        durable_spawn(f, request, args).await
     }
 
     fn durable_headers(f: &Fixture, request: &str) -> HeaderMap {
@@ -2229,70 +2453,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_spawn_interrupted_transport_pending_denial_has_no_child_and_one_notice() {
+    async fn durable_spawn_awaiting_approval_returns_at_once_and_is_denied_after_the_turn_ends() {
         let f = Fixture::new_missing(Permission::Ask);
         let workspace = f.workspace.clone();
-        let headers = durable_headers(&f, "lost-cell");
-        let task = tokio::spawn(route(
-            State(workspace.clone()),
-            headers,
-            axum::extract::Path("spawn_agent".into()),
-            Json(json!({"title":"Lost cell", "task":"Verify"})),
-        ));
-        // The HTTP/tool transport disappears while the approval remains pending.
-        let mut events = workspace.snapshots.subscribe();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !events
-                .borrow()
-                .tool_permissions
-                .iter()
-                .any(|p| p.decision.is_none())
-            {
-                events.changed().await.unwrap();
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            crate::spawn_attempts::view(&workspace, &f.caller).unwrap()[0]["phase"],
-            "pending_approval"
-        );
-        let pending = durable_spawn(
-            &f,
-            "lost-cell",
-            json!({"title":"Lost cell", "task":"Verify"}),
-        )
-        .await;
+        let args = json!({"title":"Lost cell", "task":"Verify"});
+        let pending = durable_spawn(&f, "lost-cell", args.clone()).await;
         assert_eq!(pending["pending"], true);
         assert_eq!(pending["phase"], "pending_approval");
         assert_eq!(pending["agent"], Value::Null);
-        assert_eq!(workspace.snapshots.borrow().tool_permissions.len(), 1);
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        assert_eq!(workspace.snapshots.borrow().sessions.len(), 1);
+        let attempt = pending["spawn_attempt"].as_str().unwrap().to_owned();
+        let requests = workspace.full().tool_permissions;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].spawn_attempt.as_deref(), Some(attempt.as_str()));
+        // A replay of the same request identity never asks again.
+        assert_eq!(
+            durable_spawn(&f, "lost-cell", args.clone()).await["phase"],
+            "pending_approval"
+        );
+        assert_eq!(workspace.full().tool_permissions.len(), 1);
+        // The caller's turn ends; the request stays open for the human.
+        f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
+        let request = &workspace.full().tool_permissions[0];
+        assert!(request.decision.is_none() && !request.expired);
+        assert!(spawn_notices(&f).is_empty());
         decide(&workspace, &f.caller, &f.run, false, "Spawn Lost cell").await;
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while spawn_notices(&f).is_empty() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let outcomes = crate::spawn_attempts::view(&workspace, &f.caller).unwrap();
-        assert_eq!(outcomes[0]["phase"], "denied");
-        assert_eq!(outcomes[0]["agent"], Value::Null);
-        assert_eq!(workspace.snapshots.borrow().sessions.len(), 1);
-        assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Queued);
-        // An explicit replay of the same request identity returns its denial and
-        // never creates another approval, workspace or child.
-        let value = durable_spawn(
-            &f,
-            "lost-cell",
-            json!({"title":"Lost cell", "task":"Verify"}),
+        let outcome = await_outcome(&f, &attempt).await;
+        assert_eq!(outcome["phase"], "denied");
+        assert_eq!(outcome["agent"], Value::Null);
+        assert_eq!(workspace.full().sessions.len(), 1);
+        assert_eq!(spawn_notices(&f).len(), 1);
+        // The ended run's capability can no longer replay or ask again.
+        let replay = route(
+            State(workspace.clone()),
+            durable_headers(&f, "lost-cell"),
+            axum::extract::Path("spawn_agent".into()),
+            Json(args),
         )
         .await;
-        assert_eq!(value["phase"], "denied");
-        assert_eq!(workspace.snapshots.borrow().tool_permissions.len(), 1);
+        assert_eq!(replay.unwrap_err().status, StatusCode::UNAUTHORIZED);
+        assert_eq!(workspace.full().tool_permissions.len(), 1);
         crate::spawn_attempts::flush(&workspace, &f.caller, true).unwrap();
         assert_eq!(spawn_notices(&f).len(), 1);
         f.finish().await;
@@ -2455,48 +2654,60 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn approval_feedback_approved_then_run_end_creates_no_child() {
-        let f = Fixture::new_missing(Permission::Ask);
-        let workspace = f.workspace.clone();
-        let headers = durable_headers(&f, "approved-end-race");
-        let task = tokio::spawn(route(
-            State(workspace.clone()),
-            headers,
-            axum::extract::Path("spawn_agent".into()),
-            Json(json!({"title":"Race", "task":"Verify"})),
-        ));
-        let mut events = workspace.snapshots.subscribe();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !events
-                .borrow()
-                .tool_permissions
-                .iter()
-                .any(|p| p.decision.is_none())
-            {
-                events.changed().await.unwrap();
-            }
-        })
-        .await
-        .unwrap();
-        // Commit a genuine approval, then end this run before the waiting
-        // operation resumes on this single-threaded executor.
-        decide(&workspace, &f.caller, &f.run, true, "Spawn Race").await;
+    async fn approval_after_the_callers_turn_ended_creates_and_launches_the_child() {
+        let f = Fixture::new(Permission::Ask);
+        let args = json!({"title":"Later", "task":"Verify"});
+        let pending = durable_spawn(&f, "approved-later", args).await;
+        let attempt = pending["spawn_attempt"].as_str().unwrap().to_owned();
         f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
-        let response = tokio::time::timeout(Duration::from_secs(5), task)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap()
-            .0;
-        assert_eq!(response["phase"], "cancelled");
-        assert!(matches!(
-            response["reason"].as_str(),
-            Some("stopped" | "expired_or_run_ended")
-        ));
-        let snapshot = workspace.full();
-        assert_eq!(snapshot.sessions.len(), 1);
+        decide(&f.workspace, &f.caller, &f.run, true, "Spawn Later").await;
+        let outcome = await_outcome(&f, &attempt).await;
+        assert_eq!(outcome["phase"], "created_queued");
+        let child = outcome["agent"].as_str().unwrap().to_owned();
+        let snapshot = f.workspace.full();
+        let session = snapshot.sessions.iter().find(|s| s.id == child).unwrap();
+        assert_eq!(
+            session.parent_session_id.as_deref(),
+            Some(f.caller.as_str())
+        );
+        assert_eq!(
+            session.spawn.as_ref().unwrap().requested_by_run.as_deref(),
+            Some(f.run.as_str())
+        );
+        assert!(
+            f.workspace
+                .store
+                .lock()
+                .unwrap()
+                .run_id(&child)
+                .unwrap()
+                .is_some()
+        );
+        assert!(snapshot.messages.iter().any(|m| m.session_id == f.caller
+            && m.tool.as_ref().is_some_and(|t| t.detail
+                == Some(ToolDetail::Spawn {
+                    child_session_id: Some(child.clone())
+                }))));
         assert_eq!(snapshot.tool_permissions[0].decision, Some(true));
         assert_eq!(spawn_notices(&f).len(), 1);
+        // The request is decided once; a repeated answer changes nothing.
+        let repeat = crate::tests::env(
+            snapshot.revision,
+            Command::RespondPermission {
+                permission_id: snapshot.tool_permissions[0].id.clone(),
+                run_id: f.run.clone(),
+                allow: true,
+            },
+        );
+        assert!(
+            f.workspace
+                .store
+                .lock()
+                .unwrap()
+                .apply_owned(repeat, &f.workspace.config)
+                .is_err()
+        );
+        assert_eq!(f.workspace.full().sessions.len(), 2);
         f.finish().await;
     }
 
@@ -2613,29 +2824,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_spawn_stop_cancels_approval_and_holds_recovery_without_wake() {
+    async fn durable_spawn_approval_outlives_a_human_stop_and_holds_its_outcome() {
         let f = Fixture::new_missing(Permission::Ask);
         let workspace = f.workspace.clone();
-        let headers = durable_headers(&f, "stopped-cell");
-        let task = tokio::spawn(route(
-            State(workspace.clone()),
-            headers,
-            axum::extract::Path("spawn_agent".into()),
-            Json(json!({"title":"Stopped", "task":"Verify"})),
-        ));
-        let mut events = workspace.snapshots.subscribe();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !events
-                .borrow()
-                .tool_permissions
-                .iter()
-                .any(|p| p.decision.is_none())
-            {
-                events.changed().await.unwrap();
-            }
-        })
-        .await
-        .unwrap();
+        let pending = durable_spawn(
+            &f,
+            "stopped-cell",
+            json!({"title":"Stopped", "task":"Verify"}),
+        )
+        .await;
+        let attempt = pending["spawn_attempt"].as_str().unwrap().to_owned();
         f.workspace
             .store
             .lock()
@@ -2645,17 +2843,16 @@ mod tests {
             .unwrap()
             .send_replace(true);
         f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Stopped);
-        let response = task.await.unwrap().unwrap().0;
-        assert_eq!(response["phase"], "cancelled");
-        assert_eq!(workspace.snapshots.borrow().sessions.len(), 1);
+        let request = &workspace.full().tool_permissions[0];
+        assert!(request.decision.is_none() && !request.expired);
+        decide(&workspace, &f.caller, &f.run, false, "Spawn Stopped").await;
+        assert_eq!(await_outcome(&f, &attempt).await["phase"], "denied");
+        assert_eq!(workspace.full().sessions.len(), 1);
+        // A stopped caller keeps the outcome paused; it is not woken.
         assert_eq!(spawn_notices(&f).len(), 1);
         assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Paused);
         assert_eq!(
-            workspace.snapshots.borrow().sessions[0]
-                .worker
-                .as_ref()
-                .unwrap()
-                .status,
+            workspace.full().sessions[0].worker.as_ref().unwrap().status,
             WorkerStatus::Stopped
         );
         Shutdown { workspace }.shutdown().await.unwrap();
@@ -2728,15 +2925,17 @@ mod tests {
 
         let f = Fixture::new(Permission::Ask);
         let args = json!({"title":"Separate approval","task":"Verify"});
-        let (denied, ()) = tokio::join!(
-            durable_spawn(&f, "denied-call", args.clone()),
-            decide(&f.workspace, &f.caller, &f.run, false, "Separate approval")
-        );
+        let denied =
+            decided_spawn(&f, "denied-call", args.clone(), false, "Separate approval").await;
         assert_eq!(denied["phase"], "denied");
-        let (approved, ()) = tokio::join!(
-            durable_spawn(&f, "new-authorized-call", args.clone()),
-            decide(&f.workspace, &f.caller, &f.run, true, "Separate approval")
-        );
+        let approved = decided_spawn(
+            &f,
+            "new-authorized-call",
+            args.clone(),
+            true,
+            "Separate approval",
+        )
+        .await;
         assert_eq!(approved["phase"], "created_queued");
         assert_eq!(f.workspace.snapshots.borrow().tool_permissions.len(), 2);
         assert_eq!(durable_spawn(&f, "denied-call", args).await, denied);
@@ -2803,7 +3002,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn normal_parent_end_cancels_pending_http_approval_and_revokes_run() {
+    async fn undecided_spawn_approval_survives_restart_and_creates_the_child_when_approved() {
+        let f = Fixture::new(Permission::Ask);
+        let pending = durable_spawn(
+            &f,
+            "across-restart",
+            json!({"title":"Across","task":"Verify"}),
+        )
+        .await;
+        let attempt = pending["spawn_attempt"].as_str().unwrap().to_owned();
+        f.finish().await;
+        let path = f._directory.path().join("db");
+        let config = (*f.workspace.config).clone();
+        let defaults = f.workspace.store.lock().unwrap().defaults.clone();
+        let (_, shutdown) =
+            router_with_shutdown(&path, "fixture-workspace-token".into(), defaults, config)
+                .unwrap();
+        let restored = shutdown.workspace.clone();
+        let request = restored.full().tool_permissions[0].clone();
+        assert!(request.decision.is_none() && !request.expired);
+        assert_eq!(
+            crate::spawn_attempts::view(&restored, &f.caller).unwrap()[0]["phase"],
+            "pending_approval"
+        );
+        decide(&restored, &f.caller, &f.run, true, "Spawn Across").await;
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let outcome = crate::spawn_attempts::view(&restored, &f.caller).unwrap()[0].clone();
+                if outcome["phase"] != "pending_approval"
+                    && outcome["phase"] != "preparing_workspace"
+                {
+                    return outcome;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome["spawn_attempt"], attempt.as_str());
+        assert_eq!(outcome["phase"], "created_queued");
+        assert_eq!(restored.full().sessions.len(), 2);
+        shutdown.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn parent_end_keeps_a_pending_http_spawn_approval_and_revokes_the_run() {
         let f = Fixture::new_missing(Permission::Ask);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!(
@@ -2819,30 +3062,25 @@ mod tests {
         let headers = durable_headers(&f, "parent-end");
         let stale_headers = headers.clone();
         let stale_endpoint = endpoint.clone();
-        let request = tokio::spawn(async move {
+        // The reply does not wait for the human.
+        let response: Value = tokio::time::timeout(
+            Duration::from_secs(5),
             reqwest::Client::new()
                 .post(endpoint)
                 .headers(headers)
                 .json(&json!({"title":"Pending","task":"Verify"}))
-                .send()
-                .await
-                .unwrap()
-        });
-        let mut events = f.workspace.snapshots.subscribe();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !events
-                .borrow()
-                .tool_permissions
-                .iter()
-                .any(|p| p.decision.is_none())
-            {
-                events.changed().await.unwrap();
-            }
-        })
+                .send(),
+        )
+        .await
+        .expect("Spawn awaiting approval held the HTTP reply")
+        .unwrap()
+        .json()
         .await
         .unwrap();
-        // Hold future work explicitly. Ending the run must cancel the old
-        // approval, without clearing a human hold or replaying the spawn.
+        assert_eq!(response["phase"], "pending_approval");
+        let attempt = response["spawn_attempt"].as_str().unwrap().to_owned();
+        // Hold future work explicitly. Ending the run keeps the approval
+        // open, without clearing a human hold or replaying the spawn.
         f.change(|s| {
             s.submissions.push(Submission {
                 id: "human-hold".into(),
@@ -2857,15 +3095,18 @@ mod tests {
             });
         });
         f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
-        let response = tokio::time::timeout(Duration::from_secs(5), request)
-            .await
-            .expect("Normal parent end left HTTP approval pending")
-            .unwrap();
-        let response: Value = response.json().await.unwrap();
-        assert_eq!(response["phase"], "cancelled");
         let snapshot = f.workspace.full();
         assert_eq!(snapshot.sessions.len(), 1);
-        assert!(snapshot.tool_permissions.iter().all(|p| p.expired));
+        assert!(
+            snapshot
+                .tool_permissions
+                .iter()
+                .all(|p| !p.expired && p.decision.is_none())
+        );
+        assert!(spawn_notices(&f).is_empty());
+        decide(&f.workspace, &f.caller, &f.run, false, "Spawn Pending").await;
+        assert_eq!(await_outcome(&f, &attempt).await["phase"], "denied");
+        let snapshot = f.workspace.full();
         assert_eq!(
             snapshot
                 .submissions
@@ -3076,32 +3317,87 @@ mod tests {
                 .permissions
                 .insert(Task::Review, Permission::Ask);
         });
-        let (value, ()) = tokio::join!(
-            durable_spawn(
-                &f,
-                "review-raise",
-                json!({"title":"Review","task":"Verify","permissions":{"review":"allow"}})
+        let args = json!({"title":"Review","task":"Verify","permissions":{"review":"allow"}});
+        let pending = durable_spawn(&f, "review-raise", args).await;
+        // The policy changes while the request waits for the human.
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Review, Permission::Deny);
+        });
+        decide(
+            &f.workspace,
+            &f.caller,
+            &f.run,
+            true,
+            "review allow (parent: ask)",
+        )
+        .await;
+        let outcome = await_outcome(&f, pending["spawn_attempt"].as_str().unwrap()).await;
+        assert_eq!(outcome["phase"], "rejected");
+        assert_eq!(f.workspace.full().sessions.len(), 1);
+        assert_eq!(f.workspace.full().tool_permissions.len(), 1);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn approved_spawn_is_rejected_when_the_parent_mode_changed() {
+        let f = Fixture::new(Permission::Allow);
+        let pending = durable_spawn(
+            &f,
+            "mode-raise",
+            json!({"title":"Mode","task":"Verify","execution_approval":"unrestricted"}),
+        )
+        .await;
+        assert_eq!(pending["phase"], "pending_approval");
+        // The approval named the raise from the parent's mode; now it is none.
+        f.change(|s| {
+            s.sessions[0].worker.as_mut().unwrap().execution = Some(ExecutionSettings {
+                approval: ApprovalMode::Unrestricted,
+            })
+        });
+        decide(&f.workspace, &f.caller, &f.run, true, "Spawn Mode").await;
+        let outcome = await_outcome(&f, pending["spawn_attempt"].as_str().unwrap()).await;
+        assert_eq!(outcome["phase"], "rejected");
+        assert_eq!(f.workspace.full().sessions.len(), 1);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn archiving_the_caller_expires_its_spawn_approval() {
+        let f = Fixture::new_missing(Permission::Ask);
+        let pending =
+            durable_spawn(&f, "archived", json!({"title":"Archived","task":"Verify"})).await;
+        let attempt = pending["spawn_attempt"].as_str().unwrap().to_owned();
+        f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
+        let revision = f.workspace.full().revision;
+        human(
+            &f,
+            crate::tests::env(
+                revision,
+                Command::SetSessionArchived {
+                    session_id: f.caller.clone(),
+                    archived: true,
+                },
             ),
-            async {
-                decide(
-                    &f.workspace,
-                    &f.caller,
-                    &f.run,
-                    true,
-                    "review allow (parent: ask)",
-                )
-                .await;
-                f.change(|s| {
-                    s.projects[0]
-                        .defaults
-                        .permissions
-                        .insert(Task::Review, Permission::Deny);
-                });
-            }
+        )
+        .unwrap();
+        let request = &f.workspace.full().tool_permissions[0];
+        assert!(request.expired && request.decision.is_none());
+        let outcome = await_outcome(&f, &attempt).await;
+        assert_eq!(outcome["phase"], "cancelled");
+        let snapshot = f.workspace.full();
+        let late = crate::tests::env(
+            snapshot.revision,
+            Command::RespondPermission {
+                permission_id: snapshot.tool_permissions[0].id.clone(),
+                run_id: f.run.clone(),
+                allow: true,
+            },
         );
-        assert_eq!(value["phase"], "rejected");
-        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
-        assert_eq!(f.workspace.snapshots.borrow().tool_permissions.len(), 1);
+        assert!(human(&f, late).is_err());
+        assert_eq!(f.workspace.full().sessions.len(), 1);
         f.finish().await;
     }
 
@@ -4607,7 +4903,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 31);
+        assert_eq!(schema, 32);
         f.finish().await;
     }
     #[tokio::test]
@@ -5742,7 +6038,7 @@ mod tests {
                     "{}",
                     error.message
                 ),
-                _ => assert!(error.message.contains("denied"), "{}", error.message),
+                _ => assert!(error.message.contains("stopped"), "{}", error.message),
             }
             assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1, "{change}");
             assert!(!missing.exists(), "{change}");
@@ -6507,6 +6803,7 @@ mod tests {
                 description: "Test".into(),
                 decision: None,
                 expired: false,
+                spawn_attempt: None,
             })
         });
         assert!(

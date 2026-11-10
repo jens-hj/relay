@@ -335,7 +335,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 31 {
+        if version > 32 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -356,7 +356,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS window_start_claims(window_key TEXT PRIMARY KEY, owner TEXT NOT NULL, claimed_at INTEGER NOT NULL, lease_until INTEGER NOT NULL, retry_at INTEGER NOT NULL, attempts INTEGER NOT NULL, settled INTEGER NOT NULL, dispatched INTEGER NOT NULL DEFAULT 0);
-             CREATE TABLE IF NOT EXISTS spawn_attempts(id TEXT PRIMARY KEY, caller TEXT NOT NULL, run TEXT NOT NULL, project TEXT NOT NULL, input_hash TEXT NOT NULL, phase TEXT NOT NULL, child TEXT, response TEXT, delivered INTEGER NOT NULL DEFAULT 0, notice_id TEXT);
+             CREATE TABLE IF NOT EXISTS spawn_attempts(id TEXT PRIMARY KEY, caller TEXT NOT NULL, run TEXT NOT NULL, project TEXT NOT NULL, input_hash TEXT NOT NULL, phase TEXT NOT NULL, child TEXT, response TEXT, delivered INTEGER NOT NULL DEFAULT 0, notice_id TEXT, request TEXT);
              DROP INDEX IF EXISTS spawn_attempt_input;
              CREATE TABLE IF NOT EXISTS spawn_native_calls(caller TEXT NOT NULL, run TEXT NOT NULL, native_id TEXT NOT NULL, attempt TEXT NOT NULL, input_hash TEXT NOT NULL, PRIMARY KEY(caller,run,native_id));
              CREATE TABLE IF NOT EXISTS spawn_notice_consumption(notice_id TEXT PRIMARY KEY, caller TEXT NOT NULL);
@@ -365,8 +365,22 @@ impl Store {
              CREATE TABLE IF NOT EXISTS lifecycle_events(child_session TEXT NOT NULL,child_run TEXT NOT NULL,parent_session TEXT NOT NULL,disposition TEXT NOT NULL,notice_id TEXT,hold_reason TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,held INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(child_session,child_run,parent_session));
              CREATE INDEX IF NOT EXISTS lifecycle_pending ON lifecycle_events(parent_session,disposition);
              CREATE TABLE IF NOT EXISTS lifecycle_holds(session_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,reason TEXT NOT NULL);
-             PRAGMA user_version = 31;"
+             PRAGMA user_version = 32;"
         ).map_err(Error::internal)?;
+        // Schema 32 keeps a spawn awaiting approval, to continue it once
+        // decided; older servers would cancel it and drop the request.
+        let request_column: bool = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('spawn_attempts') WHERE name='request'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(Error::internal)?;
+        if !request_column {
+            connection
+                .execute("ALTER TABLE spawn_attempts ADD COLUMN request TEXT", [])
+                .map_err(Error::internal)?;
+        }
         // Schema 31 stores the transcript one row per message (see messages.rs);
         // older servers would read an empty transcript and drop new messages.
         connection
@@ -1107,25 +1121,33 @@ impl Store {
                             && !p.expired
                     })
                     .ok_or_else(|| Error::invalid("Permission request is no longer pending"))?;
-                let active = snapshot
-                    .sessions
-                    .iter()
-                    .find(|s| s.id == permission.session_id)
-                    .and_then(|s| s.worker.as_ref())
-                    .is_some_and(|w| runtime::active(&w.status));
-                let current: Option<String> = transaction
-                    .query_row(
-                        "SELECT run_id FROM runs WHERE session_id=?1",
-                        [&permission.session_id],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(Error::internal)?;
-                if !active || current.as_deref() != Some(run_id.as_str()) {
-                    return Err(Error::invalid("Permission run is no longer active"));
+                // A spawn awaiting approval is decided without its run: the
+                // decision continues or ends the durable attempt.
+                if let Some(attempt) = permission.spawn_attempt.clone() {
+                    permission.decision = Some(allow);
+                    snapshot.revision += 1;
+                    action = Some(Action::SpawnDecided { attempt, allow });
+                } else {
+                    let active = snapshot
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == permission.session_id)
+                        .and_then(|s| s.worker.as_ref())
+                        .is_some_and(|w| runtime::active(&w.status));
+                    let current: Option<String> = transaction
+                        .query_row(
+                            "SELECT run_id FROM runs WHERE session_id=?1",
+                            [&permission.session_id],
+                            |r| r.get(0),
+                        )
+                        .optional()
+                        .map_err(Error::internal)?;
+                    if !active || current.as_deref() != Some(run_id.as_str()) {
+                        return Err(Error::invalid("Permission run is no longer active"));
+                    }
+                    permission.decision = Some(allow);
+                    snapshot.revision += 1;
                 }
-                permission.decision = Some(allow);
-                snapshot.revision += 1;
             }
             command @ (Command::SubmitTurn { .. }
             | Command::PromoteTurn { .. }
@@ -1385,6 +1407,7 @@ impl Store {
             transaction.execute("INSERT INTO syncs(project_id,request_id) VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET request_id=excluded.request_id",params![project_id,envelope.request_id]).map_err(Error::internal)?;
         }
         notices::superseded(&transaction)?;
+        spawn_attempts::expire_detached(&transaction, &snapshot)?;
         let snapshot = crate::persist(
             &self.snapshot_cache,
             &self.transcripts,
@@ -1458,6 +1481,11 @@ enum Action {
         include_descendants: bool,
     },
     Promote(String),
+    /// A human decided a spawn awaiting approval outside its run.
+    SpawnDecided {
+        attempt: String,
+        allow: bool,
+    },
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -1985,7 +2013,14 @@ pub fn router_with_browser(
         ));
     }
     let mut store = Store::open(path.as_ref(), defaults.clone())?;
-    spawn_attempts::recover(&store.connection)?;
+    let awaiting = store
+        .snapshot()?
+        .tool_permissions
+        .iter()
+        .filter(|p| p.decision.is_none() && !p.expired)
+        .filter_map(|p| p.spawn_attempt.clone())
+        .collect();
+    let detached = spawn_attempts::recover(&store.connection, &awaiting)?;
     let browser = browser::BrowserAuth::initialize(&mut store, &token, browser_config)?;
     let mut initial = store.snapshot()?;
     let mut changed = false;
@@ -2167,6 +2202,10 @@ pub fn router_with_browser(
         if permission.decision.is_none()
             && !permission.expired
             && !fixtures.contains(&permission.session_id)
+            && !permission
+                .spawn_attempt
+                .as_ref()
+                .is_some_and(|id| detached.contains(id))
         {
             permission.expired = true;
             changed = true;
@@ -2667,6 +2706,9 @@ async fn command(
                 if let Some(control) = store.controls.get(&session_id) {
                     control.send_replace(true);
                 }
+            }
+            Some(Action::SpawnDecided { attempt, allow }) => {
+                handle.spawn(agent_tools::decided(workspace.clone(), attempt, allow));
             }
             Some(Action::Operations(ids)) => {
                 for id in ids {
