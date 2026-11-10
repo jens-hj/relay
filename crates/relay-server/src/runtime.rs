@@ -1362,6 +1362,8 @@ pub(crate) async fn run(
         }
     }
     // Diff collection runs outside the writer lock and async executor.
+    #[cfg(test)]
+    runtime_gate(&workspace, &session_id, "before_review").await;
     let workspaces = {
         let source = workspace.snapshots.borrow();
         let session = source.sessions.iter().find(|s| s.id == session_id).unwrap();
@@ -1426,18 +1428,18 @@ pub(crate) async fn run(
                             }
                         }
                         Err(error) => {
-                            w.error = Some(error.to_string());
-                            if !stopped {
-                                w.status = WorkerStatus::Failed;
+                            // Review errors must not pause queued replies after
+                            // a successfully completed harness turn.
+                            if w.error.is_none() {
+                                w.error = Some(error.to_string());
                             }
                         }
                     }
                 }
             }
             Err(error) => {
-                w.error = Some(error.to_string());
-                if !stopped {
-                    w.status = WorkerStatus::Failed;
+                if w.error.is_none() {
+                    w.error = Some(error.to_string());
                 }
             }
         }

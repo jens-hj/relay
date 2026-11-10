@@ -2573,3 +2573,142 @@ async fn archive_reclaims_ignored_build_output_and_keeps_changes_and_worktree() 
     );
     assert!(repo.join("target").is_dir());
 }
+
+#[tokio::test]
+async fn review_failure_preserves_success_and_dispatches_queued_notice() {
+    review_failure_case("success").await;
+}
+
+#[tokio::test]
+async fn review_failure_preserves_execution_failure_and_human_pause() {
+    review_failure_case("failure").await;
+    review_failure_case("paused").await;
+}
+
+async fn review_failure_case(mode: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let source = if mode == "failure" {
+        format!("touch failure\n{CLAUDE_FAKE}")
+    } else {
+        CLAUDE_FAKE.into()
+    };
+    let w = claude_workspace(dir.path(), &source);
+    let s = w.snapshots.borrow().clone();
+    let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
+    let gate = runtime::RuntimeGate::new();
+    w.store
+        .lock()
+        .unwrap()
+        .runtime_gates
+        .insert((id.clone(), "before_review"), gate.clone());
+    let task = tokio::spawn(runtime::run(w.clone(), id.clone(), run.clone(), prompt, rx));
+    gate.entered().await;
+    w.update_run(&id, &run, |s| {
+        let session = s.sessions.iter_mut().find(|s| s.id == id).unwrap();
+        // A missing review base is an inspection failure, not execution failure.
+        for space in &mut session.workspaces {
+            if space.repository {
+                space.base_commit = Some("missing-review-base".into());
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    let notice = "relay-notice-review-regression";
+    {
+        let mut store = w.store.lock().unwrap();
+        let snapshot = store.snapshot().unwrap();
+        crate::notices::enqueue(
+            &w,
+            &mut store,
+            snapshot,
+            &id,
+            crate::notices::Delivery {
+                text: "Synthetic child finished".into(),
+                id: notice.into(),
+                attempt: None,
+                allow_launch: true,
+                lifecycle: &[],
+                eligible_at: None,
+            },
+        )
+        .unwrap();
+    }
+    if mode == "paused" {
+        apply(
+            &w,
+            Command::PauseQueue {
+                session_id: id.clone(),
+            },
+        );
+    }
+    gate.open();
+    task.await.unwrap();
+    let snapshot = w.snapshots.borrow().clone();
+    assert!(
+        snapshot.messages.is_empty(),
+        "Published snapshots must stay message-free"
+    );
+    if mode != "success" {
+        assert_eq!(
+            snapshot
+                .submissions
+                .iter()
+                .find(|s| s.id == notice)
+                .unwrap()
+                .state,
+            SubmissionState::Paused
+        );
+        assert_eq!(
+            worker(&snapshot, &id).status,
+            if mode == "failure" {
+                WorkerStatus::Failed
+            } else {
+                WorkerStatus::Completed
+            }
+        );
+        let error = worker(&snapshot, &id).error.as_deref().unwrap();
+        if mode == "failure" {
+            assert!(
+                !error.contains("Git review failed"),
+                "Preserve the execution error"
+            );
+        } else {
+            assert!(
+                error.contains("Git review failed"),
+                "Keep the review diagnostic"
+            );
+        }
+        return;
+    }
+    assert_ne!(
+        snapshot
+            .submissions
+            .iter()
+            .find(|s| s.id == notice)
+            .unwrap()
+            .state,
+        SubmissionState::Paused,
+        "Successful execution must not pause the notice after review failure"
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = w.snapshots.borrow().clone();
+            if let Some(turn) = snapshot.submissions.iter().find(|s| s.id == notice)
+                && turn.state == SubmissionState::Completed
+            {
+                assert_eq!(worker(&snapshot, &id).status, WorkerStatus::Completed);
+                assert!(
+                    !snapshot
+                        .submissions
+                        .iter()
+                        .any(|s| s.session_id == id && s.state == SubmissionState::Paused)
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
