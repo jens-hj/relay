@@ -809,7 +809,7 @@ pub(super) async fn execute(
             .await?;
         Ok::<_, Error>((thread, request_id))
     };
-    let result = tokio::select! { result = setup => result, _ = stop.changed() => return Ok(()) };
+    let result = tokio::select! { result = setup => result, _ = async { drop(stop.wait_for(|stopped| *stopped).await); } => return Ok(()) };
     phases.report(
         "Codex turn setup",
         if result.is_ok() { "finished" } else { "failed" },
@@ -823,7 +823,12 @@ pub(super) async fn execute(
     loop {
         tokio::select! {
             biased;
-            _ = stop.changed() => {
+            // An inline permission waiter may already have consumed the true
+            // notification on this receiver. Cancellation is a latched value,
+            // not an edge; do not wait for another notification to interrupt.
+            // Drop the returned watch Ref inside the future: select's output
+            // must own only (), so the inline waiter can borrow stop again.
+            _ = async { drop(stop.wait_for(|stopped| *stopped).await); } => {
                 if let Some(turn) = &turn {
                     let _ = rpc.send(json!({"id":999999,"method":"turn/interrupt","params":{"threadId":thread,"turnId":turn}})).await;
                     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {

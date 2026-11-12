@@ -41,6 +41,9 @@ impl Server {
         self.shutdown = shutdown;
     }
     async fn start() -> Self {
+        Self::start_with_runtime(RuntimeConfig::default()).await
+    }
+    async fn start_with_runtime(runtime: RuntimeConfig) -> Self {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("setup"), CODE).unwrap();
         let web = dir.path().join("web");
@@ -64,7 +67,7 @@ impl Server {
             dir.path().join("db"),
             TOKEN.into(),
             AgentProfile::default(),
-            RuntimeConfig::default(),
+            runtime,
             BrowserConfig {
                 public_origin: Some(ORIGIN.into()),
                 setup_token_file: Some(dir.path().join("setup")),
@@ -601,20 +604,20 @@ async fn migration_rotation_restart_and_disabled_enrollment() {
     let s = Server::start().await;
     let (cookie, _) = s.enroll().await;
     let store = Store::open(&s.dir.path().join("db"), AgentProfile::default()).unwrap();
-    let before = store.snapshot().unwrap();
+    let before = store.full();
     store
         .connection
         .pragma_update(None, "user_version", 5)
         .unwrap();
     drop(store);
     let mut store = Store::open(&s.dir.path().join("db"), AgentProfile::default()).unwrap();
-    assert_eq!(store.snapshot().unwrap(), before);
+    assert_eq!(store.full(), before);
     assert_eq!(
         store
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        30
+        33
     );
     BrowserAuth::initialize(
         &mut store,
@@ -737,11 +740,11 @@ fn real_schema_five_migration_preserves_snapshot_receipts_and_assets() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let store = Store::open(&path, AgentProfile::default()).unwrap();
-    let snapshot = store.snapshot().unwrap();
+    let snapshot = store.full();
     store.connection.execute_batch("DROP TABLE browser_owner; DROP TABLE browser_setup; DROP TABLE browser_sessions; DROP TABLE browser_recovery; DROP TABLE browser_state; PRAGMA user_version=5; INSERT INTO assets VALUES('kept','metadata',X'0102'); INSERT INTO receipts VALUES('receipt','kept');").unwrap();
     drop(store);
     let store = Store::open(&path, AgentProfile::default()).unwrap();
-    assert_eq!(snapshot, store.snapshot().unwrap());
+    assert_eq!(snapshot, store.full());
     assert_eq!(
         store
             .connection
@@ -859,4 +862,453 @@ async fn phone_forms_use_public_css_and_invalid_setup_is_rejected_before_passwor
     assert!(html.contains("width=device-width, initial-scale=1"));
     assert!(html.contains("href=/auth/style.css"));
     assert_eq!(s.form("/setup", "owner", "short", CODE).await.status(), 401);
+}
+
+/// Opt-in fixture for a real Chromium run. All state and authentication are synthetic;
+/// the harness reads its protected auth file internally and emits only test results.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires isolated browser harness and protected fixture directory"]
+async fn isolated_draft_recovery_browser_fixture() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = PathBuf::from(
+        std::env::var_os("RELAY_DRAFT_FIXTURE_DIR").expect("isolated fixture directory"),
+    );
+    let input: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("fixture-input.json")).unwrap()).unwrap();
+    let db = dir.join("db");
+    let mut initial = crate::tests::live();
+    for project in &mut initial.projects {
+        project.fixture = false;
+        project.github = None;
+    }
+    for session in &mut initial.sessions {
+        session.fixture = false;
+    }
+    {
+        let mut store = Store::open(&db, AgentProfile::default()).unwrap();
+        store.save(&initial).unwrap();
+    }
+    let token = random();
+    let (app, shutdown) = router_with_browser(
+        &db,
+        token,
+        AgentProfile::default(),
+        RuntimeConfig {
+            remote: None,
+            repository: None,
+            projects_root: Some(dir.join("projects")),
+            gh: dir.join("missing-gh"),
+            glab: dir.join("missing-glab"),
+            codex: dir.join("missing-codex"),
+            claude: dir.join("missing-claude"),
+            nix: dir.join("missing-nix"),
+            background_task_limit: Duration::from_secs(60),
+            worker: Default::default(),
+        },
+        BrowserConfig {
+            public_origin: Some(input["origin"].as_str().unwrap().into()),
+            setup_token_file: None,
+            web_root: Some(PathBuf::from(input["web_root"].as_str().unwrap())),
+        },
+    )
+    .unwrap();
+    let cookie = {
+        let store = shutdown.workspace.store.lock().unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO browser_owner(id,username,password) VALUES(1,'fixture',?1)",
+                params![password_hash(&random()).unwrap()],
+            )
+            .unwrap();
+        new_session(&store.connection).unwrap()
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // The first save never commits and outlasts the client's complete-response deadline.
+    let saves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = saves.clone();
+    let app = app.layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let seen = seen.clone();
+            async move {
+                if request.method() == Method::POST
+                    && request.uri().path().starts_with("/v1/drafts/")
+                    && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+                {
+                    tokio::time::sleep(Duration::from_secs(31)).await;
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                next.run(request).await
+            }
+        },
+    ));
+    let auth = dir.join("fixture-auth.json");
+    std::fs::write(
+        &auth,
+        serde_json::to_vec(&serde_json::json!({"port":port,"cookie":cookie})).unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(auth, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(180), async {
+        while !dir.join("fixture-stop").exists() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let store = shutdown.workspace.store.lock().unwrap();
+    let receipts: u64 = store
+        .connection
+        .query_row("SELECT count(*) FROM draft_receipts", [], |r| r.get(0))
+        .unwrap();
+    // Numeric result only, no session IDs, requests, credentials or draft content.
+    std::fs::write(dir.join("fixture-result.json"),serde_json::to_vec(&serde_json::json!({"save_requests":saves.load(std::sync::atomic::Ordering::SeqCst),"receipts":receipts})).unwrap()).unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn guarded_config_rename_browser_router_requires_auth_origin_csrf_and_protocol() {
+    let s = Server::start().await;
+    let (cookie, _) = s.enroll().await;
+    let session: serde_json::Value = s.session(&cookie).await.json().await.unwrap();
+    let csrf = session["csrf_token"].as_str().unwrap();
+    let initial = s.shutdown.workspace.snapshots.borrow().clone();
+    let config = &initial.agent_configs[0];
+    let request = crate::tests::env(
+        initial.revision,
+        Command::RenameAgentConfig {
+            agent_config_id: config.id.clone(),
+            name: "Browser rename".into(),
+            expected: AgentConfigRenameGuard::capture(config),
+        },
+    );
+    let url = format!("{}/v1/commands", s.url);
+    for (origin, token, protocol, status) in [
+        (None, Some(csrf), Some(PROTOCOL_VERSION), 403),
+        (
+            Some("https://wrong.invalid"),
+            Some(csrf),
+            Some(PROTOCOL_VERSION),
+            403,
+        ),
+        (Some(ORIGIN), None, Some(PROTOCOL_VERSION), 403),
+        (Some(ORIGIN), Some(csrf), Some(0), 409),
+    ] {
+        let mut r = s.client.post(&url).header("cookie", &cookie).json(&request);
+        if let Some(value) = origin {
+            r = r.header("origin", value);
+        }
+        if let Some(value) = token {
+            r = r.header("x-relay-csrf", value);
+        }
+        if let Some(value) = protocol {
+            r = r.header("x-relay-protocol", value.to_string());
+        }
+        assert_eq!(r.send().await.unwrap().status(), status);
+        assert_eq!(
+            s.shutdown.workspace.snapshots.borrow().revision,
+            initial.revision
+        );
+    }
+    assert_eq!(
+        s.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    let send = || {
+        s.client
+            .post(&url)
+            .header("cookie", &cookie)
+            .header("origin", ORIGIN)
+            .header("x-relay-csrf", csrf)
+            .header("x-relay-protocol", PROTOCOL_VERSION.to_string())
+            .json(&request)
+    };
+    assert_eq!(send().send().await.unwrap().status(), 200);
+    let committed = s.shutdown.workspace.snapshots.borrow().clone();
+    assert_eq!(committed.agent_configs[0].name, "Browser rename");
+    assert_eq!(send().send().await.unwrap().status(), 200);
+    assert_eq!(*s.shutdown.workspace.snapshots.borrow(), committed);
+    // A known receipt is still behind the authentication/CSRF/protocol boundary.
+    assert_eq!(
+        s.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        s.client
+            .post(&url)
+            .header("cookie", &cookie)
+            .header("origin", ORIGIN)
+            .header("x-relay-csrf", "invalid")
+            .header("x-relay-protocol", PROTOCOL_VERSION.to_string())
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        s.client
+            .post(&url)
+            .header("cookie", &cookie)
+            .header("origin", ORIGIN)
+            .header("x-relay-csrf", csrf)
+            .header("x-relay-protocol", "0")
+            .json(&request)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+    assert_eq!(*s.shutdown.workspace.snapshots.borrow(), committed);
+    let count: u64 = s
+        .db()
+        .query_row(
+            "SELECT count(*) FROM receipts WHERE request_id=?1",
+            [request.request_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[path = "latency_tests.rs"]
+mod latency_tests;
+
+#[path = "scheduling_tests.rs"]
+mod scheduling_tests;
+
+#[tokio::test]
+async fn approval_feedback_production_router_auth_replay_deny_and_expiry() {
+    let s = Server::start_with_runtime(RuntimeConfig {
+        codex: "/missing/approval-test-codex".into(),
+        claude: "/missing/approval-test-claude".into(),
+        nix: "/missing/approval-test-nix".into(),
+        ..Default::default()
+    })
+    .await;
+    let (cookie, _) = s.enroll().await;
+    let session: serde_json::Value = s.session(&cookie).await.json().await.unwrap();
+    let csrf = session["csrf_token"].as_str().unwrap();
+    let w = &s.shutdown.workspace;
+    let session_count = w.snapshots.borrow().sessions.len();
+    let (worker, run, revision) = {
+        let mut store = w.store.lock().unwrap();
+        let mut snapshot = store.full();
+        let session = snapshot.sessions.first_mut().unwrap();
+        session.fixture = false;
+        session.worker = Some(WorkerRun {
+            model: Some("synthetic".into()),
+            context_tokens: None,
+            context_window: None,
+            last_usage: None,
+            harness: Harness::Codex,
+            execution: None,
+            launched_network_policy: None,
+            status: WorkerStatus::Running,
+            thread_id: None,
+            worktree: None,
+            branch: None,
+            base_commit: None,
+            error: None,
+            usage: None,
+            changes: None,
+        });
+        let worker = session.id.clone();
+        let run = "synthetic-approval-run".to_string();
+        store
+            .connection
+            .execute(
+                "INSERT INTO runs(session_id,run_id) VALUES(?1,?2)",
+                [&worker, &run],
+            )
+            .unwrap();
+        for id in ["denied", "expired", "wrong-run", "approved", "racing"] {
+            snapshot.tool_permissions.push(ToolPermission {
+                id: id.into(),
+                session_id: worker.clone(),
+                run_id: run.clone(),
+                tool: "synthetic".into(),
+                description: "synthetic metadata".into(),
+                decision: None,
+                expired: id == "expired",
+                spawn_attempt: None,
+            });
+        }
+        snapshot.revision += 1;
+        store.save(&snapshot).unwrap();
+        w.snapshots.send_replace((snapshot.clone()).into());
+        (worker, run, snapshot.revision)
+    };
+    let url = format!("{}/v1/commands", s.url);
+    let envelope = |id: &str, run_id: &str, allow| {
+        crate::tests::env(
+            revision,
+            Command::RespondPermission {
+                permission_id: id.into(),
+                run_id: run_id.into(),
+                allow,
+            },
+        )
+    };
+    let post = |request: &CommandEnvelope| {
+        s.client
+            .post(&url)
+            .header("cookie", &cookie)
+            .header("origin", ORIGIN)
+            .header("x-relay-csrf", csrf)
+            .header("x-relay-protocol", PROTOCOL_VERSION.to_string())
+            .json(request)
+    };
+    let denied = envelope("denied", &run, false);
+    assert_eq!(
+        s.client
+            .post(&url)
+            .json(&denied)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert_eq!(
+        s.client
+            .post(&url)
+            .header("cookie", &cookie)
+            .header("origin", ORIGIN)
+            .header("x-relay-protocol", PROTOCOL_VERSION.to_string())
+            .json(&denied)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        post(&denied)
+            .header("origin", "https://wrong.invalid")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(post(&denied).send().await.unwrap().status(), 200);
+    assert_eq!(post(&denied).send().await.unwrap().status(), 200);
+    assert_eq!(
+        post(&envelope("denied", &run, true))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        422
+    );
+    let mut altered = denied.clone();
+    altered.command = Command::RespondPermission {
+        permission_id: "denied".into(),
+        run_id: run.clone(),
+        allow: true,
+    };
+    assert_eq!(post(&altered).send().await.unwrap().status(), 422);
+    for request in [
+        envelope("expired", &run, true),
+        envelope("wrong-run", "another-run", true),
+    ] {
+        assert_eq!(post(&request).send().await.unwrap().status(), 422);
+    }
+    let approved = envelope("approved", &run, true);
+    assert_eq!(post(&approved).send().await.unwrap().status(), 200);
+    // End the exact run before the remaining decision. No child/harness is started.
+    w.update_run(&worker, &run, |snapshot| {
+        snapshot
+            .sessions
+            .iter_mut()
+            .find(|v| v.id == worker)
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .status = WorkerStatus::Completed;
+        crate::harness::expire(snapshot, &worker, &run);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        post(&envelope("racing", &run, true))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        422
+    );
+    // A committed approval's ACK may be replayed after expiry, but adds no action.
+    assert_eq!(post(&approved).send().await.unwrap().status(), 200);
+    assert_eq!(
+        s.client
+            .post(&url)
+            .header("cookie", &cookie)
+            .header("origin", ORIGIN)
+            .header("x-relay-protocol", PROTOCOL_VERSION.to_string())
+            .header("x-relay-csrf", "invalid")
+            .json(&approved)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let store = w.store.lock().unwrap();
+    let snapshot = store.full();
+    assert_eq!(snapshot.sessions.len(), session_count);
+    assert_eq!(
+        snapshot
+            .tool_permissions
+            .iter()
+            .find(|p| p.id == "denied")
+            .unwrap()
+            .decision,
+        Some(false)
+    );
+    assert_eq!(
+        snapshot
+            .tool_permissions
+            .iter()
+            .find(|p| p.id == "approved")
+            .unwrap()
+            .decision,
+        Some(true)
+    );
+    assert_eq!(
+        snapshot
+            .tool_permissions
+            .iter()
+            .find(|p| p.id == "racing")
+            .unwrap()
+            .decision,
+        None
+    );
+    let receipts: u64 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM receipts WHERE request_id=?1",
+            [&denied.request_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipts, 1);
 }

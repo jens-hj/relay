@@ -878,7 +878,7 @@ fn command_discovery_errors_are_visible_and_retryable() {
             .unwrap()
             .contains("timed out")
     );
-    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let (sender, mut requests) = crate::buffer_network::request_channel();
     mounted.model.buffer_requests.set(Some(sender));
     mounted.click("Retry command discovery");
     assert!(
@@ -890,7 +890,7 @@ fn command_discovery_errors_are_visible_and_retryable() {
 #[test]
 fn first_director_draft_requests_command_discovery_and_completes() {
     let mounted = mount(false, 820.0);
-    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let (sender, mut requests) = crate::buffer_network::request_channel();
     mounted.model.buffer_requests.set(Some(sender));
     mounted
         ._scope
@@ -1471,7 +1471,7 @@ fn page_banner_escape_dismisses_settings_failure_without_changing_its_draft() {
 fn request_sending_and_send_pending_clear_on_ack_and_conflicts_keep_actions() {
     let mut mounted = mount(false, 1380.0);
     buffer_worker(&mounted);
-    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let (sender, mut requests) = crate::buffer_network::request_channel();
     mounted.model.buffer_requests.set(Some(sender));
     let model = mounted.model;
     let mut send = |text: &str, serial| {
@@ -1482,10 +1482,14 @@ fn request_sending_and_send_pending_clear_on_ack_and_conflicts_keep_actions() {
             model.submission_pending(),
             "pending includes the draft-save acknowledgement stage"
         );
-        let (session, request) = loop {
+        let (session, request, generation) = loop {
             match requests.try_recv().unwrap() {
-                crate::buffer_network::Request::Save { session, request } => {
-                    break (session, request);
+                crate::buffer_network::Request::Save {
+                    session,
+                    request,
+                    generation,
+                } => {
+                    break (session, request, generation);
                 }
                 crate::buffer_network::Request::Forget(_) => {}
                 _ => panic!("Expected draft save"),
@@ -1506,6 +1510,7 @@ fn request_sending_and_send_pending_clear_on_ack_and_conflicts_keep_actions() {
                 outcomes: std::collections::BTreeMap::from([(
                     request.request_id.clone(),
                     crate::buffer_network::Outcome::Saved {
+                        generation,
                         session,
                         request,
                         result: Ok(saved),
@@ -2552,10 +2557,11 @@ fn worker_running_stop_completed_review_and_continue_use_recorded_session() {
     mounted.model.open_session(session_id.clone());
     mounted.settle();
     mounted.focus("Stop");
+    seed_stop_targets(&mounted);
     mounted.click("Stop");
     let stop = mounted.commands.try_recv().unwrap();
     assert!(
-        matches!(stop.command, Command::StopWorker { session_id: id, include_descendants: false } if id == session_id)
+        matches!(stop.command, Command::StopWorkerRuns { session_id: id, include_descendants: false, .. } if id == session_id)
     );
     let mut snapshot = mounted.model.snapshot.get_untracked();
     snapshot.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed;
@@ -2767,10 +2773,11 @@ fn removed_board_items_keep_history_but_block_new_turns_until_restored() {
         .update(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Running);
     mounted.settle();
     mounted.focus("Stop");
+    seed_stop_targets(&mounted);
     mounted.click("Stop");
     assert!(matches!(
         mounted.commands.try_recv().unwrap().command,
-        Command::StopWorker { .. }
+        Command::StopWorkerRuns { .. }
     ));
     mounted.model.busy.set(false);
     mounted.model.snapshot.update(|s| {
@@ -3409,7 +3416,7 @@ fn recovered_queue_edit_sends_a_new_turn_without_first_repeating_the_rejection()
     use crate::buffer;
     let mut mounted = mount(false, 1380.0);
     buffer_worker(&mounted);
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _rx) = crate::buffer_network::request_channel();
     mounted.model.buffer_requests.set(Some(tx));
     buffer::edit(mounted.model, "session-plan", vec![Part::text("Recovered")]);
     mounted.model.buffer.update(|state| {
@@ -3429,7 +3436,7 @@ fn rejected_queue_edit_retains_draft_and_releases_pending_request() {
     use crate::{buffer, model::Saved};
     let mut mounted = mount(false, 1380.0);
     buffer_worker(&mounted);
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, _rx) = crate::buffer_network::request_channel();
     mounted.model.buffer_requests.set(Some(tx));
     let draft = Draft {
         session_id: "session-plan".into(),
@@ -3488,7 +3495,7 @@ fn rapid_second_send_waits_for_ack_then_promotes_exact_queue_and_keeps_newer_dra
     };
     let mut mounted = mount(false, 1380.0);
     buffer_worker(&mounted);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::buffer_network::request_channel();
     mounted.model.buffer_requests.set(Some(tx));
     buffer::edit(
         mounted.model,
@@ -3497,7 +3504,12 @@ fn rapid_second_send_waits_for_ack_then_promotes_exact_queue_and_keeps_newer_dra
     );
     buffer::send(mounted.model);
     buffer::send(mounted.model);
-    let Request::Save { session, request } = rx.try_recv().unwrap() else {
+    let Request::Save {
+        session,
+        request,
+        generation,
+    } = rx.try_recv().unwrap()
+    else {
         panic!()
     };
     assert_eq!(plain_text(&request.parts), "Correction");
@@ -3517,6 +3529,7 @@ fn rapid_second_send_waits_for_ack_then_promotes_exact_queue_and_keeps_newer_dra
             outcomes: std::collections::BTreeMap::from([(
                 request.request_id.clone(),
                 Outcome::Saved {
+                    generation,
                     session,
                     request,
                     result: Ok(saved),
@@ -3525,13 +3538,12 @@ fn rapid_second_send_waits_for_ack_then_promotes_exact_queue_and_keeps_newer_dra
             ..Default::default()
         },
     );
-    assert!(mounted.commands.try_recv().is_err());
-    let document = mounted.model.buffer.get_untracked().documents["session-plan"].clone();
-    assert!(document.finalize.is_some());
-    assert!(!document.submitting);
-    mounted.model.syncing.set(false);
-    buffer::flush(mounted.model);
+    // The saved draft version is sufficient; unrelated workspace stream lag
+    // cannot delay submission of this exact message.
     let submitted = mounted.commands.try_recv().unwrap();
+    let document = mounted.model.buffer.get_untracked().documents["session-plan"].clone();
+    assert!(document.finalize.is_none());
+    assert!(document.submitting);
     let Command::SubmitTurn { parts, .. } = &submitted.command else {
         panic!()
     };
@@ -3606,7 +3618,7 @@ fn shared_draft_conflicts_retain_local_content_and_streamed_receipts_confirm_amb
     };
     let mounted = mount(false, 1380.0);
     buffer_worker(&mounted);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::buffer_network::request_channel();
     mounted.model.buffer_requests.set(Some(tx));
     buffer::edit(mounted.model, "session-plan", vec![Part::text("Local")]);
     mounted.model.buffer.update(|s| {
@@ -3614,7 +3626,12 @@ fn shared_draft_conflicts_retain_local_content_and_streamed_receipts_confirm_amb
             std::time::Instant::now() - Duration::from_secs(1)
     });
     buffer::flush(mounted.model);
-    let Request::Save { session, request } = rx.try_recv().unwrap() else {
+    let Request::Save {
+        session,
+        request,
+        generation: _,
+    } = rx.try_recv().unwrap()
+    else {
         panic!()
     };
     buffer::edit(
@@ -3717,7 +3734,7 @@ fn draft_ime_commits_unicode_and_local_recovery_preserves_pending_file_bytes_and
         vec![Part::text("Before"), part, Part::text("After")],
     );
     mounted.model.buffer.set(Default::default());
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::buffer_network::request_channel();
     mounted.model.buffer_requests.set(Some(tx));
     crate::buffer::load_journal(mounted.model, &settings, &config);
     let crate::buffer_network::Request::Upload {
@@ -4058,6 +4075,7 @@ fn inline_permission_answers_exact_run_and_disappears_when_expired() {
         description: "notes.txt".into(),
         decision: None,
         expired: false,
+        spawn_attempt: None,
     });
     mounted.model.receive(NetworkState {
         snapshot: snapshot.clone(),
@@ -6751,6 +6769,7 @@ fn issue_status_prefers_waiting_and_active_work_then_the_latest_outcome() {
         description: "notes.txt".into(),
         decision: None,
         expired: false,
+        spawn_attempt: None,
     });
     assert_eq!(
         issue_status(&snapshot, &[running, queued, newer_success]),
@@ -8059,6 +8078,7 @@ fn wide_sessions_turn_narrow_at_double_scale_without_rebuilding_the_draft() {
         description: "notes.txt".into(),
         decision: None,
         expired: false,
+        spawn_attempt: None,
     });
     mounted.model.receive(NetworkState {
         snapshot,
@@ -9071,7 +9091,7 @@ fn first_director_message_uses_inline_assets_shortcuts_and_retains_edits_on_ackn
     let session = mounted.model.session.get_untracked();
     let mut parts = crate::buffer::parts(mounted.model, &session);
     assert_eq!(plain_text(&parts), "Before λ\nAfter");
-    let (requests, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let (requests, mut received) = crate::buffer_network::request_channel();
     mounted.model.buffer_requests.set(Some(requests));
     mounted.model.buffer.update(|s| {
         s.initialized = true;
@@ -10346,20 +10366,37 @@ fn stop_all_is_a_separate_session_action_that_stops_descendants() {
     mounted.model.open_session("session-plan".into());
     mounted.settle();
     // The header stop only stops this session's turn.
+    seed_stop_targets(&mounted);
+    mounted.model.submit(
+        Command::RenameProject {
+            project_id: "demo".into(),
+            name: "pending form".into(),
+        },
+        mounted.model.snapshot.get_untracked().revision,
+        crate::model::Saved::Action,
+    );
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::RenameProject { .. }
+    ));
+    assert!(mounted.model.busy.get_untracked());
     mounted.click("Stop");
     assert!(matches!(
         mounted.commands.try_recv().unwrap().command,
-        Command::StopWorker { ref session_id, include_descendants: false } if session_id == "session-plan"
+        Command::StopWorkerRuns { ref session_id, include_descendants: false, .. } if session_id == "session-plan"
     ));
     assert!(mounted.commands.try_recv().is_err());
-    mounted.model.busy.set(false);
+    assert!(
+        mounted.model.busy.get_untracked(),
+        "stop must preserve the pending form"
+    );
     mounted.click("Session actions");
     mounted.settle();
     assert!(has_label(&mounted, "Stop this agent and all its subagents"));
     mounted.click("Stop this agent and all its subagents");
     assert!(matches!(
         mounted.commands.try_recv().unwrap().command,
-        Command::StopWorker { ref session_id, include_descendants: true } if session_id == "session-plan"
+        Command::StopWorkerRuns { ref session_id, include_descendants: true, .. } if session_id == "session-plan"
     ));
     // Without active descendants the action is not offered.
     mounted.model.busy.set(false);
@@ -10406,10 +10443,11 @@ fn session_header_shows_context_controls_and_agents_below() {
             .as_deref()
             .is_some_and(|l| l.starts_with("Working. 7 agents below"))
     }));
+    seed_stop_targets(&mounted);
     mounted.click("Stop");
     assert!(matches!(
         mounted.commands.try_recv().unwrap().command,
-        Command::StopWorker { ref session_id, include_descendants: false } if session_id == "session-plan"
+        Command::StopWorkerRuns { ref session_id, include_descendants: false, .. } if session_id == "session-plan"
     ));
     // A session without measured context shows no gauge.
     mounted.model.open_session("session-worker".into());
@@ -10747,6 +10785,7 @@ fn tool_activity_updates_in_place_and_opens_failures() {
                 description: "printf hello".into(),
                 decision: None,
                 expired: false,
+                spawn_attempt: None,
             })
         });
         mounted.settle();
@@ -10850,7 +10889,7 @@ fn tool_kinds_keep_their_verbs_and_unknown_outcomes_stay_unclaimed() {
 #[test]
 fn one_catalog_per_project_harness_lets_every_row_show_effort() {
     let mut mounted = mount_orchestration(1380.0);
-    let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let (sender, mut requests) = crate::buffer_network::request_channel();
     mounted.model.buffer_requests.set(Some(sender));
     mounted
         ._scope
@@ -12925,7 +12964,7 @@ fn queued_reply_images_fetch_missing_bytes_and_appear_when_received() {
         .model
         .snapshot
         .update(|snapshot| snapshot.messages.retain(|m| m.session_id != "session-plan"));
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::buffer_network::request_channel();
     mounted.model.buffer_requests.set(Some(tx));
     let mut bytes = std::io::Cursor::new(Vec::new());
     image::RgbaImage::from_pixel(4, 2, image::Rgba([120, 170, 200, 255]))
@@ -13892,7 +13931,7 @@ fn composer_keeps_keyboard_focus_after_sending() {
                 s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed;
             });
         }
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::buffer_network::request_channel();
         mounted.model.buffer_requests.set(Some(tx));
         mounted.settle();
         if restored {
@@ -13933,7 +13972,12 @@ fn composer_keeps_keyboard_focus_after_sending() {
         );
         // Focus the user moves elsewhere is kept when the send completes.
         mounted.focus("Session actions");
-        let Request::Save { session, request } = rx.try_recv().unwrap() else {
+        let Request::Save {
+            session,
+            request,
+            generation,
+        } = rx.try_recv().unwrap()
+        else {
             panic!("{case}: expected draft save")
         };
         let saved = Draft {
@@ -13951,6 +13995,7 @@ fn composer_keeps_keyboard_focus_after_sending() {
                 outcomes: std::collections::BTreeMap::from([(
                     request.request_id.clone(),
                     Outcome::Saved {
+                        generation,
                         session,
                         request,
                         result: Ok(saved),
@@ -14414,7 +14459,7 @@ fn mentions_survive_save_reload_conflict_and_are_sent_as_structured_parts() {
         b.connected = true;
     });
     // Saves carry the structured part; a conflicting remote keeps it in recovery.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = crate::buffer_network::request_channel();
     mounted.model.buffer_requests.set(Some(tx));
     buffer::edit(mounted.model, "session-plan", parts.clone());
     mounted.model.buffer.update(|s| {
@@ -14422,7 +14467,12 @@ fn mentions_survive_save_reload_conflict_and_are_sent_as_structured_parts() {
             std::time::Instant::now() - Duration::from_secs(1)
     });
     buffer::flush(mounted.model);
-    let Request::Save { session, request } = rx.try_recv().unwrap() else {
+    let Request::Save {
+        session,
+        request,
+        generation: _,
+    } = rx.try_recv().unwrap()
+    else {
         panic!()
     };
     assert_eq!(request.parts, parts);
@@ -14552,4 +14602,1432 @@ fn click_suggestion(mounted: &Mounted, label: &str, index: usize) {
         });
     }
     mounted.settle();
+}
+
+fn seed_stop_targets(mounted: &Mounted) {
+    let snapshot = mounted.model.snapshot.get_untracked();
+    mounted.model.active_run_ids.set(
+        snapshot
+            .sessions
+            .iter()
+            .filter(|s| {
+                s.worker.as_ref().is_some_and(|w| {
+                    matches!(w.status, WorkerStatus::Running | WorkerStatus::Queued)
+                })
+            })
+            .map(|s| (s.id.clone(), format!("test-run-{}", s.id)))
+            .collect(),
+    );
+}
+
+#[test]
+fn independent_controls_retain_exact_retry_and_form_conflict_through_coalesced_replies() {
+    let mut mounted = mount(false, 1380.0);
+    let model = mounted.model;
+    // An unresolved form save must not prevent responding to a run's approval.
+    model.submit(
+        Command::RenameProject {
+            project_id: "demo".into(),
+            name: "form edit".into(),
+        },
+        model.snapshot.get_untracked().revision,
+        crate::model::Saved::Action,
+    );
+    let form = mounted.commands.try_recv().unwrap();
+    assert!(model.busy.get_untracked());
+    let request = Command::RespondPermission {
+        permission_id: "permission-control".into(),
+        run_id: "run-control".into(),
+        allow: true,
+    };
+    model.submit(request.clone(), 3, crate::model::Saved::Action);
+    let first = mounted.commands.try_recv().unwrap();
+    assert_eq!(first.expected_revision, 3);
+    let mut snapshot = model.snapshot.get_untracked();
+    snapshot.revision += 100;
+    let outcome = |serial, result, ambiguous| crate::network::CommandOutcome {
+        serial,
+        id: first.request_id.clone(),
+        result,
+        conflict: false,
+        ambiguous,
+    };
+    model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        outcome_serial: 1,
+        outcomes: vec![outcome(1, Err("unknown control outcome".into()), true)],
+        ..Default::default()
+    });
+    model.submit(request, snapshot.revision, crate::model::Saved::Action);
+    let retry = mounted.commands.try_recv().unwrap();
+    assert_eq!(
+        serde_json::to_value(&retry).unwrap(),
+        serde_json::to_value(&first).unwrap()
+    );
+    model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        outcome_serial: 3,
+        outcomes: vec![
+            outcome(2, Ok(()), false),
+            crate::network::CommandOutcome {
+                serial: 3,
+                id: form.request_id,
+                result: Err("genuine form conflict".into()),
+                conflict: true,
+                ambiguous: false,
+            },
+        ],
+        ..Default::default()
+    });
+    assert!(!model.busy.get_untracked());
+    assert!(
+        model.can_rebase(),
+        "coalesced control acknowledgement must retain the genuine form conflict"
+    );
+}
+
+#[test]
+fn independent_controls_send_during_pending_form_and_retry_original_message() {
+    use crate::{buffer, model::Saved};
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let model = mounted.model;
+    let (requests, _receive) = crate::buffer_network::request_channel();
+    model.buffer_requests.set(Some(requests));
+    model.submit(
+        Command::RenameProject {
+            project_id: "demo".into(),
+            name: "pending form".into(),
+        },
+        model.snapshot.get_untracked().revision,
+        Saved::Action,
+    );
+    let form = mounted.commands.try_recv().unwrap();
+    let parts = vec![Part::text("Message while form is pending")];
+    buffer::edit(model, "session-plan", parts.clone());
+    model.buffer.update(|state| {
+        let doc = state.documents.get_mut("session-plan").unwrap();
+        // The independently versioned shared draft has already been saved.
+        doc.remote.parts = parts.clone();
+        doc.remote.revision = 7;
+    });
+    model.syncing.set(true);
+    buffer::send(model);
+    let message = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(&message.command, Command::SubmitTurn { draft_revision: 7, parts: sent, .. } if sent == &parts)
+    );
+    assert!(
+        model.busy.get_untracked(),
+        "message must retain the form's pending state"
+    );
+    assert!(model.submission_pending());
+    let mut snapshot = model.snapshot.get_untracked();
+    snapshot.revision += 100;
+    model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        outcome_serial: 1,
+        outcome: Some((
+            message.request_id.clone(),
+            Err("Message acknowledgement timed out".into()),
+        )),
+        outcome_ambiguous: true,
+        ..Default::default()
+    });
+    assert!(
+        !model.submission_pending(),
+        "unknown outcome enables explicit Send retry"
+    );
+    buffer::edit(model, "session-plan", vec![Part::text("Newer local draft")]);
+    buffer::send(model);
+    let retry = mounted.commands.try_recv().unwrap();
+    assert_eq!(
+        serde_json::to_value(&retry).unwrap(),
+        serde_json::to_value(&message).unwrap()
+    );
+    assert!(mounted.commands.try_recv().is_err());
+    model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        outcome_serial: 3,
+        outcomes: vec![
+            crate::network::CommandOutcome {
+                serial: 2,
+                id: message.request_id,
+                result: Ok(()),
+                conflict: false,
+                ambiguous: false,
+            },
+            crate::network::CommandOutcome {
+                serial: 3,
+                id: form.request_id,
+                result: Err("genuine form conflict".into()),
+                conflict: true,
+                ambiguous: false,
+            },
+        ],
+        ..Default::default()
+    });
+    assert!(
+        model.can_rebase(),
+        "message acknowledgement must preserve the form conflict"
+    );
+    let state = model.buffer.get_untracked();
+    let document = &state.documents["session-plan"];
+    assert!(!document.submitting);
+    assert_eq!(plain_text(&document.parts), "Newer local draft");
+}
+
+#[test]
+fn draft_ambiguous_save_recovers_on_same_revision_and_preserves_send_intent() {
+    use crate::{
+        buffer,
+        buffer_network::{Outcome, Request, SaveFailure, Update},
+    };
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let (tx, mut rx) = crate::buffer_network::request_channel();
+    mounted.model.buffer_requests.set(Some(tx));
+    buffer::edit(mounted.model, "session-plan", vec![Part::text("A")]);
+    buffer::send(mounted.model);
+    let Request::Save {
+        session,
+        request,
+        generation,
+    } = rx.try_recv().unwrap()
+    else {
+        panic!()
+    };
+    buffer::edit(mounted.model, &session, vec![Part::text("B")]);
+    let failed = Outcome::Saved {
+        session: session.clone(),
+        request: request.clone(),
+        generation,
+        result: Err((SaveFailure::Retryable, "synthetic timeout".into())),
+    };
+    buffer::receive(
+        mounted.model,
+        Update {
+            serial: 1,
+            initialized: true,
+            connected: false,
+            outcomes: std::collections::BTreeMap::from([(
+                request.request_id.clone(),
+                failed.clone(),
+            )]),
+            ..Default::default()
+        },
+    );
+    // Advance only the retry deadline, without edits or an explicit retry action.
+    let mut state = mounted.model.buffer.get_untracked();
+    state.documents.get_mut(&session).unwrap().save_retry_at =
+        Some(crate::platform::Instant::now());
+    let remote = state.documents[&session].remote.clone();
+    mounted.model.buffer.set(state);
+    buffer::receive(
+        mounted.model,
+        Update {
+            serial: 2,
+            initialized: true,
+            connected: true,
+            drafts: vec![remote],
+            ..Default::default()
+        },
+    );
+    let retry = loop {
+        if let Request::Save {
+            session: _,
+            request: retry,
+            generation: next,
+        } = rx.try_recv().unwrap()
+        {
+            break (retry, next);
+        }
+    };
+    assert_eq!(
+        serde_json::to_value(&retry.0).unwrap(),
+        serde_json::to_value(&request).unwrap()
+    );
+    assert!(retry.1 > generation);
+    // Repeated manual retry and stale timeout cannot schedule another concurrent attempt.
+    buffer::retry_save(mounted.model);
+    buffer::retry_save(mounted.model);
+    buffer::receive(
+        mounted.model,
+        Update {
+            serial: 3,
+            initialized: true,
+            connected: true,
+            outcomes: std::collections::BTreeMap::from([(request.request_id.clone(), failed)]),
+            ..Default::default()
+        },
+    );
+    while let Ok(next) = rx.try_recv() {
+        assert!(!matches!(next, Request::Save { .. }));
+    }
+    let saved = Draft {
+        session_id: session.clone(),
+        revision: request.expected_revision + 1,
+        parts: request.parts.clone(),
+    };
+    buffer::receive(
+        mounted.model,
+        Update {
+            serial: 4,
+            initialized: true,
+            connected: true,
+            drafts: vec![saved.clone()],
+            outcomes: std::collections::BTreeMap::from([(
+                request.request_id.clone(),
+                Outcome::Saved {
+                    session: session.clone(),
+                    request,
+                    generation: retry.1,
+                    result: Ok(saved),
+                },
+            )]),
+            ..Default::default()
+        },
+    );
+    let command = mounted.commands.try_recv().unwrap();
+    assert!(matches!(command.command, Command::SubmitTurn {parts,..} if plain_text(&parts)=="A"));
+    assert_eq!(plain_text(&buffer::parts(mounted.model, &session)), "B");
+    buffer::flush(mounted.model);
+    assert!(mounted.commands.try_recv().is_err());
+}
+
+#[test]
+fn draft_permanent_and_conflict_refusals_do_not_automatically_retry() {
+    use crate::{
+        buffer,
+        buffer_network::{Outcome, Request, SaveFailure, Update},
+    };
+    for kind in [SaveFailure::Permanent, SaveFailure::Conflict] {
+        let mut mounted = mount(false, 1380.0);
+        buffer_worker(&mounted);
+        let (tx, mut rx) = crate::buffer_network::request_channel();
+        mounted.model.buffer_requests.set(Some(tx));
+        buffer::edit(mounted.model, "session-plan", vec![Part::text("A")]);
+        buffer::send(mounted.model);
+        let Request::Save {
+            session,
+            request,
+            generation,
+        } = rx.try_recv().unwrap()
+        else {
+            panic!()
+        };
+        buffer::receive(
+            mounted.model,
+            Update {
+                serial: 1,
+                initialized: true,
+                connected: true,
+                outcomes: std::collections::BTreeMap::from([(
+                    request.request_id.clone(),
+                    Outcome::Saved {
+                        session: session.clone(),
+                        request,
+                        generation,
+                        result: Err((kind, "refused".into())),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        for _ in 0..6 {
+            buffer::flush(mounted.model);
+        }
+        while let Ok(next) = rx.try_recv() {
+            assert!(!matches!(next, Request::Save { .. }));
+        }
+        assert!(mounted.commands.try_recv().is_err());
+        assert!(mounted.model.buffer.get_untracked().documents[&session].save_blocked);
+    }
+}
+
+#[test]
+fn draft_watcher_ack_and_duplicate_old_http_ack_preserve_newer_edit() {
+    use crate::{
+        buffer,
+        buffer_network::{Outcome, Request, Update},
+    };
+    let mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let (tx, mut rx) = crate::buffer_network::request_channel();
+    mounted.model.buffer_requests.set(Some(tx));
+    buffer::edit(mounted.model, "session-plan", vec![Part::text("A")]);
+    mounted.model.buffer.update(|s| {
+        s.documents.get_mut("session-plan").unwrap().changed =
+            crate::platform::Instant::now() - Duration::from_secs(1)
+    });
+    buffer::flush(mounted.model);
+    let Request::Save {
+        session,
+        request,
+        generation,
+    } = rx.try_recv().unwrap()
+    else {
+        panic!()
+    };
+    buffer::edit(mounted.model, &session, vec![Part::text("B")]);
+    mounted.model.buffer.update(|s| {
+        s.documents.get_mut(&session).unwrap().changed =
+            crate::platform::Instant::now() - Duration::from_secs(1)
+    });
+    let saved = Draft {
+        session_id: session.clone(),
+        revision: 1,
+        parts: request.parts.clone(),
+    };
+    buffer::receive(
+        mounted.model,
+        Update {
+            serial: 1,
+            initialized: true,
+            connected: true,
+            drafts: vec![saved.clone()],
+            ..Default::default()
+        },
+    );
+    let Request::Save {
+        request: next,
+        generation: next_generation,
+        ..
+    } = rx.try_recv().unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(next.expected_revision, 1);
+    assert_eq!(plain_text(&next.parts), "B");
+    // The prior attempt can finish after the new edit is queued, and its duplicate must be ignored.
+    for serial in [2, 3] {
+        buffer::receive(
+            mounted.model,
+            Update {
+                serial,
+                initialized: true,
+                connected: true,
+                outcomes: std::collections::BTreeMap::from([(
+                    request.request_id.clone(),
+                    Outcome::Saved {
+                        session: session.clone(),
+                        request: request.clone(),
+                        generation,
+                        result: Ok(saved.clone()),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        let state = mounted.model.buffer.get_untracked();
+        let doc = &state.documents[&session];
+        assert_eq!(doc.saving.as_ref().unwrap().request_id, next.request_id);
+        assert_eq!(doc.save_generation, next_generation);
+        assert_eq!(plain_text(&doc.parts), "B");
+    }
+    buffer::receive(
+        mounted.model,
+        Update {
+            serial: 4,
+            initialized: true,
+            connected: true,
+            drafts: vec![Draft {
+                session_id: session.clone(),
+                revision: 2,
+                parts: next.parts.clone(),
+            }],
+            ..Default::default()
+        },
+    );
+    let state = mounted.model.buffer.get_untracked();
+    let doc = &state.documents[&session];
+    assert!(doc.saving.is_none());
+    assert!(!doc.save_in_flight);
+    assert!(doc.save_retry_at.is_none());
+    assert_eq!(plain_text(&doc.parts), "B");
+}
+
+#[test]
+fn draft_automatic_retries_stop_at_budget_without_replacing_envelope() {
+    use crate::{
+        buffer,
+        buffer_network::{Outcome, Request, SaveFailure, Update},
+    };
+    let mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let (tx, mut rx) = crate::buffer_network::request_channel();
+    mounted.model.buffer_requests.set(Some(tx));
+    buffer::edit(mounted.model, "session-plan", vec![Part::text("synthetic")]);
+    buffer::send(mounted.model);
+    let Request::Save {
+        session,
+        request,
+        mut generation,
+    } = rx.try_recv().unwrap()
+    else {
+        panic!()
+    };
+    for attempt in 1..=5 {
+        buffer::receive(
+            mounted.model,
+            Update {
+                serial: attempt,
+                initialized: true,
+                connected: true,
+                outcomes: std::collections::BTreeMap::from([(
+                    format!("attempt-{attempt}"),
+                    Outcome::Saved {
+                        session: session.clone(),
+                        request: request.clone(),
+                        generation,
+                        result: Err((SaveFailure::Retryable, "timeout".into())),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        let mut state = mounted.model.buffer.get_untracked();
+        let doc = state.documents.get_mut(&session).unwrap();
+        assert_eq!(u64::from(doc.save_attempts), attempt);
+        if attempt < 5 {
+            assert!(doc.save_retry_at.unwrap() > crate::platform::Instant::now());
+            doc.save_retry_at = Some(crate::platform::Instant::now());
+            mounted.model.buffer.set(state);
+            buffer::flush(mounted.model);
+            let retry = loop {
+                if let Request::Save {
+                    request,
+                    generation,
+                    ..
+                } = rx.try_recv().unwrap()
+                {
+                    break (request, generation);
+                }
+            };
+            assert_eq!(
+                serde_json::to_value(&retry.0).unwrap(),
+                serde_json::to_value(&request).unwrap()
+            );
+            generation = retry.1;
+        } else {
+            assert!(doc.save_retry_at.is_none());
+            for _ in 0..6 {
+                buffer::flush(mounted.model);
+            }
+            while let Ok(next) = rx.try_recv() {
+                assert!(!matches!(next, Request::Save { .. }));
+            }
+        }
+    }
+}
+
+#[test]
+fn saturated_draft_admission_retains_latest_unsent_edits_and_recovers() {
+    use crate::{
+        buffer,
+        buffer_network::{ADMISSION_CAPACITY, Request, request_channel},
+    };
+    let mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let (tx, mut rx) = request_channel();
+    mounted.model.buffer_requests.set(Some(tx.clone()));
+    for n in 0..ADMISSION_CAPACITY {
+        tx.send(Request::Fetch(format!("held-{n}"))).unwrap();
+    }
+    for text in ["A", "B"] {
+        buffer::edit(mounted.model, "session-plan", vec![Part::text(text)]);
+        mounted.model.buffer.update(|s| {
+            s.documents.get_mut("session-plan").unwrap().changed =
+                crate::platform::Instant::now() - Duration::from_secs(1)
+        });
+        buffer::flush(mounted.model);
+        let state = mounted.model.buffer.get_untracked();
+        let doc = &state.documents["session-plan"];
+        assert!(doc.saving.is_none());
+        assert!(!doc.save_in_flight);
+        assert_eq!(plain_text(&doc.parts), text);
+    }
+    rx.try_recv().unwrap();
+    buffer::flush(mounted.model);
+    let request = loop {
+        if let Request::Save { request, .. } = rx.try_recv().unwrap() {
+            break request;
+        }
+    };
+    assert_eq!(plain_text(&request.parts), "B");
+    let state = mounted.model.buffer.get_untracked();
+    assert_eq!(
+        state.documents["session-plan"]
+            .saving
+            .as_ref()
+            .unwrap()
+            .request_id,
+        request.request_id
+    );
+}
+
+#[test]
+fn saturated_media_admission_is_refused_without_stuck_fetch_or_upload_and_can_retry() {
+    use crate::{
+        buffer,
+        buffer_network::{ADMISSION_CAPACITY, Request, request_channel},
+    };
+    let mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let (tx, mut rx) = request_channel();
+    mounted.model.buffer_requests.set(Some(tx.clone()));
+    for n in 0..ADMISSION_CAPACITY {
+        tx.send(Request::Fetch(format!("held-{n}"))).unwrap();
+    }
+    let mut bytes = Vec::with_capacity(ASSET_LIMIT * 2);
+    bytes.extend_from_slice(&[1, 2, 3]);
+    let part =
+        buffer::insert_asset(mounted.model, "file".into(), "text/plain".into(), bytes).unwrap();
+    let PartKind::Asset { asset } = part.kind else {
+        panic!()
+    };
+    assert!(
+        mounted
+            .model
+            .buffer
+            .get_untracked()
+            .failed_uploads
+            .contains(&asset.id)
+    );
+    buffer::fetch(
+        mounted.model,
+        &Asset {
+            id: "preview".into(),
+            ..asset.clone()
+        },
+    );
+    let state = mounted.model.buffer.get_untracked();
+    assert!(!state.fetching.contains("preview"));
+    assert!(state.fetch_errors.contains_key("preview"));
+    rx.try_recv().unwrap();
+    buffer::retry_save(mounted.model);
+    let upload = loop {
+        if let Request::Upload { asset, .. } = rx.try_recv().unwrap() {
+            break asset;
+        }
+    };
+    assert_eq!(upload.id, asset.id);
+    buffer::fetch(
+        mounted.model,
+        &Asset {
+            id: "preview".into(),
+            ..asset
+        },
+    );
+    assert!(
+        mounted
+            .model
+            .buffer
+            .get_untracked()
+            .fetching
+            .contains("preview")
+    );
+}
+
+#[test]
+fn saturated_ambiguous_retry_preserves_identity_and_latest_edit() {
+    use crate::{
+        buffer,
+        buffer_network::{
+            ADMISSION_CAPACITY, Outcome, Request, SaveFailure, Update, request_channel,
+        },
+    };
+    let mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let (tx, mut rx) = request_channel();
+    mounted.model.buffer_requests.set(Some(tx.clone()));
+    buffer::edit(mounted.model, "session-plan", vec![Part::text("A")]);
+    buffer::send(mounted.model);
+    let Request::Save {
+        session,
+        request,
+        generation,
+    } = rx.try_recv().unwrap()
+    else {
+        panic!()
+    };
+    buffer::receive(
+        mounted.model,
+        Update {
+            serial: 1,
+            initialized: true,
+            connected: true,
+            outcomes: std::collections::BTreeMap::from([(
+                request.request_id.clone(),
+                Outcome::Saved {
+                    session: session.clone(),
+                    request: request.clone(),
+                    generation,
+                    result: Err((SaveFailure::Retryable, "synthetic".into())),
+                },
+            )]),
+            ..Default::default()
+        },
+    );
+    assert!(matches!(rx.try_recv().unwrap(), Request::Forget(_)));
+    for n in 0..ADMISSION_CAPACITY {
+        tx.send(Request::Fetch(format!("held-{n}"))).unwrap();
+    }
+    buffer::edit(mounted.model, &session, vec![Part::text("B")]);
+    mounted.model.buffer.update(|state| {
+        state.documents.get_mut(&session).unwrap().save_retry_at =
+            Some(crate::platform::Instant::now())
+    });
+    for _ in 0..5 {
+        buffer::flush(mounted.model);
+    }
+    let state = mounted.model.buffer.get_untracked();
+    let doc = &state.documents[&session];
+    assert!(!doc.save_in_flight);
+    assert_eq!(doc.save_attempts, 1);
+    assert_eq!(
+        serde_json::to_value(doc.saving.as_ref().unwrap()).unwrap(),
+        serde_json::to_value(&request).unwrap()
+    );
+    rx.try_recv().unwrap();
+    buffer::flush(mounted.model);
+    let retry = loop {
+        if let Request::Save { request, .. } = rx.try_recv().unwrap() {
+            break request;
+        }
+    };
+    assert_eq!(
+        serde_json::to_value(retry).unwrap(),
+        serde_json::to_value(request).unwrap()
+    );
+    let state = mounted.model.buffer.get_untracked();
+    let doc = &state.documents[&session];
+    assert_eq!(plain_text(&doc.parts), "B");
+    assert!(doc.save_in_flight);
+    assert_eq!(doc.save_attempts, 2);
+}
+
+#[test]
+fn guarded_config_rename_explicit_action_preserves_policy_draft_later_edits_and_ack_baseline() {
+    let mut mounted = mount(false, 1380.0);
+    let model = mounted.model;
+    let initial = model.snapshot.get_untracked();
+    let id = initial.agent_configs[0].id.clone();
+    let guard = AgentConfigRenameGuard::capture(&initial.agent_configs[0]);
+    model.open_profile(EditTarget::Config(id.clone()));
+    model.editor_name.set("First".into());
+    model.modify_profile("network_access", |p| p.network_access = !p.network_access);
+    let local_overrides = model.editor_overrides.get_untracked();
+    let mut streamed = initial.clone();
+    streamed.revision += 5;
+    streamed.agent_configs[0].overrides.max_workers = Some(2);
+    model.receive(NetworkState {
+        snapshot: streamed.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    mounted.click("Rename agent");
+    let first = mounted.commands.try_recv().unwrap();
+    model.rename_agent_config();
+    assert!(mounted.commands.try_recv().is_err());
+
+    assert_eq!(first.expected_revision, initial.revision);
+    assert!(
+        matches!(&first.command,Command::RenameAgentConfig {agent_config_id,expected,name} if agent_config_id==&id && expected==&guard && name=="First")
+    );
+    model.editor_name.set("Second".into());
+    model.receive(NetworkState {
+        snapshot: streamed.clone(),
+        connected: true,
+        acknowledged_revision: streamed.revision + 1,
+        outcome_serial: 1,
+        outcome: Some((first.request_id.clone(), Ok(()))),
+        ..Default::default()
+    });
+    assert_eq!(model.editor_name.get_untracked(), "Second");
+    assert_eq!(model.editor_overrides.get_untracked(), local_overrides);
+    assert_eq!(
+        model.editor_rename_guard.get_untracked(),
+        Some(guard.renamed("First").unwrap())
+    );
+    assert_eq!(model.editor_revision.get_untracked(), initial.revision);
+    assert!(model.syncing.get_untracked());
+    model.rename_agent_config();
+    let second = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(&second.command,Command::RenameAgentConfig {expected,name,..} if expected.name=="First" && name=="Second")
+    );
+    streamed
+        .apply(first.command.clone(), &first.request_id, 0)
+        .unwrap();
+    streamed
+        .apply(second.command.clone(), &second.request_id, 0)
+        .unwrap();
+    model.receive(NetworkState {
+        snapshot: streamed.clone(),
+        connected: true,
+        outcome_serial: 2,
+        outcome: Some((second.request_id, Ok(()))),
+        ..Default::default()
+    });
+    model.receive(NetworkState {
+        snapshot: streamed,
+        connected: true,
+        outcome_serial: 3,
+        outcome: Some((first.request_id, Ok(()))),
+        ..Default::default()
+    });
+    assert_eq!(
+        model.editor_rename_guard.get_untracked().unwrap().name,
+        "Second"
+    );
+    assert_eq!(model.editor_overrides.get_untracked(), local_overrides);
+}
+
+#[test]
+fn guarded_config_rename_ambiguous_retry_and_editor_epoch_fence() {
+    for reopen_same in [true, false] {
+        let mut mounted = mount(false, 1380.0);
+        let model = mounted.model;
+        let initial = model.snapshot.get_untracked();
+        let id = initial.agent_configs[0].id.clone();
+        model.open_profile(EditTarget::Config(id.clone()));
+        model.editor_name.set("Submitted".into());
+        model.rename_agent_config();
+        let original = mounted.commands.try_recv().unwrap();
+        model.receive(NetworkState {
+            snapshot: initial.clone(),
+            connected: true,
+            outcome_serial: 1,
+            outcome: Some((original.request_id.clone(), Err("synthetic timeout".into()))),
+            outcome_ambiguous: true,
+            ..Default::default()
+        });
+        let guard = model.editor_rename_guard.get_untracked();
+        model.editor_name.set("Later".into());
+        model.load_latest_agent_name();
+        model.review_latest();
+        model.rename_agent_config();
+        assert_eq!(model.editor_rename_guard.get_untracked(), guard);
+        assert!(mounted.commands.try_recv().is_err());
+        let target = if reopen_same {
+            id
+        } else {
+            initial.agent_configs[1].id.clone()
+        };
+        model.open_profile(EditTarget::Config(target));
+        let current_guard = model.editor_rename_guard.get_untracked();
+        model.editor_name.set("New editor draft".into());
+        model.retry_pending();
+        let retried = mounted.commands.try_recv().unwrap();
+        assert_eq!(
+            serde_json::to_value(&retried).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        model.receive(NetworkState {
+            snapshot: initial,
+            connected: true,
+            outcome_serial: 2,
+            outcome: Some((original.request_id, Ok(()))),
+            ..Default::default()
+        });
+        assert_eq!(model.editor_rename_guard.get_untracked(), current_guard);
+        assert_eq!(model.editor_name.get_untracked(), "New editor draft");
+        assert!(!model.busy.get_untracked());
+    }
+}
+
+#[test]
+fn guarded_config_rename_conflict_requires_explicit_name_reload_and_retains_local_draft() {
+    let mut mounted = mount(false, 1380.0);
+    let model = mounted.model;
+    let mut snapshot = model.snapshot.get_untracked();
+    let id = snapshot.agent_configs[0].id.clone();
+    model.open_profile(EditTarget::Config(id.clone()));
+    model.editor_name.set("Local desired".into());
+    model.modify_profile("max_workers", |p| p.max_workers = 3);
+    let overrides = model.editor_overrides.get_untracked();
+    model.rename_agent_config();
+    let rejected = mounted.commands.try_recv().unwrap();
+    snapshot.agent_configs[0].name = "Remote".into();
+    snapshot.revision += 1;
+    model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        outcome_serial: 1,
+        outcome: Some((
+            rejected.request_id.clone(),
+            Err("Agent name changed".into()),
+        )),
+        outcome_conflict: true,
+        ..Default::default()
+    });
+    let old_guard = model.editor_rename_guard.get_untracked();
+    assert!(!model.can_rebase());
+    model.rebase_conflict();
+    model.review_latest();
+    model.rename_agent_config();
+    assert!(mounted.commands.try_recv().is_err());
+    assert_eq!(model.editor_rename_guard.get_untracked(), old_guard);
+    assert_eq!(model.editor_name.get_untracked(), "Local desired");
+    model.load_latest_agent_name();
+    assert_eq!(model.editor_name.get_untracked(), "Remote");
+    assert_eq!(
+        model.retained_agent_name.get_untracked(),
+        Some((id, "Local desired".into()))
+    );
+    assert_eq!(model.editor_overrides.get_untracked(), overrides);
+    model.restore_retained_agent_name();
+    assert_eq!(model.editor_name.get_untracked(), "Local desired");
+    model.rename_agent_config();
+    let reviewed = mounted.commands.try_recv().unwrap();
+    assert_ne!(reviewed.request_id, rejected.request_id);
+    assert!(
+        matches!(&reviewed.command,Command::RenameAgentConfig {expected,..} if expected.name=="Remote")
+    );
+    assert_eq!(model.editor_overrides.get_untracked(), overrides);
+}
+
+#[test]
+fn guarded_config_rename_does_not_split_profile_save_or_change_legal_name_semantics() {
+    let mut mounted = mount(false, 1380.0);
+    let model = mounted.model;
+    let initial = model.snapshot.get_untracked();
+    let id = initial.agent_configs[0].id.clone();
+    model.open_profile(EditTarget::Config(id));
+    model.editor_name.set("Combined".into());
+    model.modify_profile("network_access", |p| p.network_access = !p.network_access);
+    model.save_profile();
+    assert!(matches!(
+        mounted.commands.try_recv().unwrap().command,
+        Command::UpdateAgentConfig { .. }
+    ));
+    assert!(mounted.commands.try_recv().is_err());
+    // Independent fixture: whitespace-only automatic input is normalized rather than excluded.
+    let mut automatic = mount(false, 1380.0);
+    let model = automatic.model;
+    let initial = model.snapshot.get_untracked();
+    model.open_profile(EditTarget::Config(initial.agent_configs[0].id.clone()));
+    model.editor_name.set(" ".repeat(70_000));
+    model.rename_agent_config();
+    let request = automatic.commands.try_recv().unwrap();
+    assert!(serde_json::to_vec(&request).unwrap().len() < CONFIG_RENAME_BODY_LIMIT);
+    assert!(matches!(request.command,Command::RenameAgentConfig {name,..} if name.is_empty()));
+    model.editor_name.set("é".repeat(51)); // 102 bytes, invalid under the existing rule.
+    // No second action may replace the pending immutable request.
+    model.rename_agent_config();
+    assert!(automatic.commands.try_recv().is_err());
+}
+
+#[test]
+fn guarded_config_rename_deleted_editor_and_oversized_request_are_fenced() {
+    let mut mounted = mount(false, 1380.0);
+    let model = mounted.model;
+    let mut snapshot = model.snapshot.get_untracked();
+    let id = snapshot.agent_configs[0].id.clone();
+    model.open_profile(EditTarget::Config(id.clone()));
+    model.editor_name.set("Pending".into());
+    model.rename_agent_config();
+    let request = mounted.commands.try_recv().unwrap();
+    model.page.set(Page::Board); // The rename editor may be offscreen when deletion arrives.
+    snapshot.agent_configs.retain(|c| c.id != id);
+    snapshot.revision += 1;
+    model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    assert!(model.editor_rename_guard.get_untracked().is_none());
+    model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        outcome_serial: 1,
+        outcome: Some((request.request_id, Ok(()))),
+        ..Default::default()
+    });
+    assert!(model.editor_rename_guard.get_untracked().is_none());
+    let mut invalid = mount(false, 1380.0);
+    let model = invalid.model;
+    let id = model.snapshot.get_untracked().agent_configs[0].id.clone();
+    model.open_profile(EditTarget::Config(id));
+    model.editor_name.set("é".repeat(51));
+    model.rename_agent_config();
+    assert!(invalid.commands.try_recv().is_err());
+    assert!(model.notice.get_untracked().contains("100 bytes"));
+    let mut snapshot = model.snapshot.get_untracked();
+    let long = "x".repeat(40_000);
+    snapshot.agent_configs[0].id = long.clone();
+    model.snapshot.set(snapshot);
+    model.open_profile(EditTarget::Config(long));
+    model.editor_name.set("Retained".into());
+    model.rename_agent_config();
+    assert!(invalid.commands.try_recv().is_err());
+    assert!(model.notice.get_untracked().contains("size limit"));
+    assert_eq!(model.editor_name.get_untracked(), "Retained");
+}
+
+#[test]
+fn approval_feedback_clicks_preserve_form_and_retry_exact_decision() {
+    use crate::model::{PermissionFeedback, Saved};
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let model = mounted.model;
+    let mut snapshot = model.snapshot.get_untracked();
+    let permission = ToolPermission {
+        id: "feedback-permission".into(),
+        session_id: model.session.get_untracked(),
+        run_id: "feedback-run".into(),
+        tool: "Write".into(),
+        description: "synthetic.txt".into(),
+        decision: None,
+        expired: false,
+        spawn_attempt: None,
+    };
+    snapshot
+        .messages
+        .retain(|m| m.session_id != permission.session_id);
+    snapshot.tool_permissions.clear();
+    snapshot.tool_permissions.push(permission.clone());
+    model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    model.submit(
+        Command::RenameProject {
+            project_id: "demo".into(),
+            name: "Unrelated edit".into(),
+        },
+        snapshot.revision,
+        Saved::Action,
+    );
+    let form = mounted.commands.try_recv().unwrap();
+    model.syncing.set(true);
+    model.worker_prompt.set("Retain this draft".into());
+    mounted.settle();
+    mounted.click_nth("Approve", 0);
+    let first = mounted.commands.try_recv().unwrap();
+    assert_eq!(
+        model.permission_status(&permission),
+        Some(PermissionFeedback::Pending)
+    );
+    mounted.settle();
+    assert!(!has_label(&mounted, "Reject"));
+    assert!(!has_label(&mounted, "Approve"));
+    crate::sidebar::respond(model, &permission, false);
+    crate::sidebar::respond(model, &permission, true);
+    assert!(mounted.commands.try_recv().is_err());
+    // An unrelated/out-of-order ACK must not confirm this permission.
+    model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        outcome_serial: 1,
+        outcomes: vec![crate::network::CommandOutcome {
+            serial: 1,
+            id: "other".into(),
+            result: Ok(()),
+            conflict: false,
+            ambiguous: false,
+        }],
+        ..Default::default()
+    });
+    assert_eq!(
+        model.permission_status(&permission),
+        Some(PermissionFeedback::Pending)
+    );
+    model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        outcome_serial: 2,
+        outcomes: vec![crate::network::CommandOutcome {
+            serial: 2,
+            id: first.request_id.clone(),
+            result: Err("Timed out".into()),
+            conflict: false,
+            ambiguous: true,
+        }],
+        ..Default::default()
+    });
+    assert_eq!(
+        model.permission_status(&permission),
+        Some(PermissionFeedback::RetryableError)
+    );
+    mounted.settle();
+    assert!(!has_label(&mounted, "Reject"));
+    assert!(has_label(&mounted, "Original Response: Approve"));
+    mounted.click("Retry original response");
+    let retry = mounted.commands.try_recv().unwrap();
+    assert_eq!(
+        serde_json::to_value(&retry).unwrap(),
+        serde_json::to_value(&first).unwrap()
+    );
+    assert_eq!(model.worker_prompt.get_untracked(), "Retain this draft");
+    assert!(model.busy.get_untracked());
+    model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        outcome_serial: 3,
+        outcomes: vec![crate::network::CommandOutcome {
+            serial: 3,
+            id: first.request_id.clone(),
+            result: Ok(()),
+            conflict: false,
+            ambiguous: false,
+        }],
+        ..Default::default()
+    });
+    assert_eq!(
+        model.permission_status(&permission),
+        Some(PermissionFeedback::Confirmed)
+    );
+    assert!(model.busy.get_untracked());
+    mounted.settle();
+    assert!(!has_label(&mounted, "Approve"));
+    assert!(has_label(
+        &mounted,
+        "Confirmed · permission response acknowledged"
+    ));
+    // Late ambiguous delivery cannot undo a matching definitive ACK.
+    model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        outcome_serial: 4,
+        outcomes: vec![
+            crate::network::CommandOutcome {
+                serial: 4,
+                id: first.request_id,
+                result: Err("Late timeout".into()),
+                conflict: false,
+                ambiguous: true,
+            },
+            crate::network::CommandOutcome {
+                serial: 5,
+                id: form.request_id,
+                result: Err("Form conflict".into()),
+                conflict: true,
+                ambiguous: false,
+            },
+        ],
+        ..Default::default()
+    });
+    assert_eq!(
+        model.permission_status(&permission),
+        Some(PermissionFeedback::Confirmed)
+    );
+    assert!(model.can_rebase());
+}
+
+#[test]
+fn approval_feedback_expiry_and_wrong_run_prevent_click_replay() {
+    use crate::model::PermissionFeedback;
+    let mut mounted = mount(false, 1380.0);
+    buffer_worker(&mounted);
+    let model = mounted.model;
+    let mut snapshot = model.snapshot.get_untracked();
+    let permission = ToolPermission {
+        id: "expired-feedback".into(),
+        session_id: model.session.get_untracked(),
+        run_id: "old-run".into(),
+        tool: "Write".into(),
+        description: "synthetic".into(),
+        decision: None,
+        expired: false,
+        spawn_attempt: None,
+    };
+    snapshot
+        .messages
+        .retain(|m| m.session_id != permission.session_id);
+    snapshot.tool_permissions.clear();
+    snapshot.tool_permissions.push(permission.clone());
+    model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    mounted.click_nth("Reject", 0);
+    let first = mounted.commands.try_recv().unwrap();
+    assert!(matches!(
+        first.command,
+        Command::RespondPermission { allow: false, .. }
+    ));
+    snapshot.tool_permissions.last_mut().unwrap().expired = true;
+    snapshot.revision += 1;
+    model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert_eq!(
+        model.permission_status(
+            model
+                .snapshot
+                .get_untracked()
+                .tool_permissions
+                .last()
+                .unwrap()
+        ),
+        Some(PermissionFeedback::Pending)
+    );
+    crate::sidebar::respond(model, &permission, true);
+    assert!(mounted.commands.try_recv().is_err());
+    let mut wrong = permission;
+    wrong.run_id = "replacement-run".into();
+    crate::sidebar::respond(model, &wrong, true);
+    assert!(mounted.commands.try_recv().is_err());
+    assert!(!has_label(&mounted, "Approve"));
+}
+
+#[test]
+fn approval_feedback_queue_is_bounded_and_overflow_is_visible() {
+    use crate::model::{PermissionFeedback, Saved};
+    let mut mounted = mount(false, 1380.0);
+    for i in 0..17 {
+        mounted.model.submit(
+            Command::RespondPermission {
+                permission_id: format!("bounded-{i}"),
+                run_id: "bounded-run".into(),
+                allow: true,
+            },
+            1,
+            Saved::Action,
+        );
+    }
+    assert!(mounted.commands.try_recv().is_ok());
+    let mut count = 1;
+    while mounted.commands.try_recv().is_ok() {
+        count += 1;
+    }
+    assert_eq!(count, 16);
+    assert!(
+        mounted
+            .model
+            .notice
+            .get_untracked()
+            .contains("Too many unconfirmed")
+    );
+    let permission = ToolPermission {
+        id: "bounded-16".into(),
+        run_id: "bounded-run".into(),
+        session_id: "synthetic".into(),
+        tool: "synthetic".into(),
+        description: String::new(),
+        decision: None,
+        expired: false,
+        spawn_attempt: None,
+    };
+    assert_eq!(
+        mounted.model.permission_status(&permission),
+        Some(PermissionFeedback::RetryableError)
+    );
+}
+
+#[test]
+fn approval_feedback_committed_stream_keeps_exact_receipt_retry_reachable() {
+    use crate::model::{PermissionFeedback, Saved};
+    for allow in [true, false] {
+        let mut mounted = mount(false, 1380.0);
+        buffer_worker(&mounted);
+        let model = mounted.model;
+        let mut snapshot = model.snapshot.get_untracked();
+        snapshot.messages.clear();
+        snapshot.tool_permissions.clear();
+        let permission = ToolPermission {
+            id: "receipt-before-ack".into(),
+            session_id: model.session.get_untracked(),
+            run_id: "receipt-run".into(),
+            tool: "Synthetic".into(),
+            description: "Synthetic request".into(),
+            decision: None,
+            expired: false,
+            spawn_attempt: None,
+        };
+        snapshot.tool_permissions.push(permission.clone());
+        model.receive(NetworkState {
+            snapshot: snapshot.clone(),
+            connected: true,
+            ..Default::default()
+        });
+        mounted.settle();
+        mounted.click_nth(if allow { "Approve" } else { "Reject" }, 0);
+        let original = mounted.commands.try_recv().unwrap();
+        assert!(
+            matches!(original.command, Command::RespondPermission { allow: value, .. } if value == allow)
+        );
+        // The stream can reveal a committed decision (and subsequent run end)
+        // before the lost command ACK times out. This is not our receipt.
+        snapshot.revision += 100;
+        snapshot.tool_permissions[0].decision = Some(allow);
+        snapshot
+            .sessions
+            .iter_mut()
+            .find(|s| s.id == permission.session_id)
+            .unwrap()
+            .worker
+            .as_mut()
+            .unwrap()
+            .status = WorkerStatus::Completed;
+        model.receive(NetworkState {
+            snapshot: snapshot.clone(),
+            connected: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            model.permission_status(&permission),
+            Some(PermissionFeedback::Pending)
+        );
+        model.receive(NetworkState {
+            snapshot: snapshot.clone(),
+            connected: true,
+            outcome_serial: 1,
+            outcomes: vec![crate::network::CommandOutcome {
+                serial: 1,
+                id: original.request_id.clone(),
+                result: Err("ACK timed out".into()),
+                conflict: false,
+                ambiguous: true,
+            }],
+            ..Default::default()
+        });
+        mounted.settle();
+        assert_eq!(
+            model.permission_status(&permission),
+            Some(PermissionFeedback::RetryableError)
+        );
+        assert!(!has_label(&mounted, "Approve"));
+        assert!(!has_label(&mounted, "Reject"));
+        assert!(has_label(
+            &mounted,
+            if allow {
+                "Original Response: Approve"
+            } else {
+                "Original Response: Reject"
+            }
+        ));
+        // Stale opposite controls do not replay, flip, or create a fresh ID.
+        crate::sidebar::respond(model, &permission, !allow);
+        assert!(mounted.commands.try_recv().is_err());
+        mounted.click("Retry original response");
+        let retry = mounted.commands.try_recv().unwrap();
+        assert_eq!(
+            serde_json::to_value(&retry).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        assert_eq!(retry.expected_revision, original.expected_revision);
+        model.receive(NetworkState {
+            snapshot: snapshot.clone(),
+            connected: true,
+            outcome_serial: 2,
+            outcomes: vec![crate::network::CommandOutcome {
+                serial: 2,
+                id: "another-client".into(),
+                result: Ok(()),
+                conflict: false,
+                ambiguous: false,
+            }],
+            ..Default::default()
+        });
+        assert_eq!(
+            model.permission_status(&permission),
+            Some(PermissionFeedback::Pending)
+        );
+        model.receive(NetworkState {
+            snapshot: snapshot.clone(),
+            connected: true,
+            outcome_serial: 3,
+            outcomes: vec![crate::network::CommandOutcome {
+                serial: 3,
+                id: original.request_id,
+                result: Ok(()),
+                conflict: false,
+                ambiguous: false,
+            }],
+            ..Default::default()
+        });
+        mounted.settle();
+        assert_eq!(
+            model.permission_status(&permission),
+            Some(PermissionFeedback::Confirmed)
+        );
+        assert!(!has_label(&mounted, "Retry original response"));
+        assert!(has_label(
+            &mounted,
+            "Confirmed · permission response acknowledged"
+        ));
+        // With no local outstanding envelope, another client's resolved
+        // permission is terminal and cannot authorize a new decision.
+        let mut other = permission.clone();
+        other.id = "other-client-permission".into();
+        other.decision = Some(!allow);
+        snapshot.tool_permissions.push(other.clone());
+        model.receive(NetworkState {
+            snapshot,
+            connected: true,
+            outcome_serial: 3,
+            ..Default::default()
+        });
+        assert_eq!(
+            model.permission_status(&other),
+            Some(PermissionFeedback::ExpiredOrRunEnded)
+        );
+        model.submit(
+            Command::RespondPermission {
+                permission_id: other.id.clone(),
+                run_id: other.run_id.clone(),
+                allow,
+            },
+            900,
+            Saved::Action,
+        );
+        model.retry_permission(&other);
+        assert!(mounted.commands.try_recv().is_err());
+    }
+}
+
+#[test]
+fn compact_navigation_counts_requests_waiting_for_an_answer() {
+    let mounted = mount(false, 390.0);
+    mounted.settle();
+    assert!(mounted.model.mobile_navigation.get_untracked());
+    assert!(has_label(&mounted, "Open navigation"));
+    let session = mounted.model.snapshot.get_untracked().sessions[0]
+        .id
+        .clone();
+    let mut snapshot = mounted.model.snapshot.get_untracked();
+    snapshot.revision += 1;
+    snapshot.tool_permissions.push(ToolPermission {
+        id: "spawn-approval".into(),
+        session_id: session,
+        run_id: "ended-run".into(),
+        tool: "mcp__relay__spawn_agent".into(),
+        description: "Spawn Fixer with:\nexecution mode Unrestricted Access".into(),
+        decision: None,
+        expired: false,
+        spawn_attempt: Some("attempt".into()),
+    });
+    mounted.model.receive(NetworkState {
+        snapshot: snapshot.clone(),
+        connected: true,
+        ..Default::default()
+    });
+    mounted.settle();
+    assert!(has_label(&mounted, "Open navigation, 1 need you"));
+    mounted.click("Open navigation, 1 need you");
+    assert!(mounted.model.sidebar_open.get_untracked());
+    snapshot.revision += 1;
+    snapshot.tool_permissions[0].decision = Some(true);
+    mounted.model.receive(NetworkState {
+        snapshot,
+        connected: true,
+        ..Default::default()
+    });
+    mounted.model.sidebar_open.set(false);
+    mounted.settle();
+    assert!(has_label(&mounted, "Open navigation"));
 }

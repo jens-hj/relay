@@ -61,9 +61,11 @@ pub(super) fn mode(snapshot: &Snapshot, session: &str) -> Result<ApprovalMode, E
 }
 pub(super) fn expire(snapshot: &mut Snapshot, session: &str, run: &str) {
     for permission in &mut snapshot.tool_permissions {
+        // A detached spawn approval stays open after its run ends.
         if permission.session_id == session
             && permission.run_id == run
             && permission.decision.is_none()
+            && permission.spawn_attempt.is_none()
         {
             permission.expired = true;
         }
@@ -71,6 +73,13 @@ pub(super) fn expire(snapshot: &mut Snapshot, session: &str, run: &str) {
 }
 /// The longest approval description kept; longer ones are truncated.
 pub(super) const DESCRIPTION_LIMIT: usize = 16 * 1024;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PermissionOutcome {
+    Approved,
+    Denied,
+    Stopped,
+    ExpiredOrRunEnded,
+}
 pub(super) async fn permission(
     workspace: &Workspace,
     session: &str,
@@ -79,41 +88,95 @@ pub(super) async fn permission(
     description: &str,
     stop: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<bool, Error> {
-    let id = uuid::Uuid::new_v4().to_string();
+    Ok(
+        permission_outcome(workspace, session, run, tool, description, stop).await?
+            == PermissionOutcome::Approved,
+    )
+}
+/// A pending request, with its description and tool name bounded.
+pub(super) fn request(
+    id: &str,
+    session: &str,
+    run: &str,
+    tool: &str,
+    description: &str,
+    spawn_attempt: Option<&str>,
+) -> ToolPermission {
     let mut end = description.len().min(DESCRIPTION_LIMIT);
     while !description.is_char_boundary(end) {
         end -= 1;
     }
+    ToolPermission {
+        id: id.into(),
+        session_id: session.into(),
+        run_id: run.into(),
+        tool: tool.chars().take(256).collect(),
+        description: description[..end].into(),
+        decision: None,
+        expired: false,
+        spawn_attempt: spawn_attempt.map(str::to_owned),
+    }
+}
+pub(super) async fn permission_outcome(
+    workspace: &Workspace,
+    session: &str,
+    run: &str,
+    tool: &str,
+    description: &str,
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<PermissionOutcome, Error> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let request = request(&id, session, run, tool, description, None);
     workspace.update_run(session, run, |snapshot| {
-        snapshot.tool_permissions.push(ToolPermission {
-            id: id.clone(),
-            session_id: session.into(),
-            run_id: run.into(),
-            tool: tool.chars().take(256).collect(),
-            description: description[..end].into(),
-            decision: None,
-            expired: false,
-        });
+        snapshot.tool_permissions.push(request);
         Ok(())
     })?;
     let mut events = workspace.snapshots.subscribe();
     loop {
-        if *stop.borrow() {
-            return Ok(false);
+        if *stop.borrow() || stop.has_changed().is_err() {
+            return Ok(PermissionOutcome::Stopped);
         }
-        let snapshot = events.borrow().clone();
-        let request = snapshot
-            .tool_permissions
-            .iter()
-            .find(|p| p.id == id)
-            .ok_or_else(|| Error::invalid("Permission request unavailable"))?;
-        if request.expired {
-            return Ok(false);
+        // Include the mutex wait and every authoritative read in one blocking
+        // section. Watch notifications only wake us; they do not grant approval.
+        let outcome = crate::blocking(|| -> Result<Option<PermissionOutcome>, Error> {
+            let store = workspace.store.lock().map_err(Error::internal)?;
+            let current = store.shared()?;
+            let active = current
+                .sessions
+                .iter()
+                .find(|s| s.id == session)
+                .and_then(|s| s.worker.as_ref())
+                .is_some_and(|w| crate::runtime::active(&w.status));
+            if !active || store.run_id(session)?.as_deref() != Some(run) {
+                return Ok(Some(PermissionOutcome::ExpiredOrRunEnded));
+            }
+            let Some(request) = current
+                .tool_permissions
+                .iter()
+                .find(|p| p.id == id && p.session_id == session && p.run_id == run)
+            else {
+                return Ok(Some(PermissionOutcome::ExpiredOrRunEnded));
+            };
+            // expire() marks only undecided requests. A historical approved
+            // request therefore still needs the active/current-run checks above.
+            if request.expired {
+                return Ok(Some(PermissionOutcome::ExpiredOrRunEnded));
+            }
+            Ok(request.decision.map(|decision| {
+                if decision {
+                    PermissionOutcome::Approved
+                } else {
+                    PermissionOutcome::Denied
+                }
+            }))
+        })?;
+        if *stop.borrow() || stop.has_changed().is_err() {
+            return Ok(PermissionOutcome::Stopped);
         }
-        if let Some(decision) = request.decision {
-            return Ok(decision);
+        if let Some(outcome) = outcome {
+            return Ok(outcome);
         }
-        tokio::select! { _ = stop.changed() => return Ok(false), changed = events.changed() => {changed.map_err(|_| Error::invalid("Server stopped"))?;} }
+        tokio::select! { _ = stop.changed() => return Ok(PermissionOutcome::Stopped), changed = events.changed() => {changed.map_err(|_| Error::invalid("Server stopped"))?;} }
     }
 }
 pub(super) fn add_project(

@@ -1,5 +1,7 @@
 //! Relay's domain and versioned client/server contract. No UI or execution dependencies.
 
+mod config_name;
+pub use config_name::*;
 mod transport;
 pub use transport::*;
 mod build_info;
@@ -598,6 +600,16 @@ pub enum Command {
         #[serde(default)]
         include_descendants: bool,
     },
+    /// Stop only the exact active runs the human saw. Any changed subtree/run
+    /// requires review; unrelated workspace revisions are immaterial.
+    StopWorkerRuns {
+        session_id: String,
+        #[serde(default)]
+        include_descendants: bool,
+        runs: std::collections::BTreeMap<String, String>,
+        /// Sorted IDs of the affected branch, including inactive members.
+        branch: Vec<String>,
+    },
     UpdateProjectDefaults {
         project_id: String,
         profile: AgentProfile,
@@ -612,6 +624,12 @@ pub enum Command {
         agent_config_id: String,
         name: String,
         overrides: ProfileOverrides,
+    },
+    /// A guarded name-only edit; current profile and runtime selection are preserved.
+    RenameAgentConfig {
+        agent_config_id: String,
+        name: String,
+        expected: AgentConfigRenameGuard,
     },
     RemoveAgentConfig {
         agent_config_id: String,
@@ -628,6 +646,17 @@ pub enum Command {
 pub struct ApiError {
     pub code: String,
     pub message: String,
+}
+
+impl Command {
+    /// Request/run-bound controls can be in flight independently of a form save.
+    /// This does not authorize execution or weaken their server-side guards.
+    pub fn is_run_control(&self) -> bool {
+        matches!(
+            self,
+            Self::RespondPermission { .. } | Self::StopWorkerRuns { .. }
+        )
+    }
 }
 
 impl Snapshot {
@@ -784,6 +813,14 @@ impl Snapshot {
                 if archived {
                     // Unarchiving never restores these grants.
                     self.prune_peers(&branch);
+                    // A spawn awaiting approval outlives its run, not its chat.
+                    for permission in self.tool_permissions.iter_mut().filter(|p| {
+                        branch.contains(&p.session_id)
+                            && p.spawn_attempt.is_some()
+                            && p.decision.is_none()
+                    }) {
+                        permission.expired = true;
+                    }
                     for turn in self.submissions.iter_mut().filter(|s| {
                         branch.contains(&s.session_id) && s.state == SubmissionState::Queued
                     }) {
@@ -871,7 +908,8 @@ impl Snapshot {
             | Command::EditQueuedTurn { .. }
             | Command::ResumeQueue { .. }
             | Command::PauseQueue { .. }
-            | Command::StopWorker { .. } => {
+            | Command::StopWorker { .. }
+            | Command::StopWorkerRuns { .. } => {
                 return Err("This command requires the server runtime".into());
             }
             Command::SaveAgentTemplate {
@@ -957,9 +995,7 @@ impl Snapshot {
                 name,
                 overrides,
             } => {
-                if !name.trim().is_empty() {
-                    validate_text("Agent name", &name, 100)?;
-                }
+                let (name, automatic) = normalized_agent_config_name(&name)?;
                 let director = self
                     .agent_configs
                     .iter()
@@ -981,34 +1017,18 @@ impl Snapshot {
                 {
                     director.draft_selection = HarnessSelection::default();
                 }
-                director.automatic_name = name.trim().is_empty();
-                director.name = if director.automatic_name {
-                    "New agent".into()
-                } else {
-                    name.trim().into()
-                };
                 director.overrides = overrides;
-                for session in self
-                    .sessions
-                    .iter_mut()
-                    .filter(|s| s.agent_config_id == agent_config_id && s.role == SessionRole::Root)
-                {
-                    session.automatic_name = name.trim().is_empty();
-                    if !session.automatic_name {
-                        session.title = name.trim().into();
-                    } else if let Some(message) = self.messages.iter().find(|m| {
-                        m.session_id == session.id && matches!(m.kind.as_str(), "user" | "prompt")
-                    }) {
-                        session.title = message
-                            .body
-                            .split_whitespace()
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                            .chars()
-                            .take(80)
-                            .collect();
-                    }
-                }
+                self.set_agent_config_name(&agent_config_id, name, automatic);
+            }
+            Command::RenameAgentConfig {
+                agent_config_id,
+                name,
+                expected,
+            } => {
+                self.validate_agent_config_rename(&agent_config_id, &name, &expected)
+                    .map_err(|e| e.to_string())?;
+                let (name, automatic) = normalized_agent_config_name(&name)?;
+                self.set_agent_config_name(&agent_config_id, name, automatic);
             }
             Command::RemoveAgentConfig { agent_config_id } => {
                 let index = self

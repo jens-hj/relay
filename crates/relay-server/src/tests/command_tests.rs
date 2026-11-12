@@ -81,16 +81,16 @@ async fn setup_script(dir: &Path, code: &str) -> (Workspace, String, PathBuf) {
 
 fn apply(w: &Workspace, command: Command) -> Snapshot {
     let mut store = w.store.lock().unwrap();
-    let current = store.snapshot().unwrap();
+    let current = store.full();
     let (snapshot, _) = store
-        .apply(env(current.revision, command), &w.config)
+        .apply_owned(env(current.revision, command), &w.config)
         .unwrap();
-    w.snapshots.send_replace(snapshot.clone());
+    w.snapshots.send_replace((snapshot.clone()).into());
     snapshot
 }
 
 async fn turn(w: &Workspace, id: &str, text: &str) {
-    let snapshot = w.snapshots.borrow().clone();
+    let snapshot = w.full();
     let (id, run, stop, prompt) = reserve(
         w,
         env(
@@ -177,7 +177,7 @@ async fn codex_discovery_skills_settings_and_compaction_use_native_protocol() {
         rpc.iter().any(|v| v["method"] == "thread/compact/start"
             && v["params"]["threadId"] == "original-thread")
     );
-    let snapshot = w.snapshots.borrow().clone();
+    let snapshot = w.full();
     assert!(
         snapshot
             .messages
@@ -187,8 +187,7 @@ async fn codex_discovery_skills_settings_and_compaction_use_native_protocol() {
     let reopened = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
     assert_eq!(
         reopened
-            .snapshot()
-            .unwrap()
+            .full()
             .sessions
             .iter()
             .find(|s| s.id == id)
@@ -222,8 +221,7 @@ async fn turns_store_and_run_the_default_effort_when_none_is_selected() {
     let reopen = || {
         Store::open(&dir.path().join("db"), AgentProfile::default())
             .unwrap()
-            .snapshot()
-            .unwrap()
+            .full()
             .sessions
             .into_iter()
             .find(|s| s.id == id)
@@ -564,7 +562,7 @@ async fn claude_uniform_skills_commands_and_forks_preserve_native_dispatch() {
     assert!(args.contains("\n--effort\nhigh\n"));
     assert!(args.contains("\n--permission-mode\nplan\n"));
     assert!(args.contains("\"fastMode\":true"));
-    let current = w.snapshots.borrow().clone();
+    let current = w.full();
     assert!(
         current
             .messages
@@ -1002,8 +1000,7 @@ async fn installed_harness_commands(harness: Harness) {
     .await
     .unwrap();
     assert!(
-        w.snapshots
-            .borrow()
+        w.full()
             .messages
             .iter()
             .any(|m| m.session_id == id && m.body.contains("RELAY_SKILL_CONFIRMED"))
@@ -1011,7 +1008,7 @@ async fn installed_harness_commands(harness: Harness) {
     tokio::time::timeout(Duration::from_secs(180), turn(&w, &id, "/compact"))
         .await
         .unwrap();
-    let snapshot = w.snapshots.borrow().clone();
+    let snapshot = w.full();
     let (session, run, stop, prompt) = reserve(
         &w,
         env(
@@ -1148,7 +1145,7 @@ async fn example_sessions_describe_the_demo_catalog_without_a_harness() {
 async fn branch_archive_and_confirmed_deletion_remove_owned_files_and_persist_over_http() {
     let dir = tempfile::tempdir().unwrap();
     let (w, id, _) = setup(dir.path()).await;
-    let mut snapshot = w.snapshots.borrow().clone();
+    let mut snapshot = w.full();
     let parent = snapshot
         .sessions
         .iter()
@@ -1730,12 +1727,12 @@ async fn archived_chat_is_readable_but_cannot_execute_until_unarchived() {
 async fn stale_creates_and_first_turn_use_current_selection_and_run_once() {
     let dir = tempfile::tempdir().unwrap();
     let (w, _, capture) = setup(dir.path()).await;
-    let before = w.store.lock().unwrap().snapshot().unwrap();
+    let before = w.store.lock().unwrap().full();
     let config = &before.agent_configs[0];
     w.store
         .lock()
         .unwrap()
-        .apply(
+        .apply_owned(
             env(
                 before.revision,
                 Command::UpdateAgentConfig {
@@ -1957,8 +1954,7 @@ async fn stale_creates_and_first_turn_use_current_selection_and_run_once() {
     let reopened = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
     assert_eq!(
         reopened
-            .snapshot()
-            .unwrap()
+            .full()
             .agent_configs
             .iter()
             .find(|c| c.id == config)
@@ -2168,11 +2164,11 @@ async fn fork_of_a_held_worktree_waits_over_http_and_forks_once_after_release() 
     std::fs::write(path.join("pending-fork"), "copied after release").unwrap();
     let change = |update: &dyn Fn(&mut Snapshot)| {
         let mut store = w.store.lock().unwrap();
-        let mut snapshot = store.snapshot().unwrap();
+        let mut snapshot = store.full();
         update(&mut snapshot);
         snapshot.revision += 1;
         store.save(&snapshot).unwrap();
-        w.snapshots.send_replace(snapshot);
+        w.snapshots.send_replace((snapshot).into());
     };
     // An unrelated running session records the same worktree.
     change(&|s| {
@@ -2228,7 +2224,7 @@ async fn fork_of_a_held_worktree_waits_over_http_and_forks_once_after_release() 
         .unwrap()
         .join(format!("fork-{}-0", fork.request_id));
     {
-        let snapshot = w.snapshots.borrow().clone();
+        let snapshot = w.full();
         let waiting = snapshot
             .submissions
             .iter()
@@ -2270,7 +2266,7 @@ async fn fork_of_a_held_worktree_waits_over_http_and_forks_once_after_release() 
     conversation::drain_workspace_waits(&w).unwrap();
     let snapshot = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            let snapshot = w.snapshots.borrow().clone();
+            let snapshot = w.full();
             if snapshot
                 .submissions
                 .iter()
@@ -2341,11 +2337,11 @@ async fn fork_meeting_contention_after_copying_removes_the_copy_before_waiting_a
     std::fs::write(path.join("pending-fork"), "copied by the retry").unwrap();
     let change = |update: &dyn Fn(&mut Snapshot)| {
         let mut store = w.store.lock().unwrap();
-        let mut snapshot = store.snapshot().unwrap();
+        let mut snapshot = store.full();
         update(&mut snapshot);
         snapshot.revision += 1;
         store.save(&snapshot).unwrap();
-        w.snapshots.send_replace(snapshot);
+        w.snapshots.send_replace((snapshot).into());
     };
     let launch = runtime::RuntimeGate::new();
     w.store
@@ -2411,7 +2407,7 @@ async fn fork_meeting_contention_after_copying_removes_the_copy_before_waiting_a
     launch.open();
     let waiting = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            let snapshot = w.snapshots.borrow().clone();
+            let snapshot = w.full();
             if let Some(waiting) = snapshot
                 .submissions
                 .iter()
@@ -2459,7 +2455,7 @@ async fn fork_meeting_contention_after_copying_removes_the_copy_before_waiting_a
     conversation::drain_workspace_waits(&w).unwrap();
     let snapshot = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            let snapshot = w.snapshots.borrow().clone();
+            let snapshot = w.full();
             if snapshot
                 .submissions
                 .iter()
@@ -2529,11 +2525,11 @@ async fn claude_fork_from_the_queue_sends_only_its_fixed_command_even_after_its_
     finished(&w, &id).await;
     let change = |update: &dyn Fn(&mut Snapshot)| {
         let mut store = w.store.lock().unwrap();
-        let mut snapshot = store.snapshot().unwrap();
+        let mut snapshot = store.full();
         update(&mut snapshot);
         snapshot.revision += 1;
         store.save(&snapshot).unwrap();
-        w.snapshots.send_replace(snapshot);
+        w.snapshots.send_replace((snapshot).into());
     };
     change(&|s| {
         let mut holder = s.sessions.iter().find(|s| s.id == id).unwrap().clone();
@@ -2576,7 +2572,7 @@ async fn claude_fork_from_the_queue_sends_only_its_fixed_command_even_after_its_
     conversation::drain_workspace_waits(&w).unwrap();
     let snapshot = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            let snapshot = w.snapshots.borrow().clone();
+            let snapshot = w.full();
             if snapshot
                 .submissions
                 .iter()

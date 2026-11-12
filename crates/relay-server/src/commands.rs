@@ -1464,6 +1464,14 @@ pub(super) fn publish_fork(
     {
         return Err(Error::invalid("Harness did not create an independent fork"));
     }
+    // The fork copies the source transcript, which is not in the run's set.
+    let history = crate::blocking(|| {
+        workspace
+            .store
+            .lock()
+            .map_err(Error::internal)?
+            .session_messages(source)
+    })?;
     workspace.update_run(source, run, |snapshot| {
         if snapshot.sessions.iter().any(|s| s.id == fork.id) {
             return Err(Error::invalid("Fork already exists"));
@@ -1478,11 +1486,8 @@ pub(super) fn publish_fork(
             .and_then(|s| s.worker.as_ref())
             .and_then(|w| w.launched_network_policy);
         fork.worker.as_mut().unwrap().thread_id = Some(thread.into());
-        let messages: Vec<_> = snapshot
-            .messages
-            .iter()
-            .filter(|m| m.session_id == source)
-            .cloned()
+        let messages: Vec<_> = history
+            .into_iter()
             .map(|mut m| {
                 m.id = format!("fork-{}-{}", fork.id, m.id);
                 m.session_id = fork.id.clone();

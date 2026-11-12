@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use tokio::io::{AsyncWriteExt, BufReader};
 
+mod queue;
+
 pub(super) struct Capability {
     hash: [u8; 32],
     run: String,
@@ -61,7 +63,7 @@ pub(super) fn authenticate(
     }
     let control = store.controls.get(session).ok_or_else(unauthorized)?;
     if *control.borrow()
-        || !store.snapshot()?.sessions.iter().any(|s| {
+        || !store.shared()?.sessions.iter().any(|s| {
             s.id == *session
                 && s.worker
                     .as_ref()
@@ -133,6 +135,9 @@ pub(super) fn configure(
                     .into(),
                 "mcp_servers.relay.default_tools_approval_mode=\"approve\"".into(),
                 "mcp_servers.relay.tool_timeout_sec=660".into(),
+                // Relay's run-scoped management tools belong in the first
+                // model input, not an optional server's later grace window.
+                "mcp_servers.relay.required=true".into(),
             ] {
                 command.arg("-c").arg(setting);
             }
@@ -243,15 +248,22 @@ fn peer_state(snapshot: &Snapshot, session: &Session) -> Value {
         .map(|p| p.name.as_str());
     json!({"id":session.id,"title":session.title,"project":project,"status":session.worker.as_ref().map(|w| &w.status),"relationship":"peer"})
 }
-fn state(snapshot: &Snapshot, id: &str) -> Value {
+/// The newest result `id` reported about itself, from the messages table.
+fn reported_result(workspace: &Workspace, id: &str) -> Option<Value> {
+    let message = crate::blocking(|| {
+        let store = workspace.store.lock().ok()?;
+        crate::messages::newest_matching(&store.connection, id, "agent_result", None, |m| {
+            matches!(m.tool.as_ref().and_then(|t|t.detail.as_ref()),Some(ToolDetail::Result {from_session_id:Some(from),..}) if from == id)
+        })
+        .ok()
+        .flatten()
+    })?;
+    serde_json::from_str::<Value>(&message.body).ok()
+}
+fn state(workspace: &Workspace, snapshot: &Snapshot, id: &str) -> Value {
     let session = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
-    let result = snapshot
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.session_id == id && m.kind == "agent_result" && matches!(m.tool.as_ref().and_then(|t|t.detail.as_ref()),Some(ToolDetail::Result {from_session_id:Some(from),..}) if from == id));
-    let result = result.and_then(|m| serde_json::from_str::<Value>(&m.body).ok());
-    json!({"id":id,"title":session.title,"parent_session_id":session.parent_session_id,"status":session.worker.as_ref().map(|w| &w.status),"archived":session.archived,"worktree":session.worker.as_ref().and_then(|w| w.worktree.as_ref()),"result":result,"progress":session.progress.as_ref().map(progress_state)})
+    let result = reported_result(workspace, id);
+    json!({"id":id,"title":session.title,"parent_session_id":session.parent_session_id,"status":session.worker.as_ref().map(|w| &w.status),"archived":session.archived,"worktree":session.worker.as_ref().and_then(|w| w.worktree.as_ref()),"result":result,"queue":queue::summary(snapshot, id),"progress":session.progress.as_ref().map(progress_state)})
 }
 /// A progress report as agents see it, with the likely range the confidence implies.
 fn progress_state(progress: &ProgressReport) -> Value {
@@ -265,7 +277,7 @@ fn rank(permission: Permission) -> u8 {
         Permission::Allow => 2,
     }
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct Spawn {
     /// Stable identity for this logical call; reuse only for an explicit retry.
@@ -455,6 +467,98 @@ fn deletion_scope(snapshot: &Snapshot, agent: &str) -> Result<Vec<Session>, Erro
     Ok(sessions)
 }
 
+/// The existing lifecycle command addresses a whole branch. Bind approval to that
+/// exact inactive branch and its effective policies, without authorizing execution.
+fn unarchive_plan(snapshot: &Snapshot, agent: &str) -> Result<Vec<(Session, AgentProfile)>, Error> {
+    if !snapshot.can_archive_session(agent) {
+        return Err(Error::invalid(
+            "Stop this agent and its children before unarchiving",
+        ));
+    }
+    let ids = snapshot.session_branch_ids(agent);
+    if snapshot
+        .submissions
+        .iter()
+        .any(|s| ids.contains(&s.session_id) && s.state == SubmissionState::Queued)
+    {
+        return Err(Error::invalid(
+            "Pause queued turns before unarchiving this branch",
+        ));
+    }
+    let mut branch = snapshot
+        .sessions
+        .iter()
+        .filter(|s| ids.contains(&s.id))
+        .map(|s| Ok((s.clone(), profile(snapshot, s)?)))
+        .collect::<Result<Vec<_>, Error>>()?;
+    branch.sort_by(|a, b| a.0.id.cmp(&b.0.id));
+    Ok(branch)
+}
+
+async fn unarchive_agent(
+    workspace: &Workspace,
+    caller: &str,
+    run: &str,
+    input: Value,
+    stop: &mut watch::Receiver<bool>,
+) -> Result<Value, Error> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Unarchive {
+        agent: String,
+    }
+    let args: Unarchive = parse(input)?;
+    let (delegate, plan) = {
+        let snapshot = workspace.snapshots.borrow().clone();
+        archive_scope(&snapshot, caller, &args.agent)?;
+        let parent = snapshot.sessions.iter().find(|s| s.id == caller).unwrap();
+        if parent.archived {
+            return Err(unauthorized());
+        }
+        (
+            profile(&snapshot, parent)?.permissions[&Task::Delegate],
+            unarchive_plan(&snapshot, &args.agent)?,
+        )
+    };
+    match delegate {
+        Permission::Deny => return Err(Error::invalid("Profile denies managing subagents")),
+        Permission::Ask => approval(
+            workspace, caller, run, "mcp__relay__unarchive_agent",
+            &format!("Unarchive subagent {} and its entire inactive descendant branch, retaining history, workspaces and policy. Paused turns stay paused; no execution starts.", args.agent), stop,
+        ).await?,
+        Permission::Allow => {}
+    }
+    let mut store = workspace.store.lock().map_err(Error::internal)?;
+    let current = store.snapshot()?;
+    active_caller(&store, &current, caller, run)?;
+    archive_scope(&current, caller, &args.agent)?;
+    let parent = current.sessions.iter().find(|s| s.id == caller).unwrap();
+    if parent.archived {
+        return Err(unauthorized());
+    }
+    if profile(&current, parent)?.permissions[&Task::Delegate] != delegate {
+        return Err(Error::invalid("Agent policy changed; retry"));
+    }
+    if unarchive_plan(&current, &args.agent)? != plan {
+        return Err(Error::invalid(
+            "Unarchive branch or policy changed; review and retry",
+        ));
+    }
+    let (snapshot, _) = store.apply(
+        CommandEnvelope {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            expected_revision: current.revision,
+            command: Command::SetSessionArchived {
+                session_id: args.agent.clone(),
+                archived: false,
+            },
+        },
+        &workspace.config,
+    )?;
+    workspace.snapshots.send_replace(snapshot);
+    Ok(json!({"agent":args.agent,"archived":false}))
+}
+
 pub(super) async fn route(
     State(workspace): State<Workspace>,
     headers: HeaderMap,
@@ -485,25 +589,43 @@ pub(super) async fn route(
                 workspace: Workspace,
                 id: String,
                 caller: String,
+                /// Cleared once the attempt awaits a human decision instead.
+                armed: bool,
             }
             impl Drop for OutcomeGuard {
                 fn drop(&mut self) {
+                    if !self.armed {
+                        return;
+                    }
                     let _ = crate::spawn_attempts::finish(&self.workspace, &self.id, true, false);
                     let _ = crate::spawn_attempts::flush(&self.workspace, &self.caller, true);
                 }
             }
-            let _guard = OutcomeGuard {
+            let mut guard = OutcomeGuard {
                 workspace: workspace.clone(),
                 id: id.clone(),
                 caller: session.clone(),
+                armed: true,
             };
             let result = match parse(input) {
                 Ok(args) => spawn(&workspace, &session, &run, args, &mut stop, Some(&id)).await,
                 Err(error) => Err(error),
             };
-            let permission_refused = result
-                .as_ref()
-                .is_err_and(|e| e.message == "Human denied agent tool permission");
+            // Left for a human: deciding it continues or ends the attempt.
+            if let Ok(value) = &result
+                && value == &awaiting_approval(&id)
+            {
+                guard.armed = false;
+                return Ok::<_, Error>(value.clone());
+            }
+            let permission_refused = result.as_ref().is_err_and(|e| {
+                matches!(
+                    e.message.as_str(),
+                    "Human denied agent tool permission"
+                        | "Agent tool approval stopped"
+                        | "Agent tool approval expired or run ended"
+                )
+            });
             let denied = permission_refused
                 && workspace
                     .snapshots
@@ -520,7 +642,19 @@ pub(super) async fn route(
                 || stop.has_changed().is_err()
                 || (permission_refused && !denied)
                 || result.as_ref().is_err_and(|e| e.code == "agent_capability");
-            let value = crate::spawn_attempts::finish(&workspace, &id, cancelled, denied)?;
+            use crate::spawn_attempts::CancellationReason;
+            let reason = if *stop.borrow() || stop.has_changed().is_err() {
+                Some(CancellationReason::Stopped)
+            } else if result.as_ref().is_err_and(|e| e.code == "agent_capability") {
+                Some(CancellationReason::CapabilityChanged)
+            } else if permission_refused && !denied {
+                Some(CancellationReason::ExpiredOrRunEnded)
+            } else {
+                None
+            };
+            let value = crate::spawn_attempts::finish_with_reason(
+                &workspace, &id, cancelled, denied, reason,
+            )?;
             crate::spawn_attempts::flush(&workspace, &session, true)?;
             Ok::<_, Error>(value)
         });
@@ -543,6 +677,9 @@ async fn call(
 ) -> Result<Value, Error> {
     let result = dispatch(workspace, caller, run, tool, input, stop).await;
     if result.is_ok()
+        // Restoring availability must not start queued work, including unrelated
+        // workspace waiters. Messaging/resuming is a separate explicit operation.
+        && tool != "unarchive_agent"
         && let Err(error) = conversation::drain_workspace_waits(workspace)
     {
         eprintln!("Shared workspace queue advancement failed: {error}");
@@ -567,12 +704,12 @@ async fn dispatch(
                 return Err(Error::invalid("list_agents takes no arguments"));
             }
             let snapshot = workspace.snapshots.borrow().clone();
-            let mut agents = vec![state(&snapshot, caller)];
+            let mut agents = vec![state(workspace, &snapshot, caller)];
             agents.extend(
                 snapshot
                     .descendants(caller)
                     .iter()
-                    .map(|s| state(&snapshot, &s.id)),
+                    .map(|s| state(workspace, &snapshot, &s.id)),
             );
             if let Some(parent) = snapshot
                 .sessions
@@ -580,7 +717,7 @@ async fn dispatch(
                 .find(|s| s.id == caller)
                 .and_then(|s| s.parent_session_id.as_ref())
             {
-                agents.push(state(&snapshot, parent));
+                agents.push(state(workspace, &snapshot, parent));
             }
             for peer in snapshot.peers_of(caller) {
                 if !agents.iter().any(|a| a["id"] == peer.id.as_str()) {
@@ -696,7 +833,16 @@ async fn dispatch(
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-            store.save(&current)?;
+            let store = &mut *store;
+            let transaction = store.connection.transaction().map_err(Error::internal)?;
+            crate::notices::suppress(&transaction, &current, &args.agent, true, "ancestor_stop")?;
+            let current = crate::persist(
+                &store.snapshot_cache,
+                &store.transcripts,
+                &transaction,
+                current,
+            )?;
+            transaction.commit().map_err(Error::internal)?;
             store.mark_ancestor_stop(&args.agent);
             store.held.remove(&args.agent);
             store.stop_controls(&current, &args.agent);
@@ -704,8 +850,12 @@ async fn dispatch(
             Ok(json!({"agent":args.agent,"stop_requested":true}))
         }
         "archive_agent" => manage_agent(workspace, caller, run, input, stop, false).await,
+        "unarchive_agent" => unarchive_agent(workspace, caller, run, input, stop).await,
         "delete_agent" => manage_agent(workspace, caller, run, input, stop, true).await,
         "message_agent" => message_agent(workspace, caller, run, parse(input)?, stop).await,
+        tool if queue::TOOLS.contains(&tool) => {
+            queue::call(workspace, caller, run, tool, input, stop).await
+        }
         "wait_for_agents" => {
             let args: Wait = parse(input)?;
             if args.timeout_s > 600 || args.agents.is_empty() || args.agents.len() > 64 {
@@ -733,7 +883,7 @@ async fn dispatch(
                         .is_some_and(|w| !runtime::active(&w.status))
                 });
                 if done || tokio::time::Instant::now() >= deadline {
-                    let result = json!({"agents":args.agents.iter().map(|id|state(&snapshot,id)).collect::<Vec<_>>(),"timed_out":!done});
+                    let result = json!({"agents":args.agents.iter().map(|id|state(workspace,&snapshot,id)).collect::<Vec<_>>(),"timed_out":!done});
                     record(
                         workspace,
                         caller,
@@ -878,10 +1028,16 @@ async fn approval(
     description: &str,
     stop: &mut watch::Receiver<bool>,
 ) -> Result<(), Error> {
-    if crate::harness::permission(workspace, caller, run, tool, description, stop).await? {
-        Ok(())
-    } else {
-        Err(Error::invalid("Human denied agent tool permission"))
+    use crate::harness::PermissionOutcome;
+    match crate::harness::permission_outcome(workspace, caller, run, tool, description, stop)
+        .await?
+    {
+        PermissionOutcome::Approved => Ok(()),
+        PermissionOutcome::Denied => Err(Error::invalid("Human denied agent tool permission")),
+        PermissionOutcome::Stopped => Err(Error::invalid("Agent tool approval stopped")),
+        PermissionOutcome::ExpiredOrRunEnded => {
+            Err(Error::invalid("Agent tool approval expired or run ended"))
+        }
     }
 }
 /// What a spawn was decided, and any approval asked, under. It must still
@@ -894,10 +1050,22 @@ struct SpawnDecision<'a> {
     effective: &'a AgentProfile,
     parent_mode: ApprovalMode,
     execution_policy: SpawnExecutionApproval,
+    /// Whether the caller's run is still the authority, as opposed to a
+    /// human approval decided after that run may have ended.
+    live: bool,
 }
 impl SpawnDecision<'_> {
     fn holds(&self, store: &Store, current: &Snapshot) -> Result<(), Error> {
-        active_caller(store, current, self.caller, self.run)?;
+        if self.live {
+            active_caller(store, current, self.caller, self.run)?;
+        } else if store.closing
+            || !current
+                .sessions
+                .iter()
+                .any(|s| s.id == self.caller && !s.archived)
+        {
+            return Err(Error::invalid("Requesting agent is archived or missing"));
+        }
         let parent = current
             .sessions
             .iter()
@@ -927,6 +1095,32 @@ impl SpawnDecision<'_> {
         Ok(())
     }
 }
+/// A spawn resolved before any approval: the checked model choice, the modes
+/// and everything a human must approve.
+struct Prepared {
+    parent: Session,
+    effective: AgentProfile,
+    harness: Harness,
+    selection: HarnessSelection,
+    rationale: Option<String>,
+    prompt: String,
+    parent_mode: ApprovalMode,
+    requested_mode: Option<ApprovalMode>,
+    child_mode: ApprovalMode,
+    execution_policy: SpawnExecutionApproval,
+    reasons: Vec<String>,
+}
+/// The approval text, which is also what a later decision is checked against.
+fn describe(title: &str, reasons: &[String], attempt: Option<&str>) -> String {
+    format!(
+        "Spawn {} with:\n{}{}",
+        title,
+        reasons.join("\n"),
+        attempt
+            .map(|id| format!("\nSpawn attempt: {id}"))
+            .unwrap_or_default()
+    )
+}
 async fn spawn(
     workspace: &Workspace,
     caller: &str,
@@ -935,6 +1129,113 @@ async fn spawn(
     stop: &mut watch::Receiver<bool>,
     attempt: Option<&str>,
 ) -> Result<Value, Error> {
+    let prepared = prepare(workspace, caller, &args, stop).await?;
+    if !prepared.reasons.is_empty() {
+        let description = describe(&args.title, &prepared.reasons, attempt);
+        // A durable request outlives this turn: the human decides it later,
+        // and the outcome reaches the caller as a notice.
+        if let Some(attempt) = attempt {
+            return detach(workspace, caller, run, &args, attempt, &description);
+        }
+        approval(
+            workspace,
+            caller,
+            run,
+            "mcp__relay__spawn_agent",
+            &description,
+            stop,
+        )
+        .await?;
+    }
+    create_child(workspace, caller, run, args, prepared, attempt, stop, true).await
+}
+/// The reply to a durable spawn left awaiting human approval.
+fn awaiting_approval(attempt: &str) -> Value {
+    json!({"spawn_attempt":attempt,"phase":"pending_approval","pending":true,"message":"Waiting for human approval. No child exists yet. The outcome reaches you later as a Relay notice; do not retry or wait for it."})
+}
+fn detach(
+    workspace: &Workspace,
+    caller: &str,
+    run: &str,
+    args: &Spawn,
+    attempt: &str,
+    description: &str,
+) -> Result<Value, Error> {
+    crate::spawn_attempts::detach(
+        workspace,
+        attempt,
+        &json!({"args":args,"description":description}),
+    )?;
+    let request = crate::harness::request(
+        &uuid::Uuid::new_v4().to_string(),
+        caller,
+        run,
+        "mcp__relay__spawn_agent",
+        description,
+        Some(attempt),
+    );
+    workspace.update_run(caller, run, |snapshot| {
+        snapshot.tool_permissions.push(request);
+        Ok(())
+    })?;
+    Ok(awaiting_approval(attempt))
+}
+/// A human decided a detached spawn: create the child or end the attempt,
+/// then deliver the outcome to the caller.
+pub(super) async fn decided(workspace: Workspace, attempt: String, allow: bool) {
+    let Ok(Some(caller)) = crate::spawn_attempts::caller(&workspace, &attempt) else {
+        return;
+    };
+    let ended = if allow {
+        match continue_spawn(&workspace, &attempt).await {
+            Ok(()) => Ok(()),
+            // Only the fixed outcome text is kept; raw errors may hold secrets.
+            Err(_) => crate::spawn_attempts::finish(&workspace, &attempt, false, false).map(|_| ()),
+        }
+    } else {
+        crate::spawn_attempts::finish(&workspace, &attempt, false, true).map(|_| ())
+    };
+    if ended
+        .and_then(|()| crate::spawn_attempts::flush(&workspace, &caller, true))
+        .is_err()
+    {
+        eprintln!("Spawn approval outcome could not be delivered");
+    }
+}
+async fn continue_spawn(workspace: &Workspace, attempt: &str) -> Result<(), Error> {
+    let Some((caller, run, request)) = crate::spawn_attempts::detached(workspace, attempt)? else {
+        return Ok(());
+    };
+    let args: Spawn = serde_json::from_value(request["args"].clone()).map_err(Error::internal)?;
+    // The approval covers the spawn only as it was described when asked.
+    let (_running, mut stop) = watch::channel(false);
+    let prepared = prepare(workspace, &caller, &args, &mut stop).await?;
+    if request["description"].as_str()
+        != Some(&describe(&args.title, &prepared.reasons, Some(attempt)))
+    {
+        return Err(Error::invalid(
+            "Policy changed while awaiting approval; retry spawn",
+        ));
+    }
+    create_child(
+        workspace,
+        &caller,
+        &run,
+        args,
+        prepared,
+        Some(attempt),
+        &stop,
+        false,
+    )
+    .await
+    .map(|_| ())
+}
+async fn prepare(
+    workspace: &Workspace,
+    caller: &str,
+    args: &Spawn,
+    stop: &mut watch::Receiver<bool>,
+) -> Result<Prepared, Error> {
     validate_prompt(&args.task)?;
     if args
         .call_id
@@ -986,7 +1287,8 @@ async fn spawn(
         .rationale
         .as_deref()
         .map(str::trim)
-        .filter(|r| !r.is_empty());
+        .filter(|r| !r.is_empty())
+        .map(str::to_owned);
     // Use any discovered catalog for the requested harness; launch discovers it
     // again in the child workspace before executing the first turn.
     let harness = request.0.unwrap_or(effective.harness);
@@ -1018,7 +1320,7 @@ async fn spawn(
         Some(!model.efforts.is_empty())
     });
     policy
-        .check_selection(&request, rationale, offers_effort)
+        .check_selection(&request, rationale.as_deref(), offers_effort)
         .map_err(Error::invalid)?;
     let (_, model, effort) = request;
     let Some(selected_model) = model else {
@@ -1109,25 +1411,44 @@ async fn spawn(
     if permissions[&Task::Implement] == Permission::Ask {
         reasons.push("implementation for its first turn".to_string());
     }
-    if !reasons.is_empty() {
-        crate::spawn_attempts::phase(workspace, attempt, "pending_approval")?;
-        approval(
-            workspace,
-            caller,
-            run,
-            "mcp__relay__spawn_agent",
-            &format!(
-                "Spawn {} with:\n{}{}",
-                args.title,
-                reasons.join("\n"),
-                attempt
-                    .map(|id| format!("\nSpawn attempt: {id}"))
-                    .unwrap_or_default()
-            ),
-            stop,
-        )
-        .await?;
-    }
+    Ok(Prepared {
+        parent,
+        effective,
+        harness,
+        selection,
+        rationale,
+        prompt,
+        parent_mode,
+        requested_mode,
+        child_mode,
+        execution_policy,
+        reasons,
+    })
+}
+#[allow(clippy::too_many_arguments)]
+async fn create_child(
+    workspace: &Workspace,
+    caller: &str,
+    run: &str,
+    args: Spawn,
+    prepared: Prepared,
+    attempt: Option<&str>,
+    stop: &watch::Receiver<bool>,
+    live: bool,
+) -> Result<Value, Error> {
+    let Prepared {
+        parent,
+        effective,
+        harness,
+        selection,
+        rationale,
+        prompt,
+        parent_mode,
+        requested_mode,
+        child_mode,
+        execution_policy,
+        reasons: _,
+    } = prepared;
     let decision = SpawnDecision {
         caller,
         run,
@@ -1135,6 +1456,7 @@ async fn spawn(
         effective: &effective,
         parent_mode,
         execution_policy,
+        live,
     };
     // A stale approval never reaches the fork: recheck before preparing the
     // child's workspaces, and again below before the child is saved.
@@ -1183,7 +1505,7 @@ async fn spawn(
         context: args.context,
         permissions: args.permissions,
         requested_by_run: Some(run.into()),
-        selection_rationale: rationale.map(str::to_owned),
+        selection_rationale: rationale,
         execution_approval: requested_mode,
     });
     let worker = child.worker.as_mut().unwrap();
@@ -1213,24 +1535,34 @@ async fn spawn(
         // Enrich the harness's calling tool when it has already been observed.
         // A separate server receipt also survives clients/harnesses that omit it.
         let grant = child.spawn.as_ref().unwrap();
-        if let Some(tool) = current
-            .messages
+        // Only the caller's running tools can be the calling tool; the one
+        // enriched below goes back through the outbox.
+        let mut running = if live {
+            crate::messages::running_tools(&store.connection, Some(caller), Some(run))
+                .map_err(Error::internal)?
+        } else {
+            vec![]
+        };
+        if let Some(message) = running
             .iter_mut()
             .filter(|m| m.session_id == caller)
-            .filter_map(|m| m.tool.as_mut())
-            .find(|t| {
-                t.run_id == run
-                    && t.kind == ToolKind::Spawn
-                    && t.state == ToolState::Running
-                    && t.detail.is_none()
-                    && serde_json::from_str::<Value>(&t.input).is_ok_and(|input| {
-                        input["title"] == child.title && input["task"] == grant.task
-                    })
+            .find(|m| {
+                m.tool.as_ref().is_some_and(|t| {
+                    t.run_id == run
+                        && t.kind == ToolKind::Spawn
+                        && t.state == ToolState::Running
+                        && t.detail.is_none()
+                        && serde_json::from_str::<Value>(&t.input).is_ok_and(|input| {
+                            input["title"] == child.title && input["task"] == grant.task
+                        })
+                })
             })
+            && let Some(tool) = message.tool.as_mut()
         {
             tool.detail = Some(ToolDetail::Spawn {
                 child_session_id: Some(id.clone()),
             });
+            current.messages.push(message.clone());
         }
         let from_caller = Sender::Agent {
             session_id: caller.into(),
@@ -1276,6 +1608,7 @@ async fn spawn(
                 approve_implementation: true,
             },
         };
+        let store = &mut *store;
         let transaction = store
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1296,12 +1629,12 @@ async fn spawn(
                 ],
             )
             .map_err(Error::internal)?;
-        transaction
-            .execute(
-                "UPDATE workspace SET snapshot=?1 WHERE id=1",
-                [serde_json::to_string(&current).map_err(Error::internal)?],
-            )
-            .map_err(Error::internal)?;
+        let current = crate::persist(
+            &store.snapshot_cache,
+            &store.transcripts,
+            &transaction,
+            current,
+        )?;
         transaction.commit().map_err(Error::internal)?;
         store.controls.insert(id.clone(), sender);
         workspace.snapshots.send_replace(current);
@@ -1353,7 +1686,7 @@ async fn message_agent(
     let id = uuid::Uuid::new_v4().to_string();
     let tool_id = format!("agent-message-{id}");
     // Submit through the same queue machinery, preserving the user's shared draft.
-    let (action, next, next_run) = {
+    let (action, next, next_run, mut queue) = {
         let mut store = workspace.store.lock().map_err(Error::internal)?;
         if *stop.borrow() {
             return Err(unauthorized());
@@ -1370,6 +1703,7 @@ async fn message_agent(
         if profile(&current, target)?.permissions != permissions {
             return Err(Error::invalid("Target permissions changed; retry message"));
         }
+        let store = &mut *store;
         let transaction = store
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1466,13 +1800,14 @@ async fn message_agent(
                     params![args.agent, id],
                 )
                 .map_err(Error::internal)?;
+            crate::notices::superseded(&transaction)?;
         }
-        transaction
-            .execute(
-                "UPDATE workspace SET snapshot=?1 WHERE id=1",
-                [serde_json::to_string(&current).map_err(Error::internal)?],
-            )
-            .map_err(Error::internal)?;
+        let current = crate::persist(
+            &store.snapshot_cache,
+            &store.transcripts,
+            &transaction,
+            current,
+        )?;
         transaction.commit().map_err(Error::internal)?;
         let receiver = if action.is_some() {
             let (sender, receiver) = watch::channel(false);
@@ -1481,9 +1816,14 @@ async fn message_agent(
         } else {
             None
         };
+        let mut queue = queue::summary(&current, &args.agent);
+        if let Some(hint) = queue::message_hint(&current, &args.agent) {
+            queue["hint"] = json!(hint);
+        }
         workspace.snapshots.send_replace(current);
-        (action, receiver, id.clone())
+        (action, receiver, id.clone(), queue)
     };
+    queue["started"] = json!(matches!(action, Some(Action::Run { .. })));
     if let (Some(Action::Run { session_id, prompt }), Some(receiver)) = (action, next) {
         tokio::spawn(runtime::run(
             workspace.clone(),
@@ -1493,7 +1833,7 @@ async fn message_agent(
             receiver,
         ));
     }
-    Ok(json!({"submission":id,"queued":true}))
+    Ok(json!({"submission":id,"queued":true,"queue":queue}))
 }
 
 pub(super) fn mark_read(snapshot: &mut Snapshot, run: &str) {
@@ -1561,7 +1901,7 @@ fn spawn_spec(
     };
     (
         format!(
-            "Start a child Relay session. Give each intentional call a new call_id. For an explicit transport retry of that same logical call, reuse its call_id and exact arguments; never reuse a denied or failed call identity for a new attempt. Relay enforces delegation and human approval for wider permissions. {rule} {} {execution}",
+            "Start a child Relay session. Give each intentional call a new call_id. For an explicit transport retry of that same logical call, reuse its call_id and exact arguments; never reuse a denied or failed call identity for a new attempt. Relay enforces delegation and human approval for wider permissions. A spawn that needs human approval returns phase pending_approval at once and no child exists yet; do not retry or wait: end your turn, and the outcome (created child, denial or rejection) reaches you later as a Relay notice. {rule} {} {execution}",
             policy.allowed_summary()
         ),
         properties,
@@ -1618,6 +1958,12 @@ fn tools(
             vec!["agent"],
         ),
         (
+            "unarchive_agent",
+            "Unarchive your own inactive descendant and its entire inactive subtree, retaining history, workspaces and effective policy. Requires delegation permission. Restores availability only: paused turns stay paused and no execution starts. Use resume_agent_queue or message_agent explicitly for follow-up; self, ancestors, unrelated agents and active branches are forbidden.",
+            json!({"agent":string}),
+            vec!["agent"],
+        ),
+        (
             "delete_agent",
             "Permanently delete your own inactive descendant branch, only after the entire branch is archived. Requires delegation permission. Irreversibly removes chat contents, drafts, unshared attachments and owned isolated workspaces; retain needed handoff and evidence elsewhere first. Prefer archive_agent for useful history; never delete active or follow-up work.",
             json!({"agent":string}),
@@ -1625,7 +1971,7 @@ fn tools(
         ),
         (
             "message_agent",
-            "Queue a turn for an agent in this tree, or for a session a human mentioned in a message with you (a peer from list_agents, possibly in another project). Messaging a peer gives no other access to it.",
+            "Queue a turn for an agent in this tree, or for a session a human mentioned in a message with you (a peer from list_agents, possibly in another project). Messaging a peer gives no other access to it. The result's queue shows whether the turn started; behind a paused queue it waits until the queue is resumed (resume_agent_queue, for a descendant).",
             json!({"agent":string,"text":string}),
             vec!["agent", "text"],
         ),
@@ -1643,12 +1989,12 @@ fn tools(
         ),
         (
             "list_agents",
-            "List your subtree and parent with current statuses and archived flags, your caller-scoped durable spawn attempts and their phases, sessions a human mentioned with you (relationship \"peer\": ID, title, project and status only; message them with message_agent), and your worker model policy with remaining usage when it applies. A pending spawn is not a created child; inspect its outcome before retrying.",
+            "List your subtree and parent with current statuses and archived flags, your caller-scoped durable spawn attempts and their phases, sessions a human mentioned with you (relationship \"peer\": ID, title, project and status only; message them with message_agent), and your worker model policy with remaining usage when it applies. Each agent's queue reports waiting turns and whether it is paused; inspect a descendant's with view_agent_queue. A pending spawn is not a created child; inspect its outcome before retrying.",
             json!({}),
             vec![],
         ),
     ];
-    let mut tools = specs.into_iter().map(|(name,description,properties,required)|json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})).collect::<Vec<_>>();
+    let mut tools = specs.into_iter().chain(queue::specs()).map(|(name,description,properties,required)|json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})).collect::<Vec<_>>();
     if nix != Permission::Deny {
         tools.push(crate::nix::spec(nix));
     }
@@ -1671,6 +2017,166 @@ fn tools(
     }
     json!({ "tools": tools })
 }
+// Discovery is read-only and has a static fallback. Bound the entire HTTP and
+// JSON operation so a peer withholding headers or body cannot hold up stdio.
+// Do not set a client-wide timeout: tool calls can await human approval.
+const CATALOG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
+async fn catalog(client: &reqwest::Client, endpoint: &str, secret: &str) -> Value {
+    let fetch = async {
+        let response = client
+            .post(format!("{endpoint}/v1/agent-tools/tools"))
+            .bearer_auth(secret)
+            .json(&json!({}))
+            .send()
+            .await
+            .map_err(|_| "transport")?;
+        if !response.status().is_success() {
+            return Err("http_status");
+        }
+        let value = response.json::<Value>().await.map_err(|_| "json")?;
+        if !value["tools"].is_array() {
+            return Err("catalog_shape");
+        }
+        Ok(value)
+    };
+    let reason = match tokio::time::timeout(CATALOG_DEADLINE, fetch).await {
+        Ok(Ok(value)) => return value,
+        Ok(Err(reason)) => reason,
+        Err(_) => "deadline",
+    };
+    // Fixed categories only: request errors may include private URLs or data.
+    eprintln!("Relay catalog fallback: {reason}");
+    tools(&WorkerModelPolicy::default(), Permission::Deny, false, None)
+}
+
+// Long approval/wait calls must not own the stdio reader. Each operation
+// keeps its existing lifetime; only the number of outstanding requests is bounded.
+const BRIDGE_CALLS: usize = 32;
+const BRIDGE_CATALOGS: usize = 4;
+struct BridgeReply {
+    call: bool,
+    key: String,
+    value: Value,
+}
+#[derive(Default)]
+struct BridgePending {
+    calls: usize,
+    catalogs: usize,
+    ids: std::collections::HashSet<String>,
+}
+
+fn rpc_error(id: Value, code: i32, message: &str) -> Value {
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
+}
+async fn stdio_write(
+    writer: &mut tokio::io::Stdout,
+    value: Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = serde_json::to_vec(&value)?;
+    bytes.push(b'\n');
+    writer.write_all(&bytes).await?;
+    writer.flush().await?;
+    Ok(())
+}
+async fn stdio_completed(
+    reply: Result<BridgeReply, tokio::task::JoinError>,
+    pending: &mut BridgePending,
+    writer: &mut tokio::io::Stdout,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let reply = reply.map_err(|_| "Relay bridge request task failed")?;
+    pending.ids.remove(&reply.key);
+    if reply.call {
+        pending.calls -= 1;
+    } else {
+        pending.catalogs -= 1;
+    }
+    stdio_write(writer, reply.value).await
+}
+async fn stdio_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    secret: &str,
+    bridge: uuid::Uuid,
+    request: &Value,
+) -> Value {
+    let id = &request["id"];
+    let result = if request["jsonrpc"] != "2.0"
+        || !request["method"].is_string()
+        || !(id.is_string() || id.is_number() || id.is_null())
+    {
+        Err((-32600, "Invalid JSON-RPC request"))
+    } else {
+        match request["method"].as_str() {
+            Some("initialize") => Ok(
+                json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"relay","version":env!("CARGO_PKG_VERSION")}}),
+            ),
+            Some("ping") => Ok(json!({})),
+            // The server describes spawn_agent with this run's worker model
+            // policy; the generic list remains if it cannot be reached.
+            Some("tools/list") => Ok(catalog(client, endpoint, secret).await),
+            Some("tools/call") => {
+                let name = request["params"]["name"].as_str().unwrap_or("");
+                if ![
+                    "spawn_agent",
+                    "stop_agent",
+                    "archive_agent",
+                    "unarchive_agent",
+                    "delete_agent",
+                    "message_agent",
+                    "wait_for_agents",
+                    "report_result",
+                    "list_agents",
+                    crate::nix::TOOL,
+                    PROGRESS_TOOL,
+                ]
+                .contains(&name)
+                    && !queue::TOOLS.contains(&name)
+                {
+                    Err((-32602, "Unknown Relay tool"))
+                } else {
+                    let response = client
+                        .post(format!("{endpoint}/v1/agent-tools/{name}"))
+                        .bearer_auth(secret)
+                        .header(crate::spawn_attempts::REQUEST, format!("{bridge}:{id}"))
+                        .json(
+                            &request["params"]
+                                .get("arguments")
+                                .cloned()
+                                .unwrap_or(json!({})),
+                        )
+                        .send()
+                        .await;
+                    let (value, error) = match response {
+                        Ok(response) => {
+                            let error = !response.status().is_success();
+                            (
+                                response
+                                    .json::<Value>()
+                                    .await
+                                    .unwrap_or(json!({"message":"Relay response unavailable"})),
+                                error,
+                            )
+                        }
+                        Err(_) => (json!({"message":"Relay server unavailable"}), true),
+                    };
+                    let error = error || value["isError"] == true;
+                    Ok(
+                        json!({"content":[{"type":"text","text":value.to_string()}],"isError":error}),
+                    )
+                }
+            }
+            _ => Err((-32601, "Method not found")),
+        }
+    };
+    match result {
+        Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+        Err((code, message)) => {
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
+        }
+    }
+}
+
 /// Newline-delimited JSON-RPC over stdio. stdout contains protocol messages only.
 pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = std::env::var("RELAY_AGENT_URL").map_err(|_| "Missing Relay agent endpoint")?;
@@ -1682,114 +2188,92 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let mut reader = BufReader::new(tokio::io::stdin());
     let mut writer = tokio::io::stdout();
-    // MCP request numbers can restart when a harness reconnects its bridge.
-    // Exact same-run argument retries still deduplicate across bridge instances.
+    // Preserve one same-run retry identity across concurrent bridge requests.
     let bridge = uuid::Uuid::new_v4();
-    while let Some(bytes) = runtime::line(&mut reader).await? {
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut pending = BridgePending::default();
+    loop {
+        // runtime::line consumes partial input. Keep this future pinned across
+        // completions; recreating it in select! would lose fragmented frames.
+        let bytes = {
+            let next = runtime::line(&mut reader);
+            tokio::pin!(next);
+            loop {
+                tokio::select! {
+                    bytes=&mut next => break bytes?,
+                    reply=tasks.join_next(), if !tasks.is_empty() => {
+                        stdio_completed(reply.expect("Pending bridge request"),&mut pending,&mut writer).await?;
+                    }
+                }
+            }
+        };
+        let Some(bytes) = bytes else {
+            break;
+        };
         let request: Value = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
             Err(_) => {
-                writer.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Invalid JSON\"}}\n").await?;
+                stdio_write(&mut writer, rpc_error(Value::Null, -32700, "Invalid JSON")).await?;
                 continue;
             }
         };
         let Some(id) = request.get("id") else {
             continue;
         };
-        let result = if request["jsonrpc"] != "2.0"
-            || !request["method"].is_string()
-            || !(id.is_string() || id.is_number() || id.is_null())
-        {
-            Err((-32600, "Invalid JSON-RPC request"))
+        let key = id.to_string();
+        if pending.ids.contains(&key) {
+            // A conflicting duplicate must not resend a possibly started tool.
+            stdio_write(
+                &mut writer,
+                rpc_error(Value::Null, -32600, "Duplicate active Relay request ID"),
+            )
+            .await?;
+            continue;
+        }
+        let valid = request["jsonrpc"] == "2.0"
+            && request["method"].is_string()
+            && (id.is_string() || id.is_number() || id.is_null());
+        let call = valid && request["method"] == "tools/call";
+        let catalog_request = valid && request["method"] == "tools/list";
+        if call && pending.calls >= BRIDGE_CALLS {
+            stdio_write(
+                &mut writer,
+                rpc_error(
+                    id.clone(),
+                    -32000,
+                    "Relay bridge busy; request was not sent",
+                ),
+            )
+            .await?;
+            continue;
+        }
+        if catalog_request && pending.catalogs >= BRIDGE_CATALOGS {
+            stdio_write(&mut writer,json!({"jsonrpc":"2.0","id":id,"result":tools(&WorkerModelPolicy::default(),Permission::Deny,false,None)})).await?;
+            continue;
+        }
+        if call || catalog_request {
+            pending.ids.insert(key.clone());
+            if call {
+                pending.calls += 1;
+            } else {
+                pending.catalogs += 1;
+            }
+            let client = client.clone();
+            let endpoint = endpoint.clone();
+            let secret = secret.clone();
+            tasks.spawn(async move {
+                let value = stdio_request(&client, &endpoint, &secret, bridge, &request).await;
+                BridgeReply { call, key, value }
+            });
         } else {
-            match request["method"].as_str() {
-                Some("initialize") => Ok(
-                    json!({"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"relay","version":env!("CARGO_PKG_VERSION")}}),
-                ),
-                Some("ping") => Ok(json!({})),
-                // The server describes spawn_agent with this run's worker model
-                // policy; the generic list remains if it cannot be reached.
-                Some("tools/list") => Ok(
-                    match client
-                        .post(format!("{endpoint}/v1/agent-tools/tools"))
-                        .bearer_auth(&secret)
-                        .json(&json!({}))
-                        .send()
-                        .await
-                    {
-                        Ok(response) if response.status().is_success() => response
-                            .json::<Value>()
-                            .await
-                            .ok()
-                            .filter(|v| v["tools"].is_array())
-                            .unwrap_or_else(|| {
-                                tools(&WorkerModelPolicy::default(), Permission::Deny, false, None)
-                            }),
-                        _ => tools(&WorkerModelPolicy::default(), Permission::Deny, false, None),
-                    },
-                ),
-                Some("tools/call") => {
-                    let name = request["params"]["name"].as_str().unwrap_or("");
-                    if ![
-                        "spawn_agent",
-                        "stop_agent",
-                        "archive_agent",
-                        "delete_agent",
-                        "message_agent",
-                        "wait_for_agents",
-                        "report_result",
-                        "list_agents",
-                        crate::nix::TOOL,
-                        PROGRESS_TOOL,
-                    ]
-                    .contains(&name)
-                    {
-                        Err((-32602, "Unknown Relay tool"))
-                    } else {
-                        let response = client
-                            .post(format!("{endpoint}/v1/agent-tools/{name}"))
-                            .bearer_auth(&secret)
-                            .header(crate::spawn_attempts::REQUEST, format!("{bridge}:{id}"))
-                            .json(
-                                &request["params"]
-                                    .get("arguments")
-                                    .cloned()
-                                    .unwrap_or(json!({})),
-                            )
-                            .send()
-                            .await;
-                        let (value, error) = match response {
-                            Ok(response) => {
-                                let error = !response.status().is_success();
-                                (
-                                    response
-                                        .json::<Value>()
-                                        .await
-                                        .unwrap_or(json!({"message":"Relay response unavailable"})),
-                                    error,
-                                )
-                            }
-                            Err(_) => (json!({"message":"Relay server unavailable"}), true),
-                        };
-                        let error = error || value["isError"] == true;
-                        Ok(
-                            json!({"content":[{"type":"text","text":value.to_string()}],"isError":error}),
-                        )
-                    }
-                }
-                _ => Err((-32601, "Method not found")),
-            }
-        };
-        let response = match result {
-            Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-            Err((code, message)) => {
-                json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
-            }
-        };
-        let mut bytes = serde_json::to_vec(&response)?;
-        bytes.push(b'\n');
-        writer.write_all(&bytes).await?;
-        writer.flush().await?;
+            let value = stdio_request(&client, &endpoint, &secret, bridge, &request).await;
+            stdio_write(&mut writer, value).await?;
+        }
+    }
+    // Shell/CLI callers may close stdin immediately after sending a request.
+    // EOF is not cancellation or permission to replay it: drain its one result.
+    while let Some(reply) = tasks.join_next().await {
+        stdio_completed(reply, &mut pending, &mut writer).await?;
     }
     Ok(())
 }
@@ -1807,10 +2291,18 @@ mod tests {
     }
     impl Fixture {
         fn new(delegate: Permission) -> Self {
+            Self::with_missing_harness(delegate, false)
+        }
+        fn new_missing(delegate: Permission) -> Self {
+            Self::with_missing_harness(delegate, true)
+        }
+        fn with_missing_harness(delegate: Permission, missing: bool) -> Self {
             let directory = tempfile::tempdir().unwrap();
             let repo = crate::tests::review_repo(directory.path());
             let binary = directory.path().join("codex");
-            crate::tests::script(&binary, "sleep 30");
+            if !missing {
+                crate::tests::script(&binary, "sleep 30");
+            }
             let mut snapshot = crate::tests::live();
             snapshot.sessions.clear();
             snapshot.messages.clear();
@@ -1846,7 +2338,7 @@ mod tests {
                 .store
                 .lock()
                 .unwrap()
-                .apply(envelope, &workspace.config)
+                .apply_owned(envelope, &workspace.config)
                 .unwrap();
             let parent = snapshot.sessions.last_mut().unwrap();
             let caller = parent.id.clone();
@@ -1868,7 +2360,7 @@ mod tests {
                 store.save(&snapshot).unwrap();
                 store.controls.insert(caller.clone(), sender);
             }
-            workspace.snapshots.send_replace(snapshot);
+            workspace.snapshots.send_replace((snapshot).into());
             Self {
                 _directory: directory,
                 workspace,
@@ -1901,7 +2393,7 @@ mod tests {
             // It may already be terminal (including after restart recovery).
             {
                 let mut store = self.workspace.store.lock().unwrap();
-                let mut snapshot = store.snapshot().unwrap();
+                let mut snapshot = store.full();
                 let worker = snapshot
                     .sessions
                     .iter_mut()
@@ -1914,7 +2406,7 @@ mod tests {
                     worker.status = WorkerStatus::Completed;
                     snapshot.revision += 1;
                     store.save(&snapshot).unwrap();
-                    self.workspace.snapshots.send_replace(snapshot);
+                    self.workspace.snapshots.send_replace((snapshot).into());
                 }
             }
             let shutdown = Shutdown {
@@ -1925,7 +2417,7 @@ mod tests {
     }
     async fn decide(workspace: &Workspace, caller: &str, run: &str, allow: bool, contains: &str) {
         let mut events = workspace.snapshots.subscribe();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        let detached = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let pending = events
                     .borrow()
@@ -1936,7 +2428,7 @@ mod tests {
                 if let Some(pending) = pending {
                     assert!(pending.description.contains(contains));
                     let mut store = workspace.store.lock().unwrap();
-                    let snapshot = store.snapshot().unwrap();
+                    let snapshot = store.full();
                     let envelope = crate::tests::env(
                         snapshot.revision,
                         Command::RespondPermission {
@@ -1945,25 +2437,67 @@ mod tests {
                             allow,
                         },
                     );
-                    let (snapshot, _) = store.apply(envelope, &workspace.config).unwrap();
-                    workspace.snapshots.send_replace(snapshot);
-                    break;
+                    let (snapshot, action) =
+                        store.apply_owned(envelope, &workspace.config).unwrap();
+                    workspace.snapshots.send_replace((snapshot).into());
+                    // As the command endpoint does after committing.
+                    if let Some(Action::SpawnDecided { attempt, allow }) = action {
+                        tokio::spawn(decided(workspace.clone(), attempt, allow));
+                    }
+                    return pending.spawn_attempt.is_some();
                 }
                 events.changed().await.unwrap();
             }
         })
         .await
         .unwrap();
+        // A run-bound request is answered within its run.
         assert!(
-            workspace
-                .store
-                .lock()
-                .unwrap()
-                .run_id(caller)
-                .unwrap()
-                .as_deref()
-                == Some(run)
+            detached
+                || workspace
+                    .store
+                    .lock()
+                    .unwrap()
+                    .run_id(caller)
+                    .unwrap()
+                    .as_deref()
+                    == Some(run)
         );
+    }
+    /// The finished outcome of a durable spawn attempt.
+    async fn await_outcome(f: &Fixture, attempt: &str) -> Value {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let outcome = crate::spawn_attempts::view(&f.workspace, &f.caller)
+                    .unwrap()
+                    .into_iter()
+                    .find(|o| o["spawn_attempt"] == attempt)
+                    .unwrap();
+                if !matches!(
+                    outcome["phase"].as_str(),
+                    Some("pending_approval" | "preparing_workspace" | "validating")
+                ) {
+                    return outcome;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    /// A durable spawn needing approval, decided by the human, and its outcome.
+    async fn decided_spawn(
+        f: &Fixture,
+        request: &str,
+        args: Value,
+        allow: bool,
+        contains: &str,
+    ) -> Value {
+        let pending = durable_spawn(f, request, args.clone()).await;
+        assert_eq!(pending["phase"], "pending_approval");
+        decide(&f.workspace, &f.caller, &f.run, allow, contains).await;
+        await_outcome(f, pending["spawn_attempt"].as_str().unwrap()).await;
+        durable_spawn(f, request, args).await
     }
 
     fn durable_headers(f: &Fixture, request: &str) -> HeaderMap {
@@ -2007,70 +2541,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_spawn_interrupted_transport_pending_denial_has_no_child_and_one_notice() {
-        let f = Fixture::new(Permission::Ask);
+    async fn durable_spawn_awaiting_approval_returns_at_once_and_is_denied_after_the_turn_ends() {
+        let f = Fixture::new_missing(Permission::Ask);
         let workspace = f.workspace.clone();
-        let headers = durable_headers(&f, "lost-cell");
-        let task = tokio::spawn(route(
-            State(workspace.clone()),
-            headers,
-            axum::extract::Path("spawn_agent".into()),
-            Json(json!({"title":"Lost cell", "task":"Verify"})),
-        ));
-        // The HTTP/tool transport disappears while the approval remains pending.
-        let mut events = workspace.snapshots.subscribe();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !events
-                .borrow()
-                .tool_permissions
-                .iter()
-                .any(|p| p.decision.is_none())
-            {
-                events.changed().await.unwrap();
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            crate::spawn_attempts::view(&workspace, &f.caller).unwrap()[0]["phase"],
-            "pending_approval"
-        );
-        let pending = durable_spawn(
-            &f,
-            "lost-cell",
-            json!({"title":"Lost cell", "task":"Verify"}),
-        )
-        .await;
+        let args = json!({"title":"Lost cell", "task":"Verify"});
+        let pending = durable_spawn(&f, "lost-cell", args.clone()).await;
         assert_eq!(pending["pending"], true);
         assert_eq!(pending["phase"], "pending_approval");
         assert_eq!(pending["agent"], Value::Null);
-        assert_eq!(workspace.snapshots.borrow().tool_permissions.len(), 1);
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        assert_eq!(workspace.snapshots.borrow().sessions.len(), 1);
+        let attempt = pending["spawn_attempt"].as_str().unwrap().to_owned();
+        let requests = workspace.full().tool_permissions;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].spawn_attempt.as_deref(), Some(attempt.as_str()));
+        // A replay of the same request identity never asks again.
+        assert_eq!(
+            durable_spawn(&f, "lost-cell", args.clone()).await["phase"],
+            "pending_approval"
+        );
+        assert_eq!(workspace.full().tool_permissions.len(), 1);
+        // The caller's turn ends; the request stays open for the human.
+        f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
+        let request = &workspace.full().tool_permissions[0];
+        assert!(request.decision.is_none() && !request.expired);
+        assert!(spawn_notices(&f).is_empty());
         decide(&workspace, &f.caller, &f.run, false, "Spawn Lost cell").await;
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while spawn_notices(&f).is_empty() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let outcomes = crate::spawn_attempts::view(&workspace, &f.caller).unwrap();
-        assert_eq!(outcomes[0]["phase"], "denied");
-        assert_eq!(outcomes[0]["agent"], Value::Null);
-        assert_eq!(workspace.snapshots.borrow().sessions.len(), 1);
-        assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Queued);
-        // An explicit replay of the same request identity returns its denial and
-        // never creates another approval, workspace or child.
-        let value = durable_spawn(
-            &f,
-            "lost-cell",
-            json!({"title":"Lost cell", "task":"Verify"}),
+        let outcome = await_outcome(&f, &attempt).await;
+        assert_eq!(outcome["phase"], "denied");
+        assert_eq!(outcome["agent"], Value::Null);
+        assert_eq!(workspace.full().sessions.len(), 1);
+        assert_eq!(spawn_notices(&f).len(), 1);
+        // The ended run's capability can no longer replay or ask again.
+        let replay = route(
+            State(workspace.clone()),
+            durable_headers(&f, "lost-cell"),
+            axum::extract::Path("spawn_agent".into()),
+            Json(args),
         )
         .await;
-        assert_eq!(value["phase"], "denied");
-        assert_eq!(workspace.snapshots.borrow().tool_permissions.len(), 1);
+        assert_eq!(replay.unwrap_err().status, StatusCode::UNAUTHORIZED);
+        assert_eq!(workspace.full().tool_permissions.len(), 1);
         crate::spawn_attempts::flush(&workspace, &f.caller, true).unwrap();
         assert_eq!(spawn_notices(&f).len(), 1);
         f.finish().await;
@@ -2233,29 +2742,186 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn durable_spawn_stop_cancels_approval_and_holds_recovery_without_wake() {
+    async fn approval_after_the_callers_turn_ended_creates_and_launches_the_child() {
         let f = Fixture::new(Permission::Ask);
-        let workspace = f.workspace.clone();
-        let headers = durable_headers(&f, "stopped-cell");
-        let task = tokio::spawn(route(
-            State(workspace.clone()),
-            headers,
-            axum::extract::Path("spawn_agent".into()),
-            Json(json!({"title":"Stopped", "task":"Verify"})),
-        ));
-        let mut events = workspace.snapshots.subscribe();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !events
-                .borrow()
-                .tool_permissions
-                .iter()
-                .any(|p| p.decision.is_none())
-            {
-                events.changed().await.unwrap();
+        let args = json!({"title":"Later", "task":"Verify"});
+        let pending = durable_spawn(&f, "approved-later", args).await;
+        let attempt = pending["spawn_attempt"].as_str().unwrap().to_owned();
+        f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
+        decide(&f.workspace, &f.caller, &f.run, true, "Spawn Later").await;
+        let outcome = await_outcome(&f, &attempt).await;
+        assert_eq!(outcome["phase"], "created_queued");
+        let child = outcome["agent"].as_str().unwrap().to_owned();
+        let snapshot = f.workspace.full();
+        let session = snapshot.sessions.iter().find(|s| s.id == child).unwrap();
+        assert_eq!(
+            session.parent_session_id.as_deref(),
+            Some(f.caller.as_str())
+        );
+        assert_eq!(
+            session.spawn.as_ref().unwrap().requested_by_run.as_deref(),
+            Some(f.run.as_str())
+        );
+        assert!(
+            f.workspace
+                .store
+                .lock()
+                .unwrap()
+                .run_id(&child)
+                .unwrap()
+                .is_some()
+        );
+        assert!(snapshot.messages.iter().any(|m| m.session_id == f.caller
+            && m.tool.as_ref().is_some_and(|t| t.detail
+                == Some(ToolDetail::Spawn {
+                    child_session_id: Some(child.clone())
+                }))));
+        assert_eq!(snapshot.tool_permissions[0].decision, Some(true));
+        assert_eq!(spawn_notices(&f).len(), 1);
+        // The request is decided once; a repeated answer changes nothing.
+        let repeat = crate::tests::env(
+            snapshot.revision,
+            Command::RespondPermission {
+                permission_id: snapshot.tool_permissions[0].id.clone(),
+                run_id: f.run.clone(),
+                allow: true,
+            },
+        );
+        assert!(
+            f.workspace
+                .store
+                .lock()
+                .unwrap()
+                .apply_owned(repeat, &f.workspace.config)
+                .is_err()
+        );
+        assert_eq!(f.workspace.full().sessions.len(), 2);
+        f.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn approval_feedback_contended_authoritative_read_keeps_worker_free() {
+        use crate::harness::PermissionOutcome;
+        for mode in ["denied", "expired", "replacement-run", "approved"] {
+            let f = Fixture::new_missing(Permission::Ask);
+            let mut events = f.workspace.snapshots.subscribe();
+            let mut tasks = Vec::new();
+            for _ in 0..2 {
+                let workspace = f.workspace.clone();
+                let caller = f.caller.clone();
+                let run = f.run.clone();
+                let mut stop = f.stop.clone();
+                tasks.push(tokio::spawn(async move {
+                    crate::harness::permission_outcome(
+                        &workspace,
+                        &caller,
+                        &run,
+                        "synthetic",
+                        "contention test",
+                        &mut stop,
+                    )
+                    .await
+                    .unwrap()
+                }));
             }
-        })
-        .await
-        .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while events.borrow().tool_permissions.len() != 2 {
+                    events.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            let mut stale = events.borrow().as_ref().clone();
+            for permission in &mut stale.tool_permissions {
+                permission.decision = Some(true);
+            }
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            let workspace = f.workspace.clone();
+            let caller = f.caller.clone();
+            let holder = tokio::task::spawn_blocking(move || {
+                let mut store = workspace.store.lock().unwrap();
+                let mut current = store.full();
+                for permission in &mut current.tool_permissions {
+                    permission.decision = Some(mode != "denied");
+                    permission.expired = mode == "expired";
+                }
+                if mode == "replacement-run" {
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE runs SET run_id='replacement' WHERE session_id=?1",
+                            [&caller],
+                        )
+                        .unwrap();
+                    // expire() intentionally leaves recorded decisions intact.
+                    let original_run = current.tool_permissions[0].run_id.clone();
+                    crate::harness::expire(&mut current, &caller, &original_run);
+                    assert!(current.tool_permissions.iter().all(|p| !p.expired));
+                }
+                store.save(&current).unwrap();
+                ready_tx.send(()).unwrap();
+                // Fallback prevents a broken scheduling implementation hanging
+                // the test runtime forever. The normal release is explicit.
+                release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            });
+            ready_rx.await.unwrap();
+            // Both waiters are woken with a stale apparent approval while the
+            // authoritative store differs and its mutex is still held.
+            f.workspace.snapshots.send_replace((stale).into());
+            let heartbeat = tokio::spawn(async {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                1
+            });
+            let progress = tokio::time::timeout(Duration::from_millis(750), heartbeat).await;
+            release_tx.send(()).unwrap();
+            holder.await.unwrap();
+            assert_eq!(
+                progress
+                    .expect("Approval store wait occupied the sole async worker")
+                    .unwrap(),
+                1
+            );
+            let expected = match mode {
+                "denied" => PermissionOutcome::Denied,
+                "approved" => PermissionOutcome::Approved,
+                _ => PermissionOutcome::ExpiredOrRunEnded,
+            };
+            for task in tasks {
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(5), task)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    expected
+                );
+            }
+            assert_eq!(
+                f.workspace
+                    .store
+                    .lock()
+                    .unwrap()
+                    .snapshot()
+                    .unwrap()
+                    .sessions
+                    .len(),
+                1
+            );
+            f.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_spawn_approval_outlives_a_human_stop_and_holds_its_outcome() {
+        let f = Fixture::new_missing(Permission::Ask);
+        let workspace = f.workspace.clone();
+        let pending = durable_spawn(
+            &f,
+            "stopped-cell",
+            json!({"title":"Stopped", "task":"Verify"}),
+        )
+        .await;
+        let attempt = pending["spawn_attempt"].as_str().unwrap().to_owned();
         f.workspace
             .store
             .lock()
@@ -2265,17 +2931,16 @@ mod tests {
             .unwrap()
             .send_replace(true);
         f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Stopped);
-        let response = task.await.unwrap().unwrap().0;
-        assert_eq!(response["phase"], "cancelled");
-        assert_eq!(workspace.snapshots.borrow().sessions.len(), 1);
+        let request = &workspace.full().tool_permissions[0];
+        assert!(request.decision.is_none() && !request.expired);
+        decide(&workspace, &f.caller, &f.run, false, "Spawn Stopped").await;
+        assert_eq!(await_outcome(&f, &attempt).await["phase"], "denied");
+        assert_eq!(workspace.full().sessions.len(), 1);
+        // A stopped caller keeps the outcome paused; it is not woken.
         assert_eq!(spawn_notices(&f).len(), 1);
         assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Paused);
         assert_eq!(
-            workspace.snapshots.borrow().sessions[0]
-                .worker
-                .as_ref()
-                .unwrap()
-                .status,
+            workspace.full().sessions[0].worker.as_ref().unwrap().status,
             WorkerStatus::Stopped
         );
         Shutdown { workspace }.shutdown().await.unwrap();
@@ -2283,7 +2948,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_spawn_workspace_error_is_sanitized_and_created_retry_is_single_child() {
-        let f = Fixture::new(Permission::Allow);
+        let f = Fixture::new_missing(Permission::Allow);
         f.change(|s| {
             s.sessions[0].workspaces[0].path = "/nonexistent/fixture-private-value".into()
         });
@@ -2297,7 +2962,7 @@ mod tests {
         assert!(!value.to_string().contains("fixture-private-value"));
         assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
         f.finish().await;
-        let f = Fixture::new(Permission::Allow);
+        let f = Fixture::new_missing(Permission::Allow);
         let args = json!({"title":"One child", "task":"Verify"});
         let first = durable_spawn(&f, "original", args.clone()).await;
         assert_eq!(first["phase"], "created_queued");
@@ -2348,15 +3013,17 @@ mod tests {
 
         let f = Fixture::new(Permission::Ask);
         let args = json!({"title":"Separate approval","task":"Verify"});
-        let (denied, ()) = tokio::join!(
-            durable_spawn(&f, "denied-call", args.clone()),
-            decide(&f.workspace, &f.caller, &f.run, false, "Separate approval")
-        );
+        let denied =
+            decided_spawn(&f, "denied-call", args.clone(), false, "Separate approval").await;
         assert_eq!(denied["phase"], "denied");
-        let (approved, ()) = tokio::join!(
-            durable_spawn(&f, "new-authorized-call", args.clone()),
-            decide(&f.workspace, &f.caller, &f.run, true, "Separate approval")
-        );
+        let approved = decided_spawn(
+            &f,
+            "new-authorized-call",
+            args.clone(),
+            true,
+            "Separate approval",
+        )
+        .await;
         assert_eq!(approved["phase"], "created_queued");
         assert_eq!(f.workspace.snapshots.borrow().tool_permissions.len(), 2);
         assert_eq!(durable_spawn(&f, "denied-call", args).await, denied);
@@ -2407,7 +3074,7 @@ mod tests {
             assert_eq!(outcomes.len(), 1);
             assert_eq!(outcomes[0]["phase"], "cancelled");
             assert_eq!(outcomes[0]["agent"], Value::Null);
-            let snapshot = restored.snapshots.borrow().clone();
+            let snapshot = restored.full();
             assert_eq!(snapshot.sessions.len(), 1);
             assert!(snapshot.tool_permissions.is_empty());
             assert!(restored.store.lock().unwrap().controls.is_empty());
@@ -2420,6 +3087,136 @@ mod tests {
             assert_eq!(notices[0].state, SubmissionState::Paused);
             shutdown.shutdown().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn undecided_spawn_approval_survives_restart_and_creates_the_child_when_approved() {
+        let f = Fixture::new(Permission::Ask);
+        let pending = durable_spawn(
+            &f,
+            "across-restart",
+            json!({"title":"Across","task":"Verify"}),
+        )
+        .await;
+        let attempt = pending["spawn_attempt"].as_str().unwrap().to_owned();
+        f.finish().await;
+        let path = f._directory.path().join("db");
+        let config = (*f.workspace.config).clone();
+        let defaults = f.workspace.store.lock().unwrap().defaults.clone();
+        let (_, shutdown) =
+            router_with_shutdown(&path, "fixture-workspace-token".into(), defaults, config)
+                .unwrap();
+        let restored = shutdown.workspace.clone();
+        let request = restored.full().tool_permissions[0].clone();
+        assert!(request.decision.is_none() && !request.expired);
+        assert_eq!(
+            crate::spawn_attempts::view(&restored, &f.caller).unwrap()[0]["phase"],
+            "pending_approval"
+        );
+        decide(&restored, &f.caller, &f.run, true, "Spawn Across").await;
+        let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let outcome = crate::spawn_attempts::view(&restored, &f.caller).unwrap()[0].clone();
+                if outcome["phase"] != "pending_approval"
+                    && outcome["phase"] != "preparing_workspace"
+                {
+                    return outcome;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome["spawn_attempt"], attempt.as_str());
+        assert_eq!(outcome["phase"], "created_queued");
+        assert_eq!(restored.full().sessions.len(), 2);
+        shutdown.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn parent_end_keeps_a_pending_http_spawn_approval_and_revokes_the_run() {
+        let f = Fixture::new_missing(Permission::Ask);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!(
+            "http://{}/v1/agent-tools/spawn_agent",
+            listener.local_addr().unwrap()
+        );
+        let app = Router::new()
+            .route("/v1/agent-tools/{tool}", post(route))
+            .with_state(f.workspace.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let headers = durable_headers(&f, "parent-end");
+        let stale_headers = headers.clone();
+        let stale_endpoint = endpoint.clone();
+        // The reply does not wait for the human.
+        let response: Value = tokio::time::timeout(
+            Duration::from_secs(5),
+            reqwest::Client::new()
+                .post(endpoint)
+                .headers(headers)
+                .json(&json!({"title":"Pending","task":"Verify"}))
+                .send(),
+        )
+        .await
+        .expect("Spawn awaiting approval held the HTTP reply")
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(response["phase"], "pending_approval");
+        let attempt = response["spawn_attempt"].as_str().unwrap().to_owned();
+        // Hold future work explicitly. Ending the run keeps the approval
+        // open, without clearing a human hold or replaying the spawn.
+        f.change(|s| {
+            s.submissions.push(Submission {
+                id: "human-hold".into(),
+                session_id: f.caller.clone(),
+                parts: vec![Part::text("Held work")],
+                state: SubmissionState::Paused,
+                approve_implementation: false,
+                error: Some("Human pause".into()),
+                interrupts_run: None,
+                last_edit_request: None,
+                sender: Sender::User,
+            });
+        });
+        f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
+        let snapshot = f.workspace.full();
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert!(
+            snapshot
+                .tool_permissions
+                .iter()
+                .all(|p| !p.expired && p.decision.is_none())
+        );
+        assert!(spawn_notices(&f).is_empty());
+        decide(&f.workspace, &f.caller, &f.run, false, "Spawn Pending").await;
+        assert_eq!(await_outcome(&f, &attempt).await["phase"], "denied");
+        let snapshot = f.workspace.full();
+        assert_eq!(
+            snapshot
+                .submissions
+                .iter()
+                .find(|s| s.id == "human-hold")
+                .unwrap()
+                .state,
+            SubmissionState::Paused
+        );
+        assert_eq!(spawn_notices(&f).len(), 1);
+        assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Paused);
+        let stale = reqwest::Client::new()
+            .post(stale_endpoint)
+            .headers(stale_headers)
+            .json(&json!({"title":"Pending","task":"Verify"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stale.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
+        server.abort();
+        f.finish().await;
     }
 
     #[tokio::test]
@@ -2608,32 +3405,87 @@ mod tests {
                 .permissions
                 .insert(Task::Review, Permission::Ask);
         });
-        let (value, ()) = tokio::join!(
-            durable_spawn(
-                &f,
-                "review-raise",
-                json!({"title":"Review","task":"Verify","permissions":{"review":"allow"}})
+        let args = json!({"title":"Review","task":"Verify","permissions":{"review":"allow"}});
+        let pending = durable_spawn(&f, "review-raise", args).await;
+        // The policy changes while the request waits for the human.
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Review, Permission::Deny);
+        });
+        decide(
+            &f.workspace,
+            &f.caller,
+            &f.run,
+            true,
+            "review allow (parent: ask)",
+        )
+        .await;
+        let outcome = await_outcome(&f, pending["spawn_attempt"].as_str().unwrap()).await;
+        assert_eq!(outcome["phase"], "rejected");
+        assert_eq!(f.workspace.full().sessions.len(), 1);
+        assert_eq!(f.workspace.full().tool_permissions.len(), 1);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn approved_spawn_is_rejected_when_the_parent_mode_changed() {
+        let f = Fixture::new(Permission::Allow);
+        let pending = durable_spawn(
+            &f,
+            "mode-raise",
+            json!({"title":"Mode","task":"Verify","execution_approval":"unrestricted"}),
+        )
+        .await;
+        assert_eq!(pending["phase"], "pending_approval");
+        // The approval named the raise from the parent's mode; now it is none.
+        f.change(|s| {
+            s.sessions[0].worker.as_mut().unwrap().execution = Some(ExecutionSettings {
+                approval: ApprovalMode::Unrestricted,
+            })
+        });
+        decide(&f.workspace, &f.caller, &f.run, true, "Spawn Mode").await;
+        let outcome = await_outcome(&f, pending["spawn_attempt"].as_str().unwrap()).await;
+        assert_eq!(outcome["phase"], "rejected");
+        assert_eq!(f.workspace.full().sessions.len(), 1);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn archiving_the_caller_expires_its_spawn_approval() {
+        let f = Fixture::new_missing(Permission::Ask);
+        let pending =
+            durable_spawn(&f, "archived", json!({"title":"Archived","task":"Verify"})).await;
+        let attempt = pending["spawn_attempt"].as_str().unwrap().to_owned();
+        f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
+        let revision = f.workspace.full().revision;
+        human(
+            &f,
+            crate::tests::env(
+                revision,
+                Command::SetSessionArchived {
+                    session_id: f.caller.clone(),
+                    archived: true,
+                },
             ),
-            async {
-                decide(
-                    &f.workspace,
-                    &f.caller,
-                    &f.run,
-                    true,
-                    "review allow (parent: ask)",
-                )
-                .await;
-                f.change(|s| {
-                    s.projects[0]
-                        .defaults
-                        .permissions
-                        .insert(Task::Review, Permission::Deny);
-                });
-            }
+        )
+        .unwrap();
+        let request = &f.workspace.full().tool_permissions[0];
+        assert!(request.expired && request.decision.is_none());
+        let outcome = await_outcome(&f, &attempt).await;
+        assert_eq!(outcome["phase"], "cancelled");
+        let snapshot = f.workspace.full();
+        let late = crate::tests::env(
+            snapshot.revision,
+            Command::RespondPermission {
+                permission_id: snapshot.tool_permissions[0].id.clone(),
+                run_id: f.run.clone(),
+                allow: true,
+            },
         );
-        assert_eq!(value["phase"], "rejected");
-        assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1);
-        assert_eq!(f.workspace.snapshots.borrow().tool_permissions.len(), 1);
+        assert!(human(&f, late).is_err());
+        assert_eq!(f.workspace.full().sessions.len(), 1);
         f.finish().await;
     }
 
@@ -2680,7 +3532,7 @@ mod tests {
         .await
         .unwrap();
         crate::spawn_attempts::flush(&f.workspace, &f.caller, true).unwrap();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert_eq!(spawn_notices(&f).len(), 1);
         assert_eq!(snapshot.sessions.len(), 1);
         assert_eq!(
@@ -2746,7 +3598,7 @@ mod tests {
             )
             .unwrap();
             let workspace = &shutdown.workspace;
-            let snapshot = workspace.snapshots.borrow().clone();
+            let snapshot = workspace.full();
             let turns: Vec<_> = snapshot
                 .submissions
                 .iter()
@@ -2824,7 +3676,7 @@ mod tests {
         }
         assert_eq!(spawn_notices(&f).len(), 1);
         assert_eq!(spawn_notices(&f)[0].state, SubmissionState::Paused);
-        assert_one_prompt(&f.workspace.snapshots.borrow(), &notice);
+        assert_one_prompt(&f.workspace.full(), &notice);
         assert_eq!(
             crate::spawn_attempts::view(&f.workspace, &f.caller).unwrap()[0]["notice_consumed"],
             false
@@ -2845,7 +3697,7 @@ mod tests {
                 (*f.workspace.config).clone(),
             )
             .unwrap();
-            let snapshot = shutdown.workspace.snapshots.borrow().clone();
+            let snapshot = shutdown.workspace.full();
             assert_eq!(
                 snapshot
                     .submissions
@@ -2901,7 +3753,7 @@ mod tests {
             })
             .await
             .unwrap();
-            assert_one_prompt(&workspace.snapshots.borrow(), &notice);
+            assert_one_prompt(&workspace.full(), &notice);
             assert_eq!(
                 workspace
                     .snapshots
@@ -3003,7 +3855,7 @@ mod tests {
                     && !s.approve_implementation)
         );
         assert!(workspace.snapshots.borrow().tool_permissions.is_empty());
-        assert_one_prompt(&workspace.snapshots.borrow(), &notice);
+        assert_one_prompt(&workspace.full(), &notice);
         shutdown.shutdown().await.unwrap();
     }
 
@@ -3045,7 +3897,7 @@ mod tests {
     #[tokio::test]
     async fn scoped_root_profiles_start_on_the_selected_task_without_creating_another() {
         let f = Fixture::new(Permission::Allow);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let parent = snapshot.sessions[0].clone();
         let task = parent.issue_id.clone().unwrap();
         let before = snapshot.issues.len();
@@ -3059,7 +3911,7 @@ mod tests {
                 issue_ids: vec![task.clone()],
             });
         });
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let envelope = crate::tests::env(
             snapshot.revision,
             Command::StartRootAgent {
@@ -3075,7 +3927,7 @@ mod tests {
             .store
             .lock()
             .unwrap()
-            .apply(envelope, &f.workspace.config)
+            .apply_owned(envelope, &f.workspace.config)
             .unwrap();
         assert!(matches!(action, Some(Action::Run { .. })));
         assert_eq!(
@@ -3087,7 +3939,7 @@ mod tests {
             snapshot.agent_configs[0].name
         );
         assert_eq!(snapshot.issues.len(), before);
-        f.workspace.snapshots.send_replace(snapshot);
+        f.workspace.snapshots.send_replace((snapshot).into());
         f.finish().await;
     }
 
@@ -3101,7 +3953,7 @@ mod tests {
         f.change(|s| {
             s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed;
         });
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let profile =
             AgentProfile::worker(&snapshot.session_profile(&snapshot.sessions[0]).unwrap());
         let envelope = crate::tests::env(
@@ -3127,7 +3979,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let current = f.workspace.snapshots.borrow().clone();
+        let current = f.workspace.full();
         let child = current.sessions.iter().find(|s| s.id == id).unwrap();
         assert_eq!(child.parent_session_id.as_deref(), Some(f.caller.as_str()));
         assert_eq!(child.issue_id, snapshot.sessions[0].issue_id);
@@ -3165,7 +4017,7 @@ mod tests {
         for name in ["", "Static name"] {
             let f = Fixture::new(Permission::Allow);
             f.change(|s| s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed);
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let mut profile =
                 AgentProfile::worker(&snapshot.session_profile(&snapshot.sessions[0]).unwrap());
             profile.permissions.insert(Task::Implement, Permission::Ask);
@@ -3189,7 +4041,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let before = f.workspace.snapshots.borrow().clone();
+            let before = f.workspace.full();
             let child = before.sessions.iter().find(|s| s.id == id).unwrap();
             assert!(child.awaiting_first_message);
             assert_eq!(child.automatic_name, name.is_empty());
@@ -3225,7 +4077,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let rejected = f.workspace.store.lock().unwrap().apply(
+            let rejected = f.workspace.store.lock().unwrap().apply_owned(
                 crate::tests::env(
                     before.revision,
                     Command::SubmitTurn {
@@ -3256,7 +4108,7 @@ mod tests {
                 .store
                 .lock()
                 .unwrap()
-                .apply(
+                .apply_owned(
                     crate::tests::env(
                         before.revision,
                         Command::SubmitTurn {
@@ -3286,7 +4138,7 @@ mod tests {
                 "Review the sidebar borders"
             );
             assert_eq!(child.worker.as_ref().unwrap().status, WorkerStatus::Queued);
-            let persisted = f.workspace.store.lock().unwrap().snapshot().unwrap();
+            let persisted = f.workspace.store.lock().unwrap().full();
             assert_eq!(persisted.sessions.iter().find(|s| s.id == id), Some(child));
             Shutdown {
                 workspace: f.workspace.clone(),
@@ -3313,18 +4165,313 @@ mod tests {
     #[test]
     fn archive_tool_schema_is_discoverable() {
         let tools = tools(&WorkerModelPolicy::default(), Permission::Deny, false, None);
-        let tool = tools["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t["name"] == "archive_agent")
+        for name in ["archive_agent", "unarchive_agent"] {
+            let tool = tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap();
+            assert_eq!(tool["inputSchema"]["required"], json!(["agent"]));
+            assert_eq!(
+                tool["inputSchema"]["properties"],
+                json!({"agent":{"type":"string"}})
+            );
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        }
+    }
+
+    #[tokio::test]
+    async fn unarchive_preserves_branch_policy_history_workspaces_and_paused_turns() {
+        let f = Fixture::new(Permission::Allow);
+        let capture = install_peer_native(&f, false);
+        archive_fixture(&f);
+        f.change(|s| {
+            let mut worker = s.sessions[0].worker.clone().unwrap();
+            worker.status = WorkerStatus::Stopped;
+            worker.thread_id = Some("retained-child-thread".into());
+            s.sessions[1].worker = Some(worker);
+            s.submissions.push(Submission {
+                id: "unarchive-paused".into(),
+                session_id: "archive-grandchild".into(),
+                parts: vec![Part::text("Continue only explicitly")],
+                state: SubmissionState::Queued,
+                approve_implementation: false,
+                error: None,
+                interrupts_run: None,
+                last_edit_request: None,
+                sender: Sender::User,
+            });
+            let mut sibling = s.sessions[2].clone();
+            sibling.id = "archived-sibling".into();
+            sibling.parent_session_id = Some(f.caller.clone());
+            sibling.archived = true;
+            s.sessions.push(sibling);
+        });
+        f.call("archive_agent", json!({"agent":"archive-child"}))
+            .await
             .unwrap();
-        assert_eq!(tool["inputSchema"]["required"], json!(["agent"]));
+        let before = f.workspace.store.lock().unwrap().full();
+        for _ in 0..2 {
+            assert_eq!(
+                f.call("unarchive_agent", json!({"agent":"archive-child"}))
+                    .await
+                    .unwrap(),
+                json!({"agent":"archive-child","archived":false})
+            );
+        }
+        let after = f.workspace.store.lock().unwrap().full();
+        for original in &before.sessions {
+            let mut expected = original.clone();
+            if matches!(expected.id.as_str(), "archive-child" | "archive-grandchild") {
+                expected.archived = false;
+            }
+            let actual = after.sessions.iter().find(|s| s.id == expected.id).unwrap();
+            assert_eq!(actual, &expected); // includes threads, selection, settings, workspace identities
+            assert_eq!(
+                profile(&before, original).unwrap(),
+                profile(&after, actual).unwrap()
+            );
+            for workspace in &actual.workspaces {
+                assert!(Path::new(&workspace.path).exists());
+            }
+        }
+        assert_eq!(before.messages, after.messages);
+        assert_eq!(before.submissions, after.submissions);
         assert_eq!(
-            tool["inputSchema"]["properties"],
-            json!({"agent":{"type":"string"}})
+            after
+                .submissions
+                .iter()
+                .find(|s| s.id == "unarchive-paused")
+                .unwrap()
+                .state,
+            SubmissionState::Paused
         );
-        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        assert!(
+            f.call("list_agents", json!({})).await.unwrap()["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["id"] == "archive-child" && s["archived"] == false)
+        );
+        assert_eq!(turn_starts(&capture, "Continue only explicitly"), 0);
+        f.call(
+            "message_agent",
+            json!({"agent":"archive-child","text":"Explicit follow-up"}),
+        )
+        .await
+        .unwrap();
+        let queued = f.workspace.full();
+        assert!(
+            queued
+                .submissions
+                .iter()
+                .any(|s| s.session_id == "archive-child"
+                    && matches!(&s.sender,Sender::Agent{session_id} if session_id==&f.caller))
+        );
+        assert_eq!(
+            queued
+                .submissions
+                .iter()
+                .find(|s| s.id == "unarchive-paused")
+                .unwrap()
+                .state,
+            SubmissionState::Paused
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn unarchive_rejects_active_queued_invalid_and_unowned_branches() {
+        let f = Fixture::new(Permission::Allow);
+        archive_fixture(&f);
+        f.call("archive_agent", json!({"agent":"archive-child"}))
+            .await
+            .unwrap();
+        let original = f.workspace.full();
+        let mut stop = f.stop.clone();
+        assert!(
+            call(
+                &f.workspace,
+                &f.caller,
+                "expired-run",
+                "unarchive_agent",
+                json!({"agent":"archive-child"}),
+                &mut stop
+            )
+            .await
+            .is_err()
+        );
+        for target in ["archive-child", "archive-grandchild"] {
+            for status in [WorkerStatus::Queued, WorkerStatus::Running] {
+                f.change(|s| {
+                    let mut worker = s.sessions[0].worker.clone().unwrap();
+                    worker.status = status;
+                    s.sessions
+                        .iter_mut()
+                        .find(|s| s.id == target)
+                        .unwrap()
+                        .worker = Some(worker);
+                });
+                assert!(
+                    f.call("unarchive_agent", json!({"agent":"archive-child"}))
+                        .await
+                        .is_err()
+                );
+                f.change(|s| s.sessions = original.sessions.clone());
+            }
+        }
+        f.change(|s| {
+            s.submissions.push(Submission {
+                id: "unexpected-queued".into(),
+                session_id: "archive-grandchild".into(),
+                parts: vec![Part::text("Unexpected queued turn")],
+                state: SubmissionState::Queued,
+                approve_implementation: false,
+                error: None,
+                interrupts_run: None,
+                last_edit_request: None,
+                sender: Sender::User,
+            })
+        });
+        assert!(
+            f.call("unarchive_agent", json!({"agent":"archive-child"}))
+                .await
+                .is_err()
+        );
+        f.change(|s| s.submissions = original.submissions.clone());
+        for args in [
+            json!({}),
+            json!({"agent":42}),
+            json!({"agent":"archive-child","subtree":false}),
+            json!({"agent":f.caller}),
+            json!({"agent":"missing"}),
+        ] {
+            assert!(f.call("unarchive_agent", args).await.is_err());
+        }
+        for mutation in [
+            "sibling",
+            "ancestor",
+            "cross-project",
+            "cross-project-child",
+            "cycle",
+        ] {
+            f.change(|s| match mutation {
+                "sibling" => s.sessions[1].parent_session_id = None,
+                "ancestor" => {
+                    s.sessions[0].parent_session_id = Some("archive-child".into());
+                    s.sessions[1].parent_session_id = None;
+                }
+                "cross-project" => s.sessions[1].project_id = "other-project".into(),
+                "cross-project-child" => s.sessions[2].project_id = "other-project".into(),
+                "cycle" => s.sessions[1].parent_session_id = Some("archive-grandchild".into()),
+                _ => unreachable!(),
+            });
+            assert!(
+                f.call("unarchive_agent", json!({"agent":"archive-child"}))
+                    .await
+                    .is_err(),
+                "{mutation}"
+            );
+            f.change(|s| s.sessions = original.sessions.clone());
+        }
+        assert!(f.workspace.snapshots.borrow().sessions[1].archived);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn unarchive_denies_and_rechecks_approval_branch_policy_and_caller_races() {
+        let f = Fixture::new(Permission::Deny);
+        archive_fixture(&f);
+        f.change(|s| {
+            s.sessions[1].archived = true;
+            s.sessions[2].archived = true;
+        });
+        assert!(
+            f.call("unarchive_agent", json!({"agent":"archive-child"}))
+                .await
+                .is_err()
+        );
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Delegate, Permission::Ask);
+        });
+        let (result, ()) = tokio::join!(
+            f.call("unarchive_agent", json!({"agent":"archive-child"})),
+            decide(&f.workspace, &f.caller, &f.run, false, "Unarchive subagent")
+        );
+        assert!(result.is_err());
+        for mutation in [
+            "policy",
+            "child-policy",
+            "branch",
+            "workspace",
+            "scope",
+            "active",
+        ] {
+            let before = f.workspace.full();
+            let (result, ()) = tokio::join!(
+                f.call("unarchive_agent", json!({"agent":"archive-child"})),
+                async {
+                    decide(&f.workspace, &f.caller, &f.run, true, "Unarchive subagent").await;
+                    f.change(|s| match mutation {
+                        "policy" => {
+                            s.projects[0]
+                                .defaults
+                                .permissions
+                                .insert(Task::Delegate, Permission::Deny);
+                        }
+                        "child-policy" => {
+                            let mut p = profile(s, &s.sessions[2]).unwrap();
+                            p.model = "changed-model".into();
+                            s.sessions[2].profile = Some(p);
+                        }
+                        "branch" => {
+                            let mut child = s.sessions[2].clone();
+                            child.id = "new-inactive-child".into();
+                            s.sessions.push(child);
+                        }
+                        "workspace" => s.sessions[2].workspaces[0].path.push_str("-changed"),
+                        "scope" => s.sessions[1].parent_session_id = None,
+                        "active" => s.sessions[2].worker = s.sessions[0].worker.clone(),
+                        _ => unreachable!(),
+                    });
+                }
+            );
+            assert!(result.is_err(), "{mutation}");
+            assert!(f.workspace.snapshots.borrow().sessions[1].archived);
+            f.change(|s| {
+                s.sessions = before.sessions;
+                s.projects = before.projects;
+            });
+        }
+        let (result, ()) = tokio::join!(
+            f.call("unarchive_agent", json!({"agent":"archive-child"})),
+            decide(&f.workspace, &f.caller, &f.run, true, "Unarchive subagent")
+        );
+        assert!(result.is_ok());
+        f.finish().await;
+
+        let f = Fixture::new(Permission::Ask);
+        archive_fixture(&f);
+        f.change(|s| {
+            s.sessions[1].archived = true;
+            s.sessions[2].archived = true;
+        });
+        let (result, ()) = tokio::join!(
+            f.call("unarchive_agent", json!({"agent":"archive-child"})),
+            async {
+                decide(&f.workspace, &f.caller, &f.run, true, "Unarchive subagent").await;
+                f.change(|s| {
+                    s.sessions[0].worker.as_mut().unwrap().status = WorkerStatus::Completed
+                });
+            }
+        );
+        assert!(result.is_err());
+        assert!(f.workspace.snapshots.borrow().sessions[1].archived);
+        f.finish().await;
     }
 
     #[test]
@@ -3387,7 +4534,7 @@ mod tests {
                 .clone()
         };
         assert_eq!(progress(&f.caller), None);
-        let messages = f.workspace.snapshots.borrow().messages.len();
+        let messages = f.workspace.store.lock().unwrap().full().messages.len();
         assert_eq!(
             f.call(
                 "report_progress",
@@ -3403,7 +4550,10 @@ mod tests {
         assert_eq!(first.remaining, "Everything else.");
         assert!(first.updated_ms > 0);
         // A report is session state, not a transcript entry.
-        assert_eq!(f.workspace.snapshots.borrow().messages.len(), messages);
+        assert_eq!(
+            f.workspace.store.lock().unwrap().full().messages.len(),
+            messages
+        );
         f.call(
             "report_progress",
             report(100, 100, "All of it.", "Nothing is left."),
@@ -3558,7 +4708,7 @@ mod tests {
                     .is_err()
             );
         }
-        let original = f.workspace.snapshots.borrow().clone();
+        let original = f.workspace.full();
         for (id, parent, project) in [
             (
                 "archive-child",
@@ -3600,7 +4750,7 @@ mod tests {
             "branch",
             "workspace",
         ] {
-            let before = f.workspace.snapshots.borrow().clone();
+            let before = f.workspace.full();
             let (result, ()) = tokio::join!(
                 f.call("delete_agent", json!({"agent":"archive-child"})),
                 async {
@@ -3660,7 +4810,7 @@ mod tests {
                 sender: Sender::User,
             });
         });
-        let before = f.workspace.snapshots.borrow().clone();
+        let before = f.workspace.full();
         for status in [
             None,
             Some(WorkerStatus::Completed),
@@ -3688,7 +4838,7 @@ mod tests {
                 );
             }
         }
-        let after = f.workspace.store.lock().unwrap().snapshot().unwrap();
+        let after = f.workspace.store.lock().unwrap().full();
         assert!(!after.sessions[0].archived);
         assert!(
             after
@@ -3775,7 +4925,7 @@ mod tests {
                     .is_err()
             );
         }
-        let original = f.workspace.snapshots.borrow().clone();
+        let original = f.workspace.full();
         for (id, parent, project) in [
             (
                 "archive-child",
@@ -3825,7 +4975,7 @@ mod tests {
         );
         assert!(result.is_err());
         for change in ["policy", "scope", "active"] {
-            let before = f.workspace.snapshots.borrow().clone();
+            let before = f.workspace.full();
             let (result, ()) = tokio::join!(
                 f.call("archive_agent", json!({"agent":"archive-child"})),
                 async {
@@ -3946,7 +5096,7 @@ mod tests {
             .await
             .unwrap();
         let id = value["agent"].as_str().unwrap();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let child = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
         assert_eq!(child.parent_session_id.as_deref(), Some(f.caller.as_str()));
         assert_eq!(child.agent_config_id, snapshot.sessions[0].agent_config_id);
@@ -3983,7 +5133,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 30);
+        assert_eq!(schema, 33);
         f.finish().await;
     }
     #[tokio::test]
@@ -4023,7 +5173,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let selection = |id: &str| {
             snapshot
                 .sessions
@@ -4068,7 +5218,7 @@ mod tests {
         }
     }
     fn spawned_selection(f: &Fixture, value: &Value) -> (Harness, HarnessSelection) {
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let child = snapshot
             .sessions
             .iter()
@@ -4095,7 +5245,7 @@ mod tests {
             .clone()
     }
     fn spawn_grant(f: &Fixture, value: &Value) -> SpawnGrant {
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let child = snapshot
             .sessions
             .iter()
@@ -4620,7 +5770,7 @@ mod tests {
             );
             assert_eq!(result.is_ok(), allow);
             if let Ok(result) = result {
-                let snapshot = f.workspace.snapshots.borrow().clone();
+                let snapshot = f.workspace.full();
                 let child = snapshot
                     .sessions
                     .iter()
@@ -4658,7 +5808,7 @@ mod tests {
     /// The execution mode a spawned child's launches and resumes use. Every
     /// spawned child holds it as its own setting, named or inherited.
     fn child_mode(f: &Fixture, value: &Value) -> ApprovalMode {
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let id = value["agent"].as_str().unwrap();
         let mode = crate::harness::mode(&snapshot, id).unwrap();
         let child = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
@@ -4760,7 +5910,7 @@ mod tests {
                         spawn_grant(&f, &value).execution_approval,
                         Some(ApprovalMode::Automatic)
                     );
-                    let snapshot = f.workspace.snapshots.borrow().clone();
+                    let snapshot = f.workspace.full();
                     let child = snapshot
                         .sessions
                         .iter()
@@ -4799,7 +5949,7 @@ mod tests {
         // The profile's own mode is inherited the same way.
         let f = Fixture::new(Permission::Allow);
         let parent_profile_mode = {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             crate::harness::mode(&snapshot, &f.caller).unwrap()
         };
         assert_eq!(parent_profile_mode, ApprovalMode::Automatic);
@@ -4909,10 +6059,10 @@ mod tests {
         // The owner sets it with a workspace command; unknown projects fail.
         {
             let mut store = f.workspace.store.lock().unwrap();
-            let revision = store.snapshot().unwrap().revision;
+            let revision = store.full().revision;
             assert!(
                 store
-                    .apply(
+                    .apply_owned(
                         crate::tests::env(
                             revision,
                             Command::SetSpawnExecutionApproval {
@@ -4925,7 +6075,7 @@ mod tests {
                     .is_err()
             );
             let (snapshot, _) = store
-                .apply(
+                .apply_owned(
                     crate::tests::env(
                         revision,
                         Command::SetSpawnExecutionApproval {
@@ -4940,7 +6090,7 @@ mod tests {
                 snapshot.projects[0].spawn_execution_approval,
                 SpawnExecutionApproval::Strict
             );
-            f.workspace.snapshots.send_replace(snapshot);
+            f.workspace.snapshots.send_replace((snapshot).into());
         }
         f.finish().await;
     }
@@ -4997,7 +6147,7 @@ mod tests {
         );
         let value = result.unwrap();
         assert_eq!(permission_requests(&f), before + 1);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let request = snapshot.tool_permissions.last().unwrap();
         assert_eq!(request.tool, "mcp__relay__spawn_agent");
         for line in [
@@ -5118,7 +6268,7 @@ mod tests {
                     "{}",
                     error.message
                 ),
-                _ => assert!(error.message.contains("denied"), "{}", error.message),
+                _ => assert!(error.message.contains("stopped"), "{}", error.message),
             }
             assert_eq!(f.workspace.snapshots.borrow().sessions.len(), 1, "{change}");
             assert!(!missing.exists(), "{change}");
@@ -5156,7 +6306,7 @@ mod tests {
         // The parent has no execution setting of its own and runs its
         // profile's Automatic mode.
         {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let parent = snapshot.sessions.iter().find(|s| s.id == f.caller).unwrap();
             assert_eq!(parent.worker.as_ref().unwrap().execution, None);
             assert_eq!(
@@ -5185,7 +6335,7 @@ mod tests {
             }
         });
         {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             assert_eq!(
                 crate::harness::mode(&snapshot, &f.caller).unwrap(),
                 ApprovalMode::Unrestricted
@@ -5195,7 +6345,7 @@ mod tests {
         std::fs::write(&gate, "").unwrap();
         await_ended(&f, &[&child]).await;
         let worker = {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             snapshot
                 .sessions
                 .iter()
@@ -5292,7 +6442,7 @@ mod tests {
         .await;
         let child = value["agent"].as_str().unwrap().to_owned();
         await_ended(&f, &[&child]).await;
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let worker = snapshot
             .sessions
             .iter()
@@ -5338,7 +6488,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert_eq!(snapshot.ancestors(&caller).len(), 6);
         assert_eq!(
             profile(&snapshot, snapshot.sessions.last().unwrap())
@@ -5387,7 +6537,7 @@ mod tests {
         });
     }
     fn turn_allowed(f: &Fixture, id: &str) -> bool {
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let session = snapshot.sessions.iter().find(|s| s.id == id).unwrap();
         authorize_session(&snapshot, session, true, &f.workspace.config).is_ok()
     }
@@ -5441,7 +6591,7 @@ mod tests {
         // The nested director's own slot is full, yet its turn may run.
         assert!(turn_allowed(&f, "nested"));
         assert!(turn_allowed(&f, "grandchild"));
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert!(snapshot.child_slot("nested", None).is_err());
         assert!(snapshot.child_slot(&f.caller, None).is_ok());
         // With one sibling the parent's three slots are full: the nested
@@ -5489,7 +6639,7 @@ mod tests {
             .await
             .unwrap();
         let submission = queued["submission"].as_str().unwrap();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert!(
             snapshot
                 .submissions
@@ -5507,7 +6657,7 @@ mod tests {
                     ))
         );
         f.change(|s| mark_read(s, submission));
-        assert!(f.workspace.snapshots.borrow().messages.iter().any(|m| m.id
+        assert!(f.workspace.full().messages.iter().any(|m| m.id
             == format!("agent-message-{submission}")
             && matches!(
                 m.tool.as_ref().unwrap().detail,
@@ -5530,8 +6680,7 @@ mod tests {
         .unwrap();
         assert!(
             f.workspace
-                .snapshots
-                .borrow()
+                .full()
                 .messages
                 .iter()
                 .any(|m| m.session_id == f.caller
@@ -5599,9 +6748,15 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", format!("Bearer {secret}").parse().unwrap());
         assert!(authenticate(&f.workspace, &headers).is_ok());
+        assert!(
+            command
+                .as_std()
+                .get_args()
+                .any(|a| a == "mcp_servers.relay.required=true")
+        );
         assert!(!format!("{:?}", command.as_std().get_args()).contains(secret));
         assert!(
-            !serde_json::to_string(&*f.workspace.snapshots.borrow())
+            !serde_json::to_string(&f.workspace.full())
                 .unwrap()
                 .contains(secret)
         );
@@ -5675,7 +6830,7 @@ mod tests {
         let mut events = f.workspace.snapshots.subscribe();
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                let snapshot = events.borrow().clone();
+                let snapshot = f.workspace.full();
                 let read = snapshot.messages.iter().any(|m| {
                     m.id == format!("agent-message-{submission}")
                         && matches!(
@@ -5696,7 +6851,7 @@ mod tests {
         .await
         .unwrap();
         // Both the spawned task and the queued message keep their sending agent.
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let sent_by_caller = Sender::Agent {
             session_id: f.caller.clone(),
         };
@@ -5878,6 +7033,7 @@ mod tests {
                 description: "Test".into(),
                 decision: None,
                 expired: false,
+                spawn_attempt: None,
             })
         });
         assert!(
@@ -5893,7 +7049,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let envelope = crate::tests::env(
             snapshot.revision,
             Command::StopWorker {
@@ -5953,7 +7109,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let envelope = crate::tests::env(
             snapshot.revision,
             Command::StopWorker {
@@ -5988,7 +7144,7 @@ mod tests {
                 .get(&child)
                 .is_some_and(|c| !*c.borrow())
         );
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert!(crate::runtime::active(
             &snapshot
                 .sessions
@@ -6019,7 +7175,7 @@ mod tests {
                 .status = WorkerStatus::Completed
         });
         let stop = |include_descendants| {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             command(
                 State(f.workspace.clone()),
                 {
@@ -6107,7 +7263,7 @@ mod tests {
     async fn stop_worker(f: &Fixture, session: &str, include_descendants: bool) {
         // Children publish their own launch progress, so retry a stale revision.
         for _ in 0..20 {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let envelope = crate::tests::env(
                 snapshot.revision,
                 Command::StopWorker {
@@ -6235,7 +7391,7 @@ mod tests {
             .to_owned();
         stop_worker(&f, &f.caller, true).await;
         await_ended(&f, &[&child, &grandchild]).await;
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert!(
             !snapshot
                 .submissions
@@ -6266,7 +7422,7 @@ mod tests {
         let notices = notices(&f);
         assert_eq!(notices.len(), 1);
         assert_ne!(notices[0].state, SubmissionState::Queued);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let prompt = snapshot
             .messages
             .iter()
@@ -6378,7 +7534,7 @@ mod tests {
         await_ended(&f, &[&middle]).await;
         stop_worker(&f, &f.caller, true).await;
         await_ended(&f, &[&grandchild]).await;
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert!(
             !snapshot
                 .submissions
@@ -6399,7 +7555,7 @@ mod tests {
         stop_worker(&f, &grandchild, false).await;
         await_ended(&f, &[&grandchild]).await;
         assert!(notices(&f).is_empty());
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let woken = snapshot
             .submissions
             .iter()
@@ -6496,8 +7652,7 @@ mod tests {
     }
     fn nix_records(f: &Fixture) -> Vec<Message> {
         f.workspace
-            .snapshots
-            .borrow()
+            .full()
             .messages
             .iter()
             .filter(|m| m.id.starts_with("nix-command-"))
@@ -6526,10 +7681,10 @@ mod tests {
         // The setting is a project command; unknown projects are rejected.
         {
             let mut store = f.workspace.store.lock().unwrap();
-            let revision = store.snapshot().unwrap().revision;
+            let revision = store.full().revision;
             assert!(
                 store
-                    .apply(
+                    .apply_owned(
                         crate::tests::env(
                             revision,
                             Command::SetNixCommands {
@@ -6542,7 +7697,7 @@ mod tests {
                     .is_err()
             );
             let (snapshot, _) = store
-                .apply(
+                .apply_owned(
                     crate::tests::env(
                         revision,
                         Command::SetNixCommands {
@@ -6554,7 +7709,7 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(snapshot.projects[0].nix_commands, NixCommands::Allow);
-            f.workspace.snapshots.send_replace(snapshot);
+            f.workspace.snapshots.send_replace((snapshot).into());
         }
         assert!(lists_nix(&f).await);
         f.finish().await;
@@ -7052,7 +8207,7 @@ mod tests {
             records[0].body
         );
         // The ended run still accepts no ordinary transcript updates.
-        let messages = f.workspace.snapshots.borrow().messages.len();
+        let messages = f.workspace.full().messages.len();
         assert!(
             f.workspace
                 .update_run(&f.caller, &f.run, |s| {
@@ -7061,7 +8216,7 @@ mod tests {
                 })
                 .is_err()
         );
-        assert_eq!(f.workspace.snapshots.borrow().messages.len(), messages);
+        assert_eq!(f.workspace.full().messages.len(), messages);
         Shutdown {
             workspace: f.workspace.clone(),
         }
@@ -7287,7 +8442,7 @@ mod tests {
                 .unwrap_or_default()
                 .contains("turn/start")
             {
-                let snapshot = f.workspace.snapshots.borrow().clone();
+                let snapshot = f.workspace.full();
                 let worker = snapshot
                     .sessions
                     .iter()
@@ -7359,7 +8514,7 @@ mod tests {
             .to_owned();
         {
             let store = f.workspace.store.lock().unwrap();
-            let snapshot = store.snapshot().unwrap();
+            let snapshot = store.full();
             for id in [&first, &second] {
                 assert_eq!(
                     snapshot
@@ -7456,7 +8611,7 @@ mod tests {
         assert_eq!(turns.len(), 3);
         assert!(turns[1].to_string().contains("First peer message"));
         assert!(turns[2].to_string().contains("Second peer message"));
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         for id in [&first, &second] {
             let prompts: Vec<_> = snapshot
                 .messages
@@ -7577,7 +8732,7 @@ mod tests {
         );
         let independent =
             worktree_session(&f, "independent", None, WorkerStatus::Completed, &default);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         for id in [&lead, &worker, &independent, &f.caller] {
             assert!(runtime::shared_available(&snapshot, id).unwrap(), "{id}");
         }
@@ -7606,7 +8761,7 @@ mod tests {
             WorkerStatus::Running,
             &default,
         );
-        let base = f.workspace.snapshots.borrow().clone();
+        let base = f.workspace.full();
         let busy = |snapshot: &Snapshot| {
             let error = runtime::check_shared(snapshot, &lead, &Default::default()).unwrap_err();
             assert_eq!(
@@ -7811,7 +8966,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let submission = snapshot.submissions.iter().find(|s| s.id == id).unwrap();
         assert_eq!(submission.state, SubmissionState::Queued);
         assert_eq!(submission.error, None);
@@ -7848,13 +9003,15 @@ mod tests {
         let notice = format!("{}busy", crate::notices::PREFIX);
         {
             let mut store = f.workspace.store.lock().unwrap();
-            let snapshot = store.snapshot().unwrap();
+            let snapshot = store.full();
             crate::notices::enqueue(
                 &f.workspace,
                 &mut store,
                 snapshot,
                 &peer,
                 crate::notices::Delivery {
+                    lifecycle: &[],
+                    eligible_at: None,
                     text: "Worker ended".into(),
                     id: notice.clone(),
                     attempt: None,
@@ -7897,7 +9054,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         human(
             &f,
             crate::tests::env(
@@ -7936,7 +9093,7 @@ mod tests {
             ]
         );
         assert_eq!(workspace_wait_count(&f), 1);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let receiver = snapshot.sessions.iter().find(|s| s.id == peer).unwrap();
         assert_eq!(
             receiver.worker.as_ref().unwrap().status,
@@ -8000,7 +9157,7 @@ mod tests {
             ids.push(envelope.request_id);
         }
         {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let states: Vec<_> = ids
                 .iter()
                 .map(|id| {
@@ -8047,7 +9204,7 @@ mod tests {
         assert_eq!(turns[1]["params"]["threadId"], "receiver-thread");
         assert!(turns[1].to_string().contains("First human message"));
         assert!(turns[2].to_string().contains("Second human message"));
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         for id in &ids {
             let prompts: Vec<_> = snapshot
                 .messages
@@ -8130,7 +9287,7 @@ mod tests {
             .filter(|l| l.contains("turn/start") && l.contains("Late human message"))
             .count();
         assert_eq!(turns, 1);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert_eq!(
             snapshot
                 .messages
@@ -8217,7 +9374,7 @@ mod tests {
             let f = Fixture::new(Permission::Allow);
             let peer = shared_peer(&f);
             let capture = install_peer_native(&f, false);
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let agent_config_id = snapshot.agent_configs[0].id.clone();
             let issue_id = Some(snapshot.issues[0].id.clone());
             let prompt = "Original prompt".to_owned();
@@ -8263,7 +9420,7 @@ mod tests {
             let id = envelope.request_id.clone();
             launch_meeting_contention(&f, &session, envelope).await;
             wait_peer_submission(&f.workspace, &id, SubmissionState::Queued).await;
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let submission = snapshot.submissions.iter().find(|s| s.id == id).unwrap();
             assert_eq!(submission.session_id, session);
             assert_eq!(relay_core::plain_text(&submission.parts), "Original prompt");
@@ -8330,7 +9487,7 @@ mod tests {
                     (*f.workspace.config).clone(),
                 )
                 .unwrap();
-                let snapshot = shutdown.workspace.snapshots.borrow().clone();
+                let snapshot = shutdown.workspace.full();
                 assert_eq!(
                     snapshot
                         .queued_turns(&session)
@@ -8379,7 +9536,7 @@ mod tests {
             assert_eq!(turn_starts(&capture, "Follow-up"), 1, "{mode}");
             let log = std::fs::read_to_string(&capture).unwrap();
             assert!(log.find("Original prompt").unwrap() < log.find("Follow-up").unwrap());
-            let snapshot = workspace.snapshots.borrow().clone();
+            let snapshot = workspace.full();
             let session = snapshot.sessions.iter().find(|s| s.id == session).unwrap();
             assert_eq!(session.agent_config_id, config);
             for submission in [&id, &follow] {
@@ -8440,14 +9597,14 @@ mod tests {
             })
             .collect();
         assert_eq!(workspace_wait_count(&f), 2);
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         for session in [&first, &second] {
             let waiting = snapshot.sessions.iter().find(|s| &s.id == session).unwrap();
             assert!(!runtime::active(&waiting.worker.as_ref().unwrap().status));
         }
         release_shared_owner(&f);
         // Neither waiting session blocks the other: only active sessions hold.
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         for session in [&first, &second] {
             assert!(runtime::shared_available(&snapshot, session).unwrap());
         }
@@ -8457,7 +9614,7 @@ mod tests {
         conversation::drain_workspace_waits(&f.workspace).unwrap();
         launch.entered().await;
         {
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let states: Vec<_> = ids
                 .iter()
                 .map(|id| {
@@ -8484,7 +9641,7 @@ mod tests {
         assert_eq!(turn_starts(&capture, "Second waiting"), 1);
         let log = std::fs::read_to_string(&capture).unwrap();
         assert!(log.find("First waiting").unwrap() < log.find("Second waiting").unwrap());
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         for id in &ids {
             let submission = snapshot.submissions.iter().find(|s| &s.id == id).unwrap();
             assert_eq!(submission.state, SubmissionState::Completed);
@@ -8524,7 +9681,7 @@ mod tests {
             // free, and only the older waiting turn holds it for later turns.
             release_shared_owner(&f);
             {
-                let snapshot = f.workspace.snapshots.borrow().clone();
+                let snapshot = f.workspace.full();
                 let store = f.workspace.store.lock().unwrap();
                 let waits = conversation::waiting_sessions(&store.connection).unwrap();
                 assert!(runtime::shared_available(&snapshot, &newer).unwrap());
@@ -8694,7 +9851,7 @@ mod tests {
                     ),
                 )
                 .unwrap();
-                let snapshot = f.workspace.snapshots.borrow().clone();
+                let snapshot = f.workspace.full();
                 assert_eq!(
                     snapshot
                         .submissions
@@ -8709,7 +9866,7 @@ mod tests {
             // turn starts without any run ending or client command.
             f.call(tool, json!({"agent":"child"})).await.unwrap();
             wait_peer_submission(&f.workspace, &newer, SubmissionState::Completed).await;
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let child = snapshot.submissions.iter().find(|s| s.id == older);
             if tool == "delete_agent" {
                 assert!(child.is_none(), "{tool}");
@@ -8750,7 +9907,7 @@ mod tests {
             );
         }
         worktree_peer(&f, "legacy", None, WorkerStatus::Completed, &[&paths[0]]);
-        let base = f.workspace.snapshots.borrow().clone();
+        let base = f.workspace.full();
         let waiting: std::collections::HashSet<String> =
             (0..3).map(|index| format!("waiter-{index}")).collect();
         let subset = |mask: usize| -> Vec<SessionWorkspace> {
@@ -8935,7 +10092,7 @@ mod tests {
             settle(&f, &[&f.caller]);
             conversation::drain_workspace_waits(&f.workspace).unwrap();
             assert_eq!(workspace_wait_count(&f), 0, "{change}");
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             if change != "delete" {
                 let submission = snapshot
                     .submissions
@@ -9019,7 +10176,7 @@ mod tests {
         let second = second.unwrap()["submission"].as_str().unwrap().to_owned();
         settle(&f, &[&f.caller]);
         conversation::drain_workspace_waits(&f.workspace).unwrap();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert_eq!(
             snapshot
                 .submissions
@@ -9054,7 +10211,7 @@ mod tests {
         std::fs::write(&f.workspace.config.codex, format!("#!/bin/sh\n{native}")).unwrap();
         {
             let mut store = f.workspace.store.lock().unwrap();
-            let mut snapshot = store.snapshot().unwrap();
+            let mut snapshot = store.full();
             snapshot
                 .sessions
                 .iter_mut()
@@ -9066,7 +10223,7 @@ mod tests {
                 .status = WorkerStatus::Completed;
             snapshot.revision += 1;
             store.save(&snapshot).unwrap();
-            f.workspace.snapshots.send_replace(snapshot);
+            f.workspace.snapshots.send_replace((snapshot).into());
         }
         conversation::drain_workspace_waits(&f.workspace).unwrap();
         let mut events = f.workspace.snapshots.subscribe();
@@ -9114,8 +10271,7 @@ mod tests {
         let store = Store::open(&f._directory.path().join("db"), AgentProfile::default()).unwrap();
         assert_eq!(
             store
-                .snapshot()
-                .unwrap()
+                .full()
                 .submissions
                 .iter()
                 .find(|s| s.id == queued)
@@ -9139,7 +10295,7 @@ mod tests {
             (*f.workspace.config).clone(),
         )
         .unwrap();
-        let snapshot = shutdown.workspace.snapshots.borrow().clone();
+        let snapshot = shutdown.workspace.full();
         let submission = snapshot
             .submissions
             .iter()
@@ -9262,8 +10418,8 @@ mod tests {
             1
         );
         assert_eq!(
-            events
-                .borrow()
+            f.workspace
+                .full()
                 .messages
                 .iter()
                 .filter(|m| m.id == format!("prompt-{queued}"))
@@ -9324,11 +10480,11 @@ mod tests {
     }
     fn change_shared_fixture(f: &Fixture, change: impl FnOnce(&mut Snapshot)) {
         let mut store = f.workspace.store.lock().unwrap();
-        let mut snapshot = store.snapshot().unwrap();
+        let mut snapshot = store.full();
         change(&mut snapshot);
         snapshot.revision += 1;
         store.save(&snapshot).unwrap();
-        f.workspace.snapshots.send_replace(snapshot);
+        f.workspace.snapshots.send_replace((snapshot).into());
     }
     fn release_shared_owner(f: &Fixture) {
         change_shared_fixture(f, |s| {
@@ -9429,8 +10585,7 @@ mod tests {
             assert!(store.agent_capabilities.contains_key(&peer));
             assert_eq!(
                 store
-                    .snapshot()
-                    .unwrap()
+                    .full()
                     .sessions
                     .iter()
                     .find(|s| s.id == peer)
@@ -9494,7 +10649,7 @@ mod tests {
             wait_peer_submission(&f.workspace, &id, SubmissionState::Interrupted).await;
             release_shared_owner(&f);
             conversation::drain_workspace_waits(&f.workspace).unwrap();
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             assert_eq!(
                 snapshot
                     .submissions
@@ -9549,7 +10704,7 @@ mod tests {
             let dropped = arm_runtime_gate(&f, &peer, "after_guard");
             let id = late_peer_message(&f, &peer).await;
             deferred.entered().await;
-            let snapshot = f.workspace.snapshots.borrow().clone();
+            let snapshot = f.workspace.full();
             let receiver = snapshot.sessions.iter().find(|s| s.id == peer).unwrap();
             assert!(receiver.awaiting_first_message);
             assert!(receiver.worker.as_ref().unwrap().thread_id.is_none());
@@ -9589,7 +10744,7 @@ mod tests {
                         .unwrap_or_default()
                         .contains("turn/start")
                 );
-                let snapshot = workspace.snapshots.borrow().clone();
+                let snapshot = workspace.full();
                 assert!(
                     snapshot
                         .sessions
@@ -9634,7 +10789,7 @@ mod tests {
             }
             dropped.open();
             wait_peer_submission(workspace, &id, SubmissionState::Completed).await;
-            let snapshot = workspace.snapshots.borrow().clone();
+            let snapshot = workspace.full();
             assert!(
                 !snapshot
                     .sessions
@@ -9907,8 +11062,10 @@ fi
     /// Apply a workspace client's command through the normal command path.
     fn human(f: &Fixture, envelope: CommandEnvelope) -> Result<Snapshot, Error> {
         let mut store = f.workspace.store.lock().unwrap();
-        let (snapshot, _) = store.apply(envelope, &f.workspace.config)?;
-        f.workspace.snapshots.send_replace(snapshot.clone());
+        let (snapshot, _) = store.apply_owned(envelope, &f.workspace.config)?;
+        f.workspace
+            .snapshots
+            .send_replace((snapshot.clone()).into());
         Ok(snapshot)
     }
     fn human_send(f: &Fixture, session: &str, parts: Vec<Part>) -> Result<Snapshot, Error> {
@@ -10041,7 +11198,7 @@ fi
         // An agent-sent turn can never carry a mention.
         {
             let mut store = f.workspace.store.lock().unwrap();
-            let mut snapshot = store.snapshot().unwrap();
+            let mut snapshot = store.full();
             let transaction = store.connection.transaction().unwrap();
             let parts = vec![mention(target)];
             let draft = Draft {
@@ -10100,7 +11257,7 @@ fi
         assert_eq!(granted[0].sessions, pair);
         assert!(message(&f, &f.caller, &f.run, target).await.is_ok());
         assert!(message(&f, target, &other_run, &f.caller).await.is_ok());
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         assert!(snapshot.submissions.iter().any(|s| s.session_id == target
             && s.sender
                 == Sender::Agent {
@@ -10124,6 +11281,21 @@ fi
             ("wait_for_agents", json!({"agents":[target],"timeout_s":0})),
             ("stop_agent", json!({"agent":target})),
             ("archive_agent", json!({"agent":target})),
+            ("unarchive_agent", json!({"agent":target})),
+            ("view_agent_queue", json!({"agent":target})),
+            ("resume_agent_queue", json!({"agent":target})),
+            (
+                "cancel_queued_message",
+                json!({"agent":target,"submission":"x"}),
+            ),
+            (
+                "send_queued_message_now",
+                json!({"agent":target,"submission":"x"}),
+            ),
+            (
+                "edit_queued_message",
+                json!({"agent":target,"submission":"x","text":"x"}),
+            ),
         ] {
             assert!(f.call(tool, args).await.is_err(), "{tool}");
         }
@@ -10315,7 +11487,7 @@ fi
         let root = f._directory.path().join("root");
         std::fs::create_dir_all(&root).unwrap();
         f.change(|s| s.projects[0].root = Some(root.display().to_string()));
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let parts = vec![Part::text("Coordinate with "), mention(target)];
         let envelope = crate::tests::env(
             snapshot.revision,
@@ -10370,7 +11542,7 @@ fi
             .as_str()
             .unwrap()
             .to_owned();
-        let snapshot = f.workspace.snapshots.borrow().clone();
+        let snapshot = f.workspace.full();
         let turn = snapshot
             .submissions
             .iter()
@@ -10394,7 +11566,7 @@ fi
         {
             let revision = set_draft(&f, &f.caller, &parts);
             let mut store = f.workspace.store.lock().unwrap();
-            let mut snapshot = store.snapshot().unwrap();
+            let mut snapshot = store.full();
             let transaction = store.connection.transaction().unwrap();
             let error = conversation::apply(
                 &transaction,
@@ -10438,5 +11610,466 @@ fi
         assert_eq!(turn.parts, parts);
         settle(&f, &["peer-agent", "third-agent"]);
         f.finish().await;
+    }
+
+    /// A paused child with a retained thread, as a server restart leaves it.
+    fn paused_child(f: &Fixture, turns: &[(&str, &str)]) {
+        archive_fixture(f);
+        // Its own directory, so a resumed turn need not wait for the parent's.
+        let own = f._directory.path().join("child");
+        std::fs::create_dir(&own).unwrap();
+        let repo = crate::tests::review_repo(&own).display().to_string();
+        f.change(|s| {
+            let mut worker = s.sessions[0].worker.clone().unwrap();
+            worker.status = WorkerStatus::Interrupted;
+            worker.thread_id = Some("paused-child-thread".into());
+            worker.worktree = Some(repo.clone());
+            s.sessions[1].worker = Some(worker);
+            for workspace in &mut s.sessions[1].workspaces {
+                workspace.path = repo.clone();
+            }
+            for (id, text) in turns {
+                s.submissions.push(Submission {
+                    id: (*id).into(),
+                    session_id: "archive-child".into(),
+                    parts: vec![Part::text(*text)],
+                    state: SubmissionState::Paused,
+                    approve_implementation: false,
+                    error: Some("Server restarted; delivered turns are never replayed, queued turns require explicit resume".into()),
+                    interrupts_run: None,
+                    last_edit_request: None,
+                    sender: Sender::Agent {
+                        session_id: f.caller.clone(),
+                    },
+                });
+            }
+        });
+        // Each was accepted with a receipt, which authorizes its launch.
+        let store = f.workspace.store.lock().unwrap();
+        for (id, text) in turns {
+            let envelope = CommandEnvelope {
+                request_id: (*id).into(),
+                expected_revision: 0,
+                command: Command::SubmitTurn {
+                    session_id: "archive-child".into(),
+                    draft_revision: 0,
+                    parts: vec![Part::text(*text)],
+                    approve_implementation: false,
+                },
+            };
+            store
+                .connection
+                .execute(
+                    "INSERT INTO receipts(request_id,request) VALUES(?1,?2)",
+                    params![id, serde_json::to_string(&envelope).unwrap()],
+                )
+                .unwrap();
+        }
+    }
+    fn submission_state(f: &Fixture, id: &str) -> SubmissionState {
+        f.workspace
+            .full()
+            .submissions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .state
+            .clone()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn ancestors_view_edit_cancel_and_resume_a_paused_descendant_queue() {
+        let f = Fixture::new(Permission::Allow);
+        let capture = install_peer_native(&f, false);
+        paused_child(
+            &f,
+            &[("q-first", "Queued first"), ("q-second", "Queued second")],
+        );
+        let human_draft = vec![Part::text("The human's unsent draft")];
+        let draft_revision = set_draft(&f, "archive-child", &human_draft);
+
+        // A message only queues behind a paused queue, and says so.
+        let sent = f
+            .call(
+                "message_agent",
+                json!({"agent":"archive-child","text":"Queued third"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["queue"]["paused"], true);
+        assert_eq!(sent["queue"]["queued"], 3);
+        assert_eq!(sent["queue"]["started"], false);
+        assert!(
+            sent["queue"]["hint"]
+                .as_str()
+                .unwrap()
+                .contains("resume_agent_queue")
+        );
+        let third = sent["submission"].as_str().unwrap().to_owned();
+        let listed = f.call("list_agents", json!({})).await.unwrap();
+        let child = listed["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == "archive-child")
+            .unwrap();
+        assert_eq!(child["queue"], json!({"queued":3,"paused":true}));
+
+        let view = f
+            .call("view_agent_queue", json!({"agent":"archive-child"}))
+            .await
+            .unwrap();
+        assert_eq!(view["paused"], true);
+        let turns = view["turns"].as_array().unwrap();
+        assert_eq!(
+            turns
+                .iter()
+                .map(|t| (
+                    t["submission"].as_str().unwrap(),
+                    t["state"].as_str().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("q-first", "paused"),
+                ("q-second", "paused"),
+                (third.as_str(), "queued")
+            ]
+        );
+        assert_eq!(turns[0]["text"], "Queued first");
+        assert_eq!(turns[0]["sender"], f.caller.as_str());
+        assert!(
+            turns[0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("Server restarted")
+        );
+
+        // Edit keeps the place and state, and leaves the human's draft alone.
+        let edited = f
+            .call(
+                "edit_queued_message",
+                json!({"agent":"archive-child","submission":"q-second","text":"Edited second"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited["turns"][1]["text"], "Edited second");
+        assert_eq!(edited["turns"][1]["state"], "paused");
+        assert_eq!(edited["started"], false);
+        let drafts =
+            conversation::read_drafts(&f.workspace.store.lock().unwrap().connection).unwrap();
+        let draft = drafts
+            .iter()
+            .find(|d| d.session_id == "archive-child")
+            .unwrap();
+        assert_eq!(
+            (draft.revision, &draft.parts),
+            (draft_revision, &human_draft)
+        );
+        assert!(
+            f.workspace
+                .full()
+                .submissions
+                .iter()
+                .find(|s| s.id == "q-second")
+                .unwrap()
+                .last_edit_request
+                .is_some()
+        );
+
+        f.call(
+            "cancel_queued_message",
+            json!({"agent":"archive-child","submission":third}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(submission_state(&f, &third), SubmissionState::Cancelled);
+
+        // Resume starts the oldest turn, then the rest follow in order.
+        let resumed = f
+            .call("resume_agent_queue", json!({"agent":"archive-child"}))
+            .await
+            .unwrap();
+        assert_eq!(resumed["started"], true);
+        assert_eq!(resumed["paused"], false);
+        wait_peer_submission(&f.workspace, "q-first", SubmissionState::Completed).await;
+        wait_peer_submission(&f.workspace, "q-second", SubmissionState::Completed).await;
+        assert_eq!(turn_starts(&capture, "Queued first"), 1);
+        assert_eq!(turn_starts(&capture, "Edited second"), 1);
+        assert_eq!(turn_starts(&capture, "Queued second"), 0);
+        assert_eq!(turn_starts(&capture, "Queued third"), 0);
+        assert!(
+            f.workspace
+                .full()
+                .messages
+                .iter()
+                .any(|m| m.session_id == f.caller
+                    && m.kind == "agent_control"
+                    && m.body == "Resumed the queue of archive-child")
+        );
+        assert!(
+            f.call("resume_agent_queue", json!({"agent":"archive-child"}))
+                .await
+                .is_err(),
+            "an empty queue has nothing to resume"
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn send_now_starts_one_paused_turn_ahead_and_leaves_the_rest_paused() {
+        let f = Fixture::new(Permission::Allow);
+        let capture = install_peer_native(&f, false);
+        paused_child(
+            &f,
+            &[("p-first", "Paused first"), ("p-second", "Paused second")],
+        );
+        let sent = f
+            .call(
+                "send_queued_message_now",
+                json!({"agent":"archive-child","submission":"p-second"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["started"], true);
+        wait_peer_submission(&f.workspace, "p-second", SubmissionState::Completed).await;
+        assert_eq!(turn_starts(&capture, "Paused second"), 1);
+        assert_eq!(turn_starts(&capture, "Paused first"), 0);
+        assert_eq!(submission_state(&f, "p-first"), SubmissionState::Paused);
+        f.finish().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn send_now_interrupts_a_running_descendant_turn() {
+        let f = Fixture::new(Permission::Allow);
+        let _capture = install_peer_native(&f, true);
+        paused_child(&f, &[("r-first", "Running first")]);
+        f.call("resume_agent_queue", json!({"agent":"archive-child"}))
+            .await
+            .unwrap();
+        wait_peer_submission(&f.workspace, "r-first", SubmissionState::Running).await;
+        let next = f
+            .call(
+                "message_agent",
+                json!({"agent":"archive-child","text":"Interrupting next"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next["queue"]["paused"], false);
+        let next = next["submission"].as_str().unwrap().to_owned();
+        let sent = f
+            .call(
+                "send_queued_message_now",
+                json!({"agent":"archive-child","submission":next}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["interrupting_current_turn"], true);
+        assert_eq!(
+            f.workspace
+                .full()
+                .submissions
+                .iter()
+                .find(|s| s.id == next)
+                .unwrap()
+                .interrupts_run
+                .as_deref(),
+            Some("r-first")
+        );
+        std::fs::write(f._directory.path().join("release-receiver"), "").unwrap();
+        wait_peer_submission(&f.workspace, &next, SubmissionState::Completed).await;
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn queue_controls_stay_within_descendants_and_follow_delegation_policy() {
+        let f = Fixture::new(Permission::Allow);
+        paused_child(&f, &[("s-first", "Scoped first")]);
+        f.change(|s| {
+            s.submissions.push(Submission {
+                id: "grandchild-turn".into(),
+                session_id: "archive-grandchild".into(),
+                parts: vec![Part::text("Grandchild")],
+                state: SubmissionState::Paused,
+                approve_implementation: false,
+                error: None,
+                interrupts_run: None,
+                last_edit_request: None,
+                sender: Sender::User,
+            });
+        });
+        // Only descendants, and only the named agent's own submissions.
+        for agent in [f.caller.as_str(), "missing-agent"] {
+            for tool in queue::TOOLS {
+                let error = f
+                    .call(
+                        tool,
+                        json!({"agent":agent,"submission":"s-first","text":"x"}),
+                    )
+                    .await;
+                assert!(error.is_err(), "{tool} on {agent}");
+            }
+        }
+        for tool in ["cancel_queued_message", "send_queued_message_now"] {
+            let error = f
+                .call(
+                    tool,
+                    json!({"agent":"archive-child","submission":"grandchild-turn"}),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error.message.contains("not in this agent's queue"),
+                "{tool}"
+            );
+        }
+        assert!(
+            f.call(
+                "view_agent_queue",
+                json!({"agent":"archive-child","extra":true})
+            )
+            .await
+            .is_err()
+        );
+        // Delegation Deny refuses every change but still allows viewing.
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Delegate, Permission::Deny);
+        });
+        assert!(
+            f.call("view_agent_queue", json!({"agent":"archive-child"}))
+                .await
+                .is_ok()
+        );
+        let error = f
+            .call("resume_agent_queue", json!({"agent":"archive-child"}))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("denies managing subagents"));
+        // Ask needs a human decision; a denial changes nothing.
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Delegate, Permission::Ask);
+        });
+        let (result, _) = tokio::join!(
+            f.call(
+                "cancel_queued_message",
+                json!({"agent":"archive-child","submission":"s-first"})
+            ),
+            decide(
+                &f.workspace,
+                &f.caller,
+                &f.run,
+                false,
+                "Cancel queued message s-first"
+            )
+        );
+        assert!(result.is_err());
+        assert_eq!(submission_state(&f, "s-first"), SubmissionState::Paused);
+        let (result, _) = tokio::join!(
+            f.call(
+                "cancel_queued_message",
+                json!({"agent":"archive-child","submission":"s-first"})
+            ),
+            decide(
+                &f.workspace,
+                &f.caller,
+                &f.run,
+                true,
+                "Cancel queued message s-first"
+            )
+        );
+        result.unwrap();
+        assert_eq!(submission_state(&f, "s-first"), SubmissionState::Cancelled);
+        // An archived descendant must be unarchived first.
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Delegate, Permission::Allow);
+            s.sessions
+                .iter_mut()
+                .find(|s| s.id == "archive-grandchild")
+                .unwrap()
+                .archived = true;
+        });
+        let error = f
+            .call(
+                "cancel_queued_message",
+                json!({"agent":"archive-grandchild","submission":"grandchild-turn"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("Unarchive"));
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn editing_a_queued_turn_follows_the_targets_implementation_policy() {
+        let f = Fixture::new(Permission::Allow);
+        paused_child(&f, &[("e-first", "Edit me")]);
+        f.change(|s| {
+            s.submissions[0].approve_implementation = true;
+            s.submissions[0].sender = Sender::User;
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Implement, Permission::Deny);
+        });
+        let error = f
+            .call(
+                "edit_queued_message",
+                json!({"agent":"archive-child","submission":"e-first","text":"Changed"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("denies implementation"));
+        f.change(|s| {
+            s.projects[0]
+                .defaults
+                .permissions
+                .insert(Task::Implement, Permission::Allow);
+        });
+        f.call(
+            "edit_queued_message",
+            json!({"agent":"archive-child","submission":"e-first","text":"Changed"}),
+        )
+        .await
+        .unwrap();
+        let turn = f
+            .workspace
+            .full()
+            .submissions
+            .into_iter()
+            .find(|s| s.id == "e-first")
+            .unwrap();
+        // The agent's text never inherits the human's earlier approval.
+        assert_eq!(plain_text(&turn.parts), "Changed");
+        assert!(!turn.approve_implementation);
+        assert_eq!(turn.state, SubmissionState::Paused);
+        f.finish().await;
+    }
+
+    #[test]
+    fn queue_tool_schemas_are_discoverable() {
+        let tools = tools(&WorkerModelPolicy::default(), Permission::Deny, false, None);
+        for name in queue::TOOLS {
+            let tool = tools["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+            assert!(
+                tool["inputSchema"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("agent"))
+            );
+        }
     }
 }

@@ -330,6 +330,7 @@ pub fn demo_orchestration(snapshot: &mut Snapshot) {
         description: "psql -f migrations/0012_profile_overrides.sql".into(),
         decision: None,
         expired: false,
+        spawn_attempt: None,
     });
 }
 

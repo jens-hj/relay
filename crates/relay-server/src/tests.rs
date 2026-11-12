@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::{path::PathBuf, time::Duration};
 
 pub(crate) mod command_tests;
+mod config_name_tests;
 pub(crate) mod harness_tests;
 mod persistence_tests;
 pub(super) fn live() -> Snapshot {
@@ -65,7 +66,8 @@ pub(super) fn start(s: &Snapshot) -> Command {
 pub(super) fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig) -> Workspace {
     let mut store = Store::open(path, AgentProfile::default()).unwrap();
     store.save(snapshot).unwrap();
-    let (snapshots, _) = watch::channel(snapshot.clone());
+    // Publish what was committed: the transcript lives in the messages table.
+    let (snapshots, _) = watch::channel(store.shared().unwrap());
     let browser =
         browser::BrowserAuth::initialize(&mut store, "test-token", BrowserConfig::default())
             .unwrap();
@@ -82,6 +84,7 @@ pub(super) fn workspace(path: &Path, snapshot: &Snapshot, config: RuntimeConfig)
         project_jobs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         store: Arc::new(Mutex::new(store)),
         snapshots,
+        transcripts: Arc::new(transport::Reader::open(path).unwrap()),
         token: "test-token".into(),
         config: Arc::new(config),
     }
@@ -209,16 +212,16 @@ fn stale_independent_creates_preserve_background_state_and_receipts() {
     ];
     for command in commands {
         let request = env(initial.revision, command);
-        let (saved, _) = store.apply(request.clone(), &config()).unwrap();
+        let (saved, _) = store.apply_owned(request.clone(), &config()).unwrap();
         assert_eq!(saved.sessions, background.sessions);
-        let (duplicate, action) = store.apply(request.clone(), &config()).unwrap();
+        let (duplicate, action) = store.apply_owned(request.clone(), &config()).unwrap();
         assert_eq!(duplicate, saved);
         assert!(action.is_none());
         let mut reused = request;
         reused.expected_revision = saved.revision;
-        assert!(store.apply(reused, &config()).is_err());
+        assert!(store.apply_owned(reused, &config()).is_err());
     }
-    let current = store.snapshot().unwrap();
+    let current = store.full();
     assert_eq!(current.agent_configs.len(), initial.agent_configs.len() + 1);
     assert_eq!(
         current.agent_templates.len(),
@@ -231,7 +234,7 @@ fn stale_independent_creates_preserve_background_state_and_receipts() {
     };
     assert_eq!(
         store
-            .apply(env(initial.revision, duplicate_name), &config())
+            .apply_owned(env(initial.revision, duplicate_name), &config())
             .err()
             .unwrap()
             .code,
@@ -245,7 +248,7 @@ fn stale_independent_creates_preserve_background_state_and_receipts() {
     };
     assert_eq!(
         store
-            .apply(env(current.revision + 1, future), &config())
+            .apply_owned(env(current.revision + 1, future), &config())
             .err()
             .unwrap()
             .code,
@@ -258,11 +261,11 @@ fn stale_independent_creates_preserve_background_state_and_receipts() {
     };
     let edit_revision = current.revision;
     let (current, _) = store
-        .apply(env(edit_revision, edit.clone()), &config())
+        .apply_owned(env(edit_revision, edit.clone()), &config())
         .unwrap();
     assert_eq!(
         store
-            .apply(env(edit_revision, edit), &config())
+            .apply_owned(env(edit_revision, edit), &config())
             .err()
             .unwrap()
             .code,
@@ -276,19 +279,16 @@ fn stale_independent_creates_preserve_background_state_and_receipts() {
     };
     assert_eq!(
         store
-            .apply(env(initial.revision, invalid), &config())
+            .apply_owned(env(initial.revision, invalid), &config())
             .err()
             .unwrap()
             .code,
         "invalid"
     );
-    assert_eq!(store.snapshot().unwrap(), current);
+    assert_eq!(store.full(), current);
     drop(store);
     assert_eq!(
-        Store::open(&path, AgentProfile::default())
-            .unwrap()
-            .snapshot()
-            .unwrap(),
+        Store::open(&path, AgentProfile::default()).unwrap().full(),
         current
     );
 }
@@ -339,7 +339,7 @@ fn stale_project_creation_survives_agent_output_but_not_resource_conflicts() {
             ],
         },
     );
-    let (created, action) = store.apply(create.clone(), &config()).unwrap();
+    let (created, action) = store.apply_owned(create.clone(), &config()).unwrap();
     assert!(matches!(action, Some(Action::Operations(ref jobs)) if jobs.len() == 3));
     assert_eq!(created.revision, background.revision + 1);
     assert_eq!(created.sessions, background.sessions);
@@ -360,13 +360,13 @@ fn stale_project_creation_survives_agent_output_but_not_resource_conflicts() {
         5
     );
     // An exact retry of the stale envelope replays its receipt.
-    let (replayed, action) = store.apply(create.clone(), &config()).unwrap();
+    let (replayed, action) = store.apply_owned(create.clone(), &config()).unwrap();
     assert_eq!(replayed, created);
     assert!(action.is_none());
     let mut reused = create;
     reused.expected_revision = created.revision;
     assert_eq!(
-        store.apply(reused, &config()).err().unwrap().code,
+        store.apply_owned(reused, &config()).err().unwrap().code,
         "invalid"
     );
     // A second create from the same stale base still meets the current root.
@@ -378,7 +378,7 @@ fn stale_project_creation_survives_agent_output_but_not_resource_conflicts() {
             connections: vec![],
         },
     );
-    let error = store.apply(same_root, &config()).err().unwrap();
+    let error = store.apply_owned(same_root, &config()).err().unwrap();
     assert_eq!(error.code, "invalid");
     assert_eq!(error.message, "That project root is already in use");
     // Stale connection additions are checked against current connections.
@@ -395,7 +395,11 @@ fn stale_project_creation_survives_agent_output_but_not_resource_conflicts() {
         remote: "git@gitlab.com:mosaic/core.git".into(),
     });
     assert_eq!(
-        store.apply(repository, &config()).err().unwrap().message,
+        store
+            .apply_owned(repository, &config())
+            .err()
+            .unwrap()
+            .message,
         "Repository is already connected"
     );
     let duplicate_board = add(ConnectionInput::Board { source: board });
@@ -410,7 +414,7 @@ fn stale_project_creation_survives_agent_output_but_not_resource_conflicts() {
     let docs = add(ConnectionInput::Repository {
         remote: "git@gitlab.com:mosaic/docs.git".into(),
     });
-    let (current, action) = store.apply(docs.clone(), &config()).unwrap();
+    let (current, action) = store.apply_owned(docs.clone(), &config()).unwrap();
     assert!(action.is_some());
     assert!(
         current
@@ -435,7 +439,7 @@ fn stale_project_creation_survives_agent_output_but_not_resource_conflicts() {
     ] {
         assert_eq!(
             store
-                .apply(env(created.revision, command), &config())
+                .apply_owned(env(created.revision, command), &config())
                 .err()
                 .unwrap()
                 .code,
@@ -451,10 +455,10 @@ fn stale_project_creation_survives_agent_output_but_not_resource_conflicts() {
         },
     );
     assert_eq!(
-        store.apply(future, &config()).err().unwrap().code,
+        store.apply_owned(future, &config()).err().unwrap().code,
         "conflict"
     );
-    assert_eq!(store.snapshot().unwrap(), current);
+    assert_eq!(store.full(), current);
 }
 
 #[test]
@@ -462,7 +466,7 @@ fn stale_syncs_and_retries_queue_once_and_keep_real_conflicts() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
     store.save(&live()).unwrap();
-    let base = store.snapshot().unwrap();
+    let base = store.full();
     let create = env(
         base.revision,
         Command::CreateProject {
@@ -485,7 +489,7 @@ fn stale_syncs_and_retries_queue_once_and_keep_real_conflicts() {
             ],
         },
     );
-    let (created, _) = store.apply(create.clone(), &config()).unwrap();
+    let (created, _) = store.apply_owned(create.clone(), &config()).unwrap();
     let project = format!("project-{}", create.request_id);
     let connection = |board: bool| {
         created
@@ -579,7 +583,7 @@ fn stale_syncs_and_retries_queue_once_and_keep_real_conflicts() {
     };
     let code = |store: &mut Store, command: Command| {
         store
-            .apply(env(seen, command), &config())
+            .apply_owned(env(seen, command), &config())
             .err()
             .map(|e| (e.code, e.message))
     };
@@ -595,13 +599,13 @@ fn stale_syncs_and_retries_queue_once_and_keep_real_conflicts() {
             operation_id: sync.clone(),
         },
     );
-    let (after, action) = store.apply(retry.clone(), &config()).unwrap();
+    let (after, action) = store.apply_owned(retry.clone(), &config()).unwrap();
     assert!(matches!(action, Some(Action::Operations(ref jobs)) if *jobs == [sync.clone()]));
     assert_eq!(after.revision, churn.revision + 1);
     assert_eq!(after.sessions, churn.sessions);
     assert_eq!(state(&after, &sync), OperationState::Pending);
     // The same request replays its receipt and queues nothing.
-    let (replayed, action) = store.apply(retry, &config()).unwrap();
+    let (replayed, action) = store.apply_owned(retry, &config()).unwrap();
     assert_eq!(replayed, after);
     assert!(action.is_none());
     // A second retry, a manual sync and the board connection's retry, all from
@@ -624,9 +628,9 @@ fn stale_syncs_and_retries_queue_once_and_keep_real_conflicts() {
         connection_id: board_connection.id.clone(),
     };
     assert_eq!(code(&mut store, board_retry.clone()).unwrap().0, "conflict");
-    assert_eq!(queued_syncs(&store.snapshot().unwrap()), 1);
+    assert_eq!(queued_syncs(&store.full()), 1);
     // Once that sync has failed again, a stale manual sync queues exactly one.
-    let mut done = store.snapshot().unwrap();
+    let mut done = store.full();
     done.operations
         .iter_mut()
         .find(|o| o.id == sync)
@@ -634,21 +638,23 @@ fn stale_syncs_and_retries_queue_once_and_keep_real_conflicts() {
         .state = OperationState::Failed;
     done.revision += 1;
     store.save(&done).unwrap();
-    let (synced, action) = store.apply(env(seen, manual.clone()), &config()).unwrap();
+    let (synced, action) = store
+        .apply_owned(env(seen, manual.clone()), &config())
+        .unwrap();
     assert!(action.is_some());
     assert_eq!(queued_syncs(&synced), 1);
     assert_eq!(
         code(&mut store, manual).unwrap().1,
         "Resolve the pending board operation first"
     );
-    assert_eq!(queued_syncs(&store.snapshot().unwrap()), 1);
+    assert_eq!(queued_syncs(&store.full()), 1);
     // A failed repository connection is retried once from a stale view, and
     // its old clone is then no longer retryable.
     let repository_retry = Command::RetryConnection {
         connection_id: repository.id.clone(),
     };
     let (retried, action) = store
-        .apply(env(seen, repository_retry.clone()), &config())
+        .apply_owned(env(seen, repository_retry.clone()), &config())
         .unwrap();
     assert!(action.is_some());
     let cloning = OperationKind::Clone {
@@ -665,13 +671,10 @@ fn stale_syncs_and_retries_queue_once_and_keep_real_conflicts() {
         operation_id: clone.clone(),
     };
     assert_eq!(code(&mut store, old_clone).unwrap().0, "conflict");
-    assert_eq!(
-        state(&store.snapshot().unwrap(), &clone),
-        OperationState::Failed
-    );
+    assert_eq!(state(&store.full(), &clone), OperationState::Failed);
     // A connection removed meanwhile is never restored from a stale view, and
     // its failed sync is not retried; the exact revision can still restore it.
-    let mut removed = store.snapshot().unwrap();
+    let mut removed = store.full();
     for o in removed.operations.iter_mut() {
         if matches!(&o.kind, OperationKind::Sync { .. }) {
             o.state = OperationState::Failed;
@@ -696,9 +699,9 @@ fn stale_syncs_and_retries_queue_once_and_keep_real_conflicts() {
             .0,
         "invalid"
     );
-    assert_eq!(store.snapshot().unwrap(), removed);
+    assert_eq!(store.full(), removed);
     let (restored, _) = store
-        .apply(env(removed.revision, board_retry), &config())
+        .apply_owned(env(removed.revision, board_retry), &config())
         .unwrap();
     assert!(
         restored
@@ -873,9 +876,9 @@ fn stale_first_turn_validates_current_permissions_and_reserves_once() {
     let mut background = initial.clone();
     background.revision += 10;
     store.save(&background).unwrap();
-    let (saved, action) = store.apply(request.clone(), &w.config).unwrap();
+    let (saved, action) = store.apply_owned(request.clone(), &w.config).unwrap();
     assert!(matches!(action, Some(Action::Run { .. })));
-    let (duplicate, action) = store.apply(request.clone(), &w.config).unwrap();
+    let (duplicate, action) = store.apply_owned(request.clone(), &w.config).unwrap();
     assert_eq!(duplicate, saved);
     assert!(action.is_none());
     assert_eq!(saved.sessions.len(), initial.sessions.len() + 1);
@@ -886,8 +889,11 @@ fn stale_first_turn_validates_current_permissions_and_reserves_once() {
     store.save(&denied).unwrap();
     let mut next = request;
     next.request_id = uuid::Uuid::new_v4().to_string();
-    assert_eq!(store.apply(next, &w.config).err().unwrap().code, "invalid");
-    assert_eq!(store.snapshot().unwrap(), denied);
+    assert_eq!(
+        store.apply_owned(next, &w.config).err().unwrap().code,
+        "invalid"
+    );
+    assert_eq!(store.full(), denied);
 }
 
 #[tokio::test]
@@ -898,7 +904,7 @@ async fn stale_submit_preserves_draft_conflicts_and_duplicate_receipts() {
     let session_id = {
         let mut store = w.store.lock().unwrap();
         let (started, _) = store
-            .apply(env(initial.revision, start(&initial)), &w.config)
+            .apply_owned(env(initial.revision, start(&initial)), &w.config)
             .unwrap();
         started.sessions.last().unwrap().id.clone()
     };
@@ -942,22 +948,26 @@ async fn stale_submit_preserves_draft_conflicts_and_duplicate_receipts() {
             approve_implementation: true,
         },
     );
-    let (saved, action) = store.apply(request.clone(), &w.config).unwrap();
+    let (saved, action) = store.apply_owned(request.clone(), &w.config).unwrap();
     assert!(action.is_none());
     assert_eq!(
         saved.submissions.last().unwrap().state,
         SubmissionState::Queued
     );
-    let (duplicate, action) = store.apply(request.clone(), &w.config).unwrap();
+    let (duplicate, action) = store.apply_owned(request.clone(), &w.config).unwrap();
     assert_eq!(duplicate, saved);
     assert!(action.is_none());
     let mut stale_draft = request;
     stale_draft.request_id = uuid::Uuid::new_v4().to_string();
     assert_eq!(
-        store.apply(stale_draft, &w.config).err().unwrap().code,
+        store
+            .apply_owned(stale_draft, &w.config)
+            .err()
+            .unwrap()
+            .code,
         "draft_conflict"
     );
-    assert_eq!(store.snapshot().unwrap(), saved);
+    assert_eq!(store.full(), saved);
 }
 
 #[test]
@@ -967,7 +977,7 @@ fn duplicate_receipts_reserve_once_and_revision_conflicts_do_not_reserve() {
     let w = workspace(&dir.path().join("db"), &s, config());
     let request = env(s.revision, start(&s));
     let mut store = w.store.lock().unwrap();
-    let (s, action) = store.apply(request.clone(), &w.config).unwrap();
+    let (s, action) = store.apply_owned(request.clone(), &w.config).unwrap();
     assert!(matches!(action, Some(Action::Run { .. })));
     assert_eq!(
         store
@@ -975,16 +985,16 @@ fn duplicate_receipts_reserve_once_and_revision_conflicts_do_not_reserve() {
             .unwrap(),
         Some(request.request_id.clone())
     );
-    let (retry, action) = store.apply(request.clone(), &w.config).unwrap();
+    let (retry, action) = store.apply_owned(request.clone(), &w.config).unwrap();
     assert!(action.is_none());
     assert_eq!(s, retry);
-    assert!(store.apply(env(0, start(&s)), &w.config).is_err());
+    assert!(store.apply_owned(env(0, start(&s)), &w.config).is_err());
     let mut changed = request;
     changed.command = start(&s);
     if let Command::StartWorker { prompt, .. } = &mut changed.command {
         *prompt = "Changed".into();
     }
-    assert!(store.apply(changed, &w.config).is_err());
+    assert!(store.apply_owned(changed, &w.config).is_err());
 }
 #[test]
 fn concurrent_start_reservations_enforce_worker_slots() {
@@ -993,8 +1003,14 @@ fn concurrent_start_reservations_enforce_worker_slots() {
     s.projects[0].defaults.max_workers = 1;
     let w = workspace(&dir.path().join("db"), &s, config());
     let mut store = w.store.lock().unwrap();
-    let (s, _) = store.apply(env(s.revision, start(&s)), &w.config).unwrap();
-    assert!(store.apply(env(s.revision, start(&s)), &w.config).is_err());
+    let (s, _) = store
+        .apply_owned(env(s.revision, start(&s)), &w.config)
+        .unwrap();
+    assert!(
+        store
+            .apply_owned(env(s.revision, start(&s)), &w.config)
+            .is_err()
+    );
 }
 #[test]
 fn completed_items_are_immutable_usage_measured_and_thread_identity_checked() {
@@ -1005,7 +1021,7 @@ fn completed_items_are_immutable_usage_measured_and_thread_identity_checked() {
         .store
         .lock()
         .unwrap()
-        .apply(env(s.revision, start(&s)), &w.config)
+        .apply_owned(env(s.revision, start(&s)), &w.config)
         .unwrap();
     s = new;
     let id = s.sessions.last().unwrap().id.clone();
@@ -1054,7 +1070,7 @@ fn completed_turn_with_missing_usage_keeps_measurements_unknown() {
         .store
         .lock()
         .unwrap()
-        .apply(env(snapshot.revision, start(&snapshot)), &workspace.config)
+        .apply_owned(env(snapshot.revision, start(&snapshot)), &workspace.config)
         .unwrap();
     let id = snapshot.sessions.last().unwrap().id.clone();
     runtime::event(
@@ -1118,7 +1134,7 @@ fn migration_keeps_comments_and_restart_interrupts_only_unfinished_runs() {
         .store
         .lock()
         .unwrap()
-        .apply(request.clone(), &w.config)
+        .apply_owned(request.clone(), &w.config)
         .unwrap();
     // Simulate old snapshots with optional contract fields absent.
     let mut old = serde_json::to_value(demo_snapshot(AgentProfile::default())).unwrap();
@@ -1139,7 +1155,7 @@ fn migration_keeps_comments_and_restart_interrupts_only_unfinished_runs() {
     )
     .unwrap();
     let mut store = Store::open(&path, AgentProfile::default()).unwrap();
-    let restarted = store.snapshot().unwrap();
+    let restarted = store.full();
     assert_eq!(
         restarted
             .sessions
@@ -1153,12 +1169,12 @@ fn migration_keeps_comments_and_restart_interrupts_only_unfinished_runs() {
     );
     assert_eq!(restarted.messages, s.messages);
     assert_eq!(restarted.comments, s.comments);
-    assert!(store.apply(request, &config()).unwrap().1.is_none());
+    assert!(store.apply_owned(request, &config()).unwrap().1.is_none());
 }
 async fn finished(w: &Workspace, id: &str) -> Snapshot {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let s = w.snapshots.borrow().clone();
+            let s = w.full();
             if s.sessions
                 .iter()
                 .find(|s| s.id == id)
@@ -1181,8 +1197,8 @@ fn reserve(
 ) -> (String, String, watch::Receiver<bool>, String) {
     let run = request.request_id.clone();
     let mut store = w.store.lock().unwrap();
-    let (s, action) = store.apply(request, &w.config).unwrap();
-    w.snapshots.send_replace(s);
+    let (s, action) = store.apply_owned(request, &w.config).unwrap();
+    w.snapshots.send_replace((s).into());
     let Some(Action::Run { session_id, prompt }) = action else {
         panic!()
     };
@@ -1277,7 +1293,7 @@ async fn subprocess_exact_resume_sandbox_stdin_usage_and_untracked_diff() {
         },
     );
     let (id, run, rx, prompt) = reserve(&w, request);
-    let reopened = w.store.lock().unwrap().snapshot().unwrap();
+    let reopened = w.store.lock().unwrap().full();
     let worker = reopened.sessions.last().unwrap().worker.as_ref().unwrap();
     assert_eq!(worker.model.as_deref(), Some("test-model"));
     assert_eq!(worker.last_usage.as_ref().unwrap().input_tokens, 12);
@@ -1406,7 +1422,7 @@ async fn stop_before_launch_and_while_running_are_terminal_and_no_duplicate_laun
         WorkerStatus::Stopped
     );
     assert!(!marker.exists());
-    let s = w.snapshots.borrow().clone();
+    let s = w.full();
     let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
     tokio::spawn(runtime::run(w.clone(), id.clone(), run, prompt, rx));
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -1505,7 +1521,7 @@ fn paginated_board_maps_status_and_filters_drafts_prs_and_other_repos() {
         )
         .unwrap();
     w.synchronize("live", "sync-test");
-    let good = w.snapshots.borrow().clone();
+    let good = w.full();
     script(&c.gh, "echo secret-auth-detail >&2\nexit 1");
     w.store
         .lock()
@@ -1517,7 +1533,7 @@ fn paginated_board_maps_status_and_filters_drafts_prs_and_other_repos() {
         )
         .unwrap();
     w.synchronize("live", "sync-test");
-    let failed = w.snapshots.borrow().clone();
+    let failed = w.full();
     assert_eq!(failed.issues, good.issues);
     assert_eq!(failed.projects[0].columns, good.projects[0].columns);
     assert_eq!(
@@ -1572,7 +1588,7 @@ fn late_events_cannot_overwrite_another_run_and_bounded_diff_handles_binary() {
         .connection
         .execute("UPDATE runs SET run_id='newer' WHERE session_id=?1", [&id])
         .unwrap();
-    let before = w.snapshots.borrow().clone();
+    let before = w.full();
     assert!(
         w.update_run(&id, &run, |s| {
             s.messages.clear();
@@ -1580,7 +1596,7 @@ fn late_events_cannot_overwrite_another_run_and_bounded_diff_handles_binary() {
         })
         .is_err()
     );
-    assert_eq!(*w.snapshots.borrow(), before);
+    assert_eq!(w.full(), before);
 }
 #[tokio::test]
 async fn concurrent_http_retry_launches_once_and_reconnect_observes_active_worker() {
@@ -1796,24 +1812,10 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
         drop(connection);
         let mut store = Store::open(&db, AgentProfile::default()).unwrap();
         s.migrate_projects();
-        assert_eq!(store.snapshot().unwrap(), s);
+        assert_eq!(store.full(), s);
         // Legacy optional fields default to None; persisted defaults win over new seed defaults.
-        assert!(
-            store
-                .snapshot()
-                .unwrap()
-                .projects
-                .iter()
-                .all(|p| p.github.is_none())
-        );
-        assert!(
-            store
-                .snapshot()
-                .unwrap()
-                .sessions
-                .iter()
-                .all(|s| s.worker.is_none())
-        );
+        assert!(store.full().projects.iter().all(|p| p.github.is_none()));
+        assert!(store.full().sessions.iter().all(|s| s.worker.is_none()));
         assert!(
             store
                 .apply(receipt.clone(), &RuntimeConfig::default())
@@ -1826,11 +1828,11 @@ fn actual_v1_database_migrates_without_losing_local_comments() {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            30
+            33
         );
         drop(store);
         let mut reopened = Store::open(&db, AgentProfile::default()).unwrap();
-        assert_eq!(reopened.snapshot().unwrap(), s);
+        assert_eq!(reopened.full(), s);
         assert!(
             reopened
                 .apply(receipt, &RuntimeConfig::default())
@@ -1893,7 +1895,7 @@ fn legacy_agent_configuration_fields_migrate_without_losing_sessions_or_profiles
             .unwrap();
     }
     let mut store = Store::open(&path, AgentProfile::default()).unwrap();
-    assert_eq!(store.snapshot().unwrap(), original);
+    assert_eq!(store.full(), original);
     let envelope = env(
         original.revision,
         Command::SaveAgentTemplate {
@@ -1902,12 +1904,9 @@ fn legacy_agent_configuration_fields_migrate_without_losing_sessions_or_profiles
             profile: AgentProfile::worker(&original.projects[0].defaults),
         },
     );
-    let saved = store.apply(envelope, &config()).unwrap().0;
+    let saved = store.apply_owned(envelope, &config()).unwrap().0;
     drop(store);
-    let reopened = Store::open(&path, AgentProfile::default())
-        .unwrap()
-        .snapshot()
-        .unwrap();
+    let reopened = Store::open(&path, AgentProfile::default()).unwrap().full();
     assert_eq!(reopened, saved);
     assert_eq!(reopened.agent_templates[0].name, "Reviewer");
 }
@@ -1920,7 +1919,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
     let before = store.snapshot().unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 31)
+        .pragma_update(None, "user_version", 34)
         .unwrap();
     drop(store);
     let error = Store::open(&db, AgentProfile::default()).err().unwrap();
@@ -1930,7 +1929,7 @@ fn newer_database_version_is_rejected_without_mutating_history() {
         connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        31
+        34
     );
     let json: String = connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -1941,14 +1940,14 @@ fn newer_database_version_is_rejected_without_mutating_history() {
 }
 
 #[test]
-fn schema_twenty_nine_upgrades_with_progress_reports_on_and_keeps_explicit_off() {
+fn schema_thirty_two_upgrades_with_progress_reports_on_and_keeps_explicit_off() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let store = Store::open(&path, AgentProfile::default()).unwrap();
     let mut before = store.snapshot().unwrap();
     before.agent_configs[0].overrides.report_progress = Some(false);
-    before.protocol_version = 16;
-    // A schema 29 snapshot has no progress setting or report anywhere.
+    before.protocol_version = 17;
+    // A schema 32 snapshot has no progress setting or report anywhere.
     let mut legacy = serde_json::to_value(&before).unwrap();
     for project in legacy["projects"].as_array_mut().unwrap() {
         assert_eq!(
@@ -1971,7 +1970,7 @@ fn schema_twenty_nine_upgrades_with_progress_reports_on_and_keeps_explicit_off()
         .unwrap();
     store
         .connection
-        .pragma_update(None, "user_version", 29)
+        .pragma_update(None, "user_version", 32)
         .unwrap();
     drop(store);
     let store = Store::open(&path, AgentProfile::default()).unwrap();
@@ -1980,7 +1979,7 @@ fn schema_twenty_nine_upgrades_with_progress_reports_on_and_keeps_explicit_off()
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        30
+        33
     );
     let upgraded = store.snapshot().unwrap();
     assert_eq!(upgraded.protocol_version, PROTOCOL_VERSION);
@@ -1999,20 +1998,20 @@ fn schema_twenty_eight_adds_workspace_waits_without_changing_history() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let store = Store::open(&path, AgentProfile::default()).unwrap();
-    let before = store.snapshot().unwrap();
+    let before = store.full();
     store
         .connection
         .execute_batch("DROP TABLE workspace_waits; PRAGMA user_version=28;")
         .unwrap();
     drop(store);
     let store = Store::open(&path, AgentProfile::default()).unwrap();
-    assert_eq!(store.snapshot().unwrap(), before);
+    assert_eq!(store.full(), before);
     assert_eq!(
         store
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        30
+        33
     );
     assert_eq!(
         store
@@ -2046,7 +2045,7 @@ fn schema_twenty_five_defaults_network_on_and_preserves_explicit_false_on_reopen
     let path = dir.path().join("network.sqlite");
     let defaults = AgentProfile::default();
     let store = Store::open(&path, defaults.clone()).unwrap();
-    let original = store.snapshot().unwrap();
+    let original = store.full();
     let mut legacy = serde_json::to_value(&original).unwrap();
     remove_network(&mut legacy);
     legacy["protocol_version"] = serde_json::json!(14);
@@ -2067,8 +2066,8 @@ fn schema_twenty_five_defaults_network_on_and_preserves_explicit_false_on_reopen
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 30);
-    assert_eq!(store.snapshot().unwrap(), original);
+    assert_eq!(schema, 33);
+    assert_eq!(store.full(), original);
 
     let mut disabled = original;
     disabled.projects[0].defaults.network_access = false;
@@ -2080,7 +2079,7 @@ fn schema_twenty_five_defaults_network_on_and_preserves_explicit_false_on_reopen
     });
     store.save(&disabled).unwrap();
     drop(store);
-    let reopened = Store::open(&path, defaults).unwrap().snapshot().unwrap();
+    let reopened = Store::open(&path, defaults).unwrap().full();
     assert_eq!(reopened, disabled);
     assert!(
         !reopened
@@ -2105,13 +2104,19 @@ fn sync_receipts_are_idempotent_and_obsolete_results_do_not_publish() {
         },
     );
     let mut store = w.store.lock().unwrap();
-    let (saved, action) = store.apply(request.clone(), &w.config).unwrap();
+    let (saved, action) = store.apply_owned(request.clone(), &w.config).unwrap();
     assert!(matches!(action, Some(Action::Sync(_))));
-    assert!(store.apply(request.clone(), &w.config).unwrap().1.is_none());
-    w.snapshots.send_replace(saved.clone());
+    assert!(
+        store
+            .apply_owned(request.clone(), &w.config)
+            .unwrap()
+            .1
+            .is_none()
+    );
+    w.snapshots.send_replace((saved.clone()).into());
     drop(store);
     w.synchronize("live", "superseded");
-    assert_eq!(*w.snapshots.borrow(), saved);
+    assert_eq!(w.full(), saved);
     w.synchronize("live", &request.request_id);
     assert!(
         w.snapshots.borrow().projects[0]
@@ -2195,7 +2200,7 @@ async fn restart_reaps_owned_process_and_late_output_cannot_replace_interrupted_
         .await
         .unwrap()
         .unwrap();
-    let snapshot = w.store.lock().unwrap().snapshot().unwrap();
+    let snapshot = w.store.lock().unwrap().full();
     assert_eq!(
         snapshot
             .sessions
@@ -2242,7 +2247,7 @@ async fn resume_rechecks_current_profile_and_requires_new_approval() {
     })
     .unwrap();
     let mut store = w.store.lock().unwrap();
-    let s = store.snapshot().unwrap();
+    let s = store.full();
     let command = |approved| Command::SendWorker {
         session_id: id.clone(),
         prompt: "Continue".into(),
@@ -2250,7 +2255,7 @@ async fn resume_rechecks_current_profile_and_requires_new_approval() {
     };
     assert!(
         store
-            .apply(env(s.revision, command(false)), &w.config)
+            .apply_owned(env(s.revision, command(false)), &w.config)
             .is_err()
     );
     let mut denied = s;
@@ -2261,7 +2266,7 @@ async fn resume_rechecks_current_profile_and_requires_new_approval() {
     store.save(&denied).unwrap();
     assert!(
         store
-            .apply(env(denied.revision, command(true)), &w.config)
+            .apply_owned(env(denied.revision, command(true)), &w.config)
             .is_err()
     );
     denied.projects[0]
@@ -2274,7 +2279,7 @@ async fn resume_rechecks_current_profile_and_requires_new_approval() {
     store.save(&denied).unwrap();
     assert!(
         store
-            .apply(env(denied.revision, command(true)), &w.config)
+            .apply_owned(env(denied.revision, command(true)), &w.config)
             .is_err()
     );
 }
@@ -2308,13 +2313,13 @@ async fn profile_changed_after_reservation_is_enforced_before_process_launch() {
     let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
     {
         let mut store = w.store.lock().unwrap();
-        let mut s = store.snapshot().unwrap();
+        let mut s = store.full();
         s.projects[0]
             .defaults
             .permissions
             .insert(Task::Implement, Permission::Deny);
         store.save(&s).unwrap();
-        w.snapshots.send_replace(s);
+        w.snapshots.send_replace((s).into());
     }
     runtime::run(w.clone(), id.clone(), run, prompt, rx).await;
     assert!(!marker.exists());
@@ -2338,7 +2343,7 @@ fn codex_jsonl_tolerates_unknown_events_items_and_extra_fields() {
         .store
         .lock()
         .unwrap()
-        .apply(env(s.revision, start(&s)), &w.config)
+        .apply_owned(env(s.revision, start(&s)), &w.config)
         .unwrap();
     let id = s.sessions.last().unwrap().id.clone();
     runtime::event(&mut s, &id, &serde_json::json!({"type":"thread.started","thread_id":"recorded-thread","future_metadata":{"version":2}})).unwrap();
@@ -2647,7 +2652,7 @@ fn messages_and_file_lists_have_explicit_bounds() {
         .store
         .lock()
         .unwrap()
-        .apply(env(s.revision, start(&s)), &w.config)
+        .apply_owned(env(s.revision, start(&s)), &w.config)
         .unwrap();
     let id = s.sessions.last().unwrap().id.clone();
     runtime::event(&mut s,&id,&serde_json::json!({"type":"item.completed","item":{"type":"agent_message","text":"é".repeat(100_000)}})).unwrap();
@@ -2701,7 +2706,7 @@ fn removed_board_items_keep_linked_identity_without_becoming_active() {
         .execute("INSERT INTO syncs VALUES('live','sync')", [])
         .unwrap();
     w.synchronize("live", "sync");
-    let removed = w.snapshots.borrow().clone();
+    let removed = w.full();
     let historic = removed.issues.iter().find(|i| i.id == issue_id).unwrap();
     assert_eq!(historic.column_id, "github-removed-from-board");
     assert_eq!(removed.projects[0].columns.len(), 1);
@@ -2723,7 +2728,7 @@ fn removed_board_items_keep_linked_identity_without_becoming_active() {
     // Fixture ID differs from provider-qualified remote ID; simulate provider-qualified history.
     {
         let mut store = w.store.lock().unwrap();
-        let mut snapshot = store.snapshot().unwrap();
+        let mut snapshot = store.full();
         let new_id = format!(
             "github:jens-hj/relay:{}",
             original.reference.as_ref().unwrap().number
@@ -2738,7 +2743,7 @@ fn removed_board_items_keep_linked_identity_without_becoming_active() {
         store.save(&snapshot).unwrap();
     }
     w.synchronize("live", "sync");
-    let restored = w.snapshots.borrow().clone();
+    let restored = w.full();
     let restored_id = restored.sessions.last().unwrap().issue_id.as_ref().unwrap();
     let issue = restored
         .issues
@@ -2810,10 +2815,10 @@ async fn concurrent_runtime_events_publish_monotonic_committed_revisions() {
     let s = live();
     let w = workspace(&dir.path().join("db"), &s, config());
     let (a, ar, _rx, _p) = reserve(&w, env(s.revision, start(&s)));
-    let s = w.snapshots.borrow().clone();
+    let s = w.full();
     let (b, br, _rx, _p) = reserve(&w, env(s.revision, start(&s)));
     let initial = w.snapshots.borrow().revision;
-    let initial_messages = w.snapshots.borrow().messages.len();
+    let initial_messages = w.full().messages.len();
     let mut receiver = w.snapshots.subscribe();
     let writer = w.clone();
     let writing = tokio::task::spawn_blocking(move || {
@@ -2829,8 +2834,8 @@ async fn concurrent_runtime_events_publish_monotonic_committed_revisions() {
     loop {
         tokio::select! { result=&mut writing=>{result.unwrap();break;}, changed=receiver.changed()=>{changed.unwrap();let next=receiver.borrow_and_update().revision;assert!(next>=revision);revision=next;} }
     }
-    let saved = w.store.lock().unwrap().snapshot().unwrap();
-    let published = w.snapshots.borrow().clone();
+    let saved = w.store.lock().unwrap().full();
+    let published = w.full();
     assert_eq!(saved, published);
     assert_eq!(published.revision, initial + 50);
     assert_eq!(published.messages.len(), initial_messages + 50);
@@ -2924,7 +2929,7 @@ fn oversized_github_capture_reports_error_without_destroying_last_good_board() {
         .execute("INSERT INTO syncs VALUES('live','sync')", [])
         .unwrap();
     w.synchronize("live", "sync");
-    let failed = w.snapshots.borrow().clone();
+    let failed = w.full();
     assert_eq!(failed.issues, s.issues);
     assert_eq!(failed.projects[0].columns, s.projects[0].columns);
     let remote = failed.projects[0].github.as_ref().unwrap();
@@ -2943,7 +2948,7 @@ fn configured_live_project_migration_preserves_demo_and_historical_identities() 
     let db = dir.path().join("db");
     let defaults = AgentProfile::default();
     let mut store = Store::open(&db, defaults.clone()).unwrap();
-    let mut demo = store.snapshot().unwrap();
+    let mut demo = store.full();
     demo.apply(
         Command::AddComment {
             message_id: "m2".into(),
@@ -2965,10 +2970,7 @@ fn configured_live_project_migration_preserves_demo_and_historical_identities() 
         c.clone(),
     )
     .unwrap();
-    let a = Store::open(&db, defaults.clone())
-        .unwrap()
-        .snapshot()
-        .unwrap();
+    let a = Store::open(&db, defaults.clone()).unwrap().full();
     let current = a.projects[0].clone();
     assert_ne!(current.id, "demo");
     assert!(!current.fixture);
@@ -3002,13 +3004,7 @@ fn configured_live_project_migration_preserves_demo_and_historical_identities() 
         c.clone(),
     )
     .unwrap();
-    assert_eq!(
-        Store::open(&db, defaults.clone())
-            .unwrap()
-            .snapshot()
-            .unwrap(),
-        a
-    );
+    assert_eq!(Store::open(&db, defaults.clone()).unwrap().full(), a);
     let mut next = c.clone();
     next.remote.as_mut().unwrap().number = 6;
     let _router = router_with_config(
@@ -3018,10 +3014,7 @@ fn configured_live_project_migration_preserves_demo_and_historical_identities() 
         next.clone(),
     )
     .unwrap();
-    let b = Store::open(&db, defaults.clone())
-        .unwrap()
-        .snapshot()
-        .unwrap();
+    let b = Store::open(&db, defaults.clone()).unwrap().full();
     assert_ne!(b.projects[0].id, current.id);
     assert_eq!(b.projects.len(), 3);
     assert_eq!(
@@ -3038,7 +3031,7 @@ fn configured_live_project_migration_preserves_demo_and_historical_identities() 
     let mut store = Store::open(&db, defaults.clone()).unwrap();
     assert!(
         store
-            .apply(
+            .apply_owned(
                 env(
                     b.revision,
                     Command::SyncProject {
@@ -3052,7 +3045,7 @@ fn configured_live_project_migration_preserves_demo_and_historical_identities() 
     drop(store);
     let _router =
         router_with_config(&db, "token-at-least-sixteen".into(), defaults.clone(), c).unwrap();
-    let restored = Store::open(&db, defaults).unwrap().snapshot().unwrap();
+    let restored = Store::open(&db, defaults).unwrap().full();
     assert_eq!(restored.projects[0], current);
     assert_eq!(restored.projects.len(), 3);
     assert_eq!(restored.agent_configs, b.agent_configs);
@@ -3076,10 +3069,7 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
         c.clone(),
     )
     .unwrap();
-    let s = Store::open(&db, AgentProfile::default())
-        .unwrap()
-        .snapshot()
-        .unwrap();
+    let s = Store::open(&db, AgentProfile::default()).unwrap().full();
     let live_id = s.projects[0].id.clone();
     let fixtures = s.issues.clone();
     let w = workspace(&db, &s, c.clone());
@@ -3090,7 +3080,7 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
         .execute("INSERT INTO syncs VALUES(?1,'sync')", [&live_id])
         .unwrap();
     w.synchronize(&live_id, "sync");
-    let synced = w.snapshots.borrow().clone();
+    let synced = w.full();
     assert_eq!(
         synced
             .issues
@@ -3161,7 +3151,7 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
     // while the original project's issue and result remain unchanged.
     {
         let mut store = w.store.lock().unwrap();
-        let mut snapshot = store.snapshot().unwrap();
+        let mut snapshot = store.full();
         snapshot
             .issues
             .iter_mut()
@@ -3195,10 +3185,7 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
         second.clone(),
     )
     .unwrap();
-    let second_snapshot = Store::open(&db, AgentProfile::default())
-        .unwrap()
-        .snapshot()
-        .unwrap();
+    let second_snapshot = Store::open(&db, AgentProfile::default()).unwrap().full();
     let second_id = second_snapshot.projects[0].id.clone();
     let second_workspace = workspace(&db, &second_snapshot, second);
     second_workspace
@@ -3209,7 +3196,7 @@ fn live_sync_does_not_touch_fixture_scope_history_and_default_director_can_deleg
         .execute("INSERT INTO syncs VALUES(?1,'second-sync')", [&second_id])
         .unwrap();
     second_workspace.synchronize(&second_id, "second-sync");
-    let both = second_workspace.snapshots.borrow().clone();
+    let both = second_workspace.full();
     let old = both
         .issues
         .iter()
@@ -3348,7 +3335,7 @@ async fn hard_crash_kills_codex_parent_before_restart() {
         RuntimeConfig::default(),
     )
     .unwrap();
-    let snapshot = shutdown.workspace.store.lock().unwrap().snapshot().unwrap();
+    let snapshot = shutdown.workspace.store.lock().unwrap().full();
     let worker = snapshot.sessions.last().unwrap().worker.as_ref().unwrap();
     assert_eq!(worker.status, WorkerStatus::Interrupted);
     assert_eq!(worker.thread_id.as_deref(), Some("crash-thread"));
@@ -3563,7 +3550,7 @@ async fn app_server_preserves_ordered_multimodal_context_and_exact_existing_thre
     assert_eq!(worker.model.as_deref(), Some("reported-model"));
     assert_eq!(worker.context_tokens, Some(35));
     assert_eq!(worker.context_window, Some(200000));
-    let stored = w.store.lock().unwrap().snapshot().unwrap();
+    let stored = w.store.lock().unwrap().full();
     assert_eq!(
         stored
             .sessions
@@ -3617,7 +3604,7 @@ async fn app_server_preserves_ordered_multimodal_context_and_exact_existing_thre
         w.store
             .lock()
             .unwrap()
-            .apply(request, &w.config)
+            .apply_owned(request, &w.config)
             .unwrap()
             .1
             .is_none()
@@ -3638,8 +3625,7 @@ async fn promoted_queue_interrupts_one_specific_turn_then_resumes_without_duplic
         // Relay to consume that ID and publish the following item before
         // expecting a native interrupt with that exact turn identity.
         while !w
-            .snapshots
-            .borrow()
+            .full()
             .messages
             .iter()
             .any(|message| message.id == format!("codex-{first_id}-first-started"))
@@ -3653,10 +3639,10 @@ async fn promoted_queue_interrupts_one_specific_turn_then_resumes_without_duplic
     let queued_id = queued.request_id.clone();
     {
         let mut store = w.store.lock().unwrap();
-        let (s, a) = store.apply(queued.clone(), &w.config).unwrap();
+        let (s, a) = store.apply_owned(queued.clone(), &w.config).unwrap();
         assert!(a.is_none());
-        w.snapshots.send_replace(s);
-        assert!(store.apply(queued, &w.config).unwrap().1.is_none());
+        w.snapshots.send_replace((s).into());
+        assert!(store.apply_owned(queued, &w.config).unwrap().1.is_none());
     }
     let stale = env(
         w.snapshots.borrow().revision,
@@ -3665,7 +3651,13 @@ async fn promoted_queue_interrupts_one_specific_turn_then_resumes_without_duplic
             active_run_id: Some("different-run".into()),
         },
     );
-    assert!(w.store.lock().unwrap().apply(stale, &w.config).is_err());
+    assert!(
+        w.store
+            .lock()
+            .unwrap()
+            .apply_owned(stale, &w.config)
+            .is_err()
+    );
     let promote = env(
         w.snapshots.borrow().revision,
         Command::PromoteTurn {
@@ -3675,9 +3667,9 @@ async fn promoted_queue_interrupts_one_specific_turn_then_resumes_without_duplic
     );
     {
         let mut store = w.store.lock().unwrap();
-        let (s, a) = store.apply(promote, &w.config).unwrap();
+        let (s, a) = store.apply_owned(promote, &w.config).unwrap();
         assert!(matches!(a, Some(Action::Promote(_))));
-        w.snapshots.send_replace(s);
+        w.snapshots.send_replace((s).into());
         store.controls[&id].send_replace(true);
     }
     active.await.unwrap();
@@ -3740,9 +3732,9 @@ async fn edited_queue_uses_fresh_approval_at_actual_process_launch() {
     let queued_id = queued.request_id.clone();
     {
         let mut store = w.store.lock().unwrap();
-        let (s, action) = store.apply(queued, &w.config).unwrap();
+        let (s, action) = store.apply_owned(queued, &w.config).unwrap();
         assert!(action.is_none());
-        w.snapshots.send_replace(s);
+        w.snapshots.send_replace((s).into());
     }
     w.update_run(&id, &first_id, |s| {
         s.sessions
@@ -3786,9 +3778,9 @@ async fn edited_queue_uses_fresh_approval_at_actual_process_launch() {
     );
     let (run, rx, prompt) = {
         let mut store = w.store.lock().unwrap();
-        let (s, _) = store.apply(edit, &w.config).unwrap();
+        let (s, _) = store.apply_owned(edit, &w.config).unwrap();
         let (s, action) = store
-            .apply(
+            .apply_owned(
                 env(
                     s.revision,
                     Command::ResumeQueue {
@@ -3799,7 +3791,7 @@ async fn edited_queue_uses_fresh_approval_at_actual_process_launch() {
                 &w.config,
             )
             .unwrap();
-        w.snapshots.send_replace(s);
+        w.snapshots.send_replace((s).into());
         let Some(Action::Run { prompt, .. }) = action else {
             panic!()
         };
@@ -3846,8 +3838,8 @@ async fn queue_cancel_edit_and_restart_preserve_payload_and_never_replay_deliver
     let queued_id = queued.request_id.clone();
     {
         let mut store = w.store.lock().unwrap();
-        let (s, _) = store.apply(queued, &w.config).unwrap();
-        w.snapshots.send_replace(s);
+        let (s, _) = store.apply_owned(queued, &w.config).unwrap();
+        w.snapshots.send_replace((s).into());
     }
     let edited = saved_turn(&w, &id, vec![Part::text("Edited unsent")]).await;
     let Command::SubmitTurn {
@@ -3869,8 +3861,8 @@ async fn queue_cancel_edit_and_restart_preserve_payload_and_never_replay_deliver
     );
     {
         let mut store = w.store.lock().unwrap();
-        let (s, _) = store.apply(edit, &w.config).unwrap();
-        w.snapshots.send_replace(s);
+        let (s, _) = store.apply_owned(edit, &w.config).unwrap();
+        w.snapshots.send_replace((s).into());
     }
     let c = (*w.config).clone();
     drop(w);
@@ -3882,7 +3874,7 @@ async fn queue_cancel_edit_and_restart_preserve_payload_and_never_replay_deliver
     )
     .unwrap();
     let mut store = Store::open(&dir.path().join("db"), AgentProfile::default()).unwrap();
-    let s = store.snapshot().unwrap();
+    let s = store.full();
     assert_eq!(
         s.submissions
             .iter()
@@ -3896,7 +3888,7 @@ async fn queue_cancel_edit_and_restart_preserve_payload_and_never_replay_deliver
     assert_eq!(plain_text(&unsent.parts), "Edited unsent");
     assert!(
         store
-            .apply(
+            .apply_owned(
                 env(
                     s.revision,
                     Command::PromoteTurn {
@@ -3909,7 +3901,7 @@ async fn queue_cancel_edit_and_restart_preserve_payload_and_never_replay_deliver
             .is_err()
     );
     let (s, _) = store
-        .apply(
+        .apply_owned(
             env(
                 s.revision,
                 Command::CancelTurn {
@@ -4003,8 +3995,8 @@ async fn app_server_rejects_foreign_turn_events_and_failure_pauses_unsent_queue(
     let next_id = next.request_id.clone();
     {
         let mut store = w.store.lock().unwrap();
-        let (s, _) = store.apply(next, &w.config).unwrap();
-        w.snapshots.send_replace(s);
+        let (s, _) = store.apply_owned(next, &w.config).unwrap();
+        w.snapshots.send_replace((s).into());
     }
     runtime::run(w.clone(), session, run, prompt, rx).await;
     let s = finished(&w, &id).await;
@@ -4106,7 +4098,13 @@ async fn first_director_message_preserves_images_through_process_input_and_retry
         }
         *prompt = plain_text(parts);
     }
-    assert!(w.store.lock().unwrap().apply(invalid, &w.config).is_err());
+    assert!(
+        w.store
+            .lock()
+            .unwrap()
+            .apply_owned(invalid, &w.config)
+            .is_err()
+    );
     assert!(
         w.store
             .lock()
@@ -4151,7 +4149,7 @@ async fn first_director_message_preserves_images_through_process_input_and_retry
         w.store
             .lock()
             .unwrap()
-            .apply(request, &w.config)
+            .apply_owned(request, &w.config)
             .unwrap()
             .1
             .is_none()
@@ -4168,9 +4166,9 @@ async fn paused_queue_holds_turns_after_the_current_one_until_resumed() {
     let queued_id = queued.request_id.clone();
     let apply = |envelope: CommandEnvelope| {
         let mut store = w.store.lock().unwrap();
-        let result = store.apply(envelope, &w.config);
+        let result = store.apply_owned(envelope, &w.config);
         if let Ok((s, _)) = &result {
-            w.snapshots.send_replace(s.clone());
+            w.snapshots.send_replace((s.clone()).into());
         }
         result.map(|(s, action)| (s, action.is_some()))
     };
@@ -4227,7 +4225,7 @@ async fn paused_queue_holds_turns_after_the_current_one_until_resumed() {
     // The first turn completes: the held turn does not launch.
     {
         let mut store = w.store.lock().unwrap();
-        let mut s = store.snapshot().unwrap();
+        let mut s = store.full();
         s.sessions
             .iter_mut()
             .find(|s| s.id == id)
@@ -4239,8 +4237,8 @@ async fn paused_queue_holds_turns_after_the_current_one_until_resumed() {
         store.save(&s).unwrap();
     }
     conversation::advance(&w, &id, &first_run).unwrap();
-    let s = w.store.lock().unwrap().snapshot().unwrap();
-    w.snapshots.send_replace(s.clone());
+    let s = w.store.lock().unwrap().full();
+    w.snapshots.send_replace((s.clone()).into());
     assert_eq!(state(&w), SubmissionState::Paused);
     assert_eq!(
         s.sessions
@@ -4276,9 +4274,9 @@ async fn stale_queue_resume_applies_only_while_the_shown_queue_is_unchanged() {
     let queued_id = queued.request_id.clone();
     let apply = |envelope: CommandEnvelope| {
         let mut store = w.store.lock().unwrap();
-        let result = store.apply(envelope, &w.config);
+        let result = store.apply_owned(envelope, &w.config);
         if let Ok((s, _)) = &result {
-            w.snapshots.send_replace(s.clone());
+            w.snapshots.send_replace((s.clone()).into());
         }
         result.map(|(s, action)| (s, action.is_some()))
     };
@@ -4293,11 +4291,11 @@ async fn stale_queue_resume_applies_only_while_the_shown_queue_is_unchanged() {
     // Change the stored workspace as the runtime or another client would.
     let change = |edit: &dyn Fn(&mut Snapshot)| {
         let mut store = w.store.lock().unwrap();
-        let mut s = store.snapshot().unwrap();
+        let mut s = store.full();
         edit(&mut s);
         s.revision += 1;
         store.save(&s).unwrap();
-        w.snapshots.send_replace(s);
+        w.snapshots.send_replace((s).into());
     };
     // The first turn completes; the held turn stays paused.
     change(&|s| {
@@ -4311,8 +4309,8 @@ async fn stale_queue_resume_applies_only_while_the_shown_queue_is_unchanged() {
             .status = WorkerStatus::Completed;
     });
     conversation::advance(&w, &id, &first_run).unwrap();
-    let s = w.store.lock().unwrap().snapshot().unwrap();
-    w.snapshots.send_replace(s.clone());
+    let s = w.store.lock().unwrap().full();
+    w.snapshots.send_replace((s.clone()).into());
     // The client shows the paused queue; other sessions then move on.
     let seen = s.revision;
     let shown = s.queued_turns(&id);
@@ -4388,7 +4386,7 @@ fn schema_twenty_one_adds_default_worker_model_policies_and_persists_changes() {
     let path = dir.path().join("worker-models.sqlite");
     let defaults = AgentProfile::default();
     let store = Store::open(&path, defaults.clone()).unwrap();
-    let original = store.snapshot().unwrap();
+    let original = store.full();
     // A schema 20 snapshot has no worker_models in any profile.
     let mut json = serde_json::to_value(&original).unwrap();
     for project in json["projects"].as_array_mut().unwrap() {
@@ -4415,7 +4413,7 @@ fn schema_twenty_one_adds_default_worker_model_policies_and_persists_changes() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 30);
+    assert_eq!(schema, 33);
     let stored: String = store
         .connection
         .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
@@ -4423,7 +4421,7 @@ fn schema_twenty_one_adds_default_worker_model_policies_and_persists_changes() {
         })
         .unwrap();
     assert!(stored.contains("\"worker_models\""));
-    let upgraded = store.snapshot().unwrap();
+    let upgraded = store.full();
     assert_eq!(upgraded, original);
     assert!(
         upgraded
@@ -4442,7 +4440,7 @@ fn schema_twenty_one_adds_default_worker_model_policies_and_persists_changes() {
         available_usage: true,
     };
     store
-        .apply(
+        .apply_owned(
             env(
                 upgraded.revision,
                 Command::UpdateProjectDefaults {
@@ -4459,10 +4457,10 @@ fn schema_twenty_one_adds_default_worker_model_policies_and_persists_changes() {
         model: String::new(),
         effort: None,
     };
-    let revision = store.snapshot().unwrap().revision;
+    let revision = store.full().revision;
     assert!(
         store
-            .apply(
+            .apply_owned(
                 env(
                     revision,
                     Command::UpdateProjectDefaults {
@@ -4475,7 +4473,7 @@ fn schema_twenty_one_adds_default_worker_model_policies_and_persists_changes() {
             .is_err()
     );
     drop(store);
-    let reopened = Store::open(&path, defaults).unwrap().snapshot().unwrap();
+    let reopened = Store::open(&path, defaults).unwrap().full();
     assert_eq!(reopened.projects[0].defaults, profile);
 }
 
@@ -4486,7 +4484,7 @@ fn schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off() {
     let defaults = AgentProfile::default();
     let store = Store::open(&path, defaults.clone()).unwrap();
     // A schema 22 snapshot stores spawn rationales but no Nix command setting.
-    let mut original = store.snapshot().unwrap();
+    let mut original = store.full();
     original.sessions[0].spawn = Some(SpawnGrant {
         task: "Port the change".into(),
         context: None,
@@ -4511,8 +4509,8 @@ fn schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 30);
-    let upgraded = store.snapshot().unwrap();
+    assert_eq!(schema, 33);
+    let upgraded = store.full();
     assert_eq!(upgraded, original);
     assert!(upgraded.projects.iter().all(|p| p.nix_commands.is_off()));
     // A stored setting survives reopening at the current schema.
@@ -4526,7 +4524,7 @@ fn schema_twenty_three_keeps_spawn_rationales_and_loads_nix_commands_off() {
         )
         .unwrap();
     drop(store);
-    let reopened = Store::open(&path, defaults).unwrap().snapshot().unwrap();
+    let reopened = Store::open(&path, defaults).unwrap().full();
     assert_eq!(reopened.projects[0].nix_commands, NixCommands::Allow);
     assert_eq!(
         reopened.sessions[0]
@@ -4546,7 +4544,7 @@ fn schema_twenty_one_upgrades_to_twenty_five_with_every_new_setting_off() {
     let path = dir.path().join("schema-21.sqlite");
     let defaults = AgentProfile::default();
     let store = Store::open(&path, defaults.clone()).unwrap();
-    let mut original = store.snapshot().unwrap();
+    let mut original = store.full();
     original.sessions[0].spawn = Some(SpawnGrant {
         task: "Port the change".into(),
         context: None,
@@ -4584,8 +4582,8 @@ fn schema_twenty_one_upgrades_to_twenty_five_with_every_new_setting_off() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 30);
-    let upgraded = store.snapshot().unwrap();
+    assert_eq!(schema, 33);
+    let upgraded = store.full();
     assert_eq!(upgraded, original);
     assert!(upgraded.projects.iter().all(|p| p.nix_commands.is_off()));
     assert!(!upgraded.claude_window_start.enabled);
@@ -4653,7 +4651,7 @@ fn schema_twenty_three_upgrades_with_claude_window_start_off_and_an_empty_claim_
     let path = dir.path().join("window-start.sqlite");
     let defaults = AgentProfile::default();
     let store = Store::open(&path, defaults.clone()).unwrap();
-    let original = store.snapshot().unwrap();
+    let original = store.full();
     // Schema 23 had neither the setting nor the claim table.
     let json = serde_json::to_value(&original).unwrap();
     assert!(json.get("claude_window_start").is_none());
@@ -4667,8 +4665,8 @@ fn schema_twenty_three_upgrades_with_claude_window_start_off_and_an_empty_claim_
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 30);
-    let upgraded = store.snapshot().unwrap();
+    assert_eq!(schema, 33);
+    let upgraded = store.full();
     assert_eq!(upgraded, original);
     assert!(!upgraded.claude_window_start.enabled);
     let claims: i64 = store
@@ -4681,7 +4679,7 @@ fn schema_twenty_three_upgrades_with_claude_window_start_off_and_an_empty_claim_
     enabled.claude_window_start.set_enabled(true, 5);
     store.save(&enabled).unwrap();
     drop(store);
-    let reopened = Store::open(&path, defaults).unwrap().snapshot().unwrap();
+    let reopened = Store::open(&path, defaults).unwrap().full();
     assert!(reopened.claude_window_start.enabled);
     assert_eq!(reopened.claude_window_start.enabled_at, Some(5));
 }
@@ -4693,7 +4691,7 @@ fn schema_twenty_four_upgrades_with_standard_spawn_execution_approval() {
     let defaults = AgentProfile::default();
     let store = Store::open(&path, defaults.clone()).unwrap();
     // Schema 24 stored neither the project policy nor a spawn's requested mode.
-    let mut original = store.snapshot().unwrap();
+    let mut original = store.full();
     original.sessions[0].spawn = Some(SpawnGrant {
         task: "Port the change".into(),
         context: None,
@@ -4718,8 +4716,8 @@ fn schema_twenty_four_upgrades_with_standard_spawn_execution_approval() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 30);
-    let upgraded = store.snapshot().unwrap();
+    assert_eq!(schema, 33);
+    let upgraded = store.full();
     assert_eq!(upgraded, original);
     assert!(
         upgraded
@@ -4743,7 +4741,7 @@ fn schema_twenty_four_upgrades_with_standard_spawn_execution_approval() {
         )
         .unwrap();
     drop(store);
-    let reopened = Store::open(&path, defaults).unwrap().snapshot().unwrap();
+    let reopened = Store::open(&path, defaults).unwrap().full();
     assert_eq!(reopened, stored);
 }
 
@@ -4753,7 +4751,7 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
     let path = dir.path().join("archive.sqlite");
     let defaults = AgentProfile::default();
     let store = Store::open(&path, defaults.clone()).unwrap();
-    let original = store.snapshot().unwrap();
+    let original = store.full();
     let mut json = serde_json::to_value(&original).unwrap();
     for session in json["sessions"].as_array_mut().unwrap() {
         session.as_object_mut().unwrap().remove("archived");
@@ -4771,7 +4769,7 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
         .unwrap();
     drop(store);
     let mut store = Store::open(&path, defaults.clone()).unwrap();
-    let upgraded = store.snapshot().unwrap();
+    let upgraded = store.full();
     assert!(upgraded.sessions.iter().all(|s| !s.archived));
     assert_eq!(upgraded.messages, original.messages);
     assert_eq!(upgraded.protocol_version, PROTOCOL_VERSION);
@@ -4787,7 +4785,7 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
         .id
         .clone();
     store
-        .apply(
+        .apply_owned(
             env(
                 upgraded.revision,
                 Command::SetSessionArchived {
@@ -4802,8 +4800,7 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
     let store = Store::open(&path, defaults).unwrap();
     assert!(
         store
-            .snapshot()
-            .unwrap()
+            .full()
             .sessions
             .iter()
             .find(|s| s.id == id)
@@ -4814,7 +4811,7 @@ fn schema_fourteen_preserves_archive_state_and_upgrades_old_sessions() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 30);
+    assert_eq!(schema, 33);
 }
 
 #[test]
@@ -4823,7 +4820,7 @@ fn schema_nineteen_snapshots_load_prompt_senders_as_the_user() {
     let path = dir.path().join("senders.sqlite");
     let defaults = AgentProfile::default();
     let store = Store::open(&path, defaults.clone()).unwrap();
-    let mut original = store.snapshot().unwrap();
+    let mut original = store.full();
     let session_id = original.messages[0].session_id.clone();
     original.submissions.push(Submission {
         id: "queued".into(),
@@ -4856,7 +4853,7 @@ fn schema_nineteen_snapshots_load_prompt_senders_as_the_user() {
         .unwrap();
     drop(store);
     let store = Store::open(&path, defaults).unwrap();
-    let upgraded = store.snapshot().unwrap();
+    let upgraded = store.full();
     assert_eq!(upgraded.messages, original.messages);
     assert_eq!(upgraded.submissions, original.submissions);
     assert!(upgraded.messages.iter().all(|m| m.sender == Sender::User));
@@ -4865,7 +4862,7 @@ fn schema_nineteen_snapshots_load_prompt_senders_as_the_user() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 30);
+    assert_eq!(schema, 33);
 }
 
 #[test]
@@ -4874,7 +4871,7 @@ fn schema_twenty_five_databases_load_without_peer_grants_and_keep_their_data() {
     let path = dir.path().join("peers.sqlite");
     let defaults = AgentProfile::default();
     let store = Store::open(&path, defaults.clone()).unwrap();
-    let mut original = store.snapshot().unwrap();
+    let mut original = store.full();
     let session_id = original.messages[0].session_id.clone();
     original.sessions[0].spawn = Some(SpawnGrant {
         task: "Port the change".into(),
@@ -4930,8 +4927,8 @@ fn schema_twenty_five_databases_load_without_peer_grants_and_keep_their_data() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 30);
-    let mut upgraded = store.snapshot().unwrap();
+    assert_eq!(schema, 33);
+    let mut upgraded = store.full();
     assert_eq!(upgraded.protocol_version, PROTOCOL_VERSION);
     assert_eq!(upgraded, original);
     assert!(upgraded.session_peers.is_empty());
@@ -4956,10 +4953,7 @@ fn schema_twenty_five_databases_load_without_peer_grants_and_keep_their_data() {
     store.save(&upgraded).unwrap();
     drop(store);
     let store = Store::open(&path, defaults).unwrap();
-    assert_eq!(
-        store.snapshot().unwrap().session_peers,
-        upgraded.session_peers
-    );
+    assert_eq!(store.full().session_peers, upgraded.session_peers);
 }
 
 #[test]
@@ -4968,7 +4962,7 @@ fn schema_twenty_six_network_data_upgrades_and_accepts_human_peer_grants() {
     let path = dir.path().join("network-peers.sqlite");
     let defaults = AgentProfile::default();
     let store = Store::open(&path, defaults.clone()).unwrap();
-    let mut original = store.snapshot().unwrap();
+    let mut original = store.full();
     for session in &mut original.sessions {
         session.fixture = false;
     }
@@ -5049,9 +5043,9 @@ fn schema_twenty_six_network_data_upgrades_and_accepts_human_peer_grants() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(schema, 30);
-    let upgraded = store.snapshot().unwrap();
-    assert_eq!(upgraded.protocol_version, 17);
+    assert_eq!(schema, 33);
+    let upgraded = store.full();
+    assert_eq!(upgraded.protocol_version, PROTOCOL_VERSION);
     assert_eq!(upgraded, original);
     assert!(upgraded.session_peers.is_empty());
     assert!(
@@ -5126,7 +5120,7 @@ fn schema_twenty_six_network_data_upgrades_and_accepts_human_peer_grants() {
             approve_implementation: false,
         },
     );
-    let (granted, action) = store.apply(request.clone(), &config()).unwrap();
+    let (granted, action) = store.apply_owned(request.clone(), &config()).unwrap();
     assert!(action.is_none());
     assert!(granted.is_peer(&session_id, &other));
     assert_eq!(granted.session_peers.len(), 1);
@@ -5135,11 +5129,11 @@ fn schema_twenty_six_network_data_upgrades_and_accepts_human_peer_grants() {
     assert_eq!(granted.projects, original.projects);
     assert_eq!(granted.agent_configs, original.agent_configs);
     assert_eq!(granted.messages, original.messages);
-    assert_eq!(store.apply(request, &config()).unwrap().0, granted);
+    assert_eq!(store.apply_owned(request, &config()).unwrap().0, granted);
     drop(store);
     let reopened = Store::open(&path, defaults).unwrap();
-    assert_eq!(reopened.snapshot().unwrap(), granted);
-    assert!(reopened.snapshot().unwrap().is_peer(&other, &session_id));
+    assert_eq!(reopened.full(), granted);
+    assert!(reopened.full().is_peer(&other, &session_id));
 }
 
 #[test]
@@ -5158,16 +5152,16 @@ fn remove_unused_agent_config_is_persistent_and_preserves_session_history() {
             agent_config_id: "unused-director".into(),
         },
     );
-    let (saved, action) = store.apply(request.clone(), &w.config).unwrap();
+    let (saved, action) = store.apply_owned(request.clone(), &w.config).unwrap();
     assert!(action.is_none());
     let mut expected = original.clone();
     expected.agent_configs.pop();
     expected.revision += 1;
     assert_eq!(saved, expected);
-    assert_eq!(store.apply(request, &w.config).unwrap().0, saved);
+    assert_eq!(store.apply_owned(request, &w.config).unwrap().0, saved);
     assert!(
         store
-            .apply(
+            .apply_owned(
                 env(
                     saved.revision,
                     Command::RemoveAgentConfig {
@@ -5185,7 +5179,7 @@ fn remove_unused_agent_config_is_persistent_and_preserves_session_history() {
         store.save(&occupied).unwrap();
         assert!(
             store
-                .apply(
+                .apply_owned(
                     env(
                         occupied.revision,
                         Command::RemoveAgentConfig {
@@ -5196,13 +5190,13 @@ fn remove_unused_agent_config_is_persistent_and_preserves_session_history() {
                 )
                 .is_err()
         );
-        assert_eq!(store.snapshot().unwrap(), occupied);
+        assert_eq!(store.full(), occupied);
     }
     store.save(&saved).unwrap();
     drop(store);
     drop(w);
     let reopened = Store::open(&path, AgentProfile::default()).unwrap();
-    assert_eq!(reopened.snapshot().unwrap(), saved);
+    assert_eq!(reopened.full(), saved);
 }
 
 #[tokio::test]
@@ -5234,8 +5228,7 @@ async fn app_server_public_summary_streams_before_completion_without_private_rea
     let task = tokio::spawn(runtime::run(w.clone(), session, run, prompt, rx));
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
-            if updates
-                .borrow()
+            if w.full()
                 .messages
                 .iter()
                 .any(|m| m.kind == "reasoning" && m.body == "Checking the adapter λ")
@@ -5263,7 +5256,7 @@ async fn app_server_public_summary_streams_before_completion_without_private_rea
     let mut projection = transport::Projection::default();
     projection
         .request(
-            &w.snapshots.borrow(),
+            &w.full(),
             StreamRequest::Subscribe {
                 session_id: id.clone(),
                 generation: 1,
@@ -5271,12 +5264,7 @@ async fn app_server_public_summary_streams_before_completion_without_private_rea
         )
         .unwrap();
     assert_eq!(
-        projection
-            .view(&w.snapshots.borrow())
-            .1
-            .progress_summary
-            .unwrap()
-            .text,
+        projection.view(&w.full()).1.progress_summary.unwrap().text,
         "Checking the adapter λ"
     );
     std::fs::write(repo.join("release-summary"), b"").unwrap();
@@ -5389,8 +5377,7 @@ async fn app_server_public_summary_stays_fresh_after_many_public_and_redacted_it
     let task = tokio::spawn(runtime::run(w.clone(), session, run, prompt, rx));
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
-            if updates
-                .borrow()
+            if w.full()
                 .messages
                 .iter()
                 .any(|m| m.body == "All summary events processed")
@@ -5405,14 +5392,14 @@ async fn app_server_public_summary_stays_fresh_after_many_public_and_redacted_it
     let mut projection = transport::Projection::default();
     projection
         .request(
-            &w.snapshots.borrow(),
+            &w.full(),
             StreamRequest::Subscribe {
                 session_id: id.clone(),
                 generation: 1,
             },
         )
         .unwrap();
-    let snapshot = w.snapshots.borrow().clone();
+    let snapshot = w.full();
     let summary = projection.view(&snapshot).1.progress_summary;
     // Release the provider before assertions so a failure cannot leave it parked.
     std::fs::write(repo.join("release-summary"), b"").unwrap();
@@ -5482,8 +5469,13 @@ fn failed_board_sync_settles_in_a_second_commit_after_its_failure_is_visible() {
                 }],
             },
         );
-        let (snapshot, _) = w.store.lock().unwrap().apply(envelope.clone(), &c).unwrap();
-        w.snapshots.send_replace(snapshot.clone());
+        let (snapshot, _) = w
+            .store
+            .lock()
+            .unwrap()
+            .apply_owned(envelope.clone(), &c)
+            .unwrap();
+        w.snapshots.send_replace((snapshot.clone()).into());
         let project = format!("project-{}", envelope.request_id);
         let operation = snapshot
             .operations
@@ -5511,7 +5503,7 @@ fn failed_board_sync_settles_in_a_second_commit_after_its_failure_is_visible() {
     let (first, operation) = create("First", 1);
     let before = w.snapshots.borrow().revision;
     assert!(crate::providers::execute(&w, &operation).is_err());
-    let visible = w.snapshots.borrow().clone();
+    let visible = w.full();
     assert_eq!(visible.revision, before + 1);
     assert_eq!(state(&visible, &operation), OperationState::Failed);
     assert_ne!(board_connection(&visible, &first), ConnectionState::Failed);
@@ -5520,7 +5512,7 @@ fn failed_board_sync_settles_in_a_second_commit_after_its_failure_is_visible() {
     let (second, operation) = create("Second", 2);
     let before = w.snapshots.borrow().revision;
     crate::projects::run(w.clone(), operation.clone());
-    let settled = w.snapshots.borrow().clone();
+    let settled = w.full();
     assert_eq!(settled.revision, before + 3);
     assert_eq!(state(&settled, &operation), OperationState::Failed);
     assert_eq!(board_connection(&settled, &second), ConnectionState::Failed);

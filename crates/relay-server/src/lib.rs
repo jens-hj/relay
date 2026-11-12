@@ -24,12 +24,15 @@ mod conversation;
 mod deletion;
 mod github;
 mod harness;
+mod messages;
 mod nix;
 mod notices;
 mod process;
 mod projects;
 mod providers;
 mod runtime;
+mod snapshot_cache;
+mod snapshot_views;
 mod spawn_attempts;
 mod window_start;
 pub use agent_tools::stdio as mcp_stdio;
@@ -89,7 +92,14 @@ fn accepts_stale_workspace_revision(command: &Command, snapshot: &Snapshot) -> b
         | Command::AddConnection { .. }
         | Command::StartRootAgent { .. }
         | Command::StartSession { .. }
-        | Command::SubmitTurn { .. } => true,
+        | Command::SubmitTurn { .. }
+        // These name an immutable request/submission/run or consume a draft
+        // version. Their handlers still validate that target in this transaction.
+        | Command::RespondPermission { .. }
+        | Command::StopWorkerRuns { .. }
+        | Command::SendWorker { .. }
+        | Command::EditQueuedTurn { .. }
+        | Command::PromoteTurn { .. } => true,
         // The handler refuses while the board's connection is removed or any
         // operation on the board is queued or running, so it queues one sync.
         Command::SyncBoard { .. } => true,
@@ -189,6 +199,9 @@ struct Store {
     agent_capabilities: HashMap<String, agent_tools::Capability>,
     defaults: AgentProfile,
     connection: Connection,
+    snapshot_cache: snapshot_cache::SnapshotCache,
+    /// Active runs' messages between harness events.
+    transcripts: messages::Runs,
     controls: HashMap<String, watch::Sender<bool>>,
     closing: bool,
     /// Runs stopped by an ancestor's stop; their parents get no notice.
@@ -197,6 +210,7 @@ struct Store {
     notices: HashMap<String, Vec<notices::Notice>>,
     /// Ended runs whose notice waits for their own workers, keyed by session.
     held: HashMap<String, String>,
+    notice_dispatcher: bool,
     /// Sessions with a Nix command running; one at a time per session.
     nix_runs: std::collections::HashSet<String>,
     #[cfg(test)]
@@ -209,6 +223,63 @@ fn slow_store_phase(phase: &'static str, started: std::time::Instant, bytes: usi
     if elapsed >= std::time::Duration::from_millis(100) {
         eprintln!("store {phase} {}ms {bytes}bytes", elapsed.as_millis());
     }
+}
+
+/// Writes the workspace through `connection` (the store's connection or a
+/// transaction on it). `snapshot.messages` is an outbox: those messages are
+/// upserted into the messages table in order (new ids appended, existing ids
+/// updated in place) and the rest is stored as the workspace row, which the
+/// cache adopts on commit. Returns the message-free value to publish.
+fn persist(
+    cache: &snapshot_cache::SnapshotCache,
+    transcripts: &messages::Runs,
+    connection: &Connection,
+    mut snapshot: Snapshot,
+) -> Result<Arc<Snapshot>, Error> {
+    let outbox = std::mem::take(&mut snapshot.messages);
+    if !outbox.is_empty() {
+        transcripts.forget(outbox.iter().map(|m| m.session_id.as_str()));
+        messages::upsert(connection, &outbox, None, snapshot.revision).map_err(Error::internal)?;
+    }
+    let snapshot = Arc::new(snapshot);
+    cache
+        .write(connection, snapshot.clone(), slow_store_phase)
+        .map_err(Error::internal)?;
+    Ok(snapshot)
+}
+
+/// Existing messages that `Snapshot::apply` reads for `command`.
+fn context_messages(
+    connection: &Connection,
+    snapshot: &Snapshot,
+    command: &Command,
+) -> Result<Vec<Message>, Error> {
+    let mut context = Vec::new();
+    match command {
+        Command::AddComment { message_id, .. } => {
+            context.extend(messages::get(connection, message_id).map_err(Error::internal)?);
+        }
+        Command::UpdateAgentConfig {
+            agent_config_id, ..
+        }
+        | Command::RenameAgentConfig {
+            agent_config_id, ..
+        } => {
+            // Automatic names follow each root session's first prompt.
+            for session in snapshot
+                .sessions
+                .iter()
+                .filter(|s| &s.agent_config_id == agent_config_id && s.role == SessionRole::Root)
+            {
+                context.extend(
+                    messages::first_of(connection, &session.id, &["user", "prompt"])
+                        .map_err(Error::internal)?,
+                );
+            }
+        }
+        _ => {}
+    }
+    Ok(context)
 }
 
 /// Runs a store critical section, including waiting for the store mutex,
@@ -264,7 +335,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 30 {
+        if version > 33 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -285,14 +356,36 @@ impl Store {
              CREATE TABLE IF NOT EXISTS browser_setup(code_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS browser_state(id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS window_start_claims(window_key TEXT PRIMARY KEY, owner TEXT NOT NULL, claimed_at INTEGER NOT NULL, lease_until INTEGER NOT NULL, retry_at INTEGER NOT NULL, attempts INTEGER NOT NULL, settled INTEGER NOT NULL, dispatched INTEGER NOT NULL DEFAULT 0);
-             CREATE TABLE IF NOT EXISTS spawn_attempts(id TEXT PRIMARY KEY, caller TEXT NOT NULL, run TEXT NOT NULL, project TEXT NOT NULL, input_hash TEXT NOT NULL, phase TEXT NOT NULL, child TEXT, response TEXT, delivered INTEGER NOT NULL DEFAULT 0, notice_id TEXT);
+             CREATE TABLE IF NOT EXISTS spawn_attempts(id TEXT PRIMARY KEY, caller TEXT NOT NULL, run TEXT NOT NULL, project TEXT NOT NULL, input_hash TEXT NOT NULL, phase TEXT NOT NULL, child TEXT, response TEXT, delivered INTEGER NOT NULL DEFAULT 0, notice_id TEXT, request TEXT);
              DROP INDEX IF EXISTS spawn_attempt_input;
              CREATE TABLE IF NOT EXISTS spawn_native_calls(caller TEXT NOT NULL, run TEXT NOT NULL, native_id TEXT NOT NULL, attempt TEXT NOT NULL, input_hash TEXT NOT NULL, PRIMARY KEY(caller,run,native_id));
              CREATE TABLE IF NOT EXISTS spawn_notice_consumption(notice_id TEXT PRIMARY KEY, caller TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS spawn_requests(id TEXT PRIMARY KEY, attempt TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS workspace_waits(session_id TEXT PRIMARY KEY);
-             PRAGMA user_version = 30;"
+             CREATE TABLE IF NOT EXISTS lifecycle_events(child_session TEXT NOT NULL,child_run TEXT NOT NULL,parent_session TEXT NOT NULL,disposition TEXT NOT NULL,notice_id TEXT,hold_reason TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,held INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(child_session,child_run,parent_session));
+             CREATE INDEX IF NOT EXISTS lifecycle_pending ON lifecycle_events(parent_session,disposition);
+             CREATE TABLE IF NOT EXISTS lifecycle_holds(session_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,reason TEXT NOT NULL);
+             PRAGMA user_version = 33;"
         ).map_err(Error::internal)?;
+        // Schema 32 keeps a spawn awaiting approval, to continue it once
+        // decided; older servers would cancel it and drop the request.
+        let request_column: bool = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('spawn_attempts') WHERE name='request'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(Error::internal)?;
+        if !request_column {
+            connection
+                .execute("ALTER TABLE spawn_attempts ADD COLUMN request TEXT", [])
+                .map_err(Error::internal)?;
+        }
+        // Schema 31 stores the transcript one row per message (see messages.rs);
+        // older servers would read an empty transcript and drop new messages.
+        connection
+            .execute_batch(messages::SCHEMA)
+            .map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
         // workspace shows only what its agents and harnesses report.
@@ -416,20 +509,48 @@ impl Store {
                 )
                 .map_err(Error::internal)?;
         }
-        if version < 30 {
-            // Schema 30 stores the per-agent progress report setting
-            // (`report_progress`, on when absent) and each session's latest
-            // progress report, and moves the snapshot to protocol 17. Older
-            // servers reject the profile field, so the version bump keeps them
-            // from opening the database. Older data loads with reports on and
-            // no progress recorded.
-            let json: String = connection
-                .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
-                    r.get(0)
-                })
+        // Protocol 17 adds run-bound stop commands. No stored fields/schema
+        // change; keep the persisted transport version aligned on an upgrade.
+        // Schema 33 and protocol 18 add the per-agent progress report setting
+        // (`report_progress`, on when absent) and each session's latest
+        // progress report. Older servers reject the profile field, so the
+        // version bump keeps them from opening the database. Older data
+        // loads with reports on and none recorded; only the stored protocol
+        // moves.
+        let json: String = connection
+            .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .map_err(Error::internal)?;
+        let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
+        if snapshot.protocol_version > PROTOCOL_VERSION {
+            return Err(Error::invalid(
+                "Stored protocol is newer than this Relay server",
+            ));
+        }
+        let mut changed = snapshot.protocol_version != PROTOCOL_VERSION;
+        snapshot.protocol_version = PROTOCOL_VERSION;
+        // Schema 31: move a transcript still stored in the row (an upgraded
+        // database or the seed) into the messages table, in order.
+        if !snapshot.messages.is_empty() {
+            // Before schema 31 the row is the whole transcript.
+            if version < 31 {
+                connection
+                    .execute("DELETE FROM messages", [])
+                    .map_err(Error::internal)?;
+            }
+            let moved = std::mem::take(&mut snapshot.messages);
+            messages::upsert(&connection, &moved, None, snapshot.revision)
                 .map_err(Error::internal)?;
-            let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
-            snapshot.protocol_version = PROTOCOL_VERSION;
+            changed = true;
+        }
+        // Message-only updates do not rewrite the row; never go backwards.
+        let floor = messages::max_revision(&connection).map_err(Error::internal)?;
+        if floor > snapshot.revision {
+            snapshot.revision = floor;
+            changed = true;
+        }
+        if changed {
             connection
                 .execute(
                     "UPDATE workspace SET snapshot=?1 WHERE id=1",
@@ -440,45 +561,69 @@ impl Store {
         connection
             .execute_batch("COMMIT;")
             .map_err(Error::internal)?;
+        let snapshot_cache = snapshot_cache::SnapshotCache::attach(&connection)
+            .revision_floor("SELECT COALESCE(MAX(revision),0) FROM messages");
         Ok(Self {
             agent_capabilities: HashMap::new(),
             defaults,
             connection,
+            snapshot_cache,
+            transcripts: messages::Runs::default(),
             controls: HashMap::new(),
             closing: false,
             ancestor_stops: HashMap::new(),
             notices: HashMap::new(),
             held: HashMap::new(),
+            notice_dispatcher: false,
             nix_runs: std::collections::HashSet::new(),
             #[cfg(test)]
             runtime_gates: HashMap::new(),
         })
     }
+    /// An owned copy of the committed workspace, for callers that mutate it.
     fn snapshot(&self) -> Result<Snapshot, Error> {
+        let shared = self.shared()?;
         let started = std::time::Instant::now();
-        let json: String = self
-            .connection
-            .query_row("SELECT snapshot FROM workspace WHERE id = 1", [], |r| {
-                r.get(0)
-            })
-            .map_err(Error::internal)?;
-        slow_store_phase("load", started, json.len());
-        let started = std::time::Instant::now();
-        let result = serde_json::from_str(&json).map_err(Error::internal);
-        slow_store_phase("deserialize", started, json.len());
-        result
+        let snapshot = Snapshot::clone(&shared);
+        slow_store_phase("clone", started, 0);
+        Ok(snapshot)
     }
+    /// The committed workspace without copying it.
+    fn shared(&self) -> Result<Arc<Snapshot>, Error> {
+        self.snapshot_cache
+            .read(&self.connection, slow_store_phase)
+            .map_err(Error::internal)
+    }
+    /// Stores `snapshot` as the whole workspace, replacing the transcript with
+    /// its `messages` (tests seed complete snapshots this way).
+    #[cfg(test)]
     fn save(&mut self, snapshot: &Snapshot) -> Result<(), Error> {
-        let started = std::time::Instant::now();
-        let json = serde_json::to_string(snapshot).map_err(Error::internal)?;
-        let bytes = json.len();
-        slow_store_phase("serialize", started, bytes);
-        let started = std::time::Instant::now();
         self.connection
-            .execute("UPDATE workspace SET snapshot = ?1 WHERE id = 1", [json])
+            .execute("DELETE FROM messages", [])
             .map_err(Error::internal)?;
-        slow_store_phase("write", started, bytes);
-        Ok(())
+        self.transcripts.clear();
+        self.commit(snapshot.clone()).map(drop)
+    }
+    /// [`persist`]s through the store's own connection (autocommit).
+    fn commit(&self, snapshot: Snapshot) -> Result<Arc<Snapshot>, Error> {
+        persist(
+            &self.snapshot_cache,
+            &self.transcripts,
+            &self.connection,
+            snapshot,
+        )
+    }
+    /// The committed workspace with its whole transcript, as stored before
+    /// schema 31 (tests compare complete snapshots).
+    #[cfg(test)]
+    fn full(&self) -> Snapshot {
+        let mut snapshot = self.snapshot().unwrap();
+        snapshot.messages = messages::all(&self.connection).unwrap();
+        snapshot
+    }
+    /// The messages of `session`, in transcript order. Linear in its history.
+    fn session_messages(&self, session: &str) -> Result<Vec<Message>, Error> {
+        messages::session(&self.connection, session).map_err(Error::internal)
     }
     fn run_id(&self, session: &str) -> Result<Option<String>, Error> {
         self.connection
@@ -494,8 +639,20 @@ impl Store {
         &mut self,
         envelope: CommandEnvelope,
         config: &RuntimeConfig,
-    ) -> Result<(Snapshot, Option<Action>), Error> {
+    ) -> Result<(Arc<Snapshot>, Option<Action>), Error> {
         self.apply_prepared(envelope, config, None)
+    }
+    /// [`Self::apply`] with an owned result, for tests that edit it further.
+    #[cfg(test)]
+    fn apply_owned(
+        &mut self,
+        envelope: CommandEnvelope,
+        config: &RuntimeConfig,
+    ) -> Result<(Snapshot, Option<Action>), Error> {
+        let (snapshot, action) = self.apply(envelope, config)?;
+        let mut snapshot = Arc::unwrap_or_clone(snapshot);
+        snapshot.messages = messages::all(&self.connection).map_err(Error::internal)?;
+        Ok((snapshot, action))
     }
 
     fn apply_prepared(
@@ -503,7 +660,7 @@ impl Store {
         envelope: CommandEnvelope,
         config: &RuntimeConfig,
         prepared_child: Option<Session>,
-    ) -> Result<(Snapshot, Option<Action>), Error> {
+    ) -> Result<(Arc<Snapshot>, Option<Action>), Error> {
         uuid::Uuid::parse_str(&envelope.request_id)
             .map_err(|_| Error::invalid("request_id must be a UUID"))?;
         let request = serde_json::to_string(&envelope).map_err(Error::internal)?;
@@ -511,12 +668,12 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(Error::internal)?;
-        let json: String = transaction
-            .query_row("SELECT snapshot FROM workspace WHERE id = 1", [], |r| {
-                r.get(0)
-            })
+        let shared: Arc<Snapshot> = self
+            .snapshot_cache
+            .read(&transaction, slow_store_phase)
             .map_err(Error::internal)?;
-        let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
+        let mut snapshot = Snapshot::clone(&shared);
+        drop(shared);
         let receipt: Option<String> = transaction
             .query_row(
                 "SELECT request FROM receipts WHERE request_id = ?1",
@@ -531,11 +688,40 @@ impl Store {
                     "request_id was already used for a different command",
                 ));
             }
-            return Ok((snapshot, None));
+            return Ok((Arc::new(snapshot), None));
         }
-        if envelope.expected_revision > snapshot.revision
-            || (snapshot.revision != envelope.expected_revision
-                && !accepts_stale_workspace_revision(&envelope.command, &snapshot))
+        if envelope.expected_revision > snapshot.revision {
+            return Err(Error::new(
+                StatusCode::CONFLICT,
+                "conflict",
+                "Workspace changed. Refresh and review your draft before saving again.",
+            ));
+        }
+        // Receipt replay above precedes target comparison, including after later edits/deletion.
+        // This is a validated name-only exemption, never a whitelist for config replacement.
+        let guarded_rename = if let Command::RenameAgentConfig {
+            agent_config_id,
+            name,
+            expected,
+        } = &envelope.command
+        {
+            snapshot
+                .validate_agent_config_rename(agent_config_id, name, expected)
+                .map_err(|error| match error {
+                    AgentConfigRenameError::Changed => Error::new(
+                        StatusCode::CONFLICT,
+                        "agent_name_conflict",
+                        error.to_string(),
+                    ),
+                    AgentConfigRenameError::Invalid(message) => Error::invalid(message),
+                })?;
+            true
+        } else {
+            false
+        };
+        if snapshot.revision != envelope.expected_revision
+            && !guarded_rename
+            && !accepts_stale_workspace_revision(&envelope.command, &snapshot)
         {
             return Err(Error::new(
                 StatusCode::CONFLICT,
@@ -543,7 +729,63 @@ impl Store {
                 "Workspace changed. Refresh and review your draft before saving again.",
             ));
         }
-        let continuation = match &envelope.command {
+        let command = match envelope.command {
+            Command::StopWorkerRuns {
+                session_id,
+                include_descendants,
+                runs,
+                branch,
+            } => {
+                let mut expected = std::collections::BTreeMap::new();
+                let scope = if include_descendants {
+                    snapshot.session_branch_ids(&session_id)
+                } else {
+                    std::collections::HashSet::from([session_id.clone()])
+                };
+                let targets = snapshot
+                    .sessions
+                    .iter()
+                    .filter(|s| scope.contains(&s.id))
+                    .collect::<Vec<_>>();
+                let mut expected_branch = targets.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+                expected_branch.sort();
+                for session in targets {
+                    if session
+                        .worker
+                        .as_ref()
+                        .is_some_and(|w| runtime::active(&w.status))
+                    {
+                        let run: Option<String> = transaction
+                            .query_row(
+                                "SELECT run_id FROM runs WHERE session_id=?1",
+                                [&session.id],
+                                |r| r.get(0),
+                            )
+                            .optional()
+                            .map_err(Error::internal)?;
+                        // Queued is also used for launch reservations. A missing
+                        // durable identity cannot safely name a turn to cancel.
+                        let run = run.ok_or_else(|| {
+                            Error::invalid(
+                                "Active turn identity is unavailable; refresh before stopping",
+                            )
+                        })?;
+                        expected.insert(session.id.clone(), run);
+                    }
+                }
+                if runs.is_empty() || runs != expected || branch != expected_branch {
+                    return Err(Error::invalid(
+                        "Active turns changed; review before stopping",
+                    ));
+                }
+                Command::StopWorker {
+                    session_id,
+                    include_descendants,
+                }
+            }
+            command => command,
+        };
+        let continuation = match &command {
             Command::SendWorker { session_id, .. }
             | Command::SubmitTurn { session_id, .. }
             | Command::ResumeQueue { session_id, .. }
@@ -562,15 +804,18 @@ impl Store {
         {
             return Err(Error::invalid("Unarchive this chat before continuing"));
         }
-        let archived = match &envelope.command {
+        let archived = match &command {
             Command::SetSessionArchived {
                 session_id,
                 archived: true,
             } => Some(session_id.clone()),
             _ => None,
         };
+        // Run-bound stops have been validated and normalized above; retain the
+        // original envelope only for receipt identity, not lifecycle dispatch.
+        notices::command(&transaction, &snapshot, &command)?;
         let mut action = None;
-        match envelope.command {
+        match command {
             Command::DeleteSessionBranch { session_id } => {
                 deletion::delete(
                     &transaction,
@@ -883,25 +1128,33 @@ impl Store {
                             && !p.expired
                     })
                     .ok_or_else(|| Error::invalid("Permission request is no longer pending"))?;
-                let active = snapshot
-                    .sessions
-                    .iter()
-                    .find(|s| s.id == permission.session_id)
-                    .and_then(|s| s.worker.as_ref())
-                    .is_some_and(|w| runtime::active(&w.status));
-                let current: Option<String> = transaction
-                    .query_row(
-                        "SELECT run_id FROM runs WHERE session_id=?1",
-                        [&permission.session_id],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(Error::internal)?;
-                if !active || current.as_deref() != Some(run_id.as_str()) {
-                    return Err(Error::invalid("Permission run is no longer active"));
+                // A spawn awaiting approval is decided without its run: the
+                // decision continues or ends the durable attempt.
+                if let Some(attempt) = permission.spawn_attempt.clone() {
+                    permission.decision = Some(allow);
+                    snapshot.revision += 1;
+                    action = Some(Action::SpawnDecided { attempt, allow });
+                } else {
+                    let active = snapshot
+                        .sessions
+                        .iter()
+                        .find(|s| s.id == permission.session_id)
+                        .and_then(|s| s.worker.as_ref())
+                        .is_some_and(|w| runtime::active(&w.status));
+                    let current: Option<String> = transaction
+                        .query_row(
+                            "SELECT run_id FROM runs WHERE session_id=?1",
+                            [&permission.session_id],
+                            |r| r.get(0),
+                        )
+                        .optional()
+                        .map_err(Error::internal)?;
+                    if !active || current.as_deref() != Some(run_id.as_str()) {
+                        return Err(Error::invalid("Permission run is no longer active"));
+                    }
+                    permission.decision = Some(allow);
+                    snapshot.revision += 1;
                 }
-                permission.decision = Some(allow);
-                snapshot.revision += 1;
             }
             command @ (Command::SubmitTurn { .. }
             | Command::PromoteTurn { .. }
@@ -1123,9 +1376,18 @@ impl Store {
                 });
             }
             command => {
+                // Domain rules read a few existing messages (a comment's target,
+                // a config's first prompt); load just those, read-only.
+                let context = context_messages(&transaction, &snapshot, &command)?;
+                let loaded = context
+                    .iter()
+                    .map(|m| m.id.clone())
+                    .collect::<std::collections::HashSet<_>>();
+                snapshot.messages.extend(context);
                 snapshot
                     .apply(command, &envelope.request_id, now())
                     .map_err(Error::invalid)?;
+                snapshot.messages.retain(|m| !loaded.contains(&m.id));
             }
         }
         if action.is_some() {
@@ -1135,6 +1397,12 @@ impl Store {
                 .ok_or_else(|| Error::invalid("Revision exhausted"))?;
         }
         if let Some(Action::Run { session_id, .. }) = &action {
+            transaction
+                .execute(
+                    "DELETE FROM lifecycle_holds WHERE session_id=?1",
+                    [session_id],
+                )
+                .map_err(Error::internal)?;
             let identity = snapshot
                 .submissions
                 .iter()
@@ -1146,12 +1414,14 @@ impl Store {
         if let Some(Action::Sync(project_id)) = &action {
             transaction.execute("INSERT INTO syncs(project_id,request_id) VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET request_id=excluded.request_id",params![project_id,envelope.request_id]).map_err(Error::internal)?;
         }
-        transaction
-            .execute(
-                "UPDATE workspace SET snapshot = ?1 WHERE id = 1",
-                [serde_json::to_string(&snapshot).map_err(Error::internal)?],
-            )
-            .map_err(Error::internal)?;
+        notices::superseded(&transaction)?;
+        spawn_attempts::expire_detached(&transaction, &snapshot)?;
+        let snapshot = crate::persist(
+            &self.snapshot_cache,
+            &self.transcripts,
+            &transaction,
+            snapshot,
+        )?;
         transaction
             .execute(
                 "INSERT INTO receipts(request_id, request) VALUES (?1, ?2)",
@@ -1182,7 +1452,9 @@ struct Workspace {
     transports: Arc<std::sync::atomic::AtomicUsize>,
     project_jobs: Arc<std::sync::atomic::AtomicUsize>,
     store: Arc<Mutex<Store>>,
-    snapshots: watch::Sender<Snapshot>,
+    snapshots: watch::Sender<Arc<Snapshot>>,
+    /// Read-only transcript access for projections and history requests.
+    transcripts: Arc<transport::Reader>,
     token: Arc<str>,
     config: Arc<RuntimeConfig>,
 }
@@ -1217,6 +1489,11 @@ enum Action {
         include_descendants: bool,
     },
     Promote(String),
+    /// A human decided a spawn awaiting approval outside its run.
+    SpawnDecided {
+        attempt: String,
+        allow: bool,
+    },
 }
 fn now() -> u64 {
     SystemTime::now()
@@ -1255,6 +1532,14 @@ fn prompt_message(session: &str, request: &str, prompt: &str) -> Message {
     }
 }
 impl Workspace {
+    /// The published workspace with its whole transcript (tests). Reads through
+    /// the read-only connection, so it never waits on the store lock.
+    #[cfg(test)]
+    fn full(&self) -> Snapshot {
+        let mut snapshot = Snapshot::clone(&self.snapshots.borrow());
+        snapshot.messages = self.transcripts.with(|t| t.all()).unwrap().unwrap();
+        snapshot
+    }
     fn interrupt_run(&self, session: &str, run: &str) -> Result<(), Error> {
         let mut store = self.store.lock().map_err(Error::internal)?;
         if store.run_id(session)?.as_deref() != Some(run) {
@@ -1299,13 +1584,24 @@ impl Workspace {
             session,
             "Execution interrupted; review and resume explicitly",
         );
+        snapshot.messages = messages::running_tools(&store.connection, Some(session), Some(run))
+            .map_err(Error::internal)?;
         interrupt_tools(&mut snapshot, session, Some(run));
         harness::expire(&mut snapshot, session, run);
         snapshot.revision = snapshot
             .revision
             .checked_add(1)
             .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-        store.save(&snapshot)?;
+        let store = &mut *store;
+        let transaction = store.connection.transaction().map_err(Error::internal)?;
+        notices::record(&transaction, &snapshot, session, run)?;
+        let snapshot = crate::persist(
+            &store.snapshot_cache,
+            &store.transcripts,
+            &transaction,
+            snapshot,
+        )?;
+        transaction.commit().map_err(Error::internal)?;
         store.controls.remove(session);
         store.agent_capabilities.remove(session);
         self.snapshots.send_replace(snapshot);
@@ -1334,8 +1630,8 @@ impl Workspace {
         if store.run_id(session)?.as_deref() != Some(run) {
             return Err(Error::invalid("Run superseded"));
         }
-        let mut snapshot = store.snapshot()?;
-        if !snapshot
+        let base = store.shared()?;
+        if !base
             .sessions
             .iter()
             .find(|s| s.id == session)
@@ -1344,49 +1640,118 @@ impl Workspace {
         {
             return Err(Error::invalid("Run is no longer active"));
         }
+        // The closure sees the workspace plus this run's addressable messages
+        // (kept in memory between events), never the whole transcript history.
+        let mut set = store
+            .transcripts
+            .take(&store.connection, session, run)
+            .map_err(Error::internal)?;
         let started = std::time::Instant::now();
-        let previous = snapshot.clone();
+        let mut snapshot = Snapshot::clone(&base);
         slow_store_phase("clone", started, 0);
-        update(&mut snapshot)?;
-        let started = std::time::Instant::now();
-        let unchanged = snapshot == previous;
-        slow_store_phase("compare", started, 0);
-        if unchanged {
-            return Ok(());
+        snapshot.messages = std::mem::take(&mut set.messages);
+        let result =
+            self.update_run_set(&mut store, &base, snapshot, &mut set, session, run, update);
+        // On any error the in-memory set may hold uncommitted edits; reload it.
+        if matches!(result, Ok(false)) {
+            store.transcripts.put(session, set);
         }
+        result.map(drop)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn update_run_set(
+        &self,
+        store: &mut Store,
+        base: &Snapshot,
+        mut snapshot: Snapshot,
+        set: &mut messages::RunSet,
+        session: &str,
+        run: &str,
+        update: impl FnOnce(&mut Snapshot) -> Result<(), Error>,
+    ) -> Result<bool, Error> {
+        let result = (|| {
+            update(&mut snapshot)?;
+            let terminal = snapshot
+                .sessions
+                .iter()
+                .find(|s| s.id == session)
+                .and_then(|s| s.worker.as_ref())
+                .is_some_and(|w| !runtime::active(&w.status));
+            if terminal {
+                interrupt_tools(&mut snapshot, session, Some(run));
+                harness::expire(&mut snapshot, session, run);
+            }
+            Ok(terminal)
+        })();
+        set.messages = std::mem::take(&mut snapshot.messages);
+        let terminal = result?;
+        let started = std::time::Instant::now();
+        let changed = snapshot != *base || !set.dirty().is_empty();
+        slow_store_phase("compare", started, 0);
+        if !changed {
+            return Ok(false);
+        }
+        let transaction = store.connection.transaction().map_err(Error::internal)?;
+        notices::record(&transaction, &snapshot, session, run)?;
+        snapshot.messages = std::mem::take(&mut set.messages);
+        let settled = spawn_attempts::settle(&transaction, &mut snapshot, session, run);
+        set.messages = std::mem::take(&mut snapshot.messages);
+        settled?;
+        // Rewrite the workspace row only when something besides messages changed.
+        let workspace_changed = snapshot != *base;
         snapshot.revision = snapshot
             .revision
             .checked_add(1)
             .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-        if snapshot
-            .sessions
+        let dirty = set.dirty();
+        messages::upsert(
+            &transaction,
+            dirty.iter().copied(),
+            Some(run),
+            snapshot.revision,
+        )
+        .map_err(Error::internal)?;
+        // Messages this run wrote into another session's transcript (a result
+        // for its parent, a fork's copied history) leave the set after commit.
+        let written_elsewhere = dirty
             .iter()
-            .find(|s| s.id == session)
-            .and_then(|s| s.worker.as_ref())
-            .is_some_and(|w| !runtime::active(&w.status))
-        {
+            .filter(|m| m.session_id != session)
+            .map(|m| (m.id.clone(), m.session_id.clone()))
+            .collect::<HashMap<_, _>>();
+        let snapshot = Arc::new(snapshot);
+        if workspace_changed {
+            store
+                .snapshot_cache
+                .write(&transaction, snapshot.clone(), slow_store_phase)
+                .map_err(Error::internal)?;
+        } else {
+            store
+                .snapshot_cache
+                .stage(&transaction, snapshot.clone())
+                .map_err(Error::internal)?;
+        }
+        transaction.commit().map_err(Error::internal)?;
+        set.committed();
+        if !written_elsewhere.is_empty() {
+            set.messages
+                .retain(|m| !written_elsewhere.contains_key(&m.id));
+            // Those sessions' own run sets may hold the old values.
+            store
+                .transcripts
+                .forget(written_elsewhere.values().map(String::as_str));
+        }
+        if terminal {
             store.controls.remove(session);
             store.agent_capabilities.remove(session);
-            interrupt_tools(&mut snapshot, session, Some(run));
-            harness::expire(&mut snapshot, session, run);
         }
-        let transaction = store.connection.transaction().map_err(Error::internal)?;
-        spawn_attempts::settle(&transaction, &mut snapshot, session, run)?;
-        transaction
-            .execute(
-                "UPDATE workspace SET snapshot=?1 WHERE id=1",
-                [serde_json::to_string(&snapshot).map_err(Error::internal)?],
-            )
-            .map_err(Error::internal)?;
-        transaction.commit().map_err(Error::internal)?;
         self.snapshots.send_replace(snapshot);
-        Ok(())
+        Ok(terminal)
     }
     fn synchronize(&self, project_id: &str, request_id: &str) {
         let config = harness::configuration(&self.snapshots.borrow(), project_id, &self.config);
         let result = github::sync(&config, project_id);
         let update = || -> Result<(), Error> {
-            let mut store = self.store.lock().map_err(Error::internal)?;
+            let store = self.store.lock().map_err(Error::internal)?;
             let latest: Option<String> = store
                 .connection
                 .query_row(
@@ -1484,7 +1849,7 @@ impl Workspace {
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-            store.save(&snapshot)?;
+            let snapshot = store.commit(snapshot)?;
             self.snapshots.send_replace(snapshot);
             Ok(())
         };
@@ -1499,7 +1864,7 @@ impl Workspace {
         &self,
         update: impl FnOnce(&mut Snapshot) -> Result<(), Error>,
     ) -> Result<(), Error> {
-        let mut store = self.store.lock().map_err(Error::internal)?;
+        let store = self.store.lock().map_err(Error::internal)?;
         if store.closing {
             return Err(Error::invalid("Server is shutting down"));
         }
@@ -1509,7 +1874,7 @@ impl Workspace {
             .revision
             .checked_add(1)
             .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-        store.save(&snapshot)?;
+        let snapshot = store.commit(snapshot)?;
         self.snapshots.send_replace(snapshot);
         Ok(())
     }
@@ -1580,7 +1945,7 @@ impl Shutdown {
             );
             if changed {
                 snapshot.revision += 1;
-                store.save(&snapshot)?;
+                let snapshot = store.commit(snapshot)?;
                 self.workspace.snapshots.send_replace(snapshot);
             }
             for control in store.controls.values() {
@@ -1656,7 +2021,14 @@ pub fn router_with_browser(
         ));
     }
     let mut store = Store::open(path.as_ref(), defaults.clone())?;
-    spawn_attempts::recover(&store.connection)?;
+    let awaiting = store
+        .snapshot()?
+        .tool_permissions
+        .iter()
+        .filter(|p| p.decision.is_none() && !p.expired)
+        .filter_map(|p| p.spawn_attempt.clone())
+        .collect();
+    let detached = spawn_attempts::recover(&store.connection, &awaiting)?;
     let browser = browser::BrowserAuth::initialize(&mut store, &token, browser_config)?;
     let mut initial = store.snapshot()?;
     let mut changed = false;
@@ -1701,17 +2073,24 @@ pub fn router_with_browser(
         .filter(|s| s.fixture)
         .map(|s| s.id.clone())
         .collect();
+    let mut interrupted_lifecycle = Vec::new();
     for session in &mut initial.sessions {
         if let Some(w) = &mut session.worker
             && !session.fixture
             && runtime::active(&w.status)
         {
+            if let Some(run) = store.run_id(&session.id)? {
+                interrupted_lifecycle.push((session.id.clone(), run));
+            }
             w.status = WorkerStatus::Interrupted;
             w.error =
                 Some("Server restarted before the turn ended; continuation is explicit".into());
             changed = true;
         }
     }
+    // Only rows with a running tool can change; load just those (schema 31).
+    initial.messages =
+        messages::running_tools(&store.connection, None, None).map_err(Error::internal)?;
     for message in &mut initial.messages {
         if let Some(tool) = &mut message.tool
             && tool.state == ToolState::Running
@@ -1831,6 +2210,10 @@ pub fn router_with_browser(
         if permission.decision.is_none()
             && !permission.expired
             && !fixtures.contains(&permission.session_id)
+            && !permission
+                .spawn_attempt
+                .as_ref()
+                .is_some_and(|id| detached.contains(id))
         {
             permission.expired = true;
             changed = true;
@@ -1875,13 +2258,27 @@ pub fn router_with_browser(
         "Server restarted; inspect results before continuing",
     );
     changed |= initial != before_projects;
-    if changed {
+    let initial = if changed {
         initial.revision = initial
             .revision
             .checked_add(1)
             .ok_or_else(|| Error::invalid("Revision exhausted"))?;
-        store.save(&initial)?;
-    }
+        let transaction = store.connection.transaction().map_err(Error::internal)?;
+        for (session, run) in interrupted_lifecycle {
+            notices::record(&transaction, &initial, &session, &run)?;
+        }
+        let initial = crate::persist(
+            &store.snapshot_cache,
+            &store.transcripts,
+            &transaction,
+            initial,
+        )?;
+        transaction.commit().map_err(Error::internal)?;
+        initial
+    } else {
+        initial.messages.clear();
+        Arc::new(initial)
+    };
     let (snapshots, _) = watch::channel(initial);
     let workspace = Workspace {
         agent_endpoint: Arc::new(Mutex::new(None)),
@@ -1896,6 +2293,7 @@ pub fn router_with_browser(
         project_jobs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         store: Arc::new(Mutex::new(store)),
         snapshots,
+        transcripts: Arc::new(transport::Reader::open(path.as_ref())?),
         token: token.into(),
         config: Arc::new(config),
     };
@@ -1903,6 +2301,7 @@ pub fn router_with_browser(
         workspace: workspace.clone(),
     };
     spawn_attempts::recover_notices(&workspace)?;
+    notices::recover(&workspace)?;
     Ok((
         Router::new()
             .route("/v1/boards/discover", post(discover_board))
@@ -1993,9 +2392,18 @@ async fn build_version(State(workspace): State<Workspace>) -> Json<BuildInfo> {
 async fn snapshot(
     State(workspace): State<Workspace>,
     headers: HeaderMap,
-) -> Result<Json<Snapshot>, Error> {
+) -> Result<Response, Error> {
     workspace.authorize(&headers)?;
-    Ok(Json(workspace.snapshots.borrow().clone()))
+    // Diagnostics only (clients use `/v1/events`): the complete workspace,
+    // with the whole transcript read from the messages table.
+    let mut snapshot = Snapshot::clone(&workspace.snapshots.borrow());
+    snapshot.messages = workspace.transcripts.with(|t| t.all())??;
+    let body = serde_json::to_vec(&snapshot).map_err(Error::internal)?;
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response())
 }
 
 async fn protocol(
@@ -2244,6 +2652,11 @@ async fn command(
     } else {
         None
     };
+    // Permission decisions cannot free a workspace waiter. Do not delay their
+    // acknowledgement behind another full workspace queue scan/store acquisition.
+    let advance_waiters =
+        !already_applied && !matches!(envelope.command, Command::RespondPermission { .. });
+    let independent_control = envelope.command.is_run_control();
     let wake = workspace.clone();
     let handle = tokio::runtime::Handle::current();
     let result = tokio::task::spawn_blocking(move || {
@@ -2302,6 +2715,9 @@ async fn command(
                     control.send_replace(true);
                 }
             }
+            Some(Action::SpawnDecided { attempt, allow }) => {
+                handle.spawn(agent_tools::decided(workspace.clone(), attempt, allow));
+            }
             Some(Action::Operations(ids)) => {
                 for id in ids {
                     let workspace = workspace.clone();
@@ -2327,10 +2743,19 @@ async fn command(
     .map_err(Error::internal)??;
     // A command can end a wait that kept later waiting turns behind it, such
     // as a cancelled, paused or archived turn; let them launch now.
-    if let Ok(Err(error)) =
-        tokio::task::spawn_blocking(move || conversation::drain_workspace_waits(&wake)).await
-    {
-        eprintln!("Shared workspace queue advancement failed: {error}");
+    if advance_waiters {
+        let advance = tokio::task::spawn_blocking(move || {
+            if let Err(error) = conversation::drain_workspace_waits(&wake) {
+                eprintln!("Shared workspace queue advancement failed: {error}");
+            }
+        });
+        // A run-bound stop is committed and its cancellation signal has been
+        // sent. Acknowledging it need not wait for unrelated queue advancement.
+        // The existing durable wait table and closing guard still govern that
+        // work. Ordinary command sequencing retains its previous behavior.
+        if !independent_control {
+            let _ = advance.await;
+        }
     }
     Ok(Json(result))
 }
@@ -2373,7 +2798,7 @@ impl Drop for Transport {
 
 async fn stream(
     mut socket: WebSocket,
-    mut receiver: watch::Receiver<Snapshot>,
+    mut receiver: watch::Receiver<Arc<Snapshot>>,
     mut shutdown: watch::Receiver<bool>,
     workspace: Workspace,
     headers: HeaderMap,
@@ -2386,7 +2811,7 @@ async fn stream(
             }
         } => {},
         _ = workspace.session_ended(&headers) => {},
-        _ = stream_snapshots(&mut socket, &mut receiver) => return,
+        _ = stream_snapshots(&mut socket, &mut receiver, &workspace.transcripts) => return,
     }
     // A stalled client must not hold shutdown open indefinitely.
     let _ = tokio::time::timeout(
@@ -2396,9 +2821,17 @@ async fn stream(
     .await;
 }
 
-async fn stream_snapshots(socket: &mut WebSocket, receiver: &mut watch::Receiver<Snapshot>) {
+async fn stream_snapshots(
+    socket: &mut WebSocket,
+    receiver: &mut watch::Receiver<Arc<Snapshot>>,
+    transcripts: &transport::Reader,
+) {
     let mut projection = transport::Projection::default();
-    let (mut delivered, history) = projection.view(&receiver.borrow_and_update());
+    let snapshot = receiver.borrow_and_update().clone();
+    let Ok((mut delivered, history)) = transcripts.with(|t| projection.view_with(&snapshot, t))
+    else {
+        return;
+    };
     let reset = StreamEvent::Reset {
         protocol_version: PROTOCOL_VERSION,
         snapshot: Box::new(delivered.clone()),
@@ -2421,9 +2854,9 @@ async fn stream_snapshots(socket: &mut WebSocket, receiver: &mut watch::Receiver
                 Some(Ok(WsMessage::Text(json))) => {
                     let Ok(request) = serde_json::from_str::<StreamRequest>(&json) else { return; };
                     let snapshot=receiver.borrow_and_update().clone();
-                    match projection.request(&snapshot,request) {
-                        Ok(response)=>response,
-                        Err(_)=>Some(StreamEvent::Error {message:"Conversation request could not be completed".into(),generation:projection.view(&snapshot).1.generation}),
+                    match transcripts.with(|t| projection.request_with(&snapshot,request,t)) {
+                        Ok(Ok(response))=>response,
+                        _=>Some(StreamEvent::Error {message:"Conversation request could not be completed".into(),generation:projection.view(&snapshot).1.generation}),
                     }
                 },
                 Some(Ok(WsMessage::Close(_))) | Some(Err(_)) | None => return,
@@ -2431,7 +2864,9 @@ async fn stream_snapshots(socket: &mut WebSocket, receiver: &mut watch::Receiver
             },
         };
         let snapshot = receiver.borrow_and_update().clone();
-        let (view, history) = projection.view(&snapshot);
+        let Ok((view, history)) = transcripts.with(|t| projection.view_with(&snapshot, t)) else {
+            return;
+        };
         let (Ok(old), Ok(new)) = (
             serde_json::to_value(&delivered),
             serde_json::to_value(&view),

@@ -89,7 +89,7 @@ async fn protocol_guard_and_multiple_local_projects_round_trip_without_remote_cr
         "protocol_mismatch"
     );
     assert_eq!(snapshot(&server).await, initial);
-    assert_eq!(PROTOCOL_VERSION, 17);
+    assert_eq!(PROTOCOL_VERSION, 18);
     let previous = reqwest::Client::new()
         .post(format!("{}/v1/commands", server.endpoint))
         .bearer_auth(TOKEN)
@@ -844,4 +844,93 @@ async fn shared_draft_websocket_publishes_and_reconnects_without_workspace_revis
         vec![saved]
     );
     reopened.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn metadata_projection_preserves_full_history_and_message_details() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = start(&dir.path().join("db")).await;
+    let full = snapshot(&server).await;
+    let client = reqwest::Client::new();
+    let metadata: Snapshot = client
+        .get(format!("{}/v1/workspace", server.endpoint))
+        .bearer_auth(TOKEN)
+        .header("x-relay-protocol", PROTOCOL_VERSION)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(metadata.messages.is_empty() && metadata.comments.is_empty());
+    assert_eq!(metadata.revision, full.revision);
+    assert!(
+        !full.messages.is_empty(),
+        "synthetic seed must exercise history"
+    );
+    for session in &full.sessions {
+        let mut before = None;
+        let mut ids = std::collections::BTreeSet::new();
+        loop {
+            let mut request = client
+                .get(format!(
+                    "{}/v1/sessions/{}/history",
+                    server.endpoint, session.id
+                ))
+                .bearer_auth(TOKEN)
+                .header("x-relay-protocol", PROTOCOL_VERSION);
+            if let Some(cursor) = &before {
+                request = request.query(&[("before", cursor)]);
+            }
+            let page: HistoryPage = request
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            for message in &page.messages {
+                assert!(ids.insert(message.id.clone()));
+            }
+            if !page.history.has_more {
+                break;
+            }
+            assert_ne!(before, page.history.oldest_message_id);
+            before = page.history.oldest_message_id;
+        }
+        let expected = full
+            .messages
+            .iter()
+            .filter(|m| m.session_id == session.id)
+            .map(|m| m.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ids, expected);
+        for message in full.messages.iter().filter(|m| m.session_id == session.id) {
+            let detail: Message = client
+                .get(format!(
+                    "{}/v1/sessions/{}/messages/{}",
+                    server.endpoint, session.id, message.id
+                ))
+                .bearer_auth(TOKEN)
+                .header("x-relay-protocol", PROTOCOL_VERSION)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(&detail, message);
+        }
+    }
+    assert_eq!(
+        snapshot(&server).await,
+        full,
+        "projection cannot mutate stored history"
+    );
 }

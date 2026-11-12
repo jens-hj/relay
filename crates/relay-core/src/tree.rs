@@ -388,6 +388,7 @@ mod tests {
             description: String::new(),
             decision,
             expired,
+            spawn_attempt: None,
         };
         snapshot.tool_permissions = vec![
             permission("p1", "a1", None, false),

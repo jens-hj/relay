@@ -25,14 +25,13 @@ pub(super) fn delete(
         )
         .map_err(Error::invalid)?;
     let drafts = conversation::read_drafts(transaction)?;
+    // The branch's transcript, from the messages table (schema 31).
+    let mut deleted = Vec::new();
+    for id in &ids {
+        deleted.extend(messages::session(transaction, id).map_err(Error::internal)?);
+    }
     let mut references = ids.clone();
-    references.extend(
-        before
-            .messages
-            .iter()
-            .filter(|m| ids.contains(&m.session_id))
-            .map(|m| m.id.clone()),
-    );
+    references.extend(deleted.iter().map(|m| m.id.clone()));
     references.extend(
         before
             .submissions
@@ -56,13 +55,22 @@ pub(super) fn delete(
     );
     let mut removed_assets = HashSet::new();
     let mut retained_assets = HashSet::new();
-    for message in &before.messages {
-        let target = if ids.contains(&message.session_id) {
-            &mut removed_assets
-        } else {
-            &mut retained_assets
-        };
-        target.extend(assets(&message.parts).into_iter().map(|a| a.id.clone()));
+    for message in &deleted {
+        removed_assets.extend(assets(&message.parts).into_iter().map(|a| a.id.clone()));
+    }
+    // An asset stays while any other session's message mentions its id. A
+    // substring match can only over-retain, never delete a referenced asset.
+    for asset in &removed_assets {
+        let kept: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM messages WHERE instr(data,?1)>0 AND session_id NOT IN (SELECT value FROM json_each(?2)))",
+                params![asset, serde_json::to_string(&ids).map_err(Error::internal)?],
+                |r| r.get(0),
+            )
+            .map_err(Error::internal)?;
+        if kept {
+            retained_assets.insert(asset.clone());
+        }
     }
     for turn in &before.submissions {
         let target = if ids.contains(&turn.session_id) {
@@ -121,7 +129,13 @@ pub(super) fn delete(
         // Keep parent-side retry identities, but never return a deleted child
         // as a live session or allow the same request to recreate it.
         transaction.execute("UPDATE spawn_attempts SET child=NULL,phase='child_deleted',response=json_object('spawn_attempt',id,'phase','child_deleted','deleted',json('true')) WHERE child=?1", [id]).map_err(Error::internal)?;
-        for table in ["drafts", "runs", "processes", "workspace_waits"] {
+        for table in [
+            "drafts",
+            "runs",
+            "processes",
+            "workspace_waits",
+            "lifecycle_holds",
+        ] {
             transaction
                 .execute(&format!("DELETE FROM {table} WHERE session_id=?1"), [id])
                 .map_err(Error::internal)?;
@@ -133,6 +147,8 @@ pub(super) fn delete(
             )
             .map_err(Error::internal)?;
     }
+    messages::delete_sessions(transaction, ids.iter().map(String::as_str))
+        .map_err(Error::internal)?;
     for asset in removed_assets.difference(&retained_assets) {
         transaction
             .execute("DELETE FROM assets WHERE id=?1", [asset])

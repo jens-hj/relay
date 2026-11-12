@@ -14,6 +14,175 @@ pub(crate) struct Projection {
     reviews: BTreeSet<String>,
 }
 
+/// Read access to transcripts for projections. The server reads the messages
+/// table ([`Db`]); an in-memory snapshot's own `messages` also implement it.
+pub(crate) trait Transcripts {
+    /// Ids of the session's messages in transcript order.
+    fn index(&self, session: &str) -> Result<Vec<String>, Error>;
+    /// The messages with these ids, in transcript order.
+    fn load(&self, ids: &[&str]) -> Result<Vec<relay_core::Message>, Error>;
+    /// Every message of the session, in order (search only).
+    fn session(&self, session: &str) -> Result<Vec<relay_core::Message>, Error>;
+    /// The newest `prompt-…` message id of the session.
+    fn newest_prompt(&self, session: &str) -> Result<Option<String>, Error>;
+    /// The session's messages of `kind` whose id starts with `prefix`.
+    fn with_prefix(
+        &self,
+        session: &str,
+        kind: &str,
+        prefix: &str,
+    ) -> Result<Vec<relay_core::Message>, Error>;
+    /// Whole-transcript tool counts.
+    fn tool_counts(&self, session: &str) -> Result<Vec<relay_core::ToolCount>, Error>;
+    /// Every message, in order (diagnostics and tests).
+    fn all(&self) -> Result<Vec<relay_core::Message>, Error>;
+}
+
+impl Transcripts for Vec<relay_core::Message> {
+    fn all(&self) -> Result<Vec<relay_core::Message>, Error> {
+        Ok(self.clone())
+    }
+    fn index(&self, session: &str) -> Result<Vec<String>, Error> {
+        Ok(self
+            .iter()
+            .filter(|m| m.session_id == session)
+            .map(|m| m.id.clone())
+            .collect())
+    }
+    fn load(&self, ids: &[&str]) -> Result<Vec<relay_core::Message>, Error> {
+        let ids = ids.iter().copied().collect::<BTreeSet<_>>();
+        Ok(self
+            .iter()
+            .filter(|m| ids.contains(m.id.as_str()))
+            .cloned()
+            .collect())
+    }
+    fn session(&self, session: &str) -> Result<Vec<relay_core::Message>, Error> {
+        Ok(self
+            .iter()
+            .filter(|m| m.session_id == session)
+            .cloned()
+            .collect())
+    }
+    fn newest_prompt(&self, session: &str) -> Result<Option<String>, Error> {
+        Ok(self
+            .iter()
+            .rev()
+            .find(|m| m.session_id == session && m.kind == "prompt" && m.id.starts_with("prompt-"))
+            .map(|m| m.id.clone()))
+    }
+    fn with_prefix(
+        &self,
+        session: &str,
+        kind: &str,
+        prefix: &str,
+    ) -> Result<Vec<relay_core::Message>, Error> {
+        Ok(self
+            .iter()
+            .filter(|m| m.session_id == session && m.kind == kind && m.id.starts_with(prefix))
+            .cloned()
+            .collect())
+    }
+    fn tool_counts(&self, session: &str) -> Result<Vec<relay_core::ToolCount>, Error> {
+        Ok(relay_core::tool_counts(self, session))
+    }
+}
+
+/// Transcripts in the messages table, through a read connection.
+pub(crate) struct Db<'a> {
+    pub(crate) connection: &'a Connection,
+    pub(crate) counts: &'a ToolCountCache,
+}
+
+/// A read-only connection for projections and history requests, so streaming
+/// clients never wait on (or hold) the writer's store lock. WAL readers see the
+/// last committed transcript.
+pub(crate) struct Reader {
+    connection: Mutex<Connection>,
+    counts: ToolCountCache,
+}
+
+impl Reader {
+    pub(crate) fn open(path: &std::path::Path) -> Result<Self, Error> {
+        let connection = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(Error::internal)?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(Error::internal)?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+            counts: ToolCountCache::default(),
+        })
+    }
+    /// Runs `read` against the transcripts, off the async workers.
+    pub(crate) fn with<T>(&self, read: impl FnOnce(&dyn Transcripts) -> T) -> Result<T, Error> {
+        crate::blocking(|| {
+            let connection = self.connection.lock().map_err(Error::internal)?;
+            Ok(read(&Db {
+                connection: &connection,
+                counts: &self.counts,
+            }))
+        })
+    }
+}
+
+/// A session's `messages::session_version` and the counts computed at it.
+type CountEntry = ((i64, i64, i64), Vec<relay_core::ToolCount>);
+
+/// Tool counts per session, valid while the session's rows are unchanged.
+#[derive(Default)]
+pub(crate) struct ToolCountCache(Mutex<HashMap<String, CountEntry>>);
+
+impl Transcripts for Db<'_> {
+    fn all(&self) -> Result<Vec<relay_core::Message>, Error> {
+        messages::all(self.connection).map_err(Error::internal)
+    }
+    fn index(&self, session: &str) -> Result<Vec<String>, Error> {
+        Ok(messages::index(self.connection, session)
+            .map_err(Error::internal)?
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect())
+    }
+    fn load(&self, ids: &[&str]) -> Result<Vec<relay_core::Message>, Error> {
+        messages::by_ids(self.connection, ids.iter().copied()).map_err(Error::internal)
+    }
+    fn session(&self, session: &str) -> Result<Vec<relay_core::Message>, Error> {
+        messages::session(self.connection, session).map_err(Error::internal)
+    }
+    fn newest_prompt(&self, session: &str) -> Result<Option<String>, Error> {
+        messages::newest_prompt(self.connection, session).map_err(Error::internal)
+    }
+    fn with_prefix(
+        &self,
+        session: &str,
+        kind: &str,
+        prefix: &str,
+    ) -> Result<Vec<relay_core::Message>, Error> {
+        messages::with_prefix(self.connection, session, kind, prefix).map_err(Error::internal)
+    }
+    fn tool_counts(&self, session: &str) -> Result<Vec<relay_core::ToolCount>, Error> {
+        // Any insert, update or delete in the session changes this key.
+        let key = messages::session_version(self.connection, session).map_err(Error::internal)?;
+        if let Some((cached, counts)) = self.counts.0.lock().map_err(Error::internal)?.get(session)
+            && *cached == key
+        {
+            return Ok(counts.clone());
+        }
+        let transcript = self.session(session)?;
+        let counts = relay_core::tool_counts(&transcript, session);
+        self.counts
+            .0
+            .lock()
+            .map_err(Error::internal)?
+            .insert(session.into(), (key, counts.clone()));
+        Ok(counts)
+    }
+}
+
 fn pending(submission: &Submission) -> bool {
     matches!(
         submission.state,
@@ -24,32 +193,30 @@ fn pending(submission: &Submission) -> bool {
     )
 }
 
-fn active_run_ids(snapshot: &Snapshot) -> std::collections::BTreeMap<String, String> {
-    let active = snapshot
-        .sessions
-        .iter()
-        .filter(|session| {
-            session.worker.as_ref().is_some_and(|worker| {
-                matches!(worker.status, WorkerStatus::Running | WorkerStatus::Queued)
-            })
-        })
-        .map(|session| session.id.as_str())
-        .collect::<BTreeSet<_>>();
+fn active_run_ids(
+    snapshot: &Snapshot,
+    transcripts: &dyn Transcripts,
+) -> std::collections::BTreeMap<String, String> {
     let mut ids = std::collections::BTreeMap::new();
-    for message in
-        snapshot.messages.iter().rev().filter(|message| {
-            message.kind == "prompt" && active.contains(message.session_id.as_str())
+    for session in snapshot.sessions.iter().filter(|session| {
+        session.worker.as_ref().is_some_and(|worker| {
+            matches!(worker.status, WorkerStatus::Running | WorkerStatus::Queued)
         })
-    {
-        if let Some(id) = message.id.strip_prefix("prompt-") {
-            ids.entry(message.session_id.clone())
-                .or_insert_with(|| id.into());
+    }) {
+        if let Ok(Some(id)) = transcripts.newest_prompt(&session.id)
+            && let Some(run) = id.strip_prefix("prompt-")
+        {
+            ids.insert(session.id.clone(), run.into());
         }
     }
     ids
 }
 
-fn progress_summary(snapshot: &Snapshot, session: &str) -> Option<Box<ProgressSummary>> {
+fn progress_summary(
+    snapshot: &Snapshot,
+    session: &str,
+    transcripts: &dyn Transcripts,
+) -> Option<Box<ProgressSummary>> {
     let running = snapshot.sessions.iter().any(|s| {
         s.id == session
             && s.worker
@@ -59,7 +226,11 @@ fn progress_summary(snapshot: &Snapshot, session: &str) -> Option<Box<ProgressSu
     if !running {
         return None;
     }
-    let run = active_run_ids(snapshot).remove(session)?;
+    let run = transcripts
+        .newest_prompt(session)
+        .ok()??
+        .strip_prefix("prompt-")?
+        .to_owned();
     // This namespace is produced only from Codex's explicit public summary fields.
     // Legacy generic reasoning rows have no public/current-run contract.
     let prefix = format!("codex-summary-{run}-");
@@ -70,11 +241,11 @@ fn progress_summary(snapshot: &Snapshot, session: &str) -> Option<Box<ProgressSu
     let mut current = None;
     let mut selected = None;
     let mut selected_index = 0;
-    for message in &snapshot.messages {
-        if message.session_id != session
-            || message.kind != "reasoning"
-            || message.body.trim().is_empty()
-        {
+    let rows = transcripts
+        .with_prefix(session, "reasoning", &prefix)
+        .ok()?;
+    for message in &rows {
+        if message.body.trim().is_empty() {
             continue;
         }
         let Some((item, index)) = message
@@ -115,10 +286,13 @@ fn progress_summary(snapshot: &Snapshot, session: &str) -> Option<Box<ProgressSu
     }))
 }
 
-/// Whole-transcript tool counts, derived from the complete stored snapshot on
+/// Whole-transcript tool counts, derived from the complete stored transcript on
 /// every projection so they match whatever history page the client loaded.
-fn session_tool_counts(snapshot: &Snapshot, session: &str) -> Option<Vec<relay_core::ToolCount>> {
-    (!session.is_empty()).then(|| relay_core::tool_counts(&snapshot.messages, session))
+fn session_tool_counts(
+    transcripts: &dyn Transcripts,
+    session: &str,
+) -> Option<Vec<relay_core::ToolCount>> {
+    (!session.is_empty()).then(|| transcripts.tool_counts(session).unwrap_or_default())
 }
 
 fn historical_submissions(
@@ -150,30 +324,28 @@ fn historical_submissions(
 }
 
 pub(crate) fn metadata(snapshot: &Snapshot) -> Snapshot {
-    let mut result = snapshot.clone();
-    result.messages.clear();
-    result.comments.clear();
-    result.submissions.retain(pending);
-    result
-        .tool_permissions
-        .retain(|p| p.decision.is_none() && !p.expired);
-    for session in &mut result.sessions {
-        for workspace in &mut session.workspaces {
-            workspace.changes = None;
-        }
-        if let Some(worker) = &mut session.worker {
-            worker.changes = None;
-        }
-    }
-    result
+    crate::snapshot_views::metadata(snapshot)
 }
 
+/// [`history_page_with`] over the snapshot's own `messages` (tests, fixtures).
+#[cfg(test)]
 pub(crate) fn history_page(
     snapshot: &Snapshot,
     session: &str,
     before: Option<&str>,
     around: Option<&str>,
     after: Option<&str>,
+) -> Result<HistoryPage, Error> {
+    history_page_with(snapshot, session, before, around, after, &snapshot.messages)
+}
+
+pub(crate) fn history_page_with(
+    snapshot: &Snapshot,
+    session: &str,
+    before: Option<&str>,
+    around: Option<&str>,
+    after: Option<&str>,
+    transcripts: &dyn Transcripts,
 ) -> Result<HistoryPage, Error> {
     if [before, around, after]
         .iter()
@@ -186,16 +358,12 @@ pub(crate) fn history_page(
     if !snapshot.sessions.iter().any(|s| s.id == session) {
         return Err(Error::invalid("Session not found"));
     }
-    let messages = snapshot
-        .messages
-        .iter()
-        .filter(|m| m.session_id == session)
-        .collect::<Vec<_>>();
+    // Positions come from the id index; only candidate bodies are loaded.
+    let messages = transcripts.index(session)?;
+    let position = |id: &str| messages.iter().position(|m| m == id);
     let start = after
         .map(|id| {
-            messages
-                .iter()
-                .position(|m| m.id == id)
+            position(id)
                 .map(|i| i + 1)
                 .ok_or_else(|| Error::invalid("History cursor not found"))
         })
@@ -205,14 +373,10 @@ pub(crate) fn history_page(
         (start + HISTORY_PAGE_MESSAGES).min(messages.len())
     } else {
         match (before, around) {
-            (Some(id), _) => messages
-                .iter()
-                .position(|m| m.id == id)
-                .ok_or_else(|| Error::invalid("History cursor not found"))?,
-            (_, Some(id)) => (messages
-                .iter()
-                .position(|m| m.id == id)
-                .ok_or_else(|| Error::invalid("Message not found"))?
+            (Some(id), _) => {
+                position(id).ok_or_else(|| Error::invalid("History cursor not found"))?
+            }
+            (_, Some(id)) => (position(id).ok_or_else(|| Error::invalid("Message not found"))?
                 + HISTORY_PAGE_MESSAGES / 2
                 + 1)
             .min(messages.len()),
@@ -223,11 +387,8 @@ pub(crate) fn history_page(
     let mut comments = Vec::new();
     let mut previews = BTreeSet::new();
     let mut bytes = 1024;
-    let candidates: Vec<_> = if let Some(id) = around {
-        let center = messages
-            .iter()
-            .position(|m| m.id == id)
-            .ok_or_else(|| Error::invalid("Message not found"))?;
+    let candidates: Vec<usize> = if let Some(id) = around {
+        let center = position(id).ok_or_else(|| Error::invalid("Message not found"))?;
         let mut indices = vec![center];
         for distance in 1..messages.len() {
             if let Some(index) = center.checked_sub(distance) {
@@ -240,22 +401,26 @@ pub(crate) fn history_page(
                 break;
             }
         }
-        indices
-            .into_iter()
-            .take(HISTORY_PAGE_MESSAGES)
-            .map(|index| messages[index])
-            .collect()
+        indices.into_iter().take(HISTORY_PAGE_MESSAGES).collect()
     } else if after.is_some() {
-        messages[start..end].to_vec()
+        (start..end).collect()
     } else {
-        messages[..end]
-            .iter()
-            .rev()
-            .take(HISTORY_PAGE_MESSAGES)
-            .copied()
-            .collect()
+        (0..end).rev().take(HISTORY_PAGE_MESSAGES).collect()
     };
-    for source in candidates {
+    let loaded = transcripts.load(
+        &candidates
+            .iter()
+            .map(|&i| messages[i].as_str())
+            .collect::<Vec<_>>(),
+    )?;
+    let loaded = loaded
+        .iter()
+        .map(|m| (m.id.as_str(), m))
+        .collect::<HashMap<_, _>>();
+    for index in candidates {
+        let Some(source) = loaded.get(messages[index].as_str()).copied() else {
+            continue;
+        };
         let (message, is_preview) = preview(source);
         let mut related = snapshot
             .comments
@@ -282,18 +447,18 @@ pub(crate) fn history_page(
         selected.push(message);
     }
     if around.is_some() {
-        selected.sort_by_key(|m| messages.iter().position(|source| source.id == m.id));
+        selected.sort_by_key(|m| position(&m.id));
     } else if after.is_none() {
         selected.reverse();
     }
     let oldest = selected.first().map(|m| m.id.clone());
     let has_more = oldest
         .as_ref()
-        .is_some_and(|id| messages.first().is_some_and(|m| &m.id != id));
+        .is_some_and(|id| messages.first().is_some_and(|m| m != id));
     let newest = selected.last().map(|m| m.id.clone());
     let has_newer = newest
         .as_ref()
-        .is_some_and(|id| messages.last().is_some_and(|m| &m.id != id));
+        .is_some_and(|id| messages.last().is_some_and(|m| m != id));
     let mut page = HistoryPage {
         revision: snapshot.revision,
         submissions: historical_submissions(snapshot, &selected),
@@ -307,9 +472,9 @@ pub(crate) fn history_page(
             has_newer,
             preview_ids: previews,
             generation: 0,
-            active_run_ids: active_run_ids(snapshot),
-            progress_summary: progress_summary(snapshot, session),
-            tool_counts: session_tool_counts(snapshot, session),
+            active_run_ids: active_run_ids(snapshot, transcripts),
+            progress_summary: progress_summary(snapshot, session, transcripts),
+            tool_counts: session_tool_counts(transcripts, session),
         },
     };
     // Include cursor, preview references, comments and receipt metadata in the budget.
@@ -339,36 +504,46 @@ pub(crate) fn history_page(
             .history
             .oldest_message_id
             .as_ref()
-            .is_some_and(|id| messages.first().is_some_and(|message| &message.id != id));
+            .is_some_and(|id| messages.first().is_some_and(|message| message != id));
         page.history.has_newer = page
             .history
             .newest_message_id
             .as_ref()
-            .is_some_and(|id| messages.last().is_some_and(|message| &message.id != id));
+            .is_some_and(|id| messages.last().is_some_and(|message| message != id));
     }
     Ok(page)
 }
 
 impl Projection {
+    /// [`Self::view_with`] over the snapshot's own `messages` (tests, fixtures).
     pub(crate) fn view(&self, snapshot: &Snapshot) -> (Snapshot, HistoryState) {
+        self.view_with(snapshot, &snapshot.messages)
+    }
+
+    pub(crate) fn view_with(
+        &self,
+        snapshot: &Snapshot,
+        transcripts: &dyn Transcripts,
+    ) -> (Snapshot, HistoryState) {
         let mut view = metadata(snapshot);
         let mut history = HistoryState {
             session_id: self.session.clone(),
             generation: self.generation,
-            active_run_ids: active_run_ids(snapshot),
-            progress_summary: progress_summary(snapshot, &self.session),
-            tool_counts: session_tool_counts(snapshot, &self.session),
+            active_run_ids: active_run_ids(snapshot, transcripts),
+            progress_summary: progress_summary(snapshot, &self.session, transcripts),
+            tool_counts: session_tool_counts(transcripts, &self.session),
             ..Default::default()
         };
-        let messages = snapshot
-            .messages
-            .iter()
-            .filter(|m| m.session_id == self.session)
-            .collect::<Vec<_>>();
+        // A read failure shows an empty window; the next revision retries.
+        let messages = if self.session.is_empty() {
+            Vec::new()
+        } else {
+            transcripts.index(&self.session).unwrap_or_default()
+        };
         let start = self
             .oldest
             .as_ref()
-            .and_then(|id| messages.iter().position(|m| &m.id == id))
+            .and_then(|id| messages.iter().position(|m| m == id))
             .unwrap_or_else(|| {
                 if self.session.is_empty() {
                     messages.len()
@@ -379,11 +554,19 @@ impl Projection {
         let end = self
             .newest
             .as_ref()
-            .and_then(|id| messages.iter().position(|m| &m.id == id))
+            .and_then(|id| messages.iter().position(|m| m == id))
             .map_or(messages.len(), |i| i + 1);
-        for source in &messages[start.min(end)..end] {
+        let window = transcripts
+            .load(
+                &messages[start.min(end)..end]
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap_or_default();
+        for source in &window {
             let (message, is_preview) = if self.details.contains(&source.id) {
-                ((*source).clone(), false)
+                (source.clone(), false)
             } else {
                 preview(source)
             };
@@ -430,10 +613,21 @@ impl Projection {
         (view, history)
     }
 
+    /// [`Self::request_with`] over the snapshot's own `messages` (tests, fixtures).
+    #[cfg(test)]
     pub(crate) fn request(
         &mut self,
         snapshot: &Snapshot,
         request: StreamRequest,
+    ) -> Result<Option<StreamEvent>, Error> {
+        self.request_with(snapshot, request, &snapshot.messages)
+    }
+
+    pub(crate) fn request_with(
+        &mut self,
+        snapshot: &Snapshot,
+        request: StreamRequest,
+        transcripts: &dyn Transcripts,
     ) -> Result<Option<StreamEvent>, Error> {
         let (session, generation) = match &request {
             StreamRequest::Subscribe {
@@ -488,7 +682,7 @@ impl Projection {
                 self.oldest = if self.session.is_empty() {
                     None
                 } else {
-                    history_page(snapshot, &self.session, None, None, None)?
+                    history_page_with(snapshot, &self.session, None, None, None, transcripts)?
                         .history
                         .oldest_message_id
                 };
@@ -497,16 +691,30 @@ impl Projection {
                 if self.oldest.as_deref() != Some(&before) {
                     return Ok(None);
                 }
-                self.oldest = history_page(snapshot, &self.session, Some(&before), None, None)?
-                    .history
-                    .oldest_message_id
-                    .or_else(|| self.oldest.clone());
+                self.oldest = history_page_with(
+                    snapshot,
+                    &self.session,
+                    Some(&before),
+                    None,
+                    None,
+                    transcripts,
+                )?
+                .history
+                .oldest_message_id
+                .or_else(|| self.oldest.clone());
             }
             StreamRequest::Newer { after, .. } => {
                 if self.newest.as_deref() != Some(&after) {
                     return Ok(None);
                 }
-                let page = history_page(snapshot, &self.session, None, None, Some(&after))?;
+                let page = history_page_with(
+                    snapshot,
+                    &self.session,
+                    None,
+                    None,
+                    Some(&after),
+                    transcripts,
+                )?;
                 self.newest = page
                     .history
                     .has_newer
@@ -514,7 +722,14 @@ impl Projection {
                     .flatten();
             }
             StreamRequest::Around { message_id, .. } => {
-                let page = history_page(snapshot, &self.session, None, Some(&message_id), None)?;
+                let page = history_page_with(
+                    snapshot,
+                    &self.session,
+                    None,
+                    Some(&message_id),
+                    None,
+                    transcripts,
+                )?;
                 self.oldest = page.history.oldest_message_id;
                 self.newest = page
                     .history
@@ -524,10 +739,10 @@ impl Projection {
                 self.details.insert(message_id);
             }
             StreamRequest::Detail { message_id, .. } => {
-                if !snapshot
-                    .messages
+                if !transcripts
+                    .load(&[message_id.as_str()])?
                     .iter()
-                    .any(|m| m.session_id == self.session && m.id == message_id)
+                    .any(|m| m.session_id == self.session)
                 {
                     return Err(Error::invalid("Message not found"));
                 }
@@ -542,11 +757,7 @@ impl Projection {
                 if query.len() > 4096 {
                     return Err(Error::invalid("Search is too long"));
                 }
-                let messages = snapshot
-                    .messages
-                    .iter()
-                    .filter(|m| m.session_id == self.session)
-                    .collect::<Vec<_>>();
+                let messages = transcripts.session(&self.session)?;
                 let hits = messages
                     .iter()
                     .enumerate()
@@ -572,7 +783,14 @@ impl Projection {
                 let message_id = found.map(|(_, m)| m.id.clone());
                 if let Some(id) = &message_id {
                     self.details.clear();
-                    let page = history_page(snapshot, &self.session, None, Some(id), None)?;
+                    let page = history_page_with(
+                        snapshot,
+                        &self.session,
+                        None,
+                        Some(id),
+                        None,
+                        transcripts,
+                    )?;
                     self.oldest = page.history.oldest_message_id;
                     self.newest = page
                         .history
@@ -609,14 +827,20 @@ pub(crate) async fn history(
     ApiPath(session): ApiPath<String>,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<HistoryPage>, Error> {
-    history_page(
-        &workspace.snapshots.borrow(),
-        &session,
-        query.before.as_deref(),
-        query.around.as_deref(),
-        query.after.as_deref(),
-    )
-    .map(Json)
+    let snapshot = workspace.snapshots.borrow().clone();
+    workspace
+        .transcripts
+        .with(|t| {
+            history_page_with(
+                &snapshot,
+                &session,
+                query.before.as_deref(),
+                query.around.as_deref(),
+                query.after.as_deref(),
+                t,
+            )
+        })?
+        .map(Json)
 }
 
 pub(crate) async fn detail(
@@ -624,12 +848,10 @@ pub(crate) async fn detail(
     ApiPath((session, id)): ApiPath<(String, String)>,
 ) -> Result<Json<crate::Message>, Error> {
     workspace
-        .snapshots
-        .borrow()
-        .messages
-        .iter()
-        .find(|m| m.session_id == session && m.id == id)
-        .cloned()
+        .transcripts
+        .with(|t| t.load(&[id.as_str()]))??
+        .into_iter()
+        .find(|m| m.session_id == session)
         .map(Json)
         .ok_or_else(|| Error::invalid("Message not found"))
 }
@@ -677,15 +899,11 @@ pub(crate) async fn search(
     if query.query.len() > 4096 {
         return Err(Error::invalid("Search is too long"));
     }
-    let snapshot = workspace.snapshots.borrow();
+    let snapshot = workspace.snapshots.borrow().clone();
     if !snapshot.sessions.iter().any(|s| s.id == session) {
         return Err(Error::invalid("Session not found"));
     }
-    let messages = snapshot
-        .messages
-        .iter()
-        .filter(|m| m.session_id == session)
-        .collect::<Vec<_>>();
+    let messages = workspace.transcripts.with(|t| t.session(&session))??;
     let start = query
         .after
         .as_ref()
@@ -1115,7 +1333,9 @@ mod tests {
         paragraph.body = "Zero arrived later".into();
         snapshot.messages.push(paragraph.clone());
         assert_eq!(
-            progress_summary(&snapshot, "session-plan").unwrap().text,
+            progress_summary(&snapshot, "session-plan", &snapshot.messages)
+                .unwrap()
+                .text,
             "Checking the adapter λ"
         );
         snapshot
@@ -1125,7 +1345,9 @@ mod tests {
             .body
             .push_str(" with a delta");
         assert_eq!(
-            progress_summary(&snapshot, "session-plan").unwrap().text,
+            progress_summary(&snapshot, "session-plan", &snapshot.messages)
+                .unwrap()
+                .text,
             "Checking the adapter λ"
         );
         paragraph.id = "codex-summary-active-run-next-item-0".into();
@@ -1135,7 +1357,9 @@ mod tests {
         paragraph.body = "Older item late paragraph".into();
         snapshot.messages.push(paragraph.clone());
         assert_eq!(
-            progress_summary(&snapshot, "session-plan").unwrap().text,
+            progress_summary(&snapshot, "session-plan", &snapshot.messages)
+                .unwrap()
+                .text,
             "Current item"
         );
         paragraph.id = "codex-summary-active-run-next-item-31".into();
@@ -1145,7 +1369,9 @@ mod tests {
         paragraph.body = "Invalid index".into();
         snapshot.messages.push(paragraph);
         assert_eq!(
-            progress_summary(&snapshot, "session-plan").unwrap().text,
+            progress_summary(&snapshot, "session-plan", &snapshot.messages)
+                .unwrap()
+                .text,
             "Logical final paragraph"
         );
     }
@@ -1470,7 +1696,7 @@ mod tests {
         store.connection.execute_batch("PRAGMA user_version=10; INSERT INTO receipts VALUES('preserved','request'); INSERT INTO drafts VALUES('preserved','draft');").unwrap();
         drop(store);
         let store = Store::open(&path, AgentProfile::default()).unwrap();
-        let migrated = store.snapshot().unwrap();
+        let migrated = store.full();
         original.protocol_version = PROTOCOL_VERSION;
         assert_eq!(migrated, original);
         for table in ["receipts", "drafts"] {
@@ -1487,7 +1713,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            30
+            33
         );
     }
 
@@ -1522,7 +1748,7 @@ mod tests {
             .unwrap();
         drop(store);
         let store = Store::open(&path, AgentProfile::default()).unwrap();
-        let migrated = store.snapshot().unwrap();
+        let migrated = store.full();
         assert_eq!(migrated.protocol_version, PROTOCOL_VERSION);
         assert_eq!(migrated.messages.len(), 1000);
         assert_eq!(
@@ -1560,7 +1786,7 @@ mod tests {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            30
+            33
         );
     }
 

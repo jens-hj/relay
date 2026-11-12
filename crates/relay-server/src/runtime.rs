@@ -29,7 +29,7 @@ fn workflow_guidance(profile: &AgentProfile) -> String {
     }
     if profile.permissions[&Task::Delegate] != Permission::Deny {
         guidance.push_str(" Complete delegation through cleanup of successful, failed, accidental and superseded inactive workers. Resolve any active or follow-up work first. Archive useful history and evidence by default with archive_agent; archiving a failed attempt does not accept its fix. You may instead choose delete_agent for a disposable archived branch only after retaining needed handoff and evidence elsewhere; deletion irreversibly removes its contents and owned isolated workspaces. Do not clean up active workers or workers needing follow-up.");
-        guidance.push_str(" Use Relay MCP spawn_agent to start child sessions, stop_agent to stop your own descendants, archive_agent to archive inactive descendants and their subtrees while retaining history and workspaces, delete_agent to permanently remove your own entirely archived inactive descendant branch after retaining needed evidence elsewhere, message_agent to queue turns within your tree or for sessions a human mentioned with you, wait_for_agents to block until agents are terminal when you are not acting as a director, list_agents to inspect your subtree, parent and mentioned peers, and report_result to report to your parent with your worktree path. Relay enforces delegation approval and explicit human approval for wider child permissions. Do not start workers outside Relay. Child repository edits use their assigned isolated worktrees; connected directories remain shared. Do not bypass workspace isolation or worker limits.");
+        guidance.push_str(" Use Relay MCP spawn_agent to start child sessions, stop_agent to stop your own descendants, archive_agent to archive inactive descendants and their subtrees while retaining history and workspaces, unarchive_agent to restore availability of your own inactive descendant branch without starting execution or resuming paused turns, delete_agent to permanently remove your own entirely archived inactive descendant branch after retaining needed evidence elsewhere, message_agent to explicitly queue follow-up after unarchiving or within your tree or for sessions a human mentioned with you, wait_for_agents to block until agents are terminal when you are not acting as a director, list_agents to inspect your subtree, parent and mentioned peers, and report_result to report to your parent with your worktree path. Relay enforces delegation approval and explicit human approval for wider child permissions. Do not start workers outside Relay. Child repository edits use their assigned isolated worktrees; connected directories remain shared. Do not bypass workspace isolation or worker limits.");
     }
     guidance
 }
@@ -280,6 +280,8 @@ mod workflow_context_tests {
         assert!(guidance.contains("Do not clean up active workers or workers needing follow-up"));
         assert!(guidance.contains("archiving a failed attempt does not accept its fix"));
         assert!(guidance.contains("delete_agent"));
+        assert!(guidance.contains("unarchive_agent"));
+        assert!(guidance.contains("without starting execution or resuming paused turns"));
         assert!(guidance.contains("verify their results"));
         assert!(!guidance.contains("optional for trivial work"));
         assert!(
@@ -357,6 +359,7 @@ mod workflow_context_tests {
                     "connected directories remain shared",
                     "worker limits",
                     "archive_agent",
+                    "unarchive_agent",
                 ] {
                     assert!(guidance.contains(required), "{required}");
                 }
@@ -1383,27 +1386,13 @@ pub(crate) async fn run(
         }
     }
     // Diff collection runs outside the writer lock and async executor.
-    let snapshot = workspace.snapshots.borrow().clone();
-    let completed_session = snapshot
-        .sessions
-        .iter()
-        .find(|s| s.id == session_id)
-        .unwrap()
-        .clone();
-    let mut workspaces = completed_session.workspaces.clone();
-    if workspaces.is_empty()
-        && let Some(w) = &completed_session.worker
-        && let (Some(path), Some(base)) = (&w.worktree, &w.base_commit)
-    {
-        workspaces.push(SessionWorkspace {
-            connection_id: String::new(),
-            path: path.clone(),
-            repository: true,
-            branch: w.branch.clone(),
-            base_commit: Some(base.clone()),
-            changes: None,
-        });
-    }
+    #[cfg(test)]
+    runtime_gate(&workspace, &session_id, "before_review").await;
+    let workspaces = {
+        let source = workspace.snapshots.borrow();
+        let session = source.sessions.iter().find(|s| s.id == session_id).unwrap();
+        crate::snapshot_views::review_workspaces(session)
+    };
     let reviews = tokio::task::spawn_blocking(move || {
         let mut remaining = DIFF_LIMIT;
         workspaces
@@ -1463,18 +1452,18 @@ pub(crate) async fn run(
                             }
                         }
                         Err(error) => {
-                            w.error = Some(error.to_string());
-                            if !stopped {
-                                w.status = WorkerStatus::Failed;
+                            // Review errors must not pause queued replies after
+                            // a successfully completed harness turn.
+                            if w.error.is_none() {
+                                w.error = Some(error.to_string());
                             }
                         }
                     }
                 }
             }
             Err(error) => {
-                w.error = Some(error.to_string());
-                if !stopped {
-                    w.status = WorkerStatus::Failed;
+                if w.error.is_none() {
+                    w.error = Some(error.to_string());
                 }
             }
         }
@@ -1557,7 +1546,7 @@ async fn execute(
     if *stop.borrow() {
         return Ok(());
     }
-    let snapshot = workspace.snapshots.borrow().clone();
+    let snapshot = crate::snapshot_views::execution(&workspace.snapshots.borrow(), run_id);
     let worker = snapshot
         .sessions
         .iter()
@@ -1575,7 +1564,7 @@ async fn execute(
         .issue(session.issue_id.as_deref().unwrap_or_default())
         .map_err(Error::invalid)?;
     let profile = crate::agent_tools::profile(&snapshot, session)?;
-    let prepare_snapshot = snapshot.clone();
+    let prepare_snapshot = crate::snapshot_views::preparation(&snapshot);
     let prepare_session = session.clone();
     let prepare_config = (*workspace.config).clone();
     let (path, spaces) = tokio::task::spawn_blocking(move || {
@@ -2056,6 +2045,7 @@ async fn execute(
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| Error::invalid("Revision exhausted"))?;
+            let store = &mut *store;
             let transaction = store.connection.transaction().map_err(Error::internal)?;
             if let Some((pid, identity)) = &identity {
                 transaction
@@ -2065,12 +2055,12 @@ async fn execute(
                     )
                     .map_err(Error::internal)?;
             }
-            transaction
-                .execute(
-                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
-                    [serde_json::to_string(&current).map_err(Error::internal)?],
-                )
-                .map_err(Error::internal)?;
+            let current = crate::persist(
+                &store.snapshot_cache,
+                &store.transcripts,
+                &transaction,
+                current,
+            )?;
             transaction.commit().map_err(Error::internal)?;
             workspace.snapshots.send_replace(current);
             Ok(())

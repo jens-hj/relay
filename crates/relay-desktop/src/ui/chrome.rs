@@ -54,15 +54,46 @@ pub(crate) fn PageHeader(
     header
 }
 
+/// Requests waiting for a person's answer, outside archived chats.
+pub(crate) fn needs_you(snapshot: &Snapshot) -> usize {
+    snapshot
+        .tool_permissions
+        .iter()
+        .filter(|p| p.decision.is_none() && !p.expired)
+        .filter(|p| {
+            snapshot
+                .sessions
+                .iter()
+                .any(|s| s.id == p.session_id && !s.archived)
+        })
+        .count()
+}
+
+/// Opens the folded sidebar. While requests wait for an answer it shows
+/// their count, since the sidebar's Needs You section is hidden here.
 #[component]
 pub(crate) fn NavigationButton(model: Model) -> Element {
+    let waiting = Derived::new(move || model.snapshot.with(needs_you));
     view! {
-        row width:{if model.mobile_navigation.get() {44.0} else {0.0}}px shrink:0 {
+        row
+            width:{if !model.mobile_navigation.get() {0.0} else if waiting.get() > 0 {68.0} else {44.0}}px
+            shrink:0 {
             if model.mobile_navigation.get() {
-                CellButton label:"Open navigation"
+                CellButton
+                    label:(Derived::new(move || match waiting.get() {
+                        0 => "Open navigation".to_string(),
+                        count => format!("Open navigation, {count} need you"),
+                    }))
                     on-press:(press(move || model.sidebar_open.set(true)))
                     rule:(relay_ui::prelude::Rule::Right) horizontal-inset:(0.0) {
-                    icon size:18px navigation-icon
+                    row width:max-content height:min-content gap:{px(6.0)}px {
+                        icon size:18px navigation-icon
+                        if waiting.get() > 0 {
+                            Label text:(Derived::new(move || waiting.get().to_string()))
+                                role:(TextRole::Label) weight:600
+                                tone:(Tone::Signal(relay_ui::tokens::Signal::NeedsYou))
+                        }
+                    }
                 }
             }
         }
