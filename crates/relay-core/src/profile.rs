@@ -98,6 +98,13 @@ pub struct AgentProfile {
     /// The agent keeps a progress estimate and summary through Relay MCP.
     #[serde(default = "report_progress_default")]
     pub report_progress: bool,
+    /// Queue a turn when the reported five-hour usage window resets.
+    #[serde(default)]
+    pub notify_session_usage_reset: bool,
+    /// Claude Code only; ignored for Codex.
+    #[serde(default)]
+    pub notify_weekly_usage_reset: bool,
+
     /// Empty only for legacy profiles that have not selected a model yet.
     #[serde(default)]
     pub model: String,
@@ -217,6 +224,11 @@ pub struct ProfileOverrides {
     pub network_access: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_progress: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_session_usage_reset: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_weekly_usage_reset: Option<bool>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -240,6 +252,12 @@ pub struct ProfileOverrides {
 impl ProfileOverrides {
     pub fn between(base: &AgentProfile, profile: &AgentProfile) -> Self {
         Self {
+            notify_session_usage_reset: (base.notify_session_usage_reset
+                != profile.notify_session_usage_reset)
+                .then_some(profile.notify_session_usage_reset),
+            notify_weekly_usage_reset: (base.notify_weekly_usage_reset
+                != profile.notify_weekly_usage_reset)
+                .then_some(profile.notify_weekly_usage_reset),
             network_access: (base.network_access != profile.network_access)
                 .then_some(profile.network_access),
             report_progress: (base.report_progress != profile.report_progress)
@@ -262,6 +280,12 @@ impl ProfileOverrides {
     }
     pub fn resolve(&self, base: &AgentProfile) -> AgentProfile {
         AgentProfile {
+            notify_session_usage_reset: self
+                .notify_session_usage_reset
+                .unwrap_or(base.notify_session_usage_reset),
+            notify_weekly_usage_reset: self
+                .notify_weekly_usage_reset
+                .unwrap_or(base.notify_weekly_usage_reset),
             network_access: self.network_access.unwrap_or(base.network_access),
             report_progress: self.report_progress.unwrap_or(base.report_progress),
             model: self.model.clone().unwrap_or_else(|| {
@@ -686,6 +710,38 @@ mod tests {
         assert_eq!(
             ProfileOverrides::from_toml(&overrides.to_toml()).unwrap(),
             overrides
+        );
+    }
+}
+
+#[cfg(test)]
+mod usage_reset_tests {
+    use super::*;
+
+    #[test]
+    fn reset_preferences_default_off_and_inherit_with_explicit_overrides() {
+        let base = AgentProfile::default();
+        assert!(!base.notify_session_usage_reset && !base.notify_weekly_usage_reset);
+        let legacy = base
+            .to_toml()
+            .lines()
+            .filter(|l| !l.starts_with("notify_"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(AgentProfile::from_toml(&legacy).unwrap(), base);
+        let mut enabled = base.clone();
+        enabled.notify_session_usage_reset = true;
+        enabled.notify_weekly_usage_reset = true;
+        let overrides = ProfileOverrides::between(&base, &enabled);
+        assert_eq!(overrides.resolve(&base), enabled);
+        assert_eq!(ProfileOverrides::default().resolve(&enabled), enabled);
+        let off = ProfileOverrides::from_toml("notify_session_usage_reset = false")
+            .unwrap()
+            .resolve(&enabled);
+        assert!(!off.notify_session_usage_reset && off.notify_weekly_usage_reset);
+        assert_eq!(
+            AgentProfile::from_toml(&enabled.to_toml()).unwrap(),
+            enabled
         );
     }
 }

@@ -16086,3 +16086,45 @@ fn compact_navigation_counts_requests_waiting_for_an_answer() {
     mounted.settle();
     assert!(has_label(&mounted, "Open navigation"));
 }
+
+#[test]
+fn profile_usage_reset_options_save_and_inherit() {
+    let mut mounted = mount(false, 1380.0);
+    let id = mounted.model.snapshot.get_untracked().agent_configs[0]
+        .id
+        .clone();
+    mounted.model.open_profile(EditTarget::Config(id));
+    mounted
+        .model
+        .modify_profile("harness", |p| p.harness = Harness::Codex);
+    mounted.settle();
+    assert!(
+        !mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .any(|n| n.label.as_deref() == Some("Notify on Weekly Usage Reset: On"))
+    );
+
+    mounted
+        .model
+        .modify_profile("harness", |p| p.harness = Harness::ClaudeCode);
+    mounted.settle();
+    mounted.focus("Notify on Session Usage Reset: On");
+    mounted.click("Notify on Session Usage Reset: On");
+    mounted.focus("Notify on Weekly Usage Reset: On");
+    mounted.click("Notify on Weekly Usage Reset: On");
+    let p = mounted.model.editor_profile.get_untracked();
+    assert!(p.notify_session_usage_reset && p.notify_weekly_usage_reset);
+    mounted.model.save_profile();
+    let envelope = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(&envelope.command, Command::UpdateAgentConfig { overrides, .. }
+        if overrides.notify_session_usage_reset == Some(true) && overrides.notify_weekly_usage_reset == Some(true))
+    );
+    mounted.model.inherit("notify_session_usage_reset");
+    mounted.model.inherit("notify_weekly_usage_reset");
+    let p = mounted.model.editor_profile.get_untracked();
+    assert!(!p.notify_session_usage_reset && !p.notify_weekly_usage_reset);
+}

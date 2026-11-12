@@ -76,6 +76,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::net::SocketAddr::new(ip, address.port())
     ));
     shutdown.start_window_start();
+    shutdown.start_usage_reset_notifications();
     eprintln!(
         "Relay server listening on {} · database {}",
         listener.local_addr()?,

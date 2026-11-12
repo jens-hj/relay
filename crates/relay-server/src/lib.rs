@@ -34,6 +34,7 @@ mod runtime;
 mod snapshot_cache;
 mod snapshot_views;
 mod spawn_attempts;
+mod usage_reset;
 mod window_start;
 pub use agent_tools::stdio as mcp_stdio;
 pub use runtime::{RemoteConfig, RuntimeConfig};
@@ -335,7 +336,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 33 {
+        if version > 34 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -365,7 +366,8 @@ impl Store {
              CREATE TABLE IF NOT EXISTS lifecycle_events(child_session TEXT NOT NULL,child_run TEXT NOT NULL,parent_session TEXT NOT NULL,disposition TEXT NOT NULL,notice_id TEXT,hold_reason TEXT,attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,held INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(child_session,child_run,parent_session));
              CREATE INDEX IF NOT EXISTS lifecycle_pending ON lifecycle_events(parent_session,disposition);
              CREATE TABLE IF NOT EXISTS lifecycle_holds(session_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,reason TEXT NOT NULL);
-             PRAGMA user_version = 33;"
+             CREATE TABLE IF NOT EXISTS usage_reset_notices(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, harness TEXT NOT NULL, window TEXT NOT NULL, resets_at INTEGER NOT NULL, delivered INTEGER NOT NULL DEFAULT 0);
+             PRAGMA user_version = 34;"
         ).map_err(Error::internal)?;
         // Schema 32 keeps a spawn awaiting approval, to continue it once
         // decided; older servers would cancel it and drop the request.

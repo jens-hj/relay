@@ -153,6 +153,14 @@ pub(crate) fn overridden_fields(overrides: &ProfileOverrides) -> Vec<&'static st
         ("Model", overrides.model.is_some()),
         ("Execution", overrides.execution.is_some()),
         ("Network", overrides.network_access.is_some()),
+        (
+            "Notify on Session Usage Reset",
+            overrides.notify_session_usage_reset.is_some(),
+        ),
+        (
+            "Notify on Weekly Usage Reset",
+            overrides.notify_weekly_usage_reset.is_some(),
+        ),
         ("Progress", overrides.report_progress.is_some()),
         ("Scope", overrides.scope.is_some()),
         ("Responsibilities", overrides.responsibilities.is_some()),
@@ -866,6 +874,50 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
             }
         },
     );
+    let notify_session_usage_reset_index =
+        Derived::new(move || usize::from(model.editor_profile.get().notify_session_usage_reset));
+    let choose_notify_session_usage_reset: std::rc::Rc<dyn Fn(usize)> =
+        std::rc::Rc::new(move |slot| {
+            model.modify_profile("notify_session_usage_reset", |p| {
+                p.notify_session_usage_reset = slot == 1
+            });
+        });
+    let notify_session_usage_reset = field_module(
+        model,
+        "Notify on Session Usage Reset",
+        "notify_session_usage_reset",
+        None,
+        view! {
+            row height:{px(48.0)}px {
+                Segments name:("Notify on Session Usage Reset".to_string())
+                    options:(vec!["Off".to_string(), "On".to_string()])
+                    selected:(relay_ui::Live::from(notify_session_usage_reset_index))
+                    on-select:(choose_notify_session_usage_reset)
+            }
+        },
+    );
+    let notify_weekly_usage_reset_index =
+        Derived::new(move || usize::from(model.editor_profile.get().notify_weekly_usage_reset));
+    let choose_notify_weekly_usage_reset: std::rc::Rc<dyn Fn(usize)> =
+        std::rc::Rc::new(move |slot| {
+            model.modify_profile("notify_weekly_usage_reset", |p| {
+                p.notify_weekly_usage_reset = slot == 1
+            });
+        });
+    let notify_weekly_usage_reset = field_module(
+        model,
+        "Notify on Weekly Usage Reset",
+        "notify_weekly_usage_reset",
+        None,
+        view! {
+            row height:{px(48.0)}px {
+                Segments name:("Notify on Weekly Usage Reset".to_string())
+                    options:(vec!["Off".to_string(), "On".to_string()])
+                    selected:(relay_ui::Live::from(notify_weekly_usage_reset_index))
+                    on-select:(choose_notify_weekly_usage_reset)
+            }
+        },
+    );
     let whole = view! {
         CellButton label:"Scope: Whole project" selected:(whole_project)
             on-press:(press(move || model.modify_profile("scope", |p| p.scope = AgentScope::Project))) {
@@ -938,7 +990,11 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
     );
     view! {
         col height:min-content gap:0px {
-            { for module in [&harness, &model_selection, &approval, &network, &progress, &scope, &workers, &worker_model] { parent.adopt(module); } }
+            { for module in [&harness, &model_selection, &approval, &network, &progress, &notify_session_usage_reset] { parent.adopt(module); } }
+            if model.editor_profile.get().harness == Harness::ClaudeCode {
+                { parent.adopt(&notify_weekly_usage_reset); }
+            }
+            { for module in [&scope, &workers, &worker_model] { parent.adopt(module); } }
         }
     }
 }

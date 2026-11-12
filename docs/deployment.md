@@ -94,3 +94,34 @@ Replace the example values with the built packages and existing installation. Pr
 Run `nix develop --command just deploy-check` to exercise deployment decisions with isolated fixtures. These checks belong to `just check`; they do not restart production services or contact the public deployment.
 
 The regression that matters for the reported incident is: activate a locally healthy candidate, fail public TLS verification, retain that candidate with a pending status, then complete verification successfully without another restart.
+
+## Usage Reset Notifications: Schema 33 to 34
+
+[Issue #173](https://github.com/jens-hj/relay/issues/173) adds opt-in profile
+booleans `notify_session_usage_reset` and `notify_weekly_usage_reset`.
+Both default to false and support profile inheritance. Codex only uses the
+session option; Claude Code supports both. Session means the reported five-hour
+usage window, not the conversation's context window.
+
+The scheduler observes future reset timestamps reported to Relay and queues one
+notice per enabled agent and window when the timestamp is reached. It does not
+poll provider accounts or claim that a new quota has been confirmed. Unknown
+and already-expired timestamps do not arm new notices. Existing running agents
+receive a queued turn; stopped or paused agents retain it for review. Disabling
+an option or archiving an agent cancels its pending notices. Overdue records
+recovered at startup become paused turns, never automatic work replay.
+
+Schema 34 adds an initially empty `usage_reset_notices` table. Delivery receipts
+commit atomically with queued submissions, so restart cannot duplicate a notice.
+Protocol 19 protects clients from profile fields older clients cannot deserialize.
+The migration retains existing data and defaults all new settings off.
+
+Deploy matching immutable server/browser builds using the helper with
+`previous_schema_version: 33`, `schema_version: 34`,
+`previous_protocol_version: 18`, and `protocol_version: 19`.
+Keep a protected SQLite backup and previous bundle GC root before activation.
+After migration, schema 33 binaries cannot safely open the database; recover with
+a schema 34 fix. Do not restore the pre-migration backup over later writes without
+an explicit recovery decision. Verify local and public revision and asset checks
+through the helper; a public transport failure leaves the healthy candidate active
+and retries verification only.
