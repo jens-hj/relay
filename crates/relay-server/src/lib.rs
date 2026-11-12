@@ -264,7 +264,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 29 {
+        if version > 30 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -291,7 +291,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS spawn_notice_consumption(notice_id TEXT PRIMARY KEY, caller TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS spawn_requests(id TEXT PRIMARY KEY, attempt TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS workspace_waits(session_id TEXT PRIMARY KEY);
-             PRAGMA user_version = 29;"
+             PRAGMA user_version = 30;"
         ).map_err(Error::internal)?;
         let mut seed = demo_snapshot(defaults.clone());
         // The isolated demo shows an example orchestration and usage; a live
@@ -402,6 +402,27 @@ impl Store {
             // empty) and moves the snapshot to protocol 16. Older servers would drop the
             // grants, so the version bump keeps them from opening the
             // database. Older data loads without grants.
+            let json: String = connection
+                .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
+                    r.get(0)
+                })
+                .map_err(Error::internal)?;
+            let mut snapshot: Snapshot = serde_json::from_str(&json).map_err(Error::internal)?;
+            snapshot.protocol_version = PROTOCOL_VERSION;
+            connection
+                .execute(
+                    "UPDATE workspace SET snapshot=?1 WHERE id=1",
+                    [serde_json::to_string(&snapshot).map_err(Error::internal)?],
+                )
+                .map_err(Error::internal)?;
+        }
+        if version < 30 {
+            // Schema 30 stores the per-agent progress report setting
+            // (`report_progress`, on when absent) and each session's latest
+            // progress report, and moves the snapshot to protocol 17. Older
+            // servers reject the profile field, so the version bump keeps them
+            // from opening the database. Older data loads with reports on and
+            // no progress recorded.
             let json: String = connection
                 .query_row("SELECT snapshot FROM workspace WHERE id=1", [], |r| {
                     r.get(0)
@@ -623,6 +644,7 @@ impl Store {
                     execution_approval: None,
                 });
                 child.compactions.clear();
+                child.progress = None;
                 child.selection = profile.model_selection();
                 if child.selection.model.is_none() {
                     return Err(Error::invalid("Choose a model before creating this worker"));
@@ -947,6 +969,7 @@ impl Store {
                     parent_session_id: None,
                     spawn: None,
                     compactions: vec![],
+                    progress: None,
                     workspaces: vec![],
                     selection: Default::default(),
                     conversations: vec![],

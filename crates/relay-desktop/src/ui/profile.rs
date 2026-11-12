@@ -14,7 +14,7 @@ use relay_ui::surfaces::{
 use relay_ui::tokens::Signal;
 
 /// Profile fields an agent can override, each as a whole.
-const OVERRIDE_FIELDS: usize = 9;
+const OVERRIDE_FIELDS: usize = 10;
 
 #[component]
 fn AgentProfileSelector(model: Model) -> Element {
@@ -153,6 +153,7 @@ pub(crate) fn overridden_fields(overrides: &ProfileOverrides) -> Vec<&'static st
         ("Model", overrides.model.is_some()),
         ("Execution", overrides.execution.is_some()),
         ("Network", overrides.network_access.is_some()),
+        ("Progress", overrides.report_progress.is_some()),
         ("Scope", overrides.scope.is_some()),
         ("Responsibilities", overrides.responsibilities.is_some()),
         ("Completion", overrides.completion.is_some()),
@@ -815,6 +816,31 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
             }
         },
     );
+    let progress_index =
+        Derived::new(move || usize::from(model.editor_profile.get().report_progress));
+    let choose_progress: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot| {
+        model.modify_profile("report_progress", |p| p.report_progress = slot == 1);
+    });
+    let progress = field_module(
+        model,
+        "Progress Reports",
+        "report_progress",
+        None,
+        view! {
+            col height:min-content gap:0px {
+                row height:{px(48.0)}px {
+                    Segments name:("Progress Reports".to_string())
+                        options:(vec!["Off".to_string(), "On".to_string()])
+                        selected:(relay_ui::Live::from(progress_index)) on-select:(choose_progress)
+                }
+                row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px) {
+                    Label
+                        text:"The agent reports a progress estimate, its confidence, and what is completed and remaining while it works. Changes apply to the next turn."
+                        role:(TextRole::Caption) tone:(Tone::Muted)
+                }
+            }
+        },
+    );
     let whole = view! {
         CellButton label:"Scope: Whole project" selected:(whole_project)
             on-press:(press(move || model.modify_profile("scope", |p| p.scope = AgentScope::Project))) {
@@ -887,7 +913,7 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
     );
     view! {
         col height:min-content gap:0px {
-            { for module in [&harness, &model_selection, &approval, &network, &scope, &workers, &worker_model] { parent.adopt(module); } }
+            { for module in [&harness, &model_selection, &approval, &network, &progress, &scope, &workers, &worker_model] { parent.adopt(module); } }
         }
     }
 }

@@ -1,5 +1,6 @@
 harness = "codex"
 network_access = true
+report_progress = true
 responsibilities = ["plan", "delegate", "verify", "review"]
 completion = ["verify", "review"]
 max_workers = 4

@@ -35,6 +35,7 @@ pub mod marks;
 pub mod model;
 pub mod motion;
 pub mod overlay;
+pub mod progress;
 pub mod session_header;
 pub mod status;
 pub mod surfaces;
@@ -82,6 +83,7 @@ pub mod prelude {
     pub use crate::model::{Effort, ModelHue, ModelIdentity};
     pub use crate::motion::{Breath, breathe};
     pub use crate::overlay::{Popover, PopoverContent, PopoverProps, Tooltip, TooltipProps};
+    pub use crate::progress::{ProgressStrip, ProgressStripProps, TaskProgress};
     pub use crate::session_header::{
         ControlBlock, ControlBlockProps, SessionHeader, SessionHeaderProps,
     };

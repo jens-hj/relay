@@ -1148,6 +1148,7 @@ fn start(
         parent_session_id: None,
         spawn: None,
         compactions: vec![],
+        progress: None,
         id: session_id.clone(),
         project_id: project.id,
         issue_id: Some(issue_id),

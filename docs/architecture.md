@@ -91,6 +91,14 @@ relaunch records Blocked. Changes apply on the next turn, including resumed
 threads; a setting changed during launch preparation requires the user to send
 again. The combined server writes schema 28 and protocol 16, preserving both the network preferences and launch metadata alongside session peer grants. Migration normalizes network defaults for versions below 26, then adds peer defaults and rewrites the protocol for versions below 27 in the same transaction.
 
+### Progress reports
+
+Each profile has `report_progress` (on by default, inheritable and overridable like network access). While it is on, the agent's tool list includes `report_progress { percent, confidence, completed, remaining }` and its generated context tells it to keep the report current: when it starts, after milestones, when workers report back and before it ends a turn. `percent` is its estimate of how much of the current end goal is done, counting its workers; `confidence` is how sure it is of that estimate; `completed` and `remaining` are a few sentences each (at most 600 characters). The server stores the latest report on the session (`Session.progress`); it is session state, not a transcript entry, and stays across turns. `list_agents` and `wait_for_agents` include each agent's report with the likely range, so a parent can count its workers' progress. A child starts without its parent's report. With the setting off the tool is not listed, a call is rejected, and the next turn clears a stored report.
+
+The likely range is half the missing confidence on each side of `percent`, within 0 to 100 (`ProgressReport::range`). The desktop draws the report as a strip under the session's tool call strip: the fill ends at the estimate and a fainter band covers the range. Hovering or focusing the strip shows what is completed and what remains; pressing it keeps that open until it is pressed again.
+
+Schema 30 (protocol 17) adds the setting and the session report. Older data loads with reports on and none recorded; the migration only rewrites the protocol. This is distinct from `HistoryState.progress_summary`, the harness reasoning summary shown on the thinking line.
+
 ### Session mentions
 
 A human can mention another agent session in a message. The message part (`PartKind::SessionMention`) stores the session ID, which is authoritative, and a "<project> • <title>" label captured when it was selected. Every harness receives `@<label> [Relay session <id>]` in place of the part. Drafts may hold mentions of sessions that no longer exist, so stale drafts still load.

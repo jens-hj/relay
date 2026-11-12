@@ -35,3 +35,16 @@ pub fn context_view(session: &Session) -> Option<ContextView> {
     }
     Some(view)
 }
+
+/// A session's progress report with the likely range its confidence implies.
+pub fn session_progress(report: &relay_core::ProgressReport) -> relay_ui::prelude::TaskProgress {
+    let (low, high) = report.range();
+    relay_ui::prelude::TaskProgress {
+        percent: report.percent.min(100),
+        low,
+        high,
+        confidence: report.confidence.min(100),
+        completed: report.completed.clone(),
+        remaining: report.remaining.clone(),
+    }
+}

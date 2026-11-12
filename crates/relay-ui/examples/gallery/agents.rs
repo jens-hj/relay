@@ -259,6 +259,19 @@ fn usage_section() -> Element {
     }
 }
 
+/// A progress report at `percent`, with the range its confidence implies.
+pub fn board_progress(percent: u8, confidence: u8) -> TaskProgress {
+    let spread = (100 - confidence) / 2;
+    TaskProgress {
+        percent,
+        low: percent.saturating_sub(spread),
+        high: (percent + spread).min(100),
+        confidence,
+        completed: "The profile setting and the report tool exist, and the server stores the latest report on the session.".into(),
+        remaining: "The strip is not drawn in the conversation yet. Worker progress is not counted.".into(),
+    }
+}
+
 /// The conversation board's session fingerprint.
 pub fn board_tools() -> Vec<ToolCount> {
     use relay_ui::tokens::ToolKind::*;
@@ -346,6 +359,13 @@ fn header_section() -> Element {
             caption("Tool usage strip")
             col width:{px(560.0)}px height:min-content {
                 FingerprintStrip tools:(board_tools())
+            }
+            caption("Progress strip · working with a likely range, at rest and certain, at rest and unsure")
+            col width:{px(560.0)}px height:min-content gap:{px(10.0)}px {
+                ProgressStrip progress:(board_progress(60, 70)) working:(true)
+                    open:(State::new(false))
+                ProgressStrip progress:(board_progress(100, 100)) open:(State::new(false))
+                ProgressStrip progress:(board_progress(35, 40)) open:(State::new(false))
             }
         }
     }

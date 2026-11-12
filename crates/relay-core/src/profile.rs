@@ -95,6 +95,9 @@ pub struct AgentProfile {
     /// Network access is independent of filesystem access and approval mode.
     #[serde(default = "network_access_default")]
     pub network_access: bool,
+    /// The agent keeps a progress estimate and summary through Relay MCP.
+    #[serde(default = "report_progress_default")]
+    pub report_progress: bool,
     /// Empty only for legacy profiles that have not selected a model yet.
     #[serde(default)]
     pub model: String,
@@ -113,6 +116,10 @@ pub struct AgentProfile {
 }
 
 fn network_access_default() -> bool {
+    true
+}
+
+fn report_progress_default() -> bool {
     true
 }
 
@@ -208,6 +215,8 @@ pub struct AgentTemplate {
 pub struct ProfileOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_access: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_progress: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -233,6 +242,8 @@ impl ProfileOverrides {
         Self {
             network_access: (base.network_access != profile.network_access)
                 .then_some(profile.network_access),
+            report_progress: (base.report_progress != profile.report_progress)
+                .then_some(profile.report_progress),
             model: (base.model != profile.model
                 || (base.harness != profile.harness && !profile.model.is_empty()))
             .then(|| profile.model.clone()),
@@ -252,6 +263,7 @@ impl ProfileOverrides {
     pub fn resolve(&self, base: &AgentProfile) -> AgentProfile {
         AgentProfile {
             network_access: self.network_access.unwrap_or(base.network_access),
+            report_progress: self.report_progress.unwrap_or(base.report_progress),
             model: self.model.clone().unwrap_or_else(|| {
                 if self.harness.is_some_and(|h| h != base.harness) {
                     String::new()
@@ -295,6 +307,41 @@ impl ProfileOverrides {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn progress_reports_default_on_and_false_overrides_inherit_and_reset() {
+        let base = AgentProfile::default();
+        assert!(base.report_progress);
+        let legacy = base.to_toml().replace("report_progress = true\n", "");
+        assert!(AgentProfile::from_toml(&legacy).unwrap().report_progress);
+        let mut json = serde_json::to_value(&base).unwrap();
+        json.as_object_mut().unwrap().remove("report_progress");
+        assert!(
+            serde_json::from_value::<AgentProfile>(json)
+                .unwrap()
+                .report_progress
+        );
+
+        let overrides = ProfileOverrides::from_toml("report_progress = false").unwrap();
+        assert_eq!(overrides.report_progress, Some(false));
+        let resolved = overrides.resolve(&base);
+        assert!(!resolved.report_progress);
+        assert_eq!(ProfileOverrides::between(&base, &resolved), overrides);
+        assert_eq!(
+            ProfileOverrides::from_toml(&overrides.to_toml()).unwrap(),
+            overrides
+        );
+        assert!(
+            !AgentProfile::from_toml(&resolved.to_toml())
+                .unwrap()
+                .report_progress
+        );
+        assert!(!AgentProfile::worker(&resolved).report_progress);
+        assert!(ProfileOverrides::default().resolve(&base).report_progress);
+        assert_eq!(
+            ProfileOverrides::between(&base, &base).report_progress,
+            None
+        );
+    }
     #[test]
     fn network_defaults_and_false_overrides_are_independent_of_execution() {
         let base = AgentProfile::default();

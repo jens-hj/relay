@@ -162,6 +162,37 @@ pub struct Session {
     /// Every context compaction reported by the harness, across runs.
     #[serde(default)]
     pub compactions: Vec<Compaction>,
+    /// The agent's latest progress report; kept across turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ProgressReport>,
+}
+
+/// An agent's own estimate of how far its task is toward the current goal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgressReport {
+    /// Share of the goal that is done, 0 to 100.
+    pub percent: u8,
+    /// How sure the agent is of `percent`, 0 to 100.
+    pub confidence: u8,
+    pub completed: String,
+    pub remaining: String,
+    pub updated_ms: u64,
+}
+
+impl ProgressReport {
+    /// The longest `completed` or `remaining` text, in characters.
+    pub const TEXT_LIMIT: usize = 600;
+
+    /// The likely range around `percent`: half of the missing confidence on
+    /// each side, kept within 0 to 100. Full confidence is the estimate alone.
+    pub fn range(&self) -> (u8, u8) {
+        let percent = self.percent.min(100);
+        let spread = (100 - self.confidence.min(100)) / 2;
+        (
+            percent.saturating_sub(spread),
+            percent.saturating_add(spread).min(100),
+        )
+    }
 }
 
 /// What a parent session asked a sub-agent to do, and the permissions it granted.
@@ -1343,6 +1374,49 @@ mod launched_network_tests {
         assert_eq!(
             serde_json::from_value::<WorkerRun>(serde_json::to_value(&worker).unwrap()).unwrap(),
             worker
+        );
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    fn report(percent: u8, confidence: u8) -> ProgressReport {
+        ProgressReport {
+            percent,
+            confidence,
+            completed: "Done so far.".into(),
+            remaining: "Still left.".into(),
+            updated_ms: 1,
+        }
+    }
+
+    #[test]
+    fn range_is_half_the_missing_confidence_on_each_side_within_bounds() {
+        assert_eq!(report(40, 100).range(), (40, 40));
+        assert_eq!(report(40, 60).range(), (20, 60));
+        assert_eq!(report(40, 61).range(), (21, 59));
+        assert_eq!(report(10, 0).range(), (0, 60));
+        assert_eq!(report(95, 50).range(), (70, 100));
+        assert_eq!(report(0, 100).range(), (0, 0));
+        assert_eq!(report(100, 100).range(), (100, 100));
+        // Out-of-range stored values never produce a range outside 0 to 100.
+        assert_eq!(report(250, 250).range(), (100, 100));
+    }
+
+    #[test]
+    fn progress_is_absent_for_legacy_sessions_and_round_trips() {
+        let snapshot = demo_snapshot(AgentProfile::default());
+        let mut session = snapshot.sessions[0].clone();
+        session.progress = None;
+        let json = serde_json::to_value(&session).unwrap();
+        assert!(json.get("progress").is_none());
+        assert_eq!(serde_json::from_value::<Session>(json).unwrap(), session);
+        session.progress = Some(report(42, 80));
+        assert_eq!(
+            serde_json::from_value::<Session>(serde_json::to_value(&session).unwrap()).unwrap(),
+            session
         );
     }
 }

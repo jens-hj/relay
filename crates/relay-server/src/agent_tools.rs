@@ -251,7 +251,12 @@ fn state(snapshot: &Snapshot, id: &str) -> Value {
         .rev()
         .find(|m| m.session_id == id && m.kind == "agent_result" && matches!(m.tool.as_ref().and_then(|t|t.detail.as_ref()),Some(ToolDetail::Result {from_session_id:Some(from),..}) if from == id));
     let result = result.and_then(|m| serde_json::from_str::<Value>(&m.body).ok());
-    json!({"id":id,"title":session.title,"parent_session_id":session.parent_session_id,"status":session.worker.as_ref().map(|w| &w.status),"archived":session.archived,"worktree":session.worker.as_ref().and_then(|w| w.worktree.as_ref()),"result":result})
+    json!({"id":id,"title":session.title,"parent_session_id":session.parent_session_id,"status":session.worker.as_ref().map(|w| &w.status),"archived":session.archived,"worktree":session.worker.as_ref().and_then(|w| w.worktree.as_ref()),"result":result,"progress":session.progress.as_ref().map(progress_state)})
+}
+/// A progress report as agents see it, with the likely range the confidence implies.
+fn progress_state(progress: &ProgressReport) -> Value {
+    let (low, high) = progress.range();
+    json!({"percent":progress.percent,"confidence":progress.confidence,"likely_range":[low, high],"completed":progress.completed,"remaining":progress.remaining,"updated_ms":progress.updated_ms})
 }
 fn rank(permission: Permission) -> u8 {
     match permission {
@@ -295,6 +300,14 @@ struct ResultInput {
     summary: String,
     #[serde(default)]
     attachments: Vec<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressInput {
+    percent: u8,
+    confidence: u8,
+    completed: String,
+    remaining: String,
 }
 fn parse<T: serde::de::DeserializeOwned>(input: Value) -> Result<T, Error> {
     serde_json::from_value(input).map_err(|_| Error::invalid("Invalid tool arguments"))
@@ -599,9 +612,11 @@ async fn dispatch(
                 .project(&caller.project_id)
                 .map_err(Error::invalid)?
                 .spawn_execution_approval;
+            let profile = profile(&snapshot, caller)?;
             Ok(tools(
-                &profile(&snapshot, caller)?.worker_models,
+                &profile.worker_models,
                 crate::nix::permission(&snapshot, caller)?,
+                profile.report_progress,
                 Some((crate::harness::mode(&snapshot, &caller.id)?, approval)),
             ))
         }
@@ -755,8 +770,57 @@ async fn dispatch(
             })?;
             Ok(json!({"reported":true}))
         }
+        PROGRESS_TOOL => {
+            let args: ProgressInput = parse(input)?;
+            if args.percent > 100 || args.confidence > 100 {
+                return Err(Error::invalid(
+                    "percent and confidence must be between 0 and 100",
+                ));
+            }
+            let completed = progress_text("completed", &args.completed)?;
+            let remaining = progress_text("remaining", &args.remaining)?;
+            workspace.update_run(caller, run, |snapshot| {
+                if *stop.borrow() {
+                    return Err(unauthorized());
+                }
+                let session = snapshot.sessions.iter().find(|s| s.id == caller).unwrap();
+                if !profile(snapshot, session)?.report_progress {
+                    return Err(Error::invalid(
+                        "Progress reports are turned off for this agent",
+                    ));
+                }
+                let session = snapshot
+                    .sessions
+                    .iter_mut()
+                    .find(|s| s.id == caller)
+                    .unwrap();
+                session.progress = Some(ProgressReport {
+                    percent: args.percent,
+                    confidence: args.confidence,
+                    completed,
+                    remaining,
+                    updated_ms: tool_activity::now_ms(),
+                });
+                Ok(())
+            })?;
+            Ok(json!({"reported":true}))
+        }
         _ => Err(Error::invalid("Unknown Relay tool")),
     }
+}
+/// A trimmed progress text: required, and at most `ProgressReport::TEXT_LIMIT` characters.
+fn progress_text(field: &str, text: &str) -> Result<String, Error> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(Error::invalid(format!("{field} must not be empty")));
+    }
+    if text.chars().count() > ProgressReport::TEXT_LIMIT {
+        return Err(Error::invalid(format!(
+            "{field} must be at most {} characters",
+            ProgressReport::TEXT_LIMIT
+        )));
+    }
+    Ok(text.to_owned())
 }
 fn tool_message(
     session: &str,
@@ -1112,6 +1176,7 @@ async fn spawn(
     child.role = SessionRole::Worker;
     child.parent_session_id = Some(caller.into());
     child.compactions.clear();
+    child.progress = None;
     child.selection = selection;
     child.spawn = Some(SpawnGrant {
         task: args.task,
@@ -1520,10 +1585,15 @@ fn worker_models(snapshot: &Snapshot, policy: &WorkerModelPolicy) -> Value {
     value
 }
 
-/// This run's tools. run_nix is listed only when the agent may run Nix commands.
+/// The tool an agent keeps its progress state with.
+const PROGRESS_TOOL: &str = "report_progress";
+
+/// This run's tools. run_nix is listed only when the agent may run Nix commands,
+/// and report_progress only when its profile keeps progress reports on.
 fn tools(
     policy: &WorkerModelPolicy,
     nix: Permission,
+    report_progress: bool,
     execution: Option<(ApprovalMode, SpawnExecutionApproval)>,
 ) -> Value {
     let string = json!({"type":"string"});
@@ -1582,6 +1652,23 @@ fn tools(
     if nix != Permission::Deny {
         tools.push(crate::nix::spec(nix));
     }
+    if report_progress {
+        tools.push(json!({
+            "name": PROGRESS_TOOL,
+            "description": "Record how far the current task is toward its end goal. Replaces your previous report; the user sees it as a progress bar with your summary. Call it when you start, after each meaningful milestone, when workers report back, and before you end your turn.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "percent": {"type":"integer","minimum":0,"maximum":100,"description":"Share of the current end goal that is done, counting your workers' progress. Use 100 only when the goal is complete and verified."},
+                    "confidence": {"type":"integer","minimum":0,"maximum":100,"description":"How sure you are of percent. Low while the scope is unclear or workers have not reported; high when the remaining work is known."},
+                    "completed": {"type":"string","maxLength":ProgressReport::TEXT_LIMIT,"description":"A few specific sentences on what has been completed so far."},
+                    "remaining": {"type":"string","maxLength":ProgressReport::TEXT_LIMIT,"description":"A few specific sentences on what is still left to reach the goal. Say so when nothing is left."},
+                },
+                "required": ["percent", "confidence", "completed", "remaining"],
+                "additionalProperties": false,
+            },
+        }));
+    }
     json!({ "tools": tools })
 }
 /// Newline-delimited JSON-RPC over stdio. stdout contains protocol messages only.
@@ -1636,9 +1723,9 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
                             .ok()
                             .filter(|v| v["tools"].is_array())
                             .unwrap_or_else(|| {
-                                tools(&WorkerModelPolicy::default(), Permission::Deny, None)
+                                tools(&WorkerModelPolicy::default(), Permission::Deny, false, None)
                             }),
-                        _ => tools(&WorkerModelPolicy::default(), Permission::Deny, None),
+                        _ => tools(&WorkerModelPolicy::default(), Permission::Deny, false, None),
                     },
                 ),
                 Some("tools/call") => {
@@ -1653,6 +1740,7 @@ pub async fn stdio() -> Result<(), Box<dyn std::error::Error>> {
                         "report_result",
                         "list_agents",
                         crate::nix::TOOL,
+                        PROGRESS_TOOL,
                     ]
                     .contains(&name)
                     {
@@ -3224,7 +3312,7 @@ mod tests {
 
     #[test]
     fn archive_tool_schema_is_discoverable() {
-        let tools = tools(&WorkerModelPolicy::default(), Permission::Deny, None);
+        let tools = tools(&WorkerModelPolicy::default(), Permission::Deny, false, None);
         let tool = tools["tools"]
             .as_array()
             .unwrap()
@@ -3237,6 +3325,145 @@ mod tests {
             json!({"agent":{"type":"string"}})
         );
         assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+    }
+
+    #[test]
+    fn progress_tool_is_listed_only_when_progress_reports_are_on() {
+        let listed = |on| {
+            tools(&WorkerModelPolicy::default(), Permission::Deny, on, None)["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == "report_progress")
+                .cloned()
+        };
+        assert!(listed(false).is_none());
+        let tool = listed(true).unwrap();
+        assert_eq!(
+            tool["inputSchema"]["required"],
+            json!(["percent", "confidence", "completed", "remaining"])
+        );
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        for field in ["percent", "confidence"] {
+            assert_eq!(tool["inputSchema"]["properties"][field]["minimum"], 0);
+            assert_eq!(tool["inputSchema"]["properties"][field]["maximum"], 100);
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_reports_are_validated_stored_replaced_and_shown_to_the_parent() {
+        let f = Fixture::new(Permission::Allow);
+        let listed = |value: Value| {
+            value["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "report_progress")
+        };
+        assert!(listed(f.call("tools", json!({})).await.unwrap()));
+        let report = |percent: u64, confidence: u64, completed: &str, remaining: &str| json!({"percent":percent,"confidence":confidence,"completed":completed,"remaining":remaining});
+        let long = "x".repeat(ProgressReport::TEXT_LIMIT + 1);
+        for invalid in [
+            report(101, 50, "Done.", "Left."),
+            report(50, 101, "Done.", "Left."),
+            report(50, 50, "  ", "Left."),
+            report(50, 50, "Done.", ""),
+            report(50, 50, &long, "Left."),
+            report(50, 50, "Done.", &long),
+            json!({"percent":50,"confidence":50,"completed":"Done."}),
+            json!({"percent":50,"confidence":50,"completed":"Done.","remaining":"Left.","summary":"Both"}),
+        ] {
+            assert!(f.call("report_progress", invalid).await.is_err());
+        }
+        let progress = |id: &str| {
+            f.workspace
+                .snapshots
+                .borrow()
+                .sessions
+                .iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .progress
+                .clone()
+        };
+        assert_eq!(progress(&f.caller), None);
+        let messages = f.workspace.snapshots.borrow().messages.len();
+        assert_eq!(
+            f.call(
+                "report_progress",
+                report(20, 40, " Mapped the code. ", "Everything else.")
+            )
+            .await
+            .unwrap(),
+            json!({"reported":true})
+        );
+        let first = progress(&f.caller).unwrap();
+        assert_eq!((first.percent, first.confidence), (20, 40));
+        assert_eq!(first.completed, "Mapped the code.");
+        assert_eq!(first.remaining, "Everything else.");
+        assert!(first.updated_ms > 0);
+        // A report is session state, not a transcript entry.
+        assert_eq!(f.workspace.snapshots.borrow().messages.len(), messages);
+        f.call(
+            "report_progress",
+            report(100, 100, "All of it.", "Nothing is left."),
+        )
+        .await
+        .unwrap();
+        assert_eq!(progress(&f.caller).unwrap().percent, 100);
+
+        // A child starts without its parent's report, and its own report is
+        // visible to the parent.
+        let value = f
+            .call("spawn_agent", json!({"title":"Child","task":"Test"}))
+            .await
+            .unwrap();
+        let child = value["agent"].as_str().unwrap().to_owned();
+        assert_eq!(progress(&child), None);
+        let wait = f
+            .call("wait_for_agents", json!({"agents":[child],"timeout_s":0}))
+            .await
+            .unwrap();
+        assert!(wait["agents"][0]["progress"].is_null());
+        let child_run = f
+            .workspace
+            .store
+            .lock()
+            .unwrap()
+            .run_id(&child)
+            .unwrap()
+            .unwrap();
+        call(
+            &f.workspace,
+            &child,
+            &child_run,
+            "report_progress",
+            report(40, 60, "Half the tests.", "The other half."),
+            &mut f.stop.clone(),
+        )
+        .await
+        .unwrap();
+        let wait = f
+            .call("wait_for_agents", json!({"agents":[child],"timeout_s":0}))
+            .await
+            .unwrap();
+        let seen = &wait["agents"][0]["progress"];
+        assert_eq!(seen["percent"], 40);
+        assert_eq!(seen["confidence"], 60);
+        assert_eq!(seen["likely_range"], json!([20, 60]));
+        assert_eq!(seen["completed"], "Half the tests.");
+        assert_eq!(seen["remaining"], "The other half.");
+        assert_eq!(progress(&f.caller).unwrap().percent, 100);
+
+        // With the setting off the tool is neither listed nor accepted.
+        f.change(|s| s.projects[0].defaults.report_progress = false);
+        assert!(!listed(f.call("tools", json!({})).await.unwrap()));
+        assert!(
+            f.call("report_progress", report(10, 10, "Done.", "Left."))
+                .await
+                .is_err()
+        );
+        assert_eq!(progress(&f.caller).unwrap().percent, 100);
     }
 
     #[tokio::test]
@@ -3756,7 +3983,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 29);
+        assert_eq!(schema, 30);
         f.finish().await;
     }
     #[tokio::test]

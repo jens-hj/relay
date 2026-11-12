@@ -23,8 +23,9 @@ use relay_core::*;
 use relay_ui::composer::ComposerHandle;
 use relay_ui::prelude::{
     AgentText, AgentTextProps, Composer, ComposerProps, FingerprintStrip, FingerprintStripProps,
-    LedgerActions, MessageRow, MessageRowProps, ReplyStrip, ReplyStripProps, Segments,
-    SegmentsProps, ThinkingLine, ThinkingLineProps, UserMessage, UserMessageProps,
+    LedgerActions, MessageRow, MessageRowProps, ProgressStrip, ProgressStripProps, ReplyStrip,
+    ReplyStripProps, Segments, SegmentsProps, ThinkingLine, ThinkingLineProps, UserMessage,
+    UserMessageProps,
 };
 use relay_ui::prelude::{
     CellButton, CellButtonProps, Ellipsis, EllipsisProps, IconCell, IconCellProps, Label,
@@ -1765,6 +1766,30 @@ pub fn Conversation(model: Model) -> Element {
                     .is_some_and(|w| w.error.is_some() || !model.snapshot.get().can_continue(&s))
             })
     });
+    let progress_report = Derived::new(move || {
+        let id = model.session.get();
+        model
+            .snapshot
+            .get()
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.progress.as_ref())
+            .map(crate::adapt::session_progress)
+    });
+    let progress = Derived::new(move || progress_report.get().unwrap_or_default());
+    let progress_working = Derived::new(move || {
+        let snapshot = model.snapshot.get();
+        let id = model.session.get();
+        snapshot.sessions.iter().any(|s| {
+            s.id == id
+                && crate::adapt::session_status(&snapshot, s)
+                    == relay_ui::prelude::AgentStatus::Working
+        })
+    });
+    // Whether the progress summary stays open; kept while switching chats.
+    let progress_open = State::new(false);
+    let progress_shown = Derived::new(move || progress_report.get().is_some());
     // Auxiliary disclosures share a height budget. Even several open panels
     // leave space for the document; Tab reveals controls in their own scroll.
     let auxiliary_limit = Derived::new(move || {
@@ -1773,8 +1798,22 @@ pub fn Conversation(model: Model) -> Element {
             + usize::from(model.buffer.get().approval_needed)
             + usize::from(recovery.get())
             + usize::from(warning.get())
-            + usize::from(!model.command_flow.get().is_empty());
+            + usize::from(!model.command_flow.get().is_empty())
+            + usize::from(progress_open.get() && progress_shown.get());
         ((doc_height.get() - px(160.0)).max(0.0) * 0.6 / count.max(1) as f32).min(px(280.0))
+    });
+    // The progress strip takes its height from the disclosures stacked with it
+    // above the document, so the document and the composer keep theirs.
+    let header_limit = Derived::new(move || {
+        let limit = auxiliary_limit.get();
+        let count = usize::from(menu.get())
+            + usize::from(!details.get().is_empty())
+            + usize::from(warning.get());
+        if progress_shown.get() && count > 0 {
+            (limit - px(22.0) / count as f32).max(0.0)
+        } else {
+            limit
+        }
     });
     let compact = Derived::new(move || doc_width.get() < px(720.0));
     let editor = view! {
@@ -2051,9 +2090,13 @@ pub fn Conversation(model: Model) -> Element {
             if !tools.get().is_empty() {
                 FingerprintStrip tools:(relay_ui::Live::from(tools))
             }
+            if progress_shown.get() {
+                ProgressStrip progress:(relay_ui::Live::from(progress))
+                    working:(relay_ui::Live::from(progress_working)) open:(progress_open)
+            }
             Notice model:(model)
             if menu.get() {
-                BoundedPanel limit:(auxiliary_limit) {
+                BoundedPanel limit:(header_limit) {
                     col height:min-content gap:0px shrink:0
                         stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                         if compact.get() && session.get().and_then(|s|s.worker).is_some_and(|w|matches!(w.status,WorkerStatus::Running|WorkerStatus::Queued)) {
@@ -2173,7 +2216,7 @@ pub fn Conversation(model: Model) -> Element {
                 }
             }
             if warning.get() {
-                BoundedPanel limit:(auxiliary_limit) {
+                BoundedPanel limit:(header_limit) {
                     if removed.get() {
                         row height:min-content pad:(horizontal:{px(24.0)}px vertical:0px) shrink:0 {
                             text label:"Session issue removed from board" font-size:{px(12.0)}px
@@ -2202,7 +2245,7 @@ pub fn Conversation(model: Model) -> Element {
                 }
             }
             if !details.get().is_empty() {
-                BoundedPanel limit:(auxiliary_limit) {
+                BoundedPanel limit:(header_limit) {
                     col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(10.0)}px)
                         gap:{px(12.0)}px selectable label:"Session details" {
                         if details.get() == "usage" {

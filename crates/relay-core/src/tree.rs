@@ -321,6 +321,7 @@ mod tests {
             parent_session_id: parent.map(Into::into),
             spawn: None,
             compactions: vec![],
+            progress: None,
         }
     }
 

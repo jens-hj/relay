@@ -62,7 +62,7 @@ pub fn demo_snapshot(defaults: AgentProfile) -> Snapshot {
             },
         },
     ];
-    let sessions = vec![
+    let mut sessions = vec![
         session(
             "session-plan",
             None,
@@ -91,6 +91,13 @@ pub fn demo_snapshot(defaults: AgentProfile) -> Snapshot {
             None,
         ),
     ];
+    sessions[0].progress = Some(ProgressReport {
+        percent: 60,
+        confidence: 70,
+        completed: "Agent configurations inherit project defaults, and explicit overrides survive a change of defaults. The override editor shows which fields are inherited.".into(),
+        remaining: "The migration for existing agent configurations still fails on a copy of the database. Review of the inheritance rules has not started.".into(),
+        updated_ms: 0,
+    });
     let messages = [
         (
             "m1",
@@ -367,6 +374,7 @@ fn session(
         parent_session_id: parent.map(Into::into),
         spawn: None,
         compactions: vec![],
+        progress: None,
     }
 }
 

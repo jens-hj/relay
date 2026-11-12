@@ -931,6 +931,7 @@ impl Model {
             profile.scope = parent_profile.scope;
             profile.execution = parent_profile.execution;
             profile.network_access = parent_profile.network_access;
+            profile.report_progress = parent_profile.report_progress;
             profile
         } else {
             let Ok(project) = snapshot.project(&self.project.get_untracked()) else {
@@ -1772,6 +1773,7 @@ impl Model {
         } else if self.editor.get_untracked() != EditTarget::Defaults {
             self.editor_overrides.update(|overrides| match field {
                 "network_access" => overrides.network_access = Some(profile.network_access),
+                "report_progress" => overrides.report_progress = Some(profile.report_progress),
                 "execution" => overrides.execution = Some(profile.execution.clone()),
                 "model" => overrides.model = Some(profile.model.clone()),
                 "harness" => {
@@ -1796,6 +1798,7 @@ impl Model {
     pub fn inherit(&self, field: &str) {
         self.editor_overrides.update(|o| match field {
             "network_access" => o.network_access = None,
+            "report_progress" => o.report_progress = None,
             "execution" => o.execution = None,
             "model" => o.model = None,
             "harness" => {
@@ -1823,6 +1826,7 @@ impl Model {
         let overrides = self.editor_overrides.get();
         let overridden = match field {
             "network_access" => overrides.network_access.is_some(),
+            "report_progress" => overrides.report_progress.is_some(),
             "execution" => overrides.execution.is_some(),
             "model" => overrides.model.is_some(),
             "harness" => overrides.harness.is_some(),

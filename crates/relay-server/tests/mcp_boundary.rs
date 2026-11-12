@@ -318,7 +318,8 @@ async fn stdio_http_run_capability_boundary() {
     assert_eq!(values.len(), 6);
     assert_eq!(values[0]["result"]["capabilities"]["tools"], json!({}));
     let tools = values[1]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 8);
+    assert_eq!(tools.len(), 9);
+    assert!(tools.iter().any(|tool| tool["name"] == "report_progress"));
     assert!(tools.iter().any(|tool| tool["name"] == "stop_agent"));
     assert!(tools.iter().any(|tool| tool["name"] == "archive_agent"));
     assert!(tools.iter().any(|tool| tool["name"] == "delete_agent"));

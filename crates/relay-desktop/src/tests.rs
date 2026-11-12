@@ -7218,6 +7218,95 @@ fn session_network_control_sends_an_independent_false_override() {
 }
 
 #[test]
+fn profile_progress_reports_can_be_turned_off_saved_and_inherited() {
+    let mut mounted = mount(false, 1380.0);
+    let id = mounted.model.snapshot.get_untracked().agent_configs[0]
+        .id
+        .clone();
+    mounted.model.open_profile(EditTarget::Config(id));
+    mounted.settle();
+    assert!(mounted.model.editor_profile.get_untracked().report_progress);
+    assert_ne!(mounted.model.origin("report_progress"), "Agent override");
+    let before = crate::ui::overridden_fields(&mounted.model.editor_overrides.get_untracked());
+    assert!(!before.contains(&"Progress"));
+    mounted.click("Progress Reports: Off");
+    assert!(!mounted.model.editor_profile.get_untracked().report_progress);
+    assert_eq!(
+        mounted
+            .model
+            .editor_overrides
+            .get_untracked()
+            .report_progress,
+        Some(false)
+    );
+    assert_eq!(mounted.model.origin("report_progress"), "Agent override");
+    assert!(
+        crate::ui::overridden_fields(&mounted.model.editor_overrides.get_untracked())
+            .contains(&"Progress")
+    );
+    mounted.model.save_profile();
+    let envelope = mounted.commands.try_recv().unwrap();
+    assert!(
+        matches!(&envelope.command, Command::UpdateAgentConfig { overrides, .. } if overrides.report_progress == Some(false))
+    );
+    mounted.model.inherit("report_progress");
+    assert!(mounted.model.editor_profile.get_untracked().report_progress);
+    assert_eq!(
+        mounted
+            .model
+            .editor_overrides
+            .get_untracked()
+            .report_progress,
+        None
+    );
+}
+
+#[test]
+fn session_progress_strip_follows_the_report_and_keeps_its_summary_open() {
+    let mounted = mount(false, 1380.0);
+    mounted.model.open_session("session-plan".into());
+    mounted.model.history.update(|history| {
+        history.session_id = "session-plan".into();
+        history.tool_counts = Some(vec![relay_core::ToolCount {
+            kind: relay_core::ToolKind::Read,
+            count: 3,
+        }]);
+    });
+    mounted.settle();
+    let label = "Progress: 60 percent, likely 45 to 75 percent";
+    let strip = mounted.rect(label);
+    let tools = mounted.rect("Tool calls by type");
+    assert_eq!(strip.origin.y, tools.origin.y + tools.size.height);
+    assert!(mounted.rects("Progress summary").is_empty());
+    mounted.click(label);
+    assert_eq!(mounted.rects("Progress summary").len(), 1);
+    assert_eq!(mounted.rects("Completed").len(), 1);
+    assert_eq!(mounted.rects("Remaining").len(), 1);
+
+    // A new report redraws the strip; the summary stays open.
+    mounted.model.snapshot.update(|snapshot| {
+        let progress = snapshot.sessions[0].progress.as_mut().unwrap();
+        progress.percent = 100;
+        progress.confidence = 100;
+        progress.remaining = "Nothing is left.".into();
+    });
+    mounted.settle();
+    assert!(mounted.rects(label).is_empty());
+    assert_eq!(mounted.rects("Progress: 100 percent").len(), 1);
+    assert_eq!(mounted.rects("Nothing is left.").len(), 1);
+    mounted.click("Progress: 100 percent");
+    assert!(mounted.rects("Progress summary").is_empty());
+
+    // No report, no strip.
+    mounted
+        .model
+        .snapshot
+        .update(|snapshot| snapshot.sessions[0].progress = None);
+    mounted.settle();
+    assert!(mounted.rects("Progress: 100 percent").is_empty());
+}
+
+#[test]
 fn profile_network_override_can_be_inherited_without_resetting_approval() {
     let mounted = mount(false, 1380.0);
     let id = mounted.model.snapshot.get_untracked().agent_configs[0]
