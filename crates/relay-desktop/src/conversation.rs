@@ -1798,22 +1798,12 @@ pub fn Conversation(model: Model) -> Element {
             + usize::from(model.buffer.get().approval_needed)
             + usize::from(recovery.get())
             + usize::from(warning.get())
-            + usize::from(!model.command_flow.get().is_empty())
-            + usize::from(progress_open.get() && progress_shown.get());
-        ((doc_height.get() - px(160.0)).max(0.0) * 0.6 / count.max(1) as f32).min(px(280.0))
-    });
-    // The progress strip takes its height from the disclosures stacked with it
-    // above the document, so the document and the composer keep theirs.
-    let header_limit = Derived::new(move || {
-        let limit = auxiliary_limit.get();
-        let count = usize::from(menu.get())
-            + usize::from(!details.get().is_empty())
-            + usize::from(warning.get());
-        if progress_shown.get() && count > 0 {
-            (limit - px(22.0) / count as f32).max(0.0)
-        } else {
-            limit
-        }
+            + usize::from(!model.command_flow.get().is_empty());
+        // Never shorter than one row of actions: a focused action must fit
+        // inside its panel wherever the document is scrolled.
+        ((doc_height.get() - px(160.0)).max(0.0) * 0.6 / count.max(1) as f32)
+            .min(px(280.0))
+            .max(px(38.0))
     });
     let compact = Derived::new(move || doc_width.get() < px(720.0));
     let editor = view! {
@@ -2098,13 +2088,9 @@ pub fn Conversation(model: Model) -> Element {
             if !tools.get().is_empty() {
                 FingerprintStrip tools:(relay_ui::Live::from(tools))
             }
-            if progress_shown.get() {
-                ProgressStrip progress:(relay_ui::Live::from(progress))
-                    working:(relay_ui::Live::from(progress_working)) open:(progress_open)
-            }
             Notice model:(model)
             if menu.get() {
-                BoundedPanel limit:(header_limit) {
+                BoundedPanel limit:(auxiliary_limit) {
                     col height:min-content gap:0px shrink:0
                         stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
                         if compact.get() && session.get().and_then(|s|s.worker).is_some_and(|w|matches!(w.status,WorkerStatus::Running|WorkerStatus::Queued)) {
@@ -2224,7 +2210,7 @@ pub fn Conversation(model: Model) -> Element {
                 }
             }
             if warning.get() {
-                BoundedPanel limit:(header_limit) {
+                BoundedPanel limit:(auxiliary_limit) {
                     if removed.get() {
                         row height:min-content pad:(horizontal:{px(24.0)}px vertical:0px) shrink:0 {
                             text label:"Session issue removed from board" font-size:{px(12.0)}px
@@ -2253,7 +2239,7 @@ pub fn Conversation(model: Model) -> Element {
                 }
             }
             if !details.get().is_empty() {
-                BoundedPanel limit:(header_limit) {
+                BoundedPanel limit:(auxiliary_limit) {
                     col height:min-content pad:(horizontal:{px(24.0)}px vertical:{px(10.0)}px)
                         gap:{px(12.0)}px selectable label:"Session details" {
                         if details.get() == "usage" {
@@ -2466,8 +2452,17 @@ pub fn Conversation(model: Model) -> Element {
                             }
                         }
                     }
-                    el width:fill height:{px(1.0)}px fill:ground.rule label:"Draft boundary"
-                        nohit {}
+                    // The line under the history; the progress bar when there is a report.
+                    col height:min-content shrink:0 label:"Draft boundary" {
+                        if progress_shown.get() {
+                            ProgressStrip progress:(relay_ui::Live::from(progress))
+                                working:(relay_ui::Live::from(progress_working))
+                                open:(progress_open)
+                        }
+                        if !progress_shown.get() {
+                            el width:fill height:{px(1.0)}px fill:ground.rule nohit {}
+                        }
+                    }
                     { parent.adopt(&inline_composer); }
                 }
             } as document_scroll

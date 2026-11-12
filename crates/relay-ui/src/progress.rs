@@ -70,18 +70,22 @@ impl TaskProgress {
     }
 }
 
-/// Height of the strip, of the fill, and of the range band behind it.
+/// Height of the strip, of the fill, and of the range bracket around it.
 const HEIGHT: f32 = 22.0;
 const THICKNESS: f32 = 4.0;
 const BAND: f32 = 12.0;
+const LINE: f32 = 1.0;
 
 fn rect(scene: &mut Scene, rect: Rect, tint: Color) {
     scene.shape(Shape::new(rect).fill(tint));
 }
 
-/// The bar: a hairline track, the fill up to the estimate, and a taller
-/// faint band over the likely range with a tick at the estimate. The fill
-/// is the live colour and flows while the agent works; it is ink at rest.
+/// The bar: a rule across the full width, the fill up to the estimate, and
+/// an outlined bracket over the likely range with a tick at the estimate.
+/// Nothing is painted behind the fill's grain except the rule, so the grain
+/// keeps its full contrast; only the part of the range past the estimate,
+/// which has no grain, is tinted. The fill is the live colour and flows
+/// while the agent works; it is ink at rest.
 fn bar(progress: &TaskProgress, working: bool) -> Element {
     let tint = if working {
         Signal::Live.token()
@@ -103,24 +107,24 @@ fn bar(progress: &TaskProgress, working: bool) -> Element {
             ctx.scene,
             Rect::from_xywh(
                 r.origin.x,
-                r.origin.y + inset * unit,
+                r.origin.y + (HEIGHT - LINE) / 2.0 * unit,
                 r.size.width,
-                THICKNESS * unit,
+                LINE * unit,
             ),
-            color(ground.hairline),
+            color(ground.rule),
         );
-        // A flat wash under the dither keeps the whole filled length legible
-        // where the grain thins out.
-        let wash = color(tint);
+        // The done part of the rule takes the fill colour, so the filled
+        // length reads even where the grain is sparse.
+        let done = color(tint);
         rect(
             ctx.scene,
             Rect::from_xywh(
                 r.origin.x,
-                r.origin.y + inset * unit,
+                r.origin.y + (HEIGHT - LINE) / 2.0 * unit,
                 r.size.width * fraction,
-                THICKNESS * unit,
+                LINE * unit,
             ),
-            wash.alpha(wash.a * 0.45),
+            done.alpha(done.a * 0.75),
         );
     });
     let fill = view! {
@@ -148,28 +152,34 @@ fn bar(progress: &TaskProgress, working: bool) -> Element {
         let unit = ctx.rect.size.height / HEIGHT;
         let r = ctx.rect;
         let band_top = r.origin.y + (HEIGHT - BAND) / 2.0 * unit;
+        let band = BAND * unit;
+        let line = LINE * unit;
         let ink = color(tint);
+        let x = r.origin.x + r.size.width * fraction;
         if uncertain {
+            let left = r.origin.x + r.size.width * low;
+            let right = r.origin.x + r.size.width * high;
+            let edge = ink.alpha(ink.a * 0.6);
+            // Past the estimate there is no grain to obscure.
             rect(
                 ctx.scene,
-                Rect::from_xywh(
-                    r.origin.x + r.size.width * low,
-                    band_top,
-                    r.size.width * (high - low),
-                    BAND * unit,
-                ),
-                ink.alpha(ink.a * 0.26),
+                Rect::from_xywh(x, band_top, (right - x).max(0.0), band),
+                ink.alpha(ink.a * 0.16),
             );
+            for y in [band_top, band_top + band - line] {
+                rect(
+                    ctx.scene,
+                    Rect::from_xywh(left, y, right - left, line),
+                    edge,
+                );
+            }
+            for cap in [left, (right - line).max(left)] {
+                rect(ctx.scene, Rect::from_xywh(cap, band_top, line, band), edge);
+            }
         }
-        let x = r.origin.x + r.size.width * fraction;
         rect(
             ctx.scene,
-            Rect::from_xywh(
-                (x - 1.5 * unit).max(r.origin.x),
-                band_top,
-                1.5 * unit,
-                BAND * unit,
-            ),
+            Rect::from_xywh((x - 1.5 * unit).max(r.origin.x), band_top, 1.5 * unit, band),
             ink,
         );
     });
@@ -204,9 +214,10 @@ fn summary(progress: &TaskProgress) -> Element {
     }
 }
 
-/// The strip. Hovering or focusing it shows the summary below it without
-/// moving the page; pressing it sets `open`, which keeps the summary in the
-/// page until it is pressed again.
+/// The strip. It sits above the message field as the line under the history.
+/// Hovering or focusing it shows the summary above it without moving the
+/// page; pressing it sets `open`, which keeps the summary in the page, above
+/// the bar, until it is pressed again.
 #[component]
 pub fn ProgressStrip(
     progress: Live<TaskProgress>,
@@ -223,10 +234,20 @@ pub fn ProgressStrip(
     let over = State::new(false);
     let peek = State::new(false);
     Effect::new(move || peek.set(over.get() && !open.get()));
+    // Counts rebuilt strips. A replaced button's hover effect can be woken once
+    // more by a change in how focus is shown; it must then stop before it
+    // reads the button it belonged to, which is gone.
+    let generation = std::rc::Rc::new(std::cell::Cell::new(0u64));
+    {
+        let generation = generation.clone();
+        mosaic::core::reactive::on_cleanup(move || generation.set(u64::MAX));
+    }
     host.switch(
         move || (progress.get(), working.get()),
         move |parent, value| {
             let (progress, working) = value.clone();
+            let mine = generation.get().wrapping_add(1);
+            generation.set(mine);
             let toggle = move || open.set(!open.get_untracked());
             let readout = progress.readout();
             let button = view! {
@@ -247,7 +268,13 @@ pub fn ProgressStrip(
                 let interaction = button.interaction();
                 // Keyboard focus only: a bar focused by a press must not keep
                 // its summary up after the pointer leaves.
-                Effect::new(move || over.set(interaction.hovered() || interaction.focus_visible()));
+                let generation = generation.clone();
+                Effect::new(move || {
+                    if generation.get() != mine {
+                        return;
+                    }
+                    over.set(interaction.hovered() || interaction.focus_visible());
+                });
             }
             let options = TooltipOptions::default()
                 .trigger(TooltipTrigger::Manual)
@@ -256,7 +283,7 @@ pub fn ProgressStrip(
                 .hide_delay(Duration::ZERO)
                 .placement(
                     OverlayPlacement::default()
-                        .side(OverlaySide::Bottom)
+                        .side(OverlaySide::Top)
                         .align(OverlayAlign::Start)
                         .gap(0.0),
                 );
@@ -277,14 +304,13 @@ pub fn ProgressStrip(
                 });
                 root.adopt(&summary(&shown));
             });
-            parent.adopt(&button);
             let pinned = progress.clone();
             parent.adopt(&view! {
                 col height:min-content min-width:0px {
                     if open.get() {
                         col height:min-content min-width:0px label:"Progress summary"
                             pad:(horizontal:{px(14.0)}px vertical:{px(11.0)}px)
-                            stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                            stroke:(width:{px(1.0)} color:ground.rule edges:top) {
                             {
                                 parent.adopt(&summary(&pinned));
                             }
@@ -292,6 +318,7 @@ pub fn ProgressStrip(
                     }
                 }
             });
+            parent.adopt(&button);
         },
     );
     host
@@ -366,7 +393,10 @@ mod tests {
         mounted.hover(Vector2::new(700.0, 380.0));
         assert!(mounted.has("The tool and the setting exist."));
 
-        mounted.click(strip.center());
+        // The pinned summary is above the bar, so the bar has moved down.
+        let moved = mounted.rect(label);
+        assert!(mounted.rect("Progress summary").max_y() <= moved.origin.y);
+        mounted.click(moved.center());
         assert!(!open.get_untracked());
         assert!(!mounted.has("Progress summary"));
         mounted.hover(Vector2::new(700.0, 380.0));

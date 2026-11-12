@@ -7294,11 +7294,20 @@ fn session_progress_strip_follows_the_report_and_keeps_its_summary_open() {
     mounted.settle();
     let label = "Progress: 60 percent, likely 45 to 75 percent";
     let strip = mounted.rect(label);
+    // The bar is the line between the history and the message field.
     let tools = mounted.rect("Tool calls by type");
-    assert_eq!(strip.origin.y, tools.origin.y + tools.size.height);
+    assert!(strip.origin.y > tools.max_y());
+    assert_eq!(strip.max_y(), mounted.rect("Inline composer").origin.y);
+    assert_eq!(strip.max_y(), mounted.rect("Draft boundary").max_y());
     assert!(mounted.rects("Progress summary").is_empty());
     mounted.click(label);
     assert_eq!(mounted.rects("Progress summary").len(), 1);
+    // Open, the summary sits above the bar and the bar stays on the field.
+    assert!(mounted.rect("Progress summary").max_y() <= mounted.rect(label).origin.y);
+    assert_eq!(
+        mounted.rect(label).max_y(),
+        mounted.rect("Inline composer").origin.y
+    );
     assert_eq!(mounted.rects("Completed").len(), 1);
     assert_eq!(mounted.rects("Remaining").len(), 1);
 
