@@ -16096,35 +16096,72 @@ fn profile_usage_reset_options_save_and_inherit() {
     mounted.model.open_profile(EditTarget::Config(id));
     mounted
         .model
-        .modify_profile("harness", |p| p.harness = Harness::Codex);
-    mounted.settle();
+        .modify_profile("notify_session_usage_reset", |p| {
+            p.notify_session_usage_reset = true
+        });
+    assert_eq!(
+        mounted.model.origin("usage_reset_notifications"),
+        "Agent override"
+    );
+    mounted.model.inherit("usage_reset_notifications");
     assert!(
         !mounted
-            .ui
-            .inspection_snapshot()
-            .nodes
-            .iter()
-            .any(|n| n.label.as_deref() == Some("Notify on Weekly Usage Reset: On"))
+            .model
+            .editor_profile
+            .get_untracked()
+            .usage_reset_notifications()
+            .codex_session
     );
 
     mounted
         .model
-        .modify_profile("harness", |p| p.harness = Harness::ClaudeCode);
+        .modify_profile("harness", |p| p.harness = Harness::Codex);
     mounted.settle();
-    mounted.focus("Notify on Session Usage Reset: On");
-    mounted.click("Notify on Session Usage Reset: On");
-    mounted.focus("Notify on Weekly Usage Reset: On");
-    mounted.click("Notify on Weekly Usage Reset: On");
-    let p = mounted.model.editor_profile.get_untracked();
-    assert!(p.notify_session_usage_reset && p.notify_weekly_usage_reset);
+    for label in [
+        "Codex Session: On",
+        "Claude Session: On",
+        "Claude Weekly: On",
+    ] {
+        mounted.focus(label);
+        mounted.click(label);
+    }
+    let expected = UsageResetNotifications {
+        codex_session: true,
+        claude_session: true,
+        claude_weekly: true,
+    };
+    assert_eq!(
+        mounted
+            .model
+            .editor_profile
+            .get_untracked()
+            .usage_reset_notifications(),
+        expected
+    );
+    mounted
+        .model
+        .modify_profile("harness", |p| p.harness = Harness::ClaudeCode);
+    assert_eq!(
+        mounted
+            .model
+            .editor_profile
+            .get_untracked()
+            .usage_reset_notifications(),
+        expected
+    );
     mounted.model.save_profile();
     let envelope = mounted.commands.try_recv().unwrap();
     assert!(
         matches!(&envelope.command, Command::UpdateAgentConfig { overrides, .. }
-        if overrides.notify_session_usage_reset == Some(true) && overrides.notify_weekly_usage_reset == Some(true))
+        if overrides.usage_reset_notifications == Some(expected))
     );
-    mounted.model.inherit("notify_session_usage_reset");
-    mounted.model.inherit("notify_weekly_usage_reset");
-    let p = mounted.model.editor_profile.get_untracked();
-    assert!(!p.notify_session_usage_reset && !p.notify_weekly_usage_reset);
+    mounted.model.inherit("usage_reset_notifications");
+    assert_eq!(
+        mounted
+            .model
+            .editor_profile
+            .get_untracked()
+            .usage_reset_notifications(),
+        UsageResetNotifications::default()
+    );
 }

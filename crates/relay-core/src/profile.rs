@@ -89,6 +89,15 @@ impl Permission {
     }
 }
 
+/// Usage windows an agent subscribes to, independently of its execution harness.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UsageResetNotifications {
+    pub codex_session: bool,
+    pub claude_session: bool,
+    pub claude_weekly: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentProfile {
@@ -98,6 +107,9 @@ pub struct AgentProfile {
     /// The agent keeps a progress estimate and summary through Relay MCP.
     #[serde(default = "report_progress_default")]
     pub report_progress: bool,
+    /// None preserves legacy own-harness subscriptions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_reset_notifications: Option<UsageResetNotifications>,
     /// Queue a turn when the reported five-hour usage window resets.
     #[serde(default)]
     pub notify_session_usage_reset: bool,
@@ -138,6 +150,17 @@ impl Default for AgentProfile {
 }
 
 impl AgentProfile {
+    pub fn usage_reset_notifications(&self) -> UsageResetNotifications {
+        self.usage_reset_notifications
+            .unwrap_or(UsageResetNotifications {
+                codex_session: self.harness == Harness::Codex && self.notify_session_usage_reset,
+                claude_session: self.harness == Harness::ClaudeCode
+                    && self.notify_session_usage_reset,
+                claude_weekly: self.harness == Harness::ClaudeCode
+                    && self.notify_weekly_usage_reset,
+            })
+    }
+
     pub fn model_selection(&self) -> crate::HarnessSelection {
         crate::HarnessSelection {
             model: (!self.model.is_empty()).then(|| self.model.clone()),
@@ -225,6 +248,8 @@ pub struct ProfileOverrides {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_progress: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_reset_notifications: Option<UsageResetNotifications>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify_session_usage_reset: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify_weekly_usage_reset: Option<bool>,
@@ -252,6 +277,10 @@ pub struct ProfileOverrides {
 impl ProfileOverrides {
     pub fn between(base: &AgentProfile, profile: &AgentProfile) -> Self {
         Self {
+            usage_reset_notifications: (base.usage_reset_notifications
+                != profile.usage_reset_notifications)
+                .then_some(profile.usage_reset_notifications)
+                .flatten(),
             notify_session_usage_reset: (base.notify_session_usage_reset
                 != profile.notify_session_usage_reset)
                 .then_some(profile.notify_session_usage_reset),
@@ -280,6 +309,9 @@ impl ProfileOverrides {
     }
     pub fn resolve(&self, base: &AgentProfile) -> AgentProfile {
         AgentProfile {
+            usage_reset_notifications: self
+                .usage_reset_notifications
+                .or(base.usage_reset_notifications),
             notify_session_usage_reset: self
                 .notify_session_usage_reset
                 .unwrap_or(base.notify_session_usage_reset),
@@ -717,6 +749,62 @@ mod tests {
 #[cfg(test)]
 mod usage_reset_tests {
     use super::*;
+
+    #[test]
+    fn explicit_subscriptions_inherit_and_survive_harness_changes() {
+        let mut base = AgentProfile {
+            notify_session_usage_reset: true,
+            ..AgentProfile::default()
+        };
+        assert_eq!(
+            base.usage_reset_notifications(),
+            UsageResetNotifications {
+                codex_session: true,
+                ..Default::default()
+            }
+        );
+        base.harness = Harness::ClaudeCode;
+        base.notify_weekly_usage_reset = true;
+        assert_eq!(
+            base.usage_reset_notifications(),
+            UsageResetNotifications {
+                claude_session: true,
+                claude_weekly: true,
+                ..Default::default()
+            }
+        );
+        let desired = UsageResetNotifications {
+            codex_session: true,
+            claude_weekly: true,
+            claude_session: false,
+        };
+        let mut configured = base.clone();
+        configured.usage_reset_notifications = Some(desired);
+        let overrides = ProfileOverrides::between(&base, &configured);
+        assert_eq!(overrides.resolve(&base), configured);
+        assert_eq!(
+            AgentProfile::from_toml(&configured.to_toml()).unwrap(),
+            configured
+        );
+        assert_eq!(
+            serde_json::from_str::<AgentProfile>(&serde_json::to_string(&configured).unwrap())
+                .unwrap(),
+            configured
+        );
+        configured.harness = Harness::Codex;
+        assert_eq!(configured.usage_reset_notifications(), desired);
+        let inherited = ProfileOverrides::default().resolve(&configured);
+        assert_eq!(inherited.usage_reset_notifications(), desired);
+        let off = ProfileOverrides {
+            usage_reset_notifications: Some(UsageResetNotifications::default()),
+            ..Default::default()
+        }
+        .resolve(&configured);
+        assert_eq!(
+            off.usage_reset_notifications(),
+            UsageResetNotifications::default()
+        );
+    }
 
     #[test]
     fn reset_preferences_default_off_and_inherit_with_explicit_overrides() {

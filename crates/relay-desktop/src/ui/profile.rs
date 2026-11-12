@@ -154,12 +154,10 @@ pub(crate) fn overridden_fields(overrides: &ProfileOverrides) -> Vec<&'static st
         ("Execution", overrides.execution.is_some()),
         ("Network", overrides.network_access.is_some()),
         (
-            "Notify on Session Usage Reset",
-            overrides.notify_session_usage_reset.is_some(),
-        ),
-        (
-            "Notify on Weekly Usage Reset",
-            overrides.notify_weekly_usage_reset.is_some(),
+            "Usage Reset Notifications",
+            overrides.usage_reset_notifications.is_some()
+                || overrides.notify_session_usage_reset.is_some()
+                || overrides.notify_weekly_usage_reset.is_some(),
         ),
         ("Progress", overrides.report_progress.is_some()),
         ("Scope", overrides.scope.is_some()),
@@ -874,47 +872,106 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
             }
         },
     );
-    let notify_session_usage_reset_index =
-        Derived::new(move || usize::from(model.editor_profile.get().notify_session_usage_reset));
-    let choose_notify_session_usage_reset: std::rc::Rc<dyn Fn(usize)> =
-        std::rc::Rc::new(move |slot| {
-            model.modify_profile("notify_session_usage_reset", |p| {
-                p.notify_session_usage_reset = slot == 1
-            });
+    let codex_session_index = Derived::new(move || {
+        usize::from(
+            model
+                .editor_profile
+                .get()
+                .usage_reset_notifications()
+                .codex_session,
+        )
+    });
+    let choose_codex_session: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot| {
+        model.modify_profile("usage_reset_notifications", |p| {
+            let mut subscriptions = p.usage_reset_notifications();
+            subscriptions.codex_session = slot == 1;
+            p.usage_reset_notifications = Some(subscriptions);
         });
-    let notify_session_usage_reset = field_module(
-        model,
-        "Notify on Session Usage Reset",
-        "notify_session_usage_reset",
-        None,
-        view! {
-            row height:{px(48.0)}px {
-                Segments name:("Notify on Session Usage Reset".to_string())
-                    options:(vec!["Off".to_string(), "On".to_string()])
-                    selected:(relay_ui::Live::from(notify_session_usage_reset_index))
-                    on-select:(choose_notify_session_usage_reset)
+    });
+    let codex_session = view! {
+        col height:min-content {
+            row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(8.0)}px) {
+                Label text:"Codex Session" role:(TextRole::Label)
             }
-        },
-    );
-    let notify_weekly_usage_reset_index =
-        Derived::new(move || usize::from(model.editor_profile.get().notify_weekly_usage_reset));
-    let choose_notify_weekly_usage_reset: std::rc::Rc<dyn Fn(usize)> =
-        std::rc::Rc::new(move |slot| {
-            model.modify_profile("notify_weekly_usage_reset", |p| {
-                p.notify_weekly_usage_reset = slot == 1
-            });
+            row height:{px(48.0)}px {
+                Segments name:("Codex Session".to_string())
+                    options:(vec!["Off".to_string(), "On".to_string()])
+                    selected:(relay_ui::Live::from(codex_session_index))
+                    on-select:(choose_codex_session)
+            }
+        }
+    };
+    let claude_session_index = Derived::new(move || {
+        usize::from(
+            model
+                .editor_profile
+                .get()
+                .usage_reset_notifications()
+                .claude_session,
+        )
+    });
+    let choose_claude_session: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot| {
+        model.modify_profile("usage_reset_notifications", |p| {
+            let mut subscriptions = p.usage_reset_notifications();
+            subscriptions.claude_session = slot == 1;
+            p.usage_reset_notifications = Some(subscriptions);
         });
-    let notify_weekly_usage_reset = field_module(
+    });
+    let claude_session = view! {
+        col height:min-content {
+            row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(8.0)}px) {
+                Label text:"Claude Session" role:(TextRole::Label)
+            }
+            row height:{px(48.0)}px {
+                Segments name:("Claude Session".to_string())
+                    options:(vec!["Off".to_string(), "On".to_string()])
+                    selected:(relay_ui::Live::from(claude_session_index))
+                    on-select:(choose_claude_session)
+            }
+        }
+    };
+    let claude_weekly_index = Derived::new(move || {
+        usize::from(
+            model
+                .editor_profile
+                .get()
+                .usage_reset_notifications()
+                .claude_weekly,
+        )
+    });
+    let choose_claude_weekly: std::rc::Rc<dyn Fn(usize)> = std::rc::Rc::new(move |slot| {
+        model.modify_profile("usage_reset_notifications", |p| {
+            let mut subscriptions = p.usage_reset_notifications();
+            subscriptions.claude_weekly = slot == 1;
+            p.usage_reset_notifications = Some(subscriptions);
+        });
+    });
+    let claude_weekly = view! {
+        col height:min-content {
+            row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(8.0)}px) {
+                Label text:"Claude Weekly" role:(TextRole::Label)
+            }
+            row height:{px(48.0)}px {
+                Segments name:("Claude Weekly".to_string())
+                    options:(vec!["Off".to_string(), "On".to_string()])
+                    selected:(relay_ui::Live::from(claude_weekly_index))
+                    on-select:(choose_claude_weekly)
+            }
+        }
+    };
+    let usage_reset_notifications = field_module(
         model,
-        "Notify on Weekly Usage Reset",
-        "notify_weekly_usage_reset",
+        "Usage Reset Notifications",
+        "usage_reset_notifications",
         None,
         view! {
-            row height:{px(48.0)}px {
-                Segments name:("Notify on Weekly Usage Reset".to_string())
-                    options:(vec!["Off".to_string(), "On".to_string()])
-                    selected:(relay_ui::Live::from(notify_weekly_usage_reset_index))
-                    on-select:(choose_notify_weekly_usage_reset)
+            col height:min-content {
+                row height:min-content pad:(horizontal:{px(18.0)}px vertical:{px(12.0)}px) {
+                    Label
+                        text:"Notify this agent when selected usage windows reset, including harnesses used by its workers."
+                        role:(TextRole::Caption) tone:(Tone::Muted)
+                }
+                { for control in [&codex_session, &claude_session, &claude_weekly] { parent.adopt(control); } }
             }
         },
     );
@@ -990,10 +1047,7 @@ pub(crate) fn ProfileControls(model: Model) -> Element {
     );
     view! {
         col height:min-content gap:0px {
-            { for module in [&harness, &model_selection, &approval, &network, &progress, &notify_session_usage_reset] { parent.adopt(module); } }
-            if model.editor_profile.get().harness == Harness::ClaudeCode {
-                { parent.adopt(&notify_weekly_usage_reset); }
-            }
+            { for module in [&harness, &model_selection, &approval, &network, &progress, &usage_reset_notifications] { parent.adopt(module); } }
             { for module in [&scope, &workers, &worker_model] { parent.adopt(module); } }
         }
     }

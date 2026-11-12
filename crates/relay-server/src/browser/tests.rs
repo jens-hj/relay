@@ -617,7 +617,7 @@ async fn migration_rotation_restart_and_disabled_enrollment() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        34
+        35
     );
     BrowserAuth::initialize(
         &mut store,

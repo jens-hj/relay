@@ -336,7 +336,7 @@ impl Store {
         let version: u32 = connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .map_err(Error::internal)?;
-        if version > 34 {
+        if version > 35 {
             return Err(Error::invalid(
                 "Database schema is newer than this Relay server",
             ));
@@ -367,7 +367,7 @@ impl Store {
              CREATE INDEX IF NOT EXISTS lifecycle_pending ON lifecycle_events(parent_session,disposition);
              CREATE TABLE IF NOT EXISTS lifecycle_holds(session_id TEXT PRIMARY KEY,run_id TEXT NOT NULL,reason TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS usage_reset_notices(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, harness TEXT NOT NULL, window TEXT NOT NULL, resets_at INTEGER NOT NULL, delivered INTEGER NOT NULL DEFAULT 0);
-             PRAGMA user_version = 34;"
+             PRAGMA user_version = 35;"
         ).map_err(Error::internal)?;
         // Schema 32 keeps a spawn awaiting approval, to continue it once
         // decided; older servers would cancel it and drop the request.

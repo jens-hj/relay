@@ -125,3 +125,28 @@ a schema 34 fix. Do not restore the pre-migration backup over later writes witho
 an explicit recovery decision. Verify local and public revision and asset checks
 through the helper; a public transport failure leaves the healthy candidate active
 and retries verification only.
+
+## Cross-Harness Reset Subscriptions: Schema 34 to 35
+
+The follow-up to #173 makes subscriptions independent of the agent's harness.
+Every profile can select Codex session, Claude session, and Claude weekly
+notifications under Usage Reset Notifications. A Codex delegator can subscribe
+to Claude resets while retaining Codex resets. Delivery goes to the subscribed
+agent; it decides whether to continue a worker using its existing permissions.
+
+The optional `usage_reset_notifications` profile object contains booleans
+`codex_session`, `claude_session`, and `claude_weekly`. An explicit object
+takes precedence over the legacy two booleans, including when all choices are
+off. Missing objects retain the old own-harness behavior, preserving existing
+settings and pending notices. Editing subscriptions stores an explicit object;
+subsequent harness changes leave those subscriptions unchanged. Overrides
+inherit the subscription group, and reverting to inheritance restores the
+parent group's choices.
+
+Schema 35 protects the new stored profile field; protocol 20 keeps old clients
+from rejecting it. Existing notice receipts and pending windows remain intact.
+Use deployment manifest versions 34 to 35 and protocol versions 19 to 20,
+retain the old bundle and a protected database backup, and verify local health,
+data preservation, public revision, and asset hashes. After migration, recover
+with a schema 35 fix; do not start schema 34 binaries against the migrated data
+or restore a backup over later writes without a separate recovery decision.

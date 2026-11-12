@@ -11,12 +11,13 @@ fn eligible(snapshot: &Snapshot, session: &Session, harness: &str, window: &str)
         return false;
     }
     agent_tools::profile(snapshot, session).is_ok_and(|p| {
-        p.harness.label() == harness
-            && match window {
-                "five_hour" => p.notify_session_usage_reset,
-                "weekly" => p.harness == Harness::ClaudeCode && p.notify_weekly_usage_reset,
-                _ => false,
-            }
+        let subscriptions = p.usage_reset_notifications();
+        match (harness, window) {
+            ("Codex", "five_hour") => subscriptions.codex_session,
+            ("Claude Code", "five_hour") => subscriptions.claude_session,
+            ("Claude Code", "weekly") => subscriptions.claude_weekly,
+            _ => false,
+        }
     })
 }
 
@@ -181,6 +182,69 @@ mod tests {
             ));
         }
         crate::tests::workspace(path, &snapshot, RuntimeConfig::default())
+    }
+
+    #[test]
+    fn delegators_subscribe_to_other_harnesses_independently_and_persist_choices() {
+        for harness in [Harness::Codex, Harness::ClaudeCode] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("cross-harness.sqlite");
+            let w = fixture(&path, harness);
+            let snapshot = {
+                let mut store = w.store.lock().unwrap();
+                let mut snapshot = store.snapshot().unwrap();
+                snapshot.sessions[0]
+                    .profile
+                    .as_mut()
+                    .unwrap()
+                    .usage_reset_notifications = Some(UsageResetNotifications {
+                    codex_session: true,
+                    claude_session: true,
+                    claude_weekly: false,
+                });
+                for source in [Harness::Codex, Harness::ClaudeCode] {
+                    for window in [UsageWindow::FiveHour, UsageWindow::Weekly] {
+                        snapshot.record_usage_limit(UsageLimit::new(
+                            source,
+                            window,
+                            90.0,
+                            300,
+                            Some(200),
+                            100,
+                        ));
+                    }
+                }
+                let mut child = snapshot.sessions[0].clone();
+                child.id = "claude-child".into();
+                child.parent_session_id = Some(snapshot.sessions[0].id.clone());
+                child.worker.as_mut().unwrap().harness = Harness::ClaudeCode;
+                child.profile.as_mut().unwrap().usage_reset_notifications =
+                    Some(UsageResetNotifications::default());
+                snapshot.sessions.push(child);
+                store.save(&snapshot).unwrap();
+                snapshot
+            };
+            drop(w);
+            let w = crate::tests::workspace(&path, &snapshot, RuntimeConfig::default());
+            tick(&w, 100, false).unwrap();
+            tick(&w, 200, true).unwrap();
+            tick(&w, 210, true).unwrap();
+            let snapshot = w.store.lock().unwrap().snapshot().unwrap();
+            assert_eq!(snapshot.submissions.len(), 2);
+            assert!(
+                snapshot
+                    .submissions
+                    .iter()
+                    .all(|s| s.session_id == "reset-agent" && s.state == SubmissionState::Queued)
+            );
+            let prompts = serde_json::to_string(&snapshot.submissions).unwrap();
+            assert!(prompts.contains("Codex") && prompts.contains("Claude Code"));
+            assert!(!prompts.contains("weekly"));
+            assert_eq!(
+                snapshot.sessions[1].worker.as_ref().unwrap().status,
+                WorkerStatus::Running
+            );
+        }
     }
 
     #[test]

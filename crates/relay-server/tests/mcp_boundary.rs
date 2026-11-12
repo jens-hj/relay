@@ -1288,7 +1288,7 @@ async fn schema29_process_rejects_schema30_without_writing_history() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        34
+        35
     );
     let after: String = db
         .query_row("SELECT snapshot FROM workspace", [], |r| r.get(0))

@@ -1399,6 +1399,7 @@ impl Model {
             profile.network_access = parent_profile.network_access;
             profile.notify_session_usage_reset = parent_profile.notify_session_usage_reset;
             profile.notify_weekly_usage_reset = parent_profile.notify_weekly_usage_reset;
+            profile.usage_reset_notifications = parent_profile.usage_reset_notifications;
             profile.report_progress = parent_profile.report_progress;
             profile
         } else {
@@ -2399,6 +2400,9 @@ impl Model {
                 "notify_weekly_usage_reset" => {
                     overrides.notify_weekly_usage_reset = Some(profile.notify_weekly_usage_reset)
                 }
+                "usage_reset_notifications" => {
+                    overrides.usage_reset_notifications = profile.usage_reset_notifications
+                }
                 "report_progress" => overrides.report_progress = Some(profile.report_progress),
                 "execution" => overrides.execution = Some(profile.execution.clone()),
                 "model" => overrides.model = Some(profile.model.clone()),
@@ -2426,6 +2430,11 @@ impl Model {
             "network_access" => o.network_access = None,
             "notify_session_usage_reset" => o.notify_session_usage_reset = None,
             "notify_weekly_usage_reset" => o.notify_weekly_usage_reset = None,
+            "usage_reset_notifications" => {
+                o.usage_reset_notifications = None;
+                o.notify_session_usage_reset = None;
+                o.notify_weekly_usage_reset = None;
+            }
             "report_progress" => o.report_progress = None,
             "execution" => o.execution = None,
             "model" => o.model = None,
@@ -2456,6 +2465,11 @@ impl Model {
             "network_access" => overrides.network_access.is_some(),
             "notify_session_usage_reset" => overrides.notify_session_usage_reset.is_some(),
             "notify_weekly_usage_reset" => overrides.notify_weekly_usage_reset.is_some(),
+            "usage_reset_notifications" => {
+                overrides.usage_reset_notifications.is_some()
+                    || overrides.notify_session_usage_reset.is_some()
+                    || overrides.notify_weekly_usage_reset.is_some()
+            }
             "report_progress" => overrides.report_progress.is_some(),
             "execution" => overrides.execution.is_some(),
             "model" => overrides.model.is_some(),
