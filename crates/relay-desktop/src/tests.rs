@@ -13803,6 +13803,52 @@ fn first_visible_message(mounted: &Mounted) -> (String, f32) {
 }
 
 #[test]
+fn progress_bar_stays_at_the_bottom_edge_while_reading_earlier_history() {
+    let mounted = mount(false, 1380.0);
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.messages.extend(scroll_history("session-plan", 120)));
+    mounted.model.open_session("session-plan".into());
+    for _ in 0..3 {
+        mounted.settle();
+    }
+    let label = "Progress: 60 percent, likely 45 to 75 percent";
+    // At the end the bar is the line above the message field, once.
+    assert_eq!(mounted.rects(label).len(), 1);
+    assert!(mounted.rects("Pinned progress").is_empty());
+    let field = mounted.rect("Inline composer").origin.y;
+
+    wheel(&mounted, 1500.0);
+    mounted.settle();
+    let viewport = mounted.rect("Transcript viewport");
+    assert!(mounted.rect("Draft boundary").origin.y > viewport.max_y());
+    let pinned = mounted.rect("Pinned progress");
+    assert_eq!(pinned.origin.y, viewport.max_y());
+    assert!((pinned.max_y() - mounted.size.height).abs() < 1.0);
+    // Its summary opens above it, inside the window.
+    let index = mounted
+        .rects(label)
+        .iter()
+        .position(|r| r.origin.y == pinned.origin.y)
+        .unwrap();
+    mounted.click_nth(label, index);
+    assert!(
+        mounted
+            .rects("Progress summary")
+            .iter()
+            .any(|r| r.origin.y >= 0.0 && r.max_y() <= mounted.size.height)
+    );
+    mounted.click_nth(label, index);
+    assert!(mounted.rects("Progress summary").is_empty());
+
+    wheel(&mounted, -100_000.0);
+    mounted.settle();
+    assert!(mounted.rects("Pinned progress").is_empty());
+    assert_eq!(mounted.rects(label).len(), 1);
+    assert!((mounted.rect("Inline composer").origin.y - field).abs() < 2.0);
+}
+#[test]
 fn transcript_at_bottom_stays_pinned_after_scrolling_back_while_content_grows() {
     let mounted = mount(false, 1380.0);
     mounted

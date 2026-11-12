@@ -1790,6 +1790,11 @@ pub fn Conversation(model: Model) -> Element {
     // Whether the progress summary stays open; kept while switching chats.
     let progress_open = State::new(false);
     let progress_shown = Derived::new(move || progress_report.get().is_some());
+    // Whether the bar has scrolled out below the transcript; a copy then stays
+    // at the bottom edge.
+    let progress_below = State::new(false);
+    let boundary_element = Rc::new(RefCell::new(None::<Element>));
+    let boundary_slot = boundary_element.clone();
     // Auxiliary disclosures share a height budget. Even several open panels
     // leave space for the document; Tab reveals controls in their own scroll.
     let auxiliary_limit = Derived::new(move || {
@@ -2462,7 +2467,8 @@ pub fn Conversation(model: Model) -> Element {
                         if !progress_shown.get() {
                             el width:fill height:{px(1.0)}px fill:ground.rule nohit {}
                         }
-                    }
+                    } as boundary
+                    { *boundary_slot.borrow_mut() = Some(boundary.clone()); }
                     { parent.adopt(&inline_composer); }
                 }
             } as document_scroll
@@ -2471,6 +2477,21 @@ pub fn Conversation(model: Model) -> Element {
                 document_scroll.root().on_layout(move |rect| viewport_size.set(rect.size));
                 controller.get_untracked().borrow_mut().viewport=Some(document_scroll.clone());
                 controller.get_untracked().borrow_mut().draft_viewport = Some(document_scroll.clone());
+                let below_scroll = document_scroll.clone();
+                let below_boundary = boundary_element.clone();
+                Effect::new(move || {
+                    let offset = below_scroll.offset();
+                    let size = viewport_size.get();
+                    mosaic::core::reactive::untracked(|| {
+                        let below = below_boundary.borrow().as_ref().is_some_and(|boundary| {
+                            let top = below_scroll.content().layout_rect().origin.y;
+                            boundary.layout_rect().max_y() - top - offset.y > size.height + px(1.0)
+                        });
+                        if progress_below.get_untracked() != below {
+                            progress_below.set(below);
+                        }
+                    });
+                });
                 let window = controller.get_untracked().borrow().window.clone().expect("history window");
                 let window_scroll = document_scroll.clone();
                 Effect::new(move || {
@@ -2562,6 +2583,14 @@ pub fn Conversation(model: Model) -> Element {
                         }
                     }
                 });
+            }
+            // Scrolled back in the history, the bar is out of view below; this
+            // copy keeps it at the bottom edge.
+            if progress_shown.get() && progress_below.get() {
+                col height:min-content shrink:0 label:"Pinned progress" {
+                    ProgressStrip progress:(relay_ui::Live::from(progress))
+                        working:(relay_ui::Live::from(progress_working)) open:(progress_open)
+                }
             }
         }
     };
