@@ -905,7 +905,7 @@ pub(super) fn reserve(snapshot: &mut Snapshot, session: &str, id: &str, parts: &
     let prompt = Message {
         id: format!("prompt-{id}"),
         session_id: session.into(),
-        author: if id.starts_with(crate::notices::PREFIX) {
+        author: if crate::notices::is_relay_notice(id) {
             "Relay"
         } else {
             "You"

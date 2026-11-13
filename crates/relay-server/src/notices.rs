@@ -9,6 +9,33 @@ const WINDOW: std::time::Duration = if cfg!(test) {
 };
 /// Submission IDs with this prefix are Relay notices; their prompt is authored by Relay.
 pub(super) const PREFIX: &str = "relay-notice-";
+pub(super) fn is_relay_notice(id: &str) -> bool {
+    id.starts_with(PREFIX) || id.starts_with(crate::usage_reset::PREFIX)
+}
+
+/// Automatic turns require a durable submission; reset turns additionally
+/// require the scheduler's committed delivery record for this exact recipient.
+pub(super) fn authorizes_run(
+    db: &Connection,
+    snapshot: &Snapshot,
+    session: &str,
+    run: &str,
+) -> Result<bool, Error> {
+    if !snapshot
+        .submissions
+        .iter()
+        .any(|s| s.id == run && s.session_id == session)
+    {
+        return Ok(false);
+    }
+    if run.starts_with(PREFIX) {
+        return Ok(true);
+    }
+    if run.starts_with(crate::usage_reset::PREFIX) {
+        return db.query_row("SELECT EXISTS(SELECT 1 FROM usage_reset_notices WHERE id=?1 AND session_id=?2 AND delivered=1)", params![run,session], |r| r.get(0)).map_err(Error::internal);
+    }
+    Ok(false)
+}
 
 #[derive(Clone)]
 pub(super) struct Notice {
@@ -645,7 +672,7 @@ pub(super) fn enqueue(
         .connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(Error::internal)?;
-    if id.starts_with("relay-usage-reset-") {
+    if id.starts_with(crate::usage_reset::PREFIX) {
         transaction
             .execute(
                 "UPDATE usage_reset_notices SET delivered=1 WHERE id=?1",

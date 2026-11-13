@@ -8981,8 +8981,8 @@ fn relay_notice_prompts_keep_the_relay_label() {
         .unwrap();
     worker.parent_session_id = Some("session-plan".into());
     worker.title = "Markdown crate".into();
-    let notice = |sender: Sender| Message {
-        id: "prompt-relay-notice-1".into(),
+    let notice = |sender: Sender, id: &str| Message {
+        id: id.into(),
         session_id: "session-plan".into(),
         author: "Relay".into(),
         sender,
@@ -8991,19 +8991,24 @@ fn relay_notice_prompts_keep_the_relay_label() {
         parts: vec![],
         tool: None,
     };
-    for sender in [
-        Sender::User,
-        Sender::Agent {
-            session_id: "session-worker".into(),
-        },
+    for id in [
+        "prompt-relay-notice-1",
+        "prompt-relay-usage-reset-session-codex-five_hour-200",
     ] {
-        snapshot.messages = vec![notice(sender)];
-        mounted.model.snapshot.set(snapshot.clone());
-        mounted.model.open_session("session-plan".into());
-        mounted.settle();
-        assert!(has_label(&mounted, "Relay"));
-        assert!(!has_label(&mounted, "You"));
-        assert!(!has_label(&mounted, "Child · Markdown crate"));
+        for sender in [
+            Sender::User,
+            Sender::Agent {
+                session_id: "session-worker".into(),
+            },
+        ] {
+            snapshot.messages = vec![notice(sender, id)];
+            mounted.model.snapshot.set(snapshot.clone());
+            mounted.model.open_session("session-plan".into());
+            mounted.settle();
+            assert!(has_label(&mounted, "Relay"));
+            assert!(!has_label(&mounted, "You"));
+            assert!(!has_label(&mounted, "Child · Markdown crate"));
+        }
     }
 }
 

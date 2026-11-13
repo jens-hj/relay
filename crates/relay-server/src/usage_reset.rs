@@ -2,6 +2,8 @@
 //! the queued turn, and hold overdue notices at startup for explicit review.
 use super::*;
 
+pub(super) const PREFIX: &str = "relay-usage-reset-";
+
 fn eligible(snapshot: &Snapshot, session: &Session, harness: &str, window: &str) -> bool {
     if session.fixture
         || session.archived
@@ -48,7 +50,7 @@ impl Shutdown {
     }
 }
 
-fn tick(workspace: &Workspace, at: u64, allow_launch: bool) -> Result<(), Error> {
+pub(super) fn tick(workspace: &Workspace, at: u64, allow_launch: bool) -> Result<(), Error> {
     let mut store = workspace.store.lock().map_err(Error::internal)?;
     if store.closing {
         return Ok(());
@@ -65,7 +67,7 @@ fn tick(workspace: &Workspace, at: u64, allow_launch: bool) -> Result<(), Error>
                 limit.harness.label(),
                 limit.window.key(),
             ) {
-                let id = format!("relay-usage-reset-{}-{}-{}", session.id, limit.id, reset);
+                let id = format!("{PREFIX}{}-{}-{}", session.id, limit.id, reset);
                 store.connection.execute(
                     "INSERT OR IGNORE INTO usage_reset_notices(id,session_id,harness,window,resets_at) VALUES(?1,?2,?3,?4,?5)",
                     params![id,session.id,limit.harness.label(),limit.window.key(),reset],
@@ -182,6 +184,64 @@ mod tests {
             ));
         }
         crate::tests::workspace(path, &snapshot, RuntimeConfig::default())
+    }
+
+    #[test]
+    fn reset_authorization_requires_delivery_and_recipient_and_submission() {
+        let w = fixture(Path::new(":memory:"), Harness::Codex);
+        tick(&w, 100, true).unwrap();
+        tick(&w, 200, true).unwrap();
+        let store = w.store.lock().unwrap();
+        let mut s = store.snapshot().unwrap();
+        let id = s.submissions[0].id.clone();
+        assert!(notices::authorizes_run(&store.connection, &s, "reset-agent", &id).unwrap());
+        assert!(!notices::authorizes_run(&store.connection, &s, "other-agent", &id).unwrap());
+        store
+            .connection
+            .execute("UPDATE usage_reset_notices SET delivered=0", [])
+            .unwrap();
+        assert!(!notices::authorizes_run(&store.connection, &s, "reset-agent", &id).unwrap());
+        store
+            .connection
+            .execute("UPDATE usage_reset_notices SET delivered=1", [])
+            .unwrap();
+        s.submissions.clear();
+        assert!(!notices::authorizes_run(&store.connection, &s, "reset-agent", &id).unwrap());
+    }
+
+    #[test]
+    fn startup_repairs_existing_reset_attribution_without_replaying_or_reordering() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("repair.sqlite");
+        let w = fixture(&path, Harness::Codex);
+        tick(&w, 100, true).unwrap();
+        tick(&w, 200, true).unwrap();
+        let (id, before) = {
+            let mut store = w.store.lock().unwrap();
+            let mut s = store.snapshot().unwrap();
+            let id = s.submissions[0].id.clone();
+            let parts = s.submissions[0].parts.clone();
+            conversation::reserve(&mut s, "reset-agent", &id, &parts);
+            s.messages[0].author = "You".into();
+            store.save(&s).unwrap();
+            (id, store.full())
+        };
+        drop(w);
+        let store = Store::open(&path, AgentProfile::default()).unwrap();
+        let after = store.full();
+        assert_eq!(after.submissions, before.submissions);
+        assert_eq!(after.sessions, before.sessions);
+        assert_eq!(after.messages.len(), before.messages.len());
+        let message = after
+            .messages
+            .iter()
+            .find(|m| m.id == format!("prompt-{id}"))
+            .unwrap();
+        assert_eq!(message.author, "Relay");
+        assert!(after.revision > before.revision);
+        drop(store);
+        let store = Store::open(&path, AgentProfile::default()).unwrap();
+        assert_eq!(store.full(), after);
     }
 
     #[test]

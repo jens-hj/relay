@@ -150,3 +150,20 @@ retain the old bundle and a protected database backup, and verify local health,
 data preservation, public revision, and asset hashes. After migration, recover
 with a schema 35 fix; do not start schema 34 binaries against the migrated data
 or restore a backup over later writes without a separate recovery decision.
+
+## Reset Notice Attribution and Launch Authorization
+
+The #173 follow-up fixes the reset-specific notice prefix being omitted from
+Relay prompt attribution and the no-client-receipt launch path. A reset may
+launch only with a matching durable submission and a delivered reset record
+for the same session. Current implementation permissions, stop/pause holds,
+workspace contention, and run identity checks still apply. Tests run real
+Codex and Claude harness transports after a simulated five-hour idle wait.
+
+Schema 35 and protocol 20 stay unchanged. At startup, historical prompt rows
+backed by delivered reset records have their author corrected from You to
+Relay. Message IDs, order, payloads, submissions, and session states are
+preserved; this repair does not retry already-failed turns. Future eligible
+reset notices continue automatically, and an existing failed turn can be
+continued explicitly. Deploy matching immutable packages with the usual
+protected backup and local/public verification.

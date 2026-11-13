@@ -2712,3 +2712,96 @@ async fn review_failure_case(mode: &str) {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn usage_reset_resumes_idle_agents_through_real_harness_transport() {
+    for harness in [Harness::Codex, Harness::ClaudeCode] {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join("codex");
+        script(
+            &codex,
+            r#"cat > reset-input
+echo '{"type":"thread.started","thread_id":"reset-thread"}'
+echo '{"type":"item.completed","item":{"id":"reply","type":"agent_message","text":"Resumed after reset"}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}'"#,
+        );
+        let w = claude_workspace_with(dir.path(), CLAUDE_FAKE, RuntimeConfig { codex, ..config() });
+        {
+            let mut store = w.store.lock().unwrap();
+            let mut s = store.snapshot().unwrap();
+            s.projects[0].defaults.harness = harness;
+            s.projects[0].defaults.usage_reset_notifications = Some(UsageResetNotifications {
+                claude_session: true,
+                ..Default::default()
+            });
+            store.save(&s).unwrap();
+            w.snapshots.send_replace(s.into());
+        }
+        let s = w.snapshots.borrow().clone();
+        let (id, run, rx, prompt) = reserve(&w, env(s.revision, start(&s)));
+        runtime::run(w.clone(), id.clone(), run.clone(), prompt, rx).await;
+        assert_eq!(
+            worker(&w.snapshots.borrow(), &id).status,
+            WorkerStatus::Completed
+        );
+        {
+            let mut store = w.store.lock().unwrap();
+            let mut s = store.snapshot().unwrap();
+            s.record_usage_limit(UsageLimit::new(
+                Harness::ClaudeCode,
+                UsageWindow::FiveHour,
+                100.0,
+                300,
+                Some(20_000),
+                2_000,
+            ));
+            store.save(&s).unwrap();
+        }
+        crate::usage_reset::tick(&w, 2_000, true).unwrap();
+        // Simulate a five-hour wait, without sleeping or injecting a human turn.
+        crate::usage_reset::tick(&w, 20_000, true).unwrap();
+        let notice = w
+            .snapshots
+            .borrow()
+            .submissions
+            .iter()
+            .find(|s| s.id.starts_with(crate::usage_reset::PREFIX))
+            .unwrap()
+            .id
+            .clone();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let s = w.snapshots.borrow().clone();
+                let turn = s.submissions.iter().find(|s| s.id == notice).unwrap();
+                assert_ne!(
+                    turn.state,
+                    SubmissionState::Failed,
+                    "{:?}",
+                    worker(&s, &id).error
+                );
+                if turn.state == SubmissionState::Completed {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let store = w.store.lock().unwrap();
+        let message = crate::messages::get(&store.connection, &format!("prompt-{notice}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.author, "Relay");
+        assert!(message.body.contains("Claude Code"));
+        assert!(
+            !store
+                .connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM receipts WHERE request_id=?1)",
+                    [&notice],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+        );
+    }
+}

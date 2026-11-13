@@ -1972,10 +1972,12 @@ async fn execute(
             Some(Command::ConversationCommand { ref name, .. }) if name == "fork" => true,
             // Relay notices have no client receipt; their durable submission
             // establishes the turn and never carries implementation approval.
-            None if run_id.starts_with(crate::notices::PREFIX)
-                && current.submissions.iter().any(|submission| {
-                    submission.id == run_id && submission.session_id == session_id
-                }) =>
+            None if crate::notices::authorizes_run(
+                &store.connection,
+                &current,
+                session_id,
+                run_id,
+            )? =>
             {
                 false
             }

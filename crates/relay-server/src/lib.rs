@@ -546,6 +546,17 @@ impl Store {
                 .map_err(Error::internal)?;
             changed = true;
         }
+        // Correct historical reset prompts only when backed by a delivered
+        // scheduler record. Preserve message identity/order and never replay work.
+        let repaired_revision = snapshot
+            .revision
+            .max(messages::max_revision(&connection).map_err(Error::internal)?)
+            .checked_add(1)
+            .ok_or_else(|| Error::invalid("Revision exhausted"))?;
+        connection.execute(
+            "UPDATE messages SET data=json_set(data,'$.author','Relay'),revision=?1 WHERE kind='prompt' AND json_extract(data,'$.author')='You' AND EXISTS(SELECT 1 FROM usage_reset_notices n WHERE messages.id='prompt-'||n.id AND messages.session_id=n.session_id AND n.delivered=1)",
+            [repaired_revision],
+        ).map_err(Error::internal)?;
         // Message-only updates do not rewrite the row; never go backwards.
         let floor = messages::max_revision(&connection).map_err(Error::internal)?;
         if floor > snapshot.revision {
