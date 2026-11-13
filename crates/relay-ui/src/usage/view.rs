@@ -463,6 +463,32 @@ pub fn UsageDetail(usage: HarnessUsage, #[prop(optional)] on_apply: Option<OnApp
     if let Some(week) = &usage.week {
         body.adopt(&window_block("Week", week, usage.harness));
     }
+    if usage.harness == Harness::ClaudeCode
+        && let Some(fable) = &usage.fable
+    {
+        let block = view! {
+            col height:min-content gap:{px(6.0)}px pad:(top:{px(8.0)}px) {}
+        };
+        let resets = (!fable.resets.is_empty())
+            .then(|| sized_text(fable.resets.clone().into(), 12.0, 400, ground.ink));
+        block.adopt(&line(
+            grow("Fable · Week".into(), ground.muted, 400),
+            resets,
+        ));
+        block.adopt(&view! {
+            UsageBar window:(fable.clone()) harness:(Some(usage.harness))
+        });
+        block.adopt(&line(
+            grow("Up to 50% of your weekly limit".into(), ground.muted, 400),
+            Some(sized_text(
+                format!("{:.0}% used", fable.used).into(),
+                12.0,
+                600,
+                level_token(fable.used),
+            )),
+        ));
+        body.adopt(&block);
+    }
     for part in [
         mix_block(&usage.insight),
         heaviest_block(&usage.insight),

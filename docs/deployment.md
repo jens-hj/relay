@@ -167,3 +167,22 @@ preserved; this repair does not retry already-failed turns. Future eligible
 reset notices continue automatically, and an existing failed turn can be
 continued explicitly. Deploy matching immutable packages with the usual
 protected backup and local/public verification.
+
+## Fable Weekly Allowance: Schema 35 to 36
+
+Issue #174 preserves Claude's seven_day_overage_included window as the distinct
+FableWeekly allowance. The installed Claude CLI labels this field Fable limit.
+Percentages are relative to that allowance, not total weekly usage. The detail
+shows the reported percentage and reset time with the user-supplied allowance
+explanation; missing or expired measurements are hidden, never estimated from
+token mix or the overall weekly percentage. Existing reset subscriptions retain
+their meaning; this feature adds no automatic Fable reset notifications.
+
+Schema 36 and protocol 21 protect the additional stored enum variant. The
+migration adds no tables, removes no data, and preserves old usage windows,
+profiles, receipts, and history. Older servers reject the new schema before
+reading the new variant. Use a protected SQLite backup and retain the previous
+bundle before deployment. Use manifest versions 35 to 36 and 20 to 21, with
+matching immutable server/browser artifacts. After migration, use a schema 36
+fix for recovery; do not downgrade the binary or restore over later writes
+without an explicit recovery decision.

@@ -1824,7 +1824,7 @@ fn schema_six_defaults_missing_run_metadata_and_preserves_it_after_reopen() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        35
+        36
     );
     let worker = snapshot.sessions[0].worker.as_mut().unwrap();
     worker.model = Some("reported-model".into());
@@ -2245,7 +2245,19 @@ async fn claude_reports_compactions_context_rate_limits_and_tool_details() {
             .count(),
         2
     );
-    let limits = &snapshot.usage_limits;
+    assert_eq!(snapshot.usage_limits.len(), 3);
+    let fable = snapshot
+        .usage_limits
+        .iter()
+        .find(|l| l.window == UsageWindow::FableWeekly)
+        .unwrap();
+    assert_eq!(fable.used_percent, 80.0);
+    assert_eq!(fable.resets_at, Some(1900500000));
+    let limits: Vec<_> = snapshot
+        .usage_limits
+        .iter()
+        .filter(|l| l.window != UsageWindow::FableWeekly)
+        .collect();
     assert_eq!(limits.len(), 2);
     assert_eq!(limits[0].id, "claude_code-five_hour");
     assert_eq!(
@@ -2344,7 +2356,7 @@ async fn claude_reports_compactions_context_rate_limits_and_tool_details() {
 const CLAUDE_DETAIL_EVENTS: &str = r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Working"}],"usage":{"input_tokens":900,"cache_read_input_tokens":100,"cache_creation_input_tokens":10,"output_tokens":5}}}
 {"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":150000}}
 {"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":160000}}
-{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"utilization":0.25,"resetsAt":1900000000},"seven_day":{"utilization":0.5,"resetsAt":1900500000}}},"uuid":"u","session_id":"11111111-2222-4333-8444-555555555555"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"utilization":0.25,"resetsAt":1900000000},"seven_day":{"utilization":0.5,"resetsAt":1900500000},"seven_day_overage_included":{"utilization":0.8,"resetsAt":1900500000}}},"uuid":"u","session_id":"11111111-2222-4333-8444-555555555555"}
 {"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"write-new","name":"Write","input":{"file_path":"new.txt","content":"a\nb\n"}}]}}
 {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"write-new","content":"File created successfully at: new.txt"}]},"tool_use_result":{"type":"create","filePath":"new.txt","content":"a\nb\n","structuredPatch":[]}}
 {"type":"assistant","message":{"id":"m3","content":[{"type":"tool_use","id":"write-old","name":"Write","input":{"file_path":"old.txt","content":"x"}}]}}

@@ -122,16 +122,20 @@ pub fn harness_usage(
                     .and_then(|l| window(l, now))
             };
             let (session, week) = (find(Window::FiveHour), find(Window::Weekly));
+            let fable = (which == Harness::ClaudeCode)
+                .then(|| find(Window::FableWeekly))
+                .flatten();
             let connected = statuses
                 .iter()
                 .any(|status| status.harness == which && status.state == "ready");
-            if !connected && session.is_none() && week.is_none() {
+            if !connected && session.is_none() && week.is_none() && fable.is_none() {
                 return None;
             }
             Some(HarnessUsage {
                 harness: harness(which),
                 session,
                 week,
+                fable,
                 insight: insight(snapshot, which, now),
             })
         })

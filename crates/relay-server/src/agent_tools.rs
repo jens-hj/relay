@@ -5133,7 +5133,7 @@ mod tests {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(schema, 35);
+        assert_eq!(schema, 36);
         f.finish().await;
     }
     #[tokio::test]

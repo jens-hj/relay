@@ -1187,7 +1187,7 @@ fn schema_thirty_transcript_moves_to_the_messages_table_in_order() {
             .connection
             .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
             .unwrap(),
-        35
+        36
     );
 }
 

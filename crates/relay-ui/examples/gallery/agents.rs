@@ -178,6 +178,7 @@ pub fn board_usage() -> Vec<relay_ui::usage::HarnessUsage> {
     vec![
         HarnessUsage {
             harness: Harness::ClaudeCode,
+            fable: None,
             session: Some(
                 UsageWindow::new(62.0, 5 * HOUR)
                     .elapsed(2 * HOUR)
@@ -220,6 +221,7 @@ pub fn board_usage() -> Vec<relay_ui::usage::HarnessUsage> {
         },
         HarnessUsage {
             harness: Harness::Codex,
+            fable: None,
             session: Some(
                 UsageWindow::new(84.0, 5 * HOUR)
                     .elapsed(5 * HOUR * 7 / 10)

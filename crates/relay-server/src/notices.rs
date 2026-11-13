@@ -1073,7 +1073,7 @@ mod outbox_follow_on_regressions {
             let (after, _) = store
                 .apply_owned(request.clone(), &RuntimeConfig::default())
                 .unwrap();
-            assert_eq!(after.protocol_version, 20);
+            assert_eq!(after.protocol_version, 21);
             assert_ne!(after, before);
             assert_eq!(
                 store.full(),
@@ -1328,7 +1328,7 @@ mod outbox_follow_on_regressions {
                 .connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            35
+            36
         );
         assert_eq!(
             store
@@ -1355,7 +1355,7 @@ mod outbox_follow_on_regressions {
         );
         store
             .connection
-            .pragma_update(None, "user_version", 36)
+            .pragma_update(None, "user_version", 37)
             .unwrap();
         drop(store);
         assert!(Store::open(&path, AgentProfile::default()).is_err());

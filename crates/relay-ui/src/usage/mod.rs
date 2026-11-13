@@ -116,6 +116,8 @@ pub struct HarnessUsage {
     pub session: Option<UsageWindow>,
     /// The weekly limit ("wk").
     pub week: Option<UsageWindow>,
+    /// Claude Fable allowance, as a percentage of its own weekly cap.
+    pub fable: Option<UsageWindow>,
     pub insight: UsageInsight,
 }
 

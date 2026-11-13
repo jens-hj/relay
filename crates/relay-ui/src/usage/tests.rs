@@ -45,6 +45,7 @@ fn usage_foot_has_a_full_width_internal_hairline_above_its_heading() {
 fn claude(insight: UsageInsight) -> HarnessUsage {
     HarnessUsage {
         harness: Harness::ClaudeCode,
+        fable: None,
         session: Some(
             UsageWindow::new(62.0, 5 * HOUR)
                 .elapsed(2 * HOUR)
@@ -84,6 +85,7 @@ fn bar_colours(mounted: &crate::testing::Mounted, label: &str) -> Vec<(f32, f32,
 fn each_harness_fills_its_bars_with_its_colour_until_a_threshold() {
     let codex = HarnessUsage {
         harness: Harness::Codex,
+        fable: None,
         session: Some(UsageWindow::new(35.0, 5 * HOUR)),
         week: Some(UsageWindow::new(86.0, 7 * 24 * HOUR)),
         insight: UsageInsight::default(),
@@ -180,4 +182,25 @@ fn rows_open_into_a_detail_with_only_supplied_parts() {
     assert_eq!(bar.size.height, 16.0);
     mounted.click_label("Claude Code: session 62 percent, week 48 percent. Hide details");
     assert!(!mounted.has("Runs out early"));
+}
+
+#[test]
+fn fable_detail_uses_its_own_allowance_percentage_and_reset() {
+    let mut usage = claude(UsageInsight::default());
+    usage.fable = Some(UsageWindow::new(80.0, 168 * HOUR).resets("resets Saturday 1:00 PM"));
+    let mounted = mount(Size::new(460.0, 900.0), move || {
+        view! {
+            UsageDetail usage:(usage)
+        }
+    });
+    assert!(mounted.has("Fable · Week"));
+    assert!(mounted.has("80% used"));
+    assert!(mounted.has("Up to 50% of your weekly limit"));
+    assert!(mounted.has("resets Saturday 1:00 PM"));
+    let missing = mount(Size::new(460.0, 900.0), || {
+        view! {
+            UsageDetail usage:(claude(UsageInsight::default()))
+        }
+    });
+    assert!(!missing.has("Fable · Week"));
 }

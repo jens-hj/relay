@@ -10,6 +10,8 @@ pub const USAGE_LEDGER_RETENTION_SECS: u64 = 8 * 24 * 60 * 60;
 pub enum UsageWindow {
     FiveHour,
     Weekly,
+    /// Claude Fable included allowance, independent of total weekly usage.
+    FableWeekly,
 }
 
 impl UsageWindow {
@@ -17,6 +19,7 @@ impl UsageWindow {
         match self {
             Self::FiveHour => "five_hour",
             Self::Weekly => "weekly",
+            Self::FableWeekly => "fable_weekly",
         }
     }
 

@@ -931,3 +931,30 @@ fn tree_rows_show_a_stored_effort_before_any_catalog_loads() {
         assert_eq!(effort.step_name(effort.current), "high", "{}", row.name);
     }
 }
+
+#[test]
+fn fable_usage_is_reported_independently_and_hidden_after_reset() {
+    let mut snapshot = Snapshot::default();
+    snapshot.record_usage_limit(UsageLimit::new(
+        Harness::ClaudeCode,
+        UsageWindow::Weekly,
+        52.0,
+        10080,
+        Some(2000),
+        1000,
+    ));
+    snapshot.record_usage_limit(UsageLimit::new(
+        Harness::ClaudeCode,
+        UsageWindow::FableWeekly,
+        80.0,
+        10080,
+        Some(1500),
+        1000,
+    ));
+    let usage = harness_usage(&snapshot, &[], 1000);
+    assert_eq!(usage[0].week.as_ref().unwrap().used, 52.0);
+    assert_eq!(usage[0].fable.as_ref().unwrap().used, 80.0);
+    let expired = harness_usage(&snapshot, &[], 1500);
+    assert!(expired[0].fable.is_none());
+    assert!(expired[0].week.is_some());
+}

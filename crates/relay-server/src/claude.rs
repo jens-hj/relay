@@ -706,6 +706,7 @@ pub(super) fn rate_limits(snapshot: &mut Snapshot, info: &Value, now: u64) {
         let (kind, minutes) = match kind {
             "five_hour" => (UsageWindow::FiveHour, 5 * 60),
             "seven_day" => (UsageWindow::Weekly, 7 * 24 * 60),
+            "seven_day_overage_included" => (UsageWindow::FableWeekly, 7 * 24 * 60),
             _ => return,
         };
         let Some(utilization) = window["utilization"].as_f64() else {
@@ -1031,5 +1032,37 @@ fn context_window(snapshot: &mut Snapshot, session: &str, usage: &Value) {
         .filter(|w| *w > 0)
     {
         worker.context_window = Some(window);
+    }
+}
+
+#[cfg(test)]
+mod fable_usage_tests {
+    use super::*;
+    #[test]
+    fn fable_allowance_is_distinct_for_unified_and_single_window_events() {
+        for info in [
+            serde_json::json!({"unifiedWindows":{"seven_day":{"utilization":0.52,"resetsAt":2000},"seven_day_overage_included":{"utilization":0.8,"resetsAt":2000}}}),
+            serde_json::json!({"rateLimitType":"seven_day_overage_included","utilization":0.8,"resetsAt":2000}),
+        ] {
+            let mut snapshot = Snapshot::default();
+            rate_limits(&mut snapshot, &info, 1000);
+            let fable = snapshot
+                .usage_limits
+                .iter()
+                .find(|l| l.window == UsageWindow::FableWeekly)
+                .unwrap();
+            assert_eq!(fable.used_percent, 80.0);
+            assert_eq!(fable.window_minutes, 10080);
+            assert_eq!(fable.resets_at, Some(2000));
+            let round_trip: Snapshot =
+                serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+            assert_eq!(round_trip.usage_limits, snapshot.usage_limits);
+            rate_limits(
+                &mut snapshot,
+                &serde_json::json!({"rateLimitType":"seven_day_overage_included","utilization":null}),
+                1001,
+            );
+            assert_eq!(snapshot.usage_limits, round_trip.usage_limits);
+        }
     }
 }
