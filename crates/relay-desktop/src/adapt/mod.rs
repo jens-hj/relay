@@ -7,20 +7,25 @@
 
 mod context;
 mod identity;
+mod message_tools;
 mod tools;
 mod tree;
 mod usage;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::message_pair;
 
 pub use context::{context_view, session_progress};
 pub use identity::{effort_choice, harness, model_identity, selection_model, session_model};
 #[cfg(test)]
+pub use message_tools::transcript_messages;
+pub use message_tools::{MessageTools, message_tool_sources};
+#[cfg(test)]
 pub use tools::fingerprint;
 pub use tools::{
-    approval_view, session_fingerprint, tool_status, tool_view, transcript_messages,
-    transcript_permissions,
+    approval_view, session_fingerprint, tool_status, tool_view, transcript_permissions,
 };
 pub use tree::{
     agent_forest, ancestor_path, issue_status, needs_you, session_status, subtree_statuses,

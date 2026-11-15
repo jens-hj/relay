@@ -1,19 +1,18 @@
 //! Tool calls, fingerprints and approval blocks.
 
 use super::identity::{harness, session_model, stored_effort};
+use super::message_tools::MessageTools;
 use super::tree::{ancestor_path, session_status};
 use relay_core::{
     HarnessCatalog, HistoryState, Message, Snapshot, ToolCall, ToolDetail as Measured,
     ToolKind as Kind, ToolPermission, ToolState,
 };
 use relay_ui::prelude::{
-    AgentStatus, ApprovalView, CodeLine, Hunk, Opening, PlanStep, SearchFile, TestFailure,
-    ToolCallView, ToolCount, ToolDetail, WaitAgent,
+    AgentStatus, ApprovalView, CodeLine, Exchange, Hunk, Opening, PlanStep, SearchFile,
+    TestFailure, ToolCallView, ToolCount, ToolDetail, WaitAgent,
 };
 use relay_ui::tokens::ToolKind;
 use std::collections::BTreeMap;
-
-pub use relay_core::transcript_messages;
 
 /// Lines of tool output kept in a summary's tail.
 const TAIL: usize = 6;
@@ -125,9 +124,29 @@ fn clamp(value: u64) -> u32 {
 fn detail(
     snapshot: &Snapshot,
     message: &Message,
+    messages: &MessageTools,
     tool: &ToolCall,
     catalogs: &BTreeMap<String, Result<HarnessCatalog, String>>,
 ) -> Option<ToolDetail> {
+    if let Some(sent) = messages.sent(message) {
+        let mut exchange = vec![Exchange {
+            who: None,
+            text: Some(sent.text.clone()),
+        }];
+        if matches!(tool.state, ToolState::Failed | ToolState::Interrupted)
+            && !message.body.is_empty()
+        {
+            exchange.push(Exchange {
+                who: Some("Error".into()),
+                text: Some(message.body.clone()),
+            });
+        }
+        return Some(ToolDetail::Message {
+            target: title(snapshot, &sent.target),
+            read: sent.read,
+            exchange: Some(exchange),
+        });
+    }
     let output = message.body.as_str();
     let target = (!tool.target.is_empty()).then(|| tool.target.clone());
     let elapsed = tool
@@ -364,6 +383,7 @@ fn detail(
 pub fn tool_view(
     snapshot: &Snapshot,
     message: &Message,
+    messages: &MessageTools,
     opening: Opening,
     catalogs: &BTreeMap<String, Result<HarnessCatalog, String>>,
 ) -> Option<ToolCallView> {
@@ -379,7 +399,7 @@ pub fn tool_view(
         },
         target: (!tool.target.is_empty()).then(|| tool.target.clone()),
         opening,
-        detail: detail(snapshot, message, tool, catalogs),
+        detail: detail(snapshot, message, messages, tool, catalogs),
     })
 }
 

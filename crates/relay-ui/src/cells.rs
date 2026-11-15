@@ -277,7 +277,9 @@ pub fn LinkButton(
             pressed { fill:(Color::TRANSPARENT) }
             focused { stroke:(width:{px(1.0)} color:ground.ink offset:{px(2.0)}) } {
             col width:max-content height:min-content gap:{px(2.0)}px {
-                text {text.get()}
+                // Keep the rule tied to this label's line box rather than
+                // inheriting the surrounding conversation's line height.
+                text height:min-content line-height:{px(14.0)}px {text.get()}
                 el width:fill height:{px(1.0)}px fill:ground.rule-strong {}
             }
         }

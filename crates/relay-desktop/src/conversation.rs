@@ -86,6 +86,7 @@ pub struct Controller {
     index: Option<Derived<Rc<TranscriptIndex>>>,
     window: Option<HistoryWindow>,
     expanded_rows: BTreeMap<String, bool>,
+    disclosure_revision: Option<State<u64>>,
     pub(crate) tool_openings: BTreeMap<String, relay_ui::prelude::Opening>,
     source_request: Option<(String, u64)>,
     source_search: bool,
@@ -255,8 +256,24 @@ fn pinned_history(controller: &Shared, ui: &Ui) -> Vec<String> {
         .chain(state.history_anchor.as_ref().map(|(id, _)| id.clone()))
         .collect::<Vec<_>>();
     pinned.extend(state.native_selection_rows.iter().flatten().cloned());
+    let focused_rect = ui
+        .focused()
+        .and_then(|field| ui.inspection_rect(field.id()));
     for (id, row) in &state.messages {
-        if row.interaction().focus_within() {
+        let summary = state.index.is_some_and(|index| {
+            index.with_untracked(|index| {
+                index
+                    .rows
+                    .get(id)
+                    .is_some_and(|entry| entry.reasoning_group.is_some())
+            })
+        });
+        // Prepending a summary removes the old leader's disclosure. A removed
+        // control can leave focus-within set; only pin a live focused control.
+        if row.interaction().focus_within()
+            && (!summary
+                || focused_rect.is_some_and(|rect| row.layout_rect().contains(rect.center())))
+        {
             pinned.push(id.clone());
         }
     }
@@ -342,6 +359,7 @@ fn preview_assets(parts: &[Part], draft: bool) -> Vec<(String, Option<String>)> 
 struct TranscriptIndex {
     order: Vec<String>,
     rows: BTreeMap<String, TranscriptEntry>,
+    reasoning_members: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -351,6 +369,32 @@ struct TranscriptEntry {
     speaker: TranscriptSpeaker,
     continues: bool,
     spacing: f32,
+    reasoning_group: Option<String>,
+}
+
+// Public Codex summaries encode the turn's Relay run UUID, followed by the
+// provider item and paragraph index. Unknown/legacy IDs stay independent.
+fn reasoning_run(message: &Message) -> Option<&str> {
+    if message.kind != "reasoning"
+        || message.tool.is_some()
+        || (message.body.trim().is_empty() && message.parts.is_empty())
+    {
+        return None;
+    }
+    let suffix = message.id.strip_prefix("codex-summary-")?;
+    let run = suffix.get(..36)?;
+    if !run.bytes().enumerate().all(|(i, b)| {
+        if matches!(i, 8 | 13 | 18 | 23) {
+            b == b'-'
+        } else {
+            b.is_ascii_hexdigit()
+        }
+    }) {
+        return None;
+    }
+    let item = suffix.get(36..)?.strip_prefix('-')?;
+    let (item, index) = item.rsplit_once('-')?;
+    (!item.is_empty() && index.parse::<u64>().is_ok()).then_some(run)
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -364,6 +408,7 @@ struct TranscriptSpeaker {
 fn transcript_index(model: Model) -> Derived<Rc<TranscriptIndex>> {
     Derived::new(move || {
         let session = model.session.get();
+        let message_tools = model.message_tools.get();
         model.snapshot.with(|snapshot| {
             let mut result = TranscriptIndex::default();
             let mut comments: BTreeMap<&str, Vec<Comment>> = BTreeMap::new();
@@ -374,7 +419,33 @@ fn transcript_index(model: Model) -> Derived<Rc<TranscriptIndex>> {
                     .push(comment.clone());
             }
             let mut previous: Option<(TranscriptSpeaker, bool)> = None;
-            for message in crate::adapt::transcript_messages(&snapshot.messages, &session) {
+            let mut reasoning_previous: Option<(&Message, String)> = None;
+            let mut predecessor = BTreeMap::new();
+            let mut prior_id = None;
+            for message in snapshot.messages.iter().filter(|m| m.session_id == session) {
+                predecessor.insert(message.id.as_str(), prior_id);
+                prior_id = Some(message.id.as_str());
+            }
+            for message in message_tools.transcript_messages(&snapshot.messages, &session) {
+                let reasoning_group = reasoning_run(message).map(|run| {
+                    reasoning_previous
+                        .as_ref()
+                        .filter(|(prior, _)| {
+                            reasoning_run(prior) == Some(run)
+                                && prior.session_id == message.session_id
+                                && prior.author == message.author
+                                && prior.sender == message.sender
+                                // Even a receipt filtered from the visual transcript
+                                // is a boundary; never group across a tool/result.
+                                && predecessor.get(message.id.as_str()).copied().flatten()
+                                    == Some(prior.id.as_str())
+                        })
+                        .map(|(_, group)| group.clone())
+                        .unwrap_or_else(|| message.id.clone())
+                });
+                reasoning_previous = reasoning_group
+                    .as_ref()
+                    .map(|group| (message, group.clone()));
                 let speaker = if message.kind == "prompt" {
                     prompt_speaker(snapshot, message)
                 } else {
@@ -387,7 +458,7 @@ fn transcript_index(model: Model) -> Derived<Rc<TranscriptIndex>> {
                     || matches!(message.kind.as_str(), "command_execution" | "file_change");
                 let continues = previous.as_ref().is_some_and(|(name, _)| *name == speaker);
                 let entry = TranscriptEntry {
-                    message: crate::tool_activity::with_legacy_tool(message.clone()),
+                    message: message_tools.presentation(message),
                     comments: comments.remove(message.id.as_str()).unwrap_or_default(),
                     speaker: if continues {
                         TranscriptSpeaker::default()
@@ -400,8 +471,16 @@ fn transcript_index(model: Model) -> Derived<Rc<TranscriptIndex>> {
                         Some((_, true)) if tool => 6.0,
                         Some(_) => 28.0,
                     },
+                    reasoning_group,
                 };
                 previous = Some((speaker, tool));
+                if let Some(group) = &entry.reasoning_group {
+                    result
+                        .reasoning_members
+                        .entry(group.clone())
+                        .or_default()
+                        .push(message.id.clone());
+                }
                 result.order.push(message.id.clone());
                 result.rows.insert(message.id.clone(), entry);
             }
@@ -1432,6 +1511,20 @@ fn go_to_source(model: Model, controller: &Shared, anchor: &relay_core::Anchor, 
             mount_history_message(controller, &anchor.message_id);
             return;
         }
+        // Expanding a grouped summary can mount its text before HistoryWindow
+        // replaces the collapsed height. Keep the anchor pending until that
+        // report, so height compensation cannot undo the final reveal.
+        if reasoning_run(message).is_some()
+            && controller.borrow().window.as_ref().is_some_and(|window| {
+                window
+                    .heights
+                    .borrow()
+                    .get(&anchor.message_id)
+                    .is_none_or(|height| height.stale)
+            })
+        {
+            return;
+        }
         if focus {
             let fonts = model.ui.get_untracked().fonts();
             editor.borrow_mut().set_selection_bytes(
@@ -1440,6 +1533,9 @@ fn go_to_source(model: Model, controller: &Shared, anchor: &relay_core::Anchor, 
                 anchor.end - offset,
             );
             field.focus();
+            if reasoning_run(message).is_some() {
+                controller.borrow_mut().resize_follow = true;
+            }
         }
         field.reveal();
         field.paint_dirty();
@@ -1526,6 +1622,7 @@ pub fn Conversation(model: Model) -> Element {
     let controller = State::new(Rc::new(RefCell::new(Controller::default())));
     let index = transcript_index(model);
     controller.get_untracked().borrow_mut().index = Some(index);
+    controller.get_untracked().borrow_mut().disclosure_revision = Some(State::new(0));
     let message_keys = Derived::new(move || index.with(|index| index.order.clone()));
     let history_window = HistoryWindow::new();
     controller.get_untracked().borrow_mut().window = Some(history_window.clone());
@@ -2744,31 +2841,84 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
         Derived::new(move || entry.with(|entry| entry.as_ref().map_or(0.0, |entry| entry.spacing)));
     let message =
         Derived::new(move || entry.with(|entry| entry.as_ref().map(|entry| entry.message.clone())));
-    let expanded = State::new(
-        controller
-            .get_untracked()
-            .borrow()
-            .expanded_rows
-            .get(&message_id.get_untracked())
-            .copied()
-            .unwrap_or(false),
-    );
+    let group = Derived::new(move || {
+        entry.with(|entry| {
+            entry
+                .as_ref()
+                .and_then(|entry| entry.reasoning_group.clone())
+                .unwrap_or_else(|| message_id.get())
+        })
+    });
+    let member = move || group.get() != message_id.get();
+    let blank = move || {
+        message.get().is_some_and(|m| {
+            m.kind == "reasoning" && m.body.trim().is_empty() && m.parts.is_empty()
+        })
+    };
+    let has_adornments = Derived::new(move || {
+        entry.with(|entry| {
+            entry
+                .as_ref()
+                .is_some_and(|entry| !entry.comments.is_empty())
+        }) || buffer::parts(model, &model.session.get())
+            .iter()
+            .any(|part| {
+                matches!(&part.kind, PartKind::Reply { anchor, .. }
+                    if anchor.message_id == message_id.get())
+            })
+    });
+    let revision = {
+        let shared = controller.get_untracked();
+        let mut state = shared.borrow_mut();
+        *state
+            .disclosure_revision
+            .get_or_insert_with(|| State::new(0))
+    };
+    let expanded = Derived::new(move || {
+        revision.get();
+        let shared = controller.get_untracked();
+        let state = shared.borrow();
+        // Any previously expanded member keeps a group open when older history
+        // is prepended and gives that group an earlier first message.
+        index.with(|index| match index.reasoning_members.get(&group.get()) {
+            Some(members) => members
+                .iter()
+                .any(|id| state.expanded_rows.get(id).copied().unwrap_or(false)),
+            None => state
+                .expanded_rows
+                .get(&message_id.get())
+                .copied()
+                .unwrap_or(false),
+        })
+    });
+    let set_expanded = move |value| {
+        let shared = controller.get_untracked();
+        let mut state = shared.borrow_mut();
+        index.with_untracked(
+            |index| match index.reasoning_members.get(&group.get_untracked()) {
+                Some(members) => {
+                    for id in members {
+                        state.expanded_rows.insert(id.clone(), value);
+                        state.invalidate_history_height(id);
+                    }
+                }
+                None => {
+                    let id = message_id.get_untracked();
+                    state.expanded_rows.insert(id.clone(), value);
+                    state.invalidate_history_height(&id);
+                }
+            },
+        );
+        drop(state);
+        revision.update(|revision| *revision += 1);
+    };
     Effect::new(move || {
         if model
             .source_anchor
             .get()
             .is_some_and(|anchor| anchor.message_id == message_id.get_untracked())
         {
-            expanded.set(true);
-        }
-    });
-    Effect::new(move || {
-        let value = expanded.get();
-        let shared = controller.get_untracked();
-        let mut state = shared.borrow_mut();
-        let id = message_id.get_untracked();
-        if state.expanded_rows.insert(id.clone(), value) != Some(value) {
-            state.invalidate_history_height(&id);
+            set_expanded(true);
         }
     });
     let initial = message.get_untracked();
@@ -2833,104 +2983,118 @@ fn TranscriptMessage(model: Model, message_id: String, controller: ControllerSta
                 .map(|w| crate::adapt::harness(w.harness))
         })
         .flatten();
-    let body = view! {
-        col height:min-content min-width:0px gap:0px {
-            if model.history.get().preview_ids.contains(&message_id.get()) {
-                row height:min-content align:center gap:{px(8.0)}px {
-                    Label text:"Message Preview" role:(TextRole::Caption) tone:(Tone::Muted)
-                    LinkButton text:"Load full message"
-                        on-press:(press(move || model.load_message(message_id.get_untracked())))
+    let build_row = move || {
+        let body = view! {
+            col height:min-content min-width:0px gap:0px {
+                if model.history.get().preview_ids.contains(&message_id.get()) {
+                    row height:min-content align:center gap:{px(8.0)}px {
+                        Label text:"Message Preview" role:(TextRole::Caption) tone:(Tone::Muted)
+                        LinkButton text:"Load full message"
+                            on-press:(press(move || model.load_message(message_id.get_untracked())))
+                    }
                 }
-            }
-            if detail && message.get().is_none_or(|m|m.tool.is_none()) {
-                col height:min-content {
-                    row width:max-content height:{px(28.0)}px pad:(bottom:{px(8.0)}px) {
-                        button @click:{expanded.set(!expanded.get_untracked())}
-                            label:"Toggle tool activity" width:max-content height:fill radius:0px
-                            align:center pad:(horizontal:{px(8.0)}px vertical:0px)
-                            fill:{if expanded.get() { color(ground.selected) } else { Color::TRANSPARENT }}
-                            stroke:(width:{px(1.0)} color:ground.rule-strong offset:{px(-1.0)})
-                            hover { fill:ground.hover } pressed { fill:ground.pressed }
-                            focused { stroke:+(width:{px(1.0)} color:ground.ink offset:{px(-1.0)}) } {
-                            Label
-                                text:(Derived::new(move || message.get().map(|m|match m.kind.as_str(){"issue-context"=>"Context Sent to Agent","file_change"=>"File Changes","reasoning"=>"Reasoning",_=>"Tool Activity"}.to_owned()).unwrap_or_default()))
-                                role:(TextRole::Label) weight:500
+                if detail && !member() && !blank() && message.get().is_none_or(|m|m.tool.is_none()) {
+                    col height:min-content {
+                        row width:max-content height:{px(28.0)}px pad:(bottom:{px(8.0)}px) {
+                            button @click:{set_expanded(!expanded.get_untracked())}
+                                label:"Toggle tool activity" width:max-content height:fill
+                                radius:0px align:center pad:(horizontal:{px(8.0)}px vertical:0px)
+                                fill:{if expanded.get() { color(ground.selected) } else { Color::TRANSPARENT }}
+                                stroke:(width:{px(1.0)} color:ground.rule-strong offset:{px(-1.0)})
+                                hover { fill:ground.hover } pressed { fill:ground.pressed }
+                                focused {
+                                    stroke:+(width:{px(1.0)} color:ground.ink offset:{px(-1.0)})
+                                } {
+                                Label
+                                    text:(Derived::new(move || message.get().map(|m|match m.kind.as_str(){"issue-context"=>"Context Sent to Agent","file_change"=>"File Changes","reasoning"=>"Reasoning",_=>"Tool Activity"}.to_owned()).unwrap_or_default()))
+                                    role:(TextRole::Label) weight:500
+                            }
                         }
                     }
                 }
-            }
-            if message.get().is_none_or(|m|m.tool.is_none()) && (!detail || expanded.get()) {
-                col height:min-content {
-                    if message.get().is_some_and(|m|m.parts.is_empty()) {
-                        col height:min-content {
-                            BufferText model:(model) controller:(controller)
-                                location:(Location::Source {message:message_id.get(),start:0,end:None,part:None})
-                                mirror:false
-                        }
-                    } else {
-                        col height:min-content gap:{px(8.0)}px {
-                            for (_, entry) in {message.get().map(|m|located_parts(&m.parts,0)).unwrap_or_default()} {
-                                col height:min-content {
-                                    RecordedPart model:(model) controller:(controller)
-                                        message-id:(message_id.get()) part:(entry.0.clone())
-                                        offset:(entry.1)
+                if message.get().is_none_or(|m|m.tool.is_none()) && (!detail || expanded.get()) {
+                    col height:min-content {
+                        if message.get().is_some_and(|m|m.parts.is_empty()) {
+                            col height:min-content {
+                                BufferText model:(model) controller:(controller)
+                                    location:(Location::Source {message:message_id.get(),start:0,end:None,part:None})
+                                    mirror:false
+                            }
+                        } else {
+                            col height:min-content gap:{px(8.0)}px {
+                                for (_, entry) in {message.get().map(|m|located_parts(&m.parts,0)).unwrap_or_default()} {
+                                    col height:min-content {
+                                        RecordedPart model:(model) controller:(controller)
+                                            message-id:(message_id.get()) part:(entry.0.clone())
+                                            offset:(entry.1)
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-            for (_, reply) in {buffer::parts(model,&model.session.get()).into_iter().filter(|p|matches!(&p.kind,PartKind::Reply {anchor,..} if anchor.message_id==message_id.get())).map(|p|(p.id.clone(),p)).collect::<Vec<_>>()} {
-                col height:min-content pad:(top:{px(8.0)}px) {
-                    DraftPart model:(model) controller:(controller) part:(reply.clone()) mirror:true
+                for (_, reply) in {buffer::parts(model,&model.session.get()).into_iter().filter(|p|matches!(&p.kind,PartKind::Reply {anchor,..} if anchor.message_id==message_id.get())).map(|p|(p.id.clone(),p)).collect::<Vec<_>>()} {
+                    col height:min-content pad:(top:{px(8.0)}px) {
+                        DraftPart model:(model) controller:(controller) part:(reply.clone())
+                            mirror:true
+                    }
                 }
-            }
-            for (_, comment) in {entry.with(|entry| entry.as_ref().map(|entry| entry.comments.clone()).unwrap_or_default()).into_iter().map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
-                col height:min-content pad:(left:{px(14.0)}px top:{px(8.0)}px) gap:{px(5.0)}px
-                    selectable stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
-                    Label text:(comment.author.clone()) role:(TextRole::Caption) tone:(Tone::Muted)
-                    row height:min-content font-size:{px(14.0)}px {
-                        text (comment.body.clone())
+                for (_, comment) in {entry.with(|entry| entry.as_ref().map(|entry| entry.comments.clone()).unwrap_or_default()).into_iter().map(|c|(c.id.clone(),c)).collect::<Vec<_>>()} {
+                    col height:min-content pad:(left:{px(14.0)}px top:{px(8.0)}px) gap:{px(5.0)}px
+                        selectable stroke:(width:{px(1.0)} color:ground.hairline edges:left) {
+                        Label text:(comment.author.clone()) role:(TextRole::Caption)
+                            tone:(Tone::Muted)
+                        row height:min-content font-size:{px(14.0)}px {
+                            text (comment.body.clone())
+                        }
                     }
                 }
             }
-        }
-    };
-    let row = if tool {
-        view! {
-            MessageRow speaker:(relay_ui::Live::from(speaker)) harness:(harness) {
-                col height:min-content min-width:0px gap:0px {
-                    ToolMessage model:(model) message:(message)
-                    { parent.adopt(&body); }
+        };
+        if tool {
+            view! {
+                MessageRow speaker:(relay_ui::Live::from(speaker)) harness:(harness) {
+                    col height:min-content min-width:0px gap:0px {
+                        ToolMessage model:(model) message:(message)
+                        { parent.adopt(&body); }
+                    }
                 }
             }
-        }
-    } else if prompt {
-        view! {
-            MessageRow speaker:(relay_ui::Live::from(speaker))
-                speaker-role:(relay_ui::Live::from(speaker_role)) on-speaker:(Some(on_speaker))
-                speaker-link-enabled:(relay_ui::Live::from(speaker_link_enabled)) {
-                UserMessage {
-                    { parent.adopt(&body); }
+        } else if prompt {
+            view! {
+                MessageRow speaker:(relay_ui::Live::from(speaker))
+                    speaker-role:(relay_ui::Live::from(speaker_role))
+                    on-speaker:(Some(on_speaker.clone()))
+                    speaker-link-enabled:(relay_ui::Live::from(speaker_link_enabled)) {
+                    UserMessage {
+                        { parent.adopt(&body); }
+                    }
                 }
             }
-        }
-    } else {
-        view! {
-            MessageRow speaker:(relay_ui::Live::from(speaker)) harness:(harness)
-                icon:(speaker_icon) {
-                AgentText {
-                    { parent.adopt(&body); }
+        } else {
+            view! {
+                MessageRow speaker:(relay_ui::Live::from(speaker)) harness:(harness)
+                    icon:(speaker_icon) {
+                    AgentText {
+                        { parent.adopt(&body); }
+                    }
                 }
             }
         }
     };
     // Anchor paging to the content, excluding spacing that can change when
     // earlier messages arrive.
-    let content_anchor = row.clone();
+    let content_anchor = view! {
+        col height:min-content min-width:0px {
+            if ((!member() || expanded.get()) && !blank()) || has_adornments.get() {
+                { parent.adopt(&build_row()); }
+            }
+        }
+    };
     let root = view! {
-        col height:min-content min-width:0px pad:(top:{px(spacing.get())}px) {
-            { parent.adopt(&row); }
+        col height:min-content min-width:0px
+            pad:(top:{px(if blank() { 0.0 } else if member() { if expanded.get() { 8.0 } else { 0.0 } } else { spacing.get() })}px) {
+            { parent.adopt(&content_anchor); }
         }
     };
     let shared = controller.get_untracked();
@@ -4613,6 +4777,7 @@ mod tests {
                 },
                 continues: false,
                 spacing: 0.0,
+                reasoning_group: None,
             },
         );
         state.prune_history_state("first", &index, &[("keep-asset".into(), None)]);
@@ -4739,6 +4904,179 @@ mod tests {
                 "row {id}"
             );
         }
+    }
+
+    #[test]
+    fn reasoning_groups_respect_run_speaker_and_intervening_messages() {
+        let scope = Scope::new(|| {});
+        scope.run(|| {
+            let ui = Ui::new();
+            let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
+            let model = Model::new(&ui, sender);
+            model.session.set("indexed".into());
+            let summary = |run: &str, item: &str| {
+                let mut message = projected_message(
+                    &format!("codex-summary-{run}-{item}-0"),
+                    "Codex",
+                    "reasoning",
+                );
+                message.body = item.into();
+                message
+            };
+            let run = "12345678-1234-1234-1234-123456789abc";
+            let other = "87654321-1234-1234-1234-123456789abc";
+            let first = summary(run, "Preparing scoped relay-ui baseline");
+            let second = summary(run, "Sending scoped UI baseline");
+            let mut author = summary(run, "different-author");
+            author.author = "Other".into();
+            let mut sender = summary(run, "different-sender");
+            sender.sender = Sender::Agent {
+                session_id: "sender-agent".into(),
+            };
+            let mut blank = summary(run, "blank");
+            blank.body.clear();
+            let messages = vec![
+                first.clone(),
+                second.clone(),
+                projected_message("user", "You", "prompt"),
+                summary(run, "after-user"),
+                projected_message("tool", "Codex", "command_execution"),
+                summary(run, "after-tool"),
+                projected_message("result", "Codex", "tool_result"),
+                summary(run, "after-result"),
+                summary(other, "other-turn"),
+                author,
+                summary(run, "after-author"),
+                sender,
+                summary(run, "after-sender"),
+                projected_message("unknown", "Codex", "reasoning"),
+                summary(run, "after-unknown"),
+                blank,
+                summary(run, "after-blank"),
+            ];
+            model
+                .snapshot
+                .update(|snapshot| snapshot.messages = messages.clone());
+            let index = transcript_index(model);
+            let result = index.get();
+            assert_eq!(
+                result.order,
+                messages.iter().map(|m| m.id.clone()).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                result.rows[&second.id].reasoning_group.as_ref(),
+                Some(&first.id)
+            );
+            for message in &messages[2..] {
+                assert_ne!(
+                    result.rows[&message.id].reasoning_group.as_ref(),
+                    Some(&first.id)
+                );
+                if reasoning_run(message).is_some() {
+                    assert_eq!(
+                        result.rows[&message.id].reasoning_group.as_ref(),
+                        Some(&message.id)
+                    );
+                }
+            }
+            for message in &messages {
+                assert_eq!(result.rows[&message.id].message.body, message.body);
+            }
+            // Streaming updates retain membership and text; an older paragraph
+            // loaded before the group becomes its first member without dropping IDs.
+            model
+                .snapshot
+                .update(|snapshot| snapshot.messages[1].body.push_str(" continued"));
+            assert_eq!(
+                index.get().rows[&second.id].reasoning_group.as_ref(),
+                Some(&first.id)
+            );
+            assert_eq!(
+                index.get().rows[&second.id].message.body,
+                format!("{} continued", second.body)
+            );
+            let older = summary(run, "older");
+            model
+                .snapshot
+                .update(|snapshot| snapshot.messages.insert(0, older.clone()));
+            assert_eq!(
+                index.get().rows[&second.id].reasoning_group.as_ref(),
+                Some(&older.id)
+            );
+            assert!(
+                reasoning_run(&projected_message(
+                    "codex-summary-unknown-item-0",
+                    "Codex",
+                    "reasoning",
+                ))
+                .is_none()
+            );
+            model.session.set("other-session".into());
+            assert!(index.get().reasoning_members.is_empty());
+            let mut separate_session = summary(run, "other-session-summary");
+            separate_session.session_id = "other-session".into();
+            model
+                .snapshot
+                .update(|snapshot| snapshot.messages.push(separate_session.clone()));
+            assert_eq!(
+                index.get().reasoning_members.values().next(),
+                Some(&vec![separate_session.id])
+            );
+        });
+        scope.dispose();
+    }
+
+    #[test]
+    fn filtered_spawn_receipts_still_separate_reasoning_groups() {
+        let scope = Scope::new(|| {});
+        scope.run(|| {
+            let ui = Ui::new();
+            let (sender, _commands) = tokio::sync::mpsc::unbounded_channel();
+            let model = Model::new(&ui, sender);
+            model.session.set("indexed".into());
+            let summary = |item: &str| {
+                projected_message(
+                    &format!("codex-summary-12345678-1234-1234-1234-123456789abc-{item}-0"),
+                    "Codex",
+                    "reasoning",
+                )
+            };
+            let first = summary("first");
+            let second = summary("second");
+            let mut observed = crate::tool_activity::with_legacy_tool(projected_message(
+                "spawn",
+                "Codex",
+                "command_execution",
+            ));
+            let tool = observed.tool.as_mut().unwrap();
+            tool.run_id = "12345678-1234-1234-1234-123456789abc".into();
+            tool.kind = ToolKind::Spawn;
+            tool.detail = Some(ToolDetail::Spawn {
+                child_session_id: Some("child".into()),
+            });
+            let mut receipt = observed.clone();
+            receipt.id = "agent-tool-receipt".into();
+            receipt.author = "Relay".into();
+            receipt.kind = "tool".into();
+            receipt.body.clear();
+            model.snapshot.update(|snapshot| {
+                snapshot.messages = vec![observed, first.clone(), receipt, second.clone()];
+            });
+            let result = transcript_index(model).get();
+            assert_eq!(
+                result.order,
+                vec!["spawn".to_owned(), first.id.clone(), second.id.clone()]
+            );
+            assert_eq!(
+                result.rows[&first.id].reasoning_group.as_ref(),
+                Some(&first.id)
+            );
+            assert_eq!(
+                result.rows[&second.id].reasoning_group.as_ref(),
+                Some(&second.id)
+            );
+        });
+        scope.dispose();
     }
 
     #[test]
@@ -5139,6 +5477,589 @@ mod layout_regression {
     use super::*;
     use mosaic::core::reactive::flush;
     use std::time::Duration;
+
+    const REASONING_FIRST: &str = "codex-summary-12345678-1234-1234-1234-123456789abc-first-0";
+    const REASONING_SECOND: &str = "codex-summary-12345678-1234-1234-1234-123456789abc-second-0";
+    const REASONING_OLDER: &str = "codex-summary-12345678-1234-1234-1234-123456789abc-older-0";
+
+    fn windowed_summary(id: &str, body: String) -> Message {
+        Message {
+            id: id.into(),
+            session_id: "session-plan".into(),
+            author: "Codex".into(),
+            sender: Sender::User,
+            kind: "reasoning".into(),
+            body,
+            parts: vec![],
+            tool: None,
+        }
+    }
+
+    // Mount the real conversation so its Scroll, HistoryWindow, reveal effects,
+    // keyed row disposal, and layout-height reporting all participate.
+    struct WindowedReasoning {
+        scope: Scope,
+        ui: Ui,
+        model: Model,
+        controller: Shared,
+        window: HistoryWindow,
+        _commands: tokio::sync::mpsc::UnboundedReceiver<CommandEnvelope>,
+    }
+
+    impl Drop for WindowedReasoning {
+        fn drop(&mut self) {
+            self.scope.dispose();
+        }
+    }
+
+    impl WindowedReasoning {
+        fn new(second_body: String) -> Self {
+            mosaic::core::builtins::install();
+            install_theme(&relay_ui::tokens::theme(
+                relay_ui::tokens::ThemeVariant::Dark,
+                1.0,
+            ));
+            install_theme(&relay_ui::icons::icons());
+            install_theme(&crate::icons::icons());
+            let scope = Scope::new(|| {});
+            let ui = scope.run(Ui::new);
+            let mut fonts = mosaic::text::FontContext::embedded_only();
+            relay_ui::fonts::install(&mut fonts);
+            ui.set_fonts(fonts);
+            relay_ui::attach(&ui);
+            let (sender, commands) = tokio::sync::mpsc::unbounded_channel();
+            let model = scope.run(|| Model::new(&ui, sender));
+            let mut snapshot = demo_snapshot(AgentProfile::default());
+            snapshot.messages = (0..200)
+                .map(|index| Message {
+                    id: format!("reasoning-window-{index}"),
+                    session_id: "session-plan".into(),
+                    author: "Codex".into(),
+                    sender: Sender::User,
+                    kind: "assistant".into(),
+                    body: format!("Entry {index}.\n\nA separate transcript message."),
+                    parts: vec![],
+                    tool: None,
+                })
+                .collect();
+            snapshot.messages[0] = windowed_summary(REASONING_FIRST, "First summary.".into());
+            snapshot.messages[1] = windowed_summary(REASONING_SECOND, second_body);
+            model.receive(crate::network::NetworkState {
+                snapshot,
+                connected: true,
+                ..Default::default()
+            });
+            model.open_session("session-plan".into());
+            // Dispose the mounted conversation before its model signals: its
+            // cleanup still reads the model's conversation_controller.
+            scope.run(|| {
+                Scope::new(|| {
+                    let _ambient = ui.enter();
+                    ui.mount(&view! {
+                        Conversation model:(model)
+                    });
+                });
+            });
+            let controller = model.conversation_controller.get_untracked().unwrap();
+            let window = controller.borrow().window.clone().unwrap();
+            assert!(
+                controller.borrow().viewport.is_some(),
+                "use the real Scroll"
+            );
+            let mounted = Self {
+                scope,
+                ui,
+                model,
+                controller,
+                window,
+                _commands: commands,
+            };
+            mounted.settle();
+            mounted
+        }
+
+        fn settle(&self) {
+            for _ in 0..48 {
+                flush();
+                self.ui.tick(Duration::from_millis(16));
+                self.ui.frame(Size::new(1380.0, 900.0), 1.0);
+            }
+        }
+
+        fn scroll(&self, delta: f32) {
+            let viewport = self.controller.borrow().viewport.clone().unwrap();
+            self.ui.dispatch_pointer(PointerEvent {
+                kind: PointerEventKind::Wheel {
+                    delta: Vector2::new(0.0, delta),
+                },
+                position: viewport.root().layout_rect().center(),
+                pointer_type: PointerType::Mouse,
+                modifiers: Modifiers::default(),
+                timestamp: Duration::ZERO,
+            });
+            self.settle();
+        }
+
+        fn focus_draft(&self) {
+            let draft = self
+                .controller
+                .borrow()
+                .surfaces
+                .iter()
+                .find(|(key, _)| key.starts_with("draft-"))
+                .map(|(_, (field, _))| field.clone())
+                .expect("the composer stays mounted");
+            draft.focus();
+            self.settle();
+        }
+
+        fn leave_group(&self) {
+            self.focus_draft();
+            self.scroll(-1_000_000.0);
+            for id in [REASONING_OLDER, REASONING_FIRST, REASONING_SECOND] {
+                assert!(
+                    !self.controller.borrow().messages.contains_key(id),
+                    "{id} must actually dispose outside the mounted window"
+                );
+            }
+        }
+
+        fn source(&self, id: &str) -> Option<Element> {
+            let prefix = format!("source-{id}-");
+            self.controller
+                .borrow()
+                .surfaces
+                .iter()
+                .find(|(key, _)| key.starts_with(&prefix))
+                .map(|(_, (field, _))| field.clone())
+        }
+
+        fn click_disclosure(&self) {
+            let viewport = self.controller.borrow().viewport.clone().unwrap();
+            let position = self
+                .ui
+                .inspection_snapshot()
+                .nodes
+                .into_iter()
+                .find(|node| {
+                    node.label.as_deref() == Some("Toggle tool activity")
+                        && node.rect.size.height > 0.0
+                        && viewport.root().layout_rect().contains(node.rect.center())
+                })
+                .expect("the group's single disclosure is in the real viewport")
+                .rect
+                .center();
+            for kind in [
+                PointerEventKind::Down(PointerButton::Primary),
+                PointerEventKind::Up(PointerButton::Primary),
+            ] {
+                self.ui.dispatch_pointer(PointerEvent {
+                    kind,
+                    position,
+                    pointer_type: PointerType::Mouse,
+                    modifiers: Modifiers::default(),
+                    timestamp: Duration::ZERO,
+                });
+            }
+            self.settle();
+        }
+    }
+
+    #[test]
+    fn reasoning_window_caches_zero_height_members_across_real_scroll_disposal() {
+        let mounted = WindowedReasoning::new("Second summary.".into());
+        mounted.scroll(1_000_000.0);
+        assert!(
+            mounted
+                .controller
+                .borrow()
+                .messages
+                .contains_key(REASONING_SECOND)
+        );
+        assert!(mounted.source(REASONING_SECOND).is_none());
+        let measured = mounted.window.heights.borrow()[REASONING_SECOND];
+        assert_eq!(
+            measured.pixels, 0.0,
+            "collapsed members consume no layout height"
+        );
+        assert!(
+            !measured.stale,
+            "a real zero-height layout must revalidate the cache"
+        );
+        let index = mounted.controller.borrow().index.unwrap().get();
+        let slots = mounted.window.slots(&index.order, &[]);
+        assert!(
+            slots
+                .iter()
+                .any(|slot| slot.key == (true, REASONING_SECOND.into()) && slot.height == 0.0),
+            "the real visible slot retains its zero measurement"
+        );
+        mounted.leave_group();
+        assert_eq!(mounted.window.height(REASONING_SECOND), 0.0);
+        mounted.scroll(1_000_000.0);
+        assert!(
+            mounted
+                .controller
+                .borrow()
+                .messages
+                .contains_key(REASONING_SECOND)
+        );
+        assert_eq!(mounted.window.height(REASONING_SECOND), 0.0);
+        assert!(!mounted.window.heights.borrow()[REASONING_SECOND].stale);
+        assert!(mounted.source(REASONING_SECOND).is_none());
+    }
+
+    #[test]
+    fn reasoning_window_reveals_offscreen_member_with_its_leader_unmounted() {
+        let quote = "Anchor target in public summary";
+        let body = format!(
+            "{}\n\n{quote}",
+            "A public summary paragraph.\n\n".repeat(160)
+        );
+        let start = body.find(quote).unwrap();
+        let mounted = WindowedReasoning::new(body);
+        assert!(
+            !mounted
+                .controller
+                .borrow()
+                .messages
+                .contains_key(REASONING_SECOND),
+            "start with the original member outside the mounted window"
+        );
+        mounted.model.source_anchor.set(Some(relay_core::Anchor {
+            message_id: REASONING_SECOND.into(),
+            start,
+            end: start + quote.len(),
+            quote: quote.into(),
+        }));
+        flush();
+        assert_eq!(
+            mounted.window.requested.get_untracked().as_deref(),
+            Some(REASONING_SECOND),
+            "the offscreen anchor must request the original member before layout"
+        );
+        assert!(mounted.model.source_anchor.get_untracked().is_some());
+        mounted.settle();
+        assert!(
+            mounted.model.source_anchor.get_untracked().is_none(),
+            "the real reveal effect must resolve the member anchor after layout"
+        );
+        assert!(mounted.window.requested.get_untracked().is_none());
+        assert!(
+            !mounted
+                .controller
+                .borrow()
+                .messages
+                .contains_key(REASONING_FIRST),
+            "the leader must be outside overscan, not merely clipped"
+        );
+        let field = mounted.source(REASONING_SECOND).unwrap();
+        assert_eq!(mounted.ui.focused().unwrap().id(), field.id());
+        let viewport = mounted.controller.borrow().viewport.clone().unwrap();
+        let field_rect = field.layout_rect();
+        let viewport_rect = viewport.root().layout_rect();
+        assert!(
+            field_rect.max_y() > viewport_rect.origin.y
+                && field_rect.origin.y < viewport_rect.max_y(),
+            "field={field_rect:?}, viewport={viewport_rect:?}, offset={:?}, geometry={:?}",
+            viewport.offset(),
+            mounted.window.geometry.get_untracked(),
+        );
+        let caret_rect = mounted.ui.ime_cursor_area().unwrap();
+        assert!(
+            caret_rect.origin.y >= viewport_rect.origin.y
+                && caret_rect.max_y() <= viewport_rect.max_y(),
+            "the selected quote's caret must be in view: {caret_rect:?} in {viewport_rect:?}"
+        );
+        let state = mounted.controller.borrow();
+        let prefix = format!("source-{REASONING_SECOND}-");
+        let (_, (_, editor)) = state
+            .surfaces
+            .iter()
+            .find(|(key, _)| key.starts_with(&prefix))
+            .unwrap();
+        assert_eq!(
+            editor.borrow().selection_bytes(),
+            (start, start + quote.len())
+        );
+        assert_eq!(state.expanded_rows.get(REASONING_FIRST), Some(&true));
+        assert_eq!(state.expanded_rows.get(REASONING_SECOND), Some(&true));
+    }
+
+    #[test]
+    fn reasoning_window_prepend_remount_and_click_preserve_group_disclosure() {
+        let mounted = WindowedReasoning::new("Second summary.".into());
+        mounted.scroll(1_000_000.0);
+        mounted.click_disclosure();
+        let original_source = mounted.source(REASONING_SECOND).unwrap().id();
+        mounted.model.snapshot.update(|snapshot| {
+            snapshot.messages.insert(
+                0,
+                windowed_summary(REASONING_OLDER, "Earlier summary.".into()),
+            );
+        });
+        mounted.settle();
+        assert!(
+            mounted.source(REASONING_OLDER).is_some(),
+            "the prepended leader inherits the expanded member state"
+        );
+        mounted.leave_group();
+        mounted.scroll(1_000_000.0);
+        assert_ne!(
+            mounted.source(REASONING_SECOND).unwrap().id(),
+            original_source,
+            "the source must be rebuilt after actual row disposal"
+        );
+        for id in [REASONING_OLDER, REASONING_FIRST, REASONING_SECOND] {
+            assert!(
+                mounted.source(id).is_some(),
+                "{id} stays expanded on remount"
+            );
+        }
+        mounted.click_disclosure();
+        for id in [REASONING_OLDER, REASONING_FIRST, REASONING_SECOND] {
+            assert_eq!(
+                mounted.controller.borrow().expanded_rows.get(id),
+                Some(&false)
+            );
+            assert!(mounted.source(id).is_none());
+        }
+        mounted.leave_group();
+        mounted.scroll(1_000_000.0);
+        for id in [REASONING_FIRST, REASONING_SECOND] {
+            assert!(
+                mounted.source(id).is_none(),
+                "collapse persists through remount"
+            );
+            assert_eq!(mounted.window.height(id), 0.0);
+            assert!(!mounted.window.heights.borrow()[id].stale);
+        }
+    }
+
+    #[test]
+    fn collapsed_reasoning_keeps_dynamic_comments_and_draft_replies() {
+        mosaic::core::builtins::install();
+        install_theme(&relay_ui::tokens::theme(
+            relay_ui::tokens::ThemeVariant::Dark,
+            1.0,
+        ));
+        install_theme(&relay_ui::icons::icons());
+        let scope = Scope::new(|| {});
+        let ui = scope.run(Ui::new);
+        let mut fonts = mosaic::text::FontContext::embedded_only();
+        relay_ui::fonts::install(&mut fonts);
+        ui.set_fonts(fonts);
+        relay_ui::attach(&ui);
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let model = scope.run(|| Model::new(&ui, sender));
+        model.session.set("reasoning-layout".into());
+        let first = "codex-summary-12345678-1234-1234-1234-123456789abc-first-0";
+        let second = "codex-summary-12345678-1234-1234-1234-123456789abc-second-0";
+        model.snapshot.update(|snapshot| {
+            for (id, body) in [
+                (first, "First heading"),
+                (second, "Second heading"),
+                ("blank", ""),
+            ] {
+                snapshot.messages.push(Message {
+                    id: id.into(),
+                    session_id: "reasoning-layout".into(),
+                    author: "Codex".into(),
+                    sender: Sender::User,
+                    kind: "reasoning".into(),
+                    body: body.into(),
+                    parts: vec![],
+                    tool: None,
+                });
+            }
+        });
+        let controller = scope.run(|| {
+            State::new(Rc::new(RefCell::new(Controller {
+                index: Some(transcript_index(model)),
+                disclosure_revision: Some(State::new(0)),
+                ..Default::default()
+            })))
+        });
+        let index = controller.get_untracked().borrow().index.unwrap();
+        scope.run(|| {
+            let _ambient = ui.enter();
+            ui.mount(&view! {
+                col height:min-content {
+                    {
+                        parent.keyed(
+                            move || index.get().order.clone().into_iter().map(|id| (id, ())),
+                            move |parent, id, ()| {
+                                parent.adopt(&view! {
+                                    TranscriptMessage model:(model) message-id:(id.clone()) controller:(controller)
+                                });
+                            },
+                        );
+                    }
+                }
+            });
+        });
+        let frame = || {
+            for _ in 0..12 {
+                flush();
+                ui.tick(Duration::from_millis(16));
+                ui.frame(Size::new(848.0, 2000.0), 1.0);
+            }
+        };
+        frame();
+        let toggle = || {
+            ui.inspection_snapshot()
+                .nodes
+                .into_iter()
+                .filter(|node| {
+                    node.label.as_deref() == Some("Toggle tool activity")
+                        && node.rect.size.height > 0.0
+                })
+                .map(|node| node.rect)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            toggle().len(),
+            1,
+            "one disclosure for adjacent summaries; none for blank text"
+        );
+        // Add adornments after mounting, while the reasoning stays collapsed.
+        model.snapshot.update(|snapshot| {
+            snapshot.comments.push(Comment {
+                id: "comment".into(),
+                message_id: second.into(),
+                quote: None,
+                author: "Review Comment".into(),
+                body: "Keep this visible".into(),
+                created_at: 1,
+            });
+        });
+        let reply = |id: &str, target: &str| Part {
+            id: id.into(),
+            kind: PartKind::Reply {
+                anchor: relay_core::Anchor {
+                    message_id: target.into(),
+                    start: 0,
+                    end: 0,
+                    quote: String::new(),
+                },
+                parts: vec![Part {
+                    id: format!("{id}-text"),
+                    kind: PartKind::Text {
+                        text: "Draft reply".into(),
+                    },
+                }],
+            },
+        };
+        buffer::edit(
+            model,
+            "reasoning-layout",
+            vec![reply("member-reply", second), reply("blank-reply", "blank")],
+        );
+        frame();
+        assert!(ui.inspection_snapshot().nodes.iter().any(|node| {
+            node.label.as_deref() == Some("Review Comment") && node.rect.size.height > 0.0
+        }));
+        {
+            let shared = controller.get_untracked();
+            let state = shared.borrow();
+            for id in ["member-reply-text", "blank-reply-text"] {
+                let (field, _) = &state.surfaces[&format!("inline-{id}")];
+                assert!(field.layout_rect().size.height > 0.0);
+            }
+            assert!(
+                !state
+                    .surfaces
+                    .keys()
+                    .any(|key| key.starts_with(&format!("source-{second}-")))
+            );
+        }
+        // Revealing an original member anchor still expands its reasoning group.
+        model.source_anchor.set(Some(relay_core::Anchor {
+            message_id: second.into(),
+            start: 0,
+            end: 6,
+            quote: "Second".into(),
+        }));
+        frame();
+        assert!(
+            controller
+                .get_untracked()
+                .borrow()
+                .surfaces
+                .keys()
+                .any(|key| { key.starts_with(&format!("source-{second}-")) })
+        );
+        model.source_anchor.set(None);
+        // Prepending history changes the group leader while retaining the
+        // original member expansion and anchor identities.
+        let older = "codex-summary-12345678-1234-1234-1234-123456789abc-older-0";
+        model.snapshot.update(|snapshot| {
+            let mut message = snapshot.messages[0].clone();
+            message.id = older.into();
+            message.body = "Earlier heading".into();
+            snapshot.messages.insert(0, message);
+        });
+        frame();
+        assert_eq!(toggle().len(), 1);
+        for id in [older, first, second] {
+            assert!(
+                controller
+                    .get_untracked()
+                    .borrow()
+                    .surfaces
+                    .keys()
+                    .any(|key| { key.starts_with(&format!("source-{id}-")) })
+            );
+        }
+        let position = toggle()[0].center();
+        for kind in [
+            PointerEventKind::Down(PointerButton::Primary),
+            PointerEventKind::Up(PointerButton::Primary),
+        ] {
+            ui.dispatch_pointer(PointerEvent {
+                kind,
+                position,
+                pointer_type: PointerType::Mouse,
+                modifiers: Modifiers::default(),
+                timestamp: Duration::ZERO,
+            });
+        }
+        frame();
+        {
+            let shared = controller.get_untracked();
+            let state = shared.borrow();
+            for id in [older, first, second] {
+                assert_eq!(state.expanded_rows.get(id), Some(&false));
+                assert!(
+                    !state
+                        .surfaces
+                        .keys()
+                        .any(|key| key.starts_with(&format!("source-{id}-")))
+                );
+            }
+        }
+        assert!(ui.inspection_snapshot().nodes.iter().any(|node| {
+            node.label.as_deref() == Some("Review Comment") && node.rect.size.height > 0.0
+        }));
+        model.snapshot.update(|snapshot| snapshot.comments.clear());
+        buffer::edit(model, "reasoning-layout", vec![]);
+        frame();
+        assert!(
+            !ui.inspection_snapshot()
+                .nodes
+                .iter()
+                .any(|node| node.label.as_deref() == Some("Review Comment"))
+        );
+        assert!(
+            !controller
+                .get_untracked()
+                .borrow()
+                .surfaces
+                .keys()
+                .any(|key| key.starts_with("inline-"))
+        );
+        scope.dispose();
+    }
 
     #[test]
     fn transcript_text_fits_panels_after_wrapping_streaming_and_resize() {

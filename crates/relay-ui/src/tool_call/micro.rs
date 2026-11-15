@@ -159,6 +159,8 @@ pub(super) fn micrographic(vm: &ToolCallView) -> Element {
         ToolDetail::Message { read, .. } => {
             if *read == Some(true) {
                 row.adopt(&label("read".into()));
+            } else if *read == Some(false) && vm.status == AgentStatus::Done {
+                row.adopt(&label("queued".into()));
             }
         }
         ToolDetail::Wait {

@@ -105,6 +105,7 @@ pub struct Model {
     pub show_archived: State<bool>,
     pub settings_store: State<crate::settings::Store>,
     pub snapshot: State<Snapshot>,
+    pub message_tools: Derived<std::rc::Rc<crate::adapt::MessageTools>>,
     pub connected: State<bool>,
     pub status: State<String>,
     pub server_endpoint: State<String>,
@@ -174,6 +175,16 @@ pub struct Model {
 
 impl Model {
     pub fn new(ui: &Ui, commands: UnboundedSender<CommandEnvelope>) -> Self {
+        let snapshot = State::new(Snapshot::default());
+        // Equality cutoff: metadata and other tool/prose updates may recheck
+        // these records, but cannot reparse or rebuild the correlation index.
+        let message_sources = Derived::new(move || {
+            snapshot.with(|s| crate::adapt::message_tool_sources(&s.messages))
+        });
+        let message_tools = Derived::new(move || {
+            message_sources
+                .with(|messages| std::rc::Rc::new(crate::adapt::MessageTools::new(messages)))
+        });
         Self {
             window: State::new(AppContext::detached().window()),
             window_gesture: State::new(None),
@@ -212,7 +223,8 @@ impl Model {
             sidebar_open: State::new(false),
             show_archived: State::new(false),
             settings_store: State::new(crate::settings::Store::default()),
-            snapshot: State::new(Snapshot::default()),
+            snapshot,
+            message_tools,
             connected: State::new(false),
             status: State::new("Connecting…".into()),
             server_endpoint: State::new(String::new()),

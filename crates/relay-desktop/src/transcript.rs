@@ -196,23 +196,31 @@ pub(crate) fn ToolMessage(model: Model, message: Derived<Option<Message>>) -> El
         }
     });
     let data = Derived::new(move || {
-        let snapshot = model.snapshot.get();
         let message = message.get()?;
-        let failed = adapt::tool_status(&snapshot, &message) == AgentStatus::Failed;
-        let opening = chosen.get().unwrap_or(if failed {
-            Opening::Summary
-        } else {
-            Opening::Collapsed
-        });
-        adapt::tool_view(&snapshot, &message, opening, &model.catalogs.get())
+        let messages = model.message_tools.get();
+        model.snapshot.with(|snapshot| {
+            let failed = adapt::tool_status(snapshot, &message) == AgentStatus::Failed;
+            let opening = chosen.get().unwrap_or(if failed {
+                Opening::Summary
+            } else {
+                Opening::Collapsed
+            });
+            adapt::tool_view(
+                snapshot,
+                &message,
+                &messages,
+                opening,
+                &model.catalogs.get(),
+            )
+        })
     });
     let child = Derived::new(move || {
-        let snapshot = model.snapshot.get();
         let message = message.get()?;
         let tool = message.tool.as_ref()?;
         let Some(ToolDetailRef::Spawn(id)) = spawn_child(tool) else {
             return None;
         };
+        let snapshot = model.snapshot.get();
         let session = snapshot.sessions.iter().find(|s| s.id == id)?;
         let (model_identity, effort) = adapt::session_model(session, &model.catalogs.get());
         Some(SpawnChild {

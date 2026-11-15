@@ -1,5 +1,6 @@
 use super::identity::{effort, model_identity, stored_effort};
 use super::tools::ui_kind;
+use super::transcript_messages;
 use super::*;
 use relay_core::*;
 use relay_ui::prelude::{AgentNode, AgentStatus, ModelHue, Opening, ToolDetail as View};
@@ -11,6 +12,302 @@ fn demo() -> Snapshot {
     let mut snapshot = demo_snapshot(AgentProfile::default());
     demo_orchestration(&mut snapshot);
     snapshot
+}
+
+const SUBMISSION_A: &str = "00000000-0000-4000-8000-000000000001";
+const SUBMISSION_B: &str = "00000000-0000-4000-8000-000000000002";
+
+pub(crate) fn message_pair(submission: &str, observed_id: &str) -> (Message, Message) {
+    let observed = Message {
+        id: observed_id.into(),
+        session_id: "session-plan".into(),
+        author: "Codex".into(),
+        sender: Sender::User,
+        kind: "tool_call".into(),
+        body: serde_json::json!({"submission": submission, "queued": true,
+            "queue": {"pending": 1, "started": false}}).to_string(),
+        parts: vec![],
+        tool: Some(ToolCall {
+            run_id: "sending-turn".into(),
+            name: "mcp__relay__message_agent".into(),
+            kind: ToolKind::Message,
+            state: ToolState::Completed,
+            input: serde_json::json!({"agent": "recipient", "text": "Please check the change.\nKeep the result local."}).to_string(),
+            target: String::new(),
+            directory: None,
+            exit_code: None,
+            started_ms: None,
+            finished_ms: None,
+            detail: None,
+        }),
+    };
+    let mut receipt = observed.clone();
+    receipt.id = format!("agent-message-{submission}");
+    receipt.author = "Relay".into();
+    receipt.kind = "tool".into();
+    receipt.body.clear();
+    let tool = receipt.tool.as_mut().unwrap();
+    tool.input.clear();
+    tool.detail = Some(ToolDetail::Message {
+        target_session_id: Some("recipient".into()),
+        read: false,
+    });
+    (observed, receipt)
+}
+
+fn message_view(snapshot: &Snapshot, message: &Message) -> relay_ui::prelude::ToolCallView {
+    let mut sources = snapshot.messages.clone();
+    if !sources.contains(message) {
+        sources.push(message.clone());
+    }
+    tool_view(
+        snapshot,
+        message,
+        &MessageTools::new(&sources),
+        Opening::Expanded,
+        &BTreeMap::new(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn message_identical_sends_keep_distinct_observed_ids_in_any_order_and_replay() {
+    let (first, receipt_a) = message_pair(SUBMISSION_A, "native-a");
+    let (mut second, mut receipt_b) = message_pair(SUBMISSION_B, "native-b");
+    if let Some(ToolDetail::Message { read, .. }) = &mut receipt_b.tool.as_mut().unwrap().detail {
+        *read = true;
+    }
+    // Codex's string arguments and Claude's object arguments carry the same text.
+    second.tool.as_mut().unwrap().input =
+        serde_json::to_string(&second.tool.as_ref().unwrap().input).unwrap();
+    for messages in [
+        vec![
+            first.clone(),
+            receipt_a.clone(),
+            second.clone(),
+            receipt_b.clone(),
+        ],
+        vec![
+            receipt_b.clone(),
+            second.clone(),
+            receipt_a.clone(),
+            first.clone(),
+        ],
+        vec![
+            receipt_a.clone(),
+            receipt_b.clone(),
+            first.clone(),
+            second.clone(),
+            first.clone(),
+            receipt_a.clone(),
+        ],
+    ] {
+        let snapshot = Snapshot {
+            messages,
+            ..Default::default()
+        };
+        let visible = transcript_messages(&snapshot.messages, "session-plan");
+        assert_eq!(visible.len(), 2);
+        assert_eq!(
+            visible
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["native-a", "native-b"])
+        );
+        for observed in visible {
+            let view = message_view(&snapshot, observed);
+            assert_eq!(view.status, AgentStatus::Done);
+            let Some(View::Message {
+                target,
+                read,
+                exchange: Some(exchange),
+            }) = view.detail
+            else {
+                panic!("message detail")
+            };
+            assert_eq!(target.as_deref(), Some("recipient"));
+            assert_eq!(read, Some(observed.id == "native-b"));
+            assert_eq!(exchange.len(), 1);
+            assert_eq!(
+                exchange[0].text.as_deref(),
+                Some("Please check the change.\nKeep the result local.")
+            );
+        }
+    }
+}
+
+#[test]
+fn message_lifecycle_keeps_native_identity_and_follows_exact_read_receipt() {
+    let (completed, mut receipt) = message_pair(SUBMISSION_A, "native-a");
+    assert_eq!(
+        transcript_messages(std::slice::from_ref(&receipt), "session-plan")[0].id,
+        receipt.id
+    );
+    let mut observed = completed.clone();
+    observed.body.clear();
+    observed.tool.as_mut().unwrap().state = ToolState::Running;
+    let mut snapshot = Snapshot {
+        messages: vec![observed.clone()],
+        ..Default::default()
+    };
+    assert_eq!(
+        message_view(&snapshot, &observed).status,
+        AgentStatus::Working
+    );
+    snapshot.messages.push(receipt.clone());
+    // Before the result arrives, there is no common identity: do not guess.
+    assert_eq!(
+        transcript_messages(&snapshot.messages, "session-plan").len(),
+        2
+    );
+    snapshot.messages[0] = completed.clone();
+    assert_eq!(
+        transcript_messages(&snapshot.messages, "session-plan")[0].id,
+        "native-a"
+    );
+    if let Some(ToolDetail::Message { read, .. }) = &mut receipt.tool.as_mut().unwrap().detail {
+        *read = true;
+    }
+    snapshot.messages[1] = receipt;
+    assert!(matches!(
+        message_view(&snapshot, &completed).detail,
+        Some(View::Message {
+            read: Some(true),
+            ..
+        })
+    ));
+    snapshot.messages.truncate(1);
+    assert!(matches!(
+        message_view(&snapshot, &completed).detail,
+        Some(View::Message {
+            read: Some(false),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn message_receipt_envelopes_use_only_a_unique_top_level_submission() {
+    let (mut observed, receipt) = message_pair(SUBMISSION_A, "native-a");
+    let direct: serde_json::Value = serde_json::from_str(&observed.body).unwrap();
+    for body in [
+        direct.clone(),
+        serde_json::json!({"content": [{"type": "text", "text": direct.to_string()}], "isError": false}),
+        serde_json::json!({"structuredContent": direct, "content": [{"type": "text", "text": direct.to_string()}]}),
+    ] {
+        observed.body = body.to_string();
+        let messages = vec![receipt.clone(), observed.clone()];
+        assert_eq!(
+            transcript_messages(&messages, "session-plan")[0].id,
+            "native-a"
+        );
+        assert_eq!(transcript_messages(&messages, "session-plan").len(), 1);
+    }
+    for body in [
+        "{}".into(),
+        "{truncated".into(),
+        serde_json::json!({"submission": "", "queued": true}).to_string(),
+        serde_json::json!({"submission": "malformed", "queued": true}).to_string(),
+        serde_json::json!({"submission": SUBMISSION_A, "queued": false}).to_string(),
+        serde_json::json!({"queue": direct}).to_string(),
+        serde_json::json!({"isError": true, "structuredContent": direct}).to_string(),
+        serde_json::json!({"structuredContent": direct, "content": [{"type": "text", "text": serde_json::json!({"submission": SUBMISSION_B, "queued": true}).to_string()}]}).to_string(),
+    ] {
+        observed.body = body;
+        assert_eq!(transcript_messages(&[receipt.clone(), observed.clone()], "session-plan").len(), 2);
+    }
+}
+
+#[test]
+fn message_uncertain_matches_preserve_fallbacks_and_failures() {
+    let (observed, receipt) = message_pair(SUBMISSION_A, "native-a");
+    let mut cases = Vec::new();
+    let mut no_run = vec![observed.clone(), receipt.clone()];
+    for message in &mut no_run {
+        message.tool.as_mut().unwrap().run_id.clear();
+    }
+    cases.push(no_run);
+    let mut changed = observed.clone();
+    changed.tool.as_mut().unwrap().run_id = "other-turn".into();
+    cases.push(vec![changed, receipt.clone()]);
+    let mut changed = observed.clone();
+    changed.session_id = "other-session".into();
+    cases.push(vec![changed, receipt.clone()]);
+    for input in ["", "{truncated", "{}"] {
+        let mut changed = observed.clone();
+        changed.tool.as_mut().unwrap().input = input.into();
+        cases.push(vec![changed, receipt.clone()]);
+    }
+    for state in [
+        ToolState::Failed,
+        ToolState::Interrupted,
+        ToolState::Unknown,
+    ] {
+        let mut changed = observed.clone();
+        changed.tool.as_mut().unwrap().state = state;
+        cases.push(vec![changed, receipt.clone()]);
+    }
+    let mut changed = observed.clone();
+    changed.id = "another-send-with-the-same-receipt".into();
+    cases.push(vec![observed.clone(), changed, receipt.clone()]);
+    let mut changed = observed.clone();
+    changed.tool.as_mut().unwrap().name = "mcp__another__message_agent".into();
+    cases.push(vec![changed, receipt.clone()]);
+    let mut changed = receipt.clone();
+    changed.body = "Legacy receipt context".into();
+    cases.push(vec![observed.clone(), changed]);
+    let mut changed = receipt.clone();
+    changed.tool.as_mut().unwrap().detail = None;
+    cases.push(vec![observed.clone(), changed]);
+    let mut changed = receipt.clone();
+    changed.tool.as_mut().unwrap().detail = Some(ToolDetail::Message {
+        target_session_id: Some("different-recipient".into()),
+        read: true,
+    });
+    cases.push(vec![observed.clone(), changed]);
+    let mut conflicting = receipt.clone();
+    if let Some(ToolDetail::Message { read, .. }) = &mut conflicting.tool.as_mut().unwrap().detail {
+        *read = true;
+    }
+    cases.push(vec![observed.clone(), receipt.clone(), conflicting]);
+    for messages in cases {
+        assert!(
+            transcript_messages(&messages, "session-plan")
+                .iter()
+                .any(|m| m.id == receipt.id),
+            "lost fallback for {messages:?}"
+        );
+    }
+    let mut failed = observed;
+    failed.body = "Target denies implementation".into();
+    failed.tool.as_mut().unwrap().state = ToolState::Failed;
+    let view = message_view(&Snapshot::default(), &failed);
+    assert_eq!(view.status, AgentStatus::Failed);
+    let Some(View::Message {
+        read: None,
+        exchange: Some(exchange),
+        ..
+    }) = view.detail
+    else {
+        panic!("failure detail")
+    };
+    assert_eq!(
+        exchange[0].text.as_deref(),
+        Some("Please check the change.\nKeep the result local.")
+    );
+    assert_eq!(exchange[1].who.as_deref(), Some("Error"));
+    assert_eq!(
+        exchange[1].text.as_deref(),
+        Some("Target denies implementation")
+    );
+    // A different caller's run does not make this exact match ambiguous.
+    let (observed, receipt) = message_pair(SUBMISSION_A, "native-a");
+    let mut another = observed.clone();
+    another.id = "different-caller".into();
+    another.session_id = "another-session".into();
+    let messages = vec![observed, receipt, another];
+    assert_eq!(transcript_messages(&messages, "session-plan").len(), 1);
 }
 
 #[test]
@@ -424,6 +721,7 @@ fn effort_tracks_offered_steps_and_max_only_when_offered() {
 fn tool_calls_map_measured_details_and_pending_permissions() {
     let mut snapshot = demo();
     let catalogs = BTreeMap::new();
+    let messages = MessageTools::new(&snapshot.messages);
     let message = |snapshot: &Snapshot, id: &str| {
         snapshot
             .messages
@@ -435,6 +733,7 @@ fn tool_calls_map_measured_details_and_pending_permissions() {
     let read = tool_view(
         &snapshot,
         &message(&snapshot, "t-read"),
+        &messages,
         Opening::Summary,
         &catalogs,
     )
@@ -462,6 +761,7 @@ fn tool_calls_map_measured_details_and_pending_permissions() {
     let spawn = tool_view(
         &snapshot,
         &message(&snapshot, "t-spawn"),
+        &messages,
         Opening::Expanded,
         &catalogs,
     )
@@ -486,6 +786,7 @@ fn tool_calls_map_measured_details_and_pending_permissions() {
     let other = tool_view(
         &snapshot,
         &message(&snapshot, "t-other"),
+        &messages,
         Opening::Collapsed,
         &catalogs,
     )

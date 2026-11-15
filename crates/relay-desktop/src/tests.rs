@@ -9869,6 +9869,263 @@ fn spawn_receipt_and_harness_event_render_one_child_and_keep_the_fallback() {
     assert!(has_label(&mounted, "Tool call agent-tool-receipt"));
 }
 
+#[test]
+fn message_index_keeps_untyped_legacy_text_and_opening_without_receipt_guessing() {
+    let mounted = mount(false, 1000.0);
+    mounted.model.open_session("session-plan".into());
+    let (mut legacy, receipt) = crate::adapt::message_pair(
+        "00000000-0000-4000-8000-000000000001",
+        "legacy-index-message",
+    );
+    let input = legacy.tool.take().unwrap().input;
+    legacy.kind = "command_execution".into();
+    legacy.body = format!("mcp__relay__message_agent\n{input}");
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.messages = vec![legacy, receipt.clone()]);
+    mounted.settle();
+    let index = mounted.model.message_tools.get_untracked();
+    assert_eq!(
+        tool_row_description(&mounted, "legacy-index-message"),
+        "Message · Queued"
+    );
+    assert!(has_label(&mounted, &format!("Tool call {}", receipt.id)));
+    mounted.click_nth("Collapsed. Open summary", 0);
+    mounted.click("Summary. Expand fully");
+    let text = "Please check the change.\nKeep the result local.";
+    assert!(has_label(&mounted, text));
+    mounted.model.snapshot.update(|s| s.revision += 1);
+    mounted.settle();
+    assert!(std::rc::Rc::ptr_eq(
+        &index,
+        &mounted.model.message_tools.get_untracked()
+    ));
+    assert!(has_label(&mounted, "Expanded. Collapse"));
+    assert!(has_label(&mounted, text));
+}
+
+#[test]
+fn message_index_cache_ignores_metadata_and_tracks_same_count_lifecycle_changes() {
+    let mounted = mount(false, 1000.0);
+    mounted.model.open_session("session-plan".into());
+    let (completed, receipt) =
+        crate::adapt::message_pair("00000000-0000-4000-8000-000000000001", "native-index-cache");
+    let mut running = completed.clone();
+    running.body.clear();
+    running.tool.as_mut().unwrap().state = ToolState::Running;
+    let mut prose = running.clone();
+    prose.id = "unrelated-prose".into();
+    prose.tool = None;
+    prose.kind = "assistant".into();
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.messages = vec![running, receipt, prose]);
+    mounted.settle();
+    let mut index = mounted.model.message_tools.get_untracked();
+    for _ in 0..3 {
+        mounted.model.snapshot.update(|s| {
+            s.revision += 1;
+            s.projects[0].name.push('.');
+            s.sessions[0].title.push('.');
+            s.messages[2].body.push_str(" ordinary prose update");
+        });
+        mounted.settle();
+        assert!(
+            std::rc::Rc::ptr_eq(&index, &mounted.model.message_tools.get_untracked()),
+            "metadata/prose must not rebuild or parse the index"
+        );
+    }
+    let read = |index: &crate::adapt::MessageTools| {
+        let snapshot = mounted.model.snapshot.get_untracked();
+        let view = crate::adapt::tool_view(
+            &snapshot,
+            &snapshot.messages[0],
+            index,
+            relay_ui::prelude::Opening::Expanded,
+            &Default::default(),
+        )
+        .unwrap();
+        let Some(relay_ui::prelude::ToolDetail::Message { read, exchange, .. }) = view.detail
+        else {
+            panic!("message detail");
+        };
+        (read, exchange.unwrap()[0].text.clone().unwrap())
+    };
+    assert_eq!(read(&index).0, None);
+    // Count stays fixed throughout: state, result, input and measured delivery
+    // changes must all invalidate, regardless of unchanged row IDs.
+    for step in 0..8 {
+        mounted.model.snapshot.update(|s| match step {
+            0 => s.messages[0].tool.as_mut().unwrap().state = ToolState::Completed,
+            1 => s.messages[0].body = completed.body.clone(),
+            2 => {
+                s.messages[1].tool.as_mut().unwrap().detail = Some(ToolDetail::Message {
+                    target_session_id: Some("recipient".into()),
+                    read: true,
+                })
+            }
+            3 => {
+                s.messages[0].tool.as_mut().unwrap().input =
+                    serde_json::json!({"agent": "recipient", "text": "Changed sent text"})
+                        .to_string()
+            }
+            4 => {
+                s.messages[1].tool.as_mut().unwrap().detail = Some(ToolDetail::Message {
+                    target_session_id: Some("different-recipient".into()),
+                    read: true,
+                })
+            }
+            5 => {
+                s.messages[0].tool.as_mut().unwrap().input =
+                    serde_json::json!({"agent": "different-recipient", "text": "Changed sent text"})
+                        .to_string()
+            }
+            6 => s.messages[1].body = "Legacy context must remain visible".into(),
+            7 => {
+                s.messages[0].tool.as_mut().unwrap().state = ToolState::Failed;
+                s.messages[0].body = "Target denies implementation".into();
+            }
+            _ => unreachable!(),
+        });
+        mounted.settle();
+        let next = mounted.model.message_tools.get_untracked();
+        assert!(
+            !std::rc::Rc::ptr_eq(&index, &next),
+            "step {step} did not invalidate"
+        );
+        let snapshot = mounted.model.snapshot.get_untracked();
+        assert_eq!(snapshot.messages.len(), 3);
+        let visible = next.transcript_messages(&snapshot.messages, "session-plan");
+        assert_eq!(
+            visible.len(),
+            if [1, 2, 3, 5].contains(&step) { 2 } else { 3 }
+        );
+        assert_eq!(
+            read(&next).0,
+            match step {
+                0 | 7 => None,
+                1 | 4 | 6 => Some(false),
+                _ => Some(true),
+            }
+        );
+        if step >= 3 {
+            assert_eq!(read(&next).1, "Changed sent text");
+        }
+        if step == 7 {
+            assert_eq!(
+                tool_row_description(&mounted, "native-index-cache"),
+                "Message · Failed"
+            );
+        }
+        index = next;
+    }
+    // Replay the same snapshot without a relevant version change.
+    let snapshot = mounted.model.snapshot.get_untracked();
+    mounted.model.snapshot.set(snapshot);
+    mounted.settle();
+    assert!(std::rc::Rc::ptr_eq(
+        &index,
+        &mounted.model.message_tools.get_untracked()
+    ));
+}
+
+#[test]
+fn message_delivery_updates_one_native_row_with_sent_text_and_keeps_separate_sends() {
+    let mounted = mount(false, 1000.0);
+    mounted.model.open_session("session-plan".into());
+    let (completed, mut receipt) =
+        crate::adapt::message_pair("00000000-0000-4000-8000-000000000001", "native-message");
+    let mut running = completed.clone();
+    running.body.clear();
+    running.tool.as_mut().unwrap().state = ToolState::Running;
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.messages = vec![running]);
+    mounted.settle();
+    let row_id = |mounted: &Mounted| {
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .into_iter()
+            .find(|node| node.label.as_deref() == Some("Tool call native-message"))
+            .unwrap()
+            .id
+    };
+    let original_row = row_id(&mounted);
+    let row_has = |label: &str| {
+        let tree = mounted.ui.inspection_snapshot();
+        let mut descendants = tree.node(row_id(&mounted)).unwrap().children.clone();
+        while let Some(id) = descendants.pop() {
+            let node = tree.node(id).unwrap();
+            if node.label.as_deref() == Some(label) {
+                return true;
+            }
+            descendants.extend(&node.children);
+        }
+        false
+    };
+    assert_eq!(
+        tool_row_description(&mounted, "native-message"),
+        "Message · Working"
+    );
+    mounted.click("Collapsed. Open summary");
+    mounted.click("Summary. Expand fully");
+    let sent = "Please check the change.\nKeep the result local.";
+    assert!(row_has(sent));
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.messages = vec![receipt.clone(), completed.clone()]);
+    mounted.settle();
+    assert_eq!(row_id(&mounted), original_row);
+    assert!(!has_label(&mounted, &format!("Tool call {}", receipt.id)));
+    assert!(row_has("→ recipient"));
+    assert!(row_has("queued"));
+    assert!(has_label(&mounted, "Expanded. Collapse"));
+    assert!(row_has(sent));
+    assert!(!row_has(&completed.body));
+    if let Some(ToolDetail::Message { read, .. }) = &mut receipt.tool.as_mut().unwrap().detail {
+        *read = true;
+    }
+    for _ in 0..2 {
+        mounted
+            .model
+            .snapshot
+            .update(|s| s.messages = vec![completed.clone(), receipt.clone()]);
+        mounted.settle();
+        assert_eq!(row_id(&mounted), original_row);
+        assert!(row_has("read"));
+        assert!(!row_has("queued"));
+        assert!(row_has(sent));
+    }
+    let (second, receipt_b) =
+        crate::adapt::message_pair("00000000-0000-4000-8000-000000000002", "second-message");
+    mounted
+        .model
+        .snapshot
+        .update(|s| s.messages.extend([second, receipt_b]));
+    mounted.settle();
+    assert!(has_label(&mounted, "Tool call native-message"));
+    assert!(has_label(&mounted, "Tool call second-message"));
+    assert_eq!(
+        mounted
+            .ui
+            .inspection_snapshot()
+            .nodes
+            .iter()
+            .filter(|node| node
+                .label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("Tool call ")))
+            .count(),
+        2
+    );
+}
+
 fn focused_label(mounted: &Mounted) -> Option<String> {
     let focused = mounted.ui.focused()?.id();
     mounted

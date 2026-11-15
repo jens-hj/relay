@@ -100,6 +100,23 @@ impl Mounted {
 }
 
 #[test]
+fn link_button_keeps_a_compact_line_box_inside_conversation_text() {
+    let mounted = mount(Size::new(400.0, 200.0), || {
+        let press: OnPress = Rc::new(|| {});
+        view! {
+            col height:min-content line-height:32px {
+                LinkButton text:"Compact action" on-press:(press)
+            }
+        }
+    });
+    // 14px label, 2px gap, 1px rule, independent of the inherited line height.
+    assert!((mounted.rect("Compact action").size.height - 17.0).abs() < 0.5);
+    install_theme(&theme(ThemeVariant::Light, 1.5));
+    mounted.settle();
+    assert!((mounted.rect("Compact action").size.height - 25.5).abs() < 0.5);
+}
+
+#[test]
 fn status_squares_name_every_state_and_follow_changes() {
     let status = State::new(AgentStatus::Working);
     let mounted = mount(Size::new(400.0, 100.0), || {
