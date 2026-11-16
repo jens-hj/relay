@@ -8,6 +8,8 @@ use relay_core::*;
 use relay_ui::tokens::{ThemeVariant, theme};
 use std::time::Duration;
 
+mod multi_project;
+
 fn windowed_history(count: usize) -> Mounted {
     let mounted = mount(false, 1380.0);
     mounted.model.open_session("session-plan".into());
@@ -5374,10 +5376,12 @@ fn operation_rows_show_status_marks_full_cell_details_and_keep_server_order() {
                     assert!(details.size.height >= 36.0, "{id}");
                 }
             }
-            // Exactly the running row carries the working mark.
+            // Exactly the running operation carries the working mark. Scope
+            // by both axes: the sidebar also contains agent status marks.
             let working = nodes
                 .iter()
                 .filter(|n| n.role == Role::Image && n.label.as_deref() == Some("Working"))
+                .filter(|n| card.contains(n.rect.center()))
                 .filter(|n| n.rect.origin.y >= card.origin.y && n.rect.max_y() <= card.max_y())
                 .count();
             assert_eq!(
@@ -5389,6 +5393,7 @@ fn operation_rows_show_status_marks_full_cell_details_and_keep_server_order() {
             assert!(
                 nodes.iter().any(|n| n.role == Role::Image
                     && n.label.as_deref() == Some(mark)
+                    && card.contains(n.rect.center())
                     && n.rect.origin.y >= card.origin.y
                     && n.rect.max_y() <= card.max_y()),
                 "{id} lacks its {mark} mark at {width}"
@@ -10198,7 +10203,7 @@ fn sidebar_keeps_project_navigation_in_ruled_cells_above_the_agent_tree() {
 }
 
 #[test]
-fn agent_tree_follows_parent_links_scoped_to_the_selected_project() {
+fn agent_tree_follows_parent_links_in_each_open_project() {
     let mounted = mount_orchestration(1380.0);
     let plan = tree_row(&mounted, "Profile design");
     let migration = tree_row(&mounted, "Schema migration");
@@ -10219,7 +10224,7 @@ fn agent_tree_follows_parent_links_scoped_to_the_selected_project() {
             .fold(f32::MAX, f32::min)
     };
     assert!((indent("Write migrations") - indent("Schema migration") - 14.0).abs() < 1.0);
-    // Another project's agents stay out of this project's tree.
+    // Another project begins closed, then coexists with the first tree.
     let mut snapshot = mounted.model.snapshot.get_untracked();
     let mut other = snapshot.projects[0].clone();
     other.id = "other".into();
@@ -10238,8 +10243,11 @@ fn agent_tree_follows_parent_links_scoped_to_the_selected_project() {
     mounted.click("Select project Other project");
     assert_eq!(mounted.model.project.get_untracked(), "other");
     assert!(has_row(&mounted, "Other agent"));
-    assert!(!has_row(&mounted, "Schema migration"));
-    mounted.click("Other agent");
+    assert!(has_row(&mounted, "Schema migration"));
+    // Both deep trees remain mounted; keyboard focus reveals a row below
+    // the shared viewport before activating it.
+    focus_row(&mounted, "Other agent");
+    mounted.key(Key::Enter, false);
     assert_eq!(mounted.model.session.get_untracked(), "other-session");
     assert_eq!(mounted.model.page.get_untracked(), Page::Sessions);
 }
@@ -11944,7 +11952,7 @@ fn project_menu_summarizes_running_agents_and_updates_without_reopening() {
     mounted.click("Select project Other project");
     assert!(!has_label(&mounted, "Projects"));
     assert!(has_row(&mounted, "Other agent"));
-    assert!(!has_row(&mounted, "Profile design"));
+    assert!(has_row(&mounted, "Profile design"));
 }
 
 #[test]
@@ -11954,10 +11962,10 @@ fn project_sidebar_summaries_keep_the_selected_agent_tree_indented() {
     let project = mounted.rect("Select project Relay · demo");
     assert!(!has_label(&mounted, "Director row Project director"));
     assert!(!has_label(&mounted, "Open director Project director"));
-    // The 60px agents header starts right under the project menu; its New
-    // agent cell is centred in it.
-    let new_project = mounted.rect("New Project");
-    let header_top = new_project.origin.y + new_project.size.height;
+    // Each agents header follows its project section header; its New agent
+    // cell fills the same 60px row.
+    let section = mounted.rect("Toggle agents for Relay · demo");
+    let header_top = section.origin.y + section.size.height;
     assert!((mounted.rect("New agent").center().y - (header_top + 30.0)).abs() < 1.0);
     let root = tree_row(&mounted, "Profile design");
     // The tree keeps its normal 12px row padding plus the project's elbow.

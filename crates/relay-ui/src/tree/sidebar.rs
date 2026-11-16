@@ -257,6 +257,13 @@ pub fn AgentSidebar(
     /// Draw an outer frame when used outside an already framed sidebar.
     #[prop(default = true)]
     framed: bool,
+    /// Fit the content inside a parent's scroll area instead of creating
+    /// a separate tree viewport. Useful for several project sections.
+    #[prop(default = false)]
+    embedded: bool,
+    /// The enclosing scroll viewport, used to keep row actions in view.
+    #[prop(optional)]
+    action_viewport: Option<State<Rect>>,
     roots: Live<Vec<AgentNode>>,
     /// Width in logical pixels before UI scale.
     #[prop(default = 380.0)]
@@ -447,11 +454,14 @@ pub fn AgentSidebar(
         },
     );
 
-    let viewport = State::new(Rect::default());
+    let viewport = action_viewport.unwrap_or_else(|| State::new(Rect::default()));
     let tree_viewport = view! {
-        col height:1fr min-height:0px {}
+        col height:{if embedded { Dimension::MinContent } else { Dimension::Fr(1.0) }}
+            min-height:0px {}
     };
-    tree_viewport.on_layout(move |rect| viewport.set(rect));
+    if action_viewport.is_none() {
+        tree_viewport.on_layout(move |rect| viewport.set(rect));
+    }
     let tree = view! {
         col height:min-content pad:(top:{px(2.0)}px bottom:{px(14.0)}px) {}
     };
@@ -507,13 +517,19 @@ pub fn AgentSidebar(
     let filter_value: Live<Option<AgentStatus>> = filter.into();
     let tally: Live<StatusTally> = tally.into();
     let waiting: Live<Vec<Approval>> = waiting.into();
-    tree_viewport.adopt(&view! {
-        scroll {
-            { parent.adopt(&tree); }
-        }
-    });
+    if embedded {
+        tree_viewport.adopt(&tree);
+    } else {
+        tree_viewport.adopt(&view! {
+            scroll {
+                { parent.adopt(&tree); }
+            }
+        });
+    }
     view! {
-        col width:{px(width)}px shrink:0 fill:ground.panel font-color:ground.ink label:"Agents"
+        col width:{px(width)}px
+            height:{if embedded { Dimension::MinContent } else { Dimension::Fill }} shrink:0
+            fill:ground.panel font-color:ground.ink label:"Agents"
             stroke:(width:{px(if framed { 1.0 } else { 0.0 })} color:ground.hairline offset:{px(-1.0)}) {
             row height:{px(60.0)}px shrink:0 {
                 row width:1fr gap:{px(10.0)}px align:center

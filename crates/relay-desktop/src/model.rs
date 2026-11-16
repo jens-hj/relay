@@ -22,6 +22,11 @@ pub enum EditTarget {
     New,
 }
 #[derive(Clone)]
+struct ProjectSelection {
+    session: String,
+    issue: Option<String>,
+}
+#[derive(Clone)]
 pub enum Saved {
     Buffer(Draft),
     #[cfg(test)]
@@ -127,6 +132,9 @@ pub struct Model {
     pub project_draft: State<crate::projects::ProjectDraft>,
     pub workspace_selection: State<Option<Vec<String>>>,
     pub expanded_projects: State<BTreeSet<String>>,
+    /// Explicit section choices, local to this client session like agent folds.
+    pub collapsed_projects: State<BTreeSet<String>>,
+    project_selections: State<std::collections::BTreeMap<String, ProjectSelection>>,
     pub expanded_directors: State<BTreeSet<String>>,
     pub issue: State<Option<String>>,
     pub session: State<String>,
@@ -246,6 +254,8 @@ impl Model {
             project_draft: State::new(Default::default()),
             workspace_selection: State::new(None),
             expanded_projects: State::new(BTreeSet::new()),
+            collapsed_projects: State::new(BTreeSet::new()),
+            project_selections: State::new(Default::default()),
             expanded_directors: State::new(BTreeSet::new()),
             issue: State::new(None),
             session: State::new(String::new()),
@@ -376,6 +386,18 @@ impl Model {
                 .comments
                 .retain(|c| message_ids.contains(&c.message_id));
         }
+        self.expanded_projects.update(|ids| {
+            ids.retain(|id| snapshot.projects.iter().any(|p| &p.id == id));
+        });
+        self.collapsed_projects.update(|ids| {
+            ids.retain(|id| snapshot.projects.iter().any(|p| &p.id == id));
+        });
+        self.project_selections.update(|selections| {
+            selections.retain(|project, selection| {
+                snapshot.projects.iter().any(|p| &p.id == project)
+                    && Self::session_in_project(&snapshot, &selection.session, project)
+            });
+        });
         self.snapshot.set(snapshot);
         for id in &removed_configs {
             removed.insert(format!("agent-draft-{id}"));
@@ -433,6 +455,12 @@ impl Model {
                 .or(snapshot.projects.first())
             {
                 self.select_project(project.id.clone());
+            } else {
+                self.project.set(String::new());
+                self.session.set(String::new());
+                self.issue.set(None);
+                self.worker_director.set(String::new());
+                self.page.set(Page::NewProject);
             }
         }
         self.connected.set(update.connected);
@@ -1329,6 +1357,12 @@ impl Model {
             return;
         }
         let snapshot = self.snapshot.get_untracked();
+        if let EditTarget::Config(id) = &target {
+            let Some(config) = snapshot.agent_configs.iter().find(|c| &c.id == id) else {
+                return;
+            };
+            self.activate_project(&config.project_id);
+        }
         let Ok(project) = snapshot.project(&self.project.get_untracked()) else {
             return;
         };
@@ -1382,11 +1416,16 @@ impl Model {
         self.page.set(Page::Profiles);
     }
     pub fn open_new_worker(&self, parent_id: String) {
+        if self.busy.get_untracked() {
+            self.notice
+                .set("Wait for the save to finish before switching profiles.".into());
+            return;
+        }
         let snapshot = self.snapshot.get_untracked();
         let Some(parent) = snapshot.sessions.iter().find(|s| s.id == parent_id) else {
             return;
         };
-        self.project.set(parent.project_id.clone());
+        self.activate_project(&parent.project_id);
         self.open_profile(EditTarget::New);
         self.editor_parent.set(Some(parent_id));
         self.worker_prompt.set(String::new());
@@ -1472,6 +1511,109 @@ impl Model {
             Saved::AgentTemplate,
         );
     }
+    pub fn set_project_expanded(&self, id: String, expanded: bool) {
+        self.expanded_projects.update(|ids| {
+            if expanded {
+                ids.insert(id.clone());
+            } else {
+                ids.remove(&id);
+            }
+        });
+        self.collapsed_projects.update(|ids| {
+            if expanded {
+                ids.remove(&id);
+            } else {
+                ids.insert(id);
+            }
+        });
+    }
+    fn session_in_project(snapshot: &Snapshot, id: &str, project: &str) -> bool {
+        snapshot
+            .sessions
+            .iter()
+            .any(|s| s.id == id && s.project_id == project)
+            || id.strip_prefix("agent-draft-").is_some_and(|id| {
+                snapshot
+                    .agent_configs
+                    .iter()
+                    .any(|c| c.id == id && c.project_id == project)
+            })
+    }
+    /// Change the active context without changing any other section's openness
+    /// or touching conversation buffers. Board selection is already per project.
+    fn activate_project(&self, id: &str) {
+        let snapshot = self.snapshot.get_untracked();
+        if !snapshot.projects.iter().any(|p| p.id == id) {
+            return;
+        }
+        let previous = self.project.get_untracked();
+        let session = self.session.get_untracked();
+        if Self::session_in_project(&snapshot, &session, &previous) {
+            self.project_selections.update(|selections| {
+                selections.insert(
+                    previous.clone(),
+                    ProjectSelection {
+                        session: session.clone(),
+                        issue: self.issue.get_untracked(),
+                    },
+                );
+            });
+        }
+        if !self.collapsed_projects.get_untracked().contains(id) {
+            self.expanded_projects.update(|ids| {
+                ids.insert(id.to_owned());
+            });
+        }
+        if previous == id && Self::session_in_project(&snapshot, &session, id) {
+            return;
+        }
+        self.project.set(id.to_owned());
+        let selection = self
+            .project_selections
+            .get_untracked()
+            .get(id)
+            .cloned()
+            .filter(|selection| Self::session_in_project(&snapshot, &selection.session, id));
+        let issue = selection
+            .as_ref()
+            .and_then(|selection| selection.issue.clone())
+            .filter(|issue| {
+                snapshot
+                    .issue(issue)
+                    .is_ok_and(|task| task.project_id == id)
+            })
+            .map(|issue| snapshot.canonical_issue_id(&issue).to_owned());
+        let session = selection
+            .map(|selection| selection.session)
+            .or_else(|| {
+                snapshot
+                    .sessions
+                    .iter()
+                    .find(|s| s.project_id == id)
+                    .map(|s| s.id.clone())
+            })
+            .unwrap_or_default();
+        self.issue.set(issue);
+        self.session.set(session);
+    }
+    pub fn open_project_profile(&self, id: String, target: EditTarget) {
+        if self.busy.get_untracked() {
+            self.notice
+                .set("Wait for the save to finish before switching profiles.".into());
+            return;
+        }
+        if !self
+            .snapshot
+            .get_untracked()
+            .projects
+            .iter()
+            .any(|p| p.id == id)
+        {
+            return;
+        }
+        self.activate_project(&id);
+        self.open_profile(target);
+    }
     pub fn select_project(&self, id: String) {
         self.sidebar_open.set(false);
         let snapshot = self.snapshot.get_untracked();
@@ -1490,11 +1632,7 @@ impl Model {
             })
             .map(|p| p.id.clone())
             .unwrap_or(id);
-        self.expanded_projects.update(|ids| {
-            ids.insert(id.clone());
-        });
-        self.project.set(id.clone());
-        self.issue.set(None);
+        self.activate_project(&id);
         self.worker_director.set(
             self.snapshot
                 .get_untracked()
@@ -1506,15 +1644,6 @@ impl Model {
         );
         self.worker_approval.set(false);
         self.workspace_selection.set(None);
-        let snapshot = self.snapshot.get_untracked();
-        self.session.set(
-            snapshot
-                .sessions
-                .iter()
-                .find(|s| s.project_id == id)
-                .map(|s| s.id.clone())
-                .unwrap_or_default(),
-        );
         self.page.set(Page::Board);
     }
     pub fn request_history(&self, request: StreamRequest) -> bool {
@@ -1628,10 +1757,7 @@ impl Model {
             .iter()
             .find(|session| session.id == id)
         {
-            self.project.set(session.project_id.clone());
-            self.expanded_projects.update(|ids| {
-                ids.insert(session.project_id.clone());
-            });
+            self.activate_project(&session.project_id);
             self.expanded_directors.update(|ids| {
                 ids.insert(session.agent_config_id.clone());
             });
@@ -1667,7 +1793,7 @@ impl Model {
         }) {
             self.open_session(session.id.clone());
         } else {
-            self.project.set(director.project_id.clone());
+            self.activate_project(&director.project_id);
             let task = snapshot
                 .effective_profile(director)
                 .ok()

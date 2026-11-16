@@ -1,6 +1,5 @@
-//! The sidebar: project navigation as ruled header cells above the agent
-//! tree of the selected project, with usage and the server connection at
-//! its foot.
+//! Independent project sections sharing a scroll area, with usage and the
+//! server connection at the foot. Selection does not close other sections.
 
 use crate::icons::*;
 use crate::ui::press;
@@ -56,10 +55,16 @@ fn unix_now() -> u64 {
 /// request reads the same snapshot entry, so it resolves everywhere.
 pub fn respond_first(model: Model, session_id: &str, allow: bool) {
     let snapshot = model.snapshot.get_untracked();
-    if let Some(pending) = adapt::needs_you(&snapshot, &model.project.get_untracked())
-        .into_iter()
-        .find(|p| p.session_id == session_id)
-    {
+    let pending = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .and_then(|session| {
+            adapt::needs_you(&snapshot, &session.project_id)
+                .into_iter()
+                .find(|p| p.session_id == session_id)
+        });
+    if let Some(pending) = pending {
         respond(model, &pending.permission, allow);
     } else {
         model
@@ -91,6 +96,160 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
         SIDEBAR_WIDTH
     };
     let menu = State::new(false);
+    let action_viewport = State::new(Rect::default());
+    let projects = view! {
+        col height:1fr min-height:0px {}
+    };
+    projects.on_layout(move |rect| action_viewport.set(rect));
+    projects.adopt(&view! {
+        scroll {
+            col height:min-content label:"Project agents" {
+                for (_, project) in {model.snapshot.get().projects.into_iter().map(|p| (p.id.clone(), p))} {
+                    ProjectSection model:(model) project-id:(State::new(project.id.clone()))
+                        name:(State::new(project.name.clone())) width:(width)
+                        action-viewport:(action_viewport)
+                }
+            }
+        }
+    });
+    let usage = Derived::new(move || {
+        adapt::harness_usage(&model.snapshot.get(), &model.harnesses.get(), unix_now())
+    });
+    view! {
+        stack width:{px(width)}px shrink:0 fill:ground.panel clip label:"Sidebar" {
+            col {
+                NavigationHead model:(model) menu:(menu)
+                if menu.get() {
+                    ProjectMenu model:(model) menu:(menu)
+                }
+                row height:{px(32.0)}px shrink:0
+                    stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                    CellButton label:"Show archived chats" selected:(model.show_archived)
+                        on-press:(press(move || model.show_archived.set(!model.show_archived.get_untracked()))) {
+                        Label
+                            text:(Derived::new(move || if model.show_archived.get() { "✓ Show archived".to_string() } else { "Show archived".to_string() }))
+                            role:(TextRole::Label) tone:(Tone::Muted)
+                    }
+                }
+                { parent.adopt(&projects); }
+                if !usage.get().is_empty() {
+                    UsageFoot harnesses:(relay_ui::Live::from(usage))
+                }
+                ServerFoot model:(model)
+            }
+            el width:fill height:fill nohit label:"Sidebar border"
+                stroke:(width:{px(1.0)} color:ground.rule edges:(left right) offset:{px(-1.0)}) {}
+        }
+    }
+}
+
+#[component]
+fn ProjectSection(
+    model: Model,
+    project_id: State<String>,
+    name: State<String>,
+    width: f32,
+    action_viewport: State<Rect>,
+) -> Element {
+    let expanded = Derived::new(move || model.expanded_projects.get().contains(&project_id.get()));
+    // At large interface scales the phone drawer has few logical pixels.
+    // Wrap the actions so the project name remains readable.
+    let compact = width < 280.0;
+    let actions = view! {
+        ProjectSectionActions model:(model) project-id:(project_id) name:(name) compact:(compact)
+    };
+    let toggle = menu_cell(
+        Derived::new(move || format!("Toggle agents for {}", name.get())),
+        press(move || {
+            model.set_project_expanded(project_id.get_untracked(), !expanded.get_untracked())
+        }),
+        true,
+        view! {
+            row width:1fr min-width:0px align:center gap:{px(8.0)}px {
+                icon size:{px(12.0)}px shrink:0
+                    {if expanded.get() {tree_chevron_down} else {tree_chevron_right}}
+                ProjectSummary model:(model) project-id:(project_id) name:(name)
+            }
+        },
+        Some(Derived::new(move || {
+            if expanded.get() {
+                "Expanded".into()
+            } else {
+                "Collapsed".into()
+            }
+        })),
+    );
+    toggle.on_key(move |event, ctx| {
+        if !matches!(event.kind, KeyEventKind::Down { .. }) {
+            return;
+        }
+        match event.key {
+            Key::ArrowLeft => model.set_project_expanded(project_id.get_untracked(), false),
+            Key::ArrowRight => model.set_project_expanded(project_id.get_untracked(), true),
+            _ => return,
+        }
+        ctx.stop_propagation();
+    });
+    view! {
+        col height:min-content shrink:0 label:{format!("Agents in {}", name.get())} {
+            row height:{px(34.0)}px shrink:0
+                fill:{if model.project.get() == project_id.get() {color(ground.selected)} else {Color::TRANSPARENT}}
+                stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
+                { parent.adopt(&toggle); }
+                { if !compact { parent.adopt(&actions); } }
+            }
+            { if compact { parent.adopt(&actions); } }
+            if expanded.get() {
+                ProjectAgents model:(model) project-id:(project_id) width:(width)
+                    action-viewport:(action_viewport)
+            }
+        }
+    }
+}
+
+#[component]
+fn ProjectSectionActions(
+    model: Model,
+    project_id: State<String>,
+    name: State<String>,
+    compact: bool,
+) -> Element {
+    view! {
+        row height:{px(34.0)}px
+            width:{if compact { Dimension::Fill } else { Dimension::Px(px(102.0)) }} shrink:0
+            stroke:(width:{px(if compact {1.0} else {0.0})} color:ground.hairline edges:bottom) {
+            row width:1fr min-width:0px {
+                CellButton label:(Derived::new(move || format!("Project board for {}", name.get())))
+                    rule:(Rule::Left) horizontal-inset:0.0
+                    on-press:(press(move || model.select_project(project_id.get_untracked()))) {
+                    icon size:{px(14.0)}px board-icon
+                }
+            }
+            row width:1fr min-width:0px {
+                CellButton label:(Derived::new(move || format!("Connections for {}", name.get())))
+                    rule:(Rule::Left) horizontal-inset:0.0
+                    on-press:(press(move || { model.select_project(project_id.get_untracked()); model.page.set(Page::Connections); })) {
+                    icon size:{px(14.0)}px connections-icon
+                }
+            }
+            row width:1fr min-width:0px {
+                CellButton label:(Derived::new(move || format!("Defaults for {}", name.get())))
+                    rule:(Rule::Left) horizontal-inset:0.0
+                    on-press:(press(move || model.open_project_profile(project_id.get_untracked(), EditTarget::Defaults))) {
+                    icon size:{px(14.0)}px sliders-icon
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ProjectAgents(
+    model: Model,
+    project_id: State<String>,
+    width: f32,
+    action_viewport: State<Rect>,
+) -> Element {
     let roots = Derived::new(move || {
         let mut snapshot = model.snapshot.get();
         // Presentation only: a matching ACK resolves this client's action
@@ -116,7 +275,7 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
         };
         let roots = adapt::agent_forest(
             &snapshot,
-            &model.project.get(),
+            &project_id.get(),
             &selected,
             &model.collapsed_agents.get(),
             &model.catalogs.get(),
@@ -126,9 +285,6 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
         } else {
             without_archived(roots)
         }
-    });
-    let usage = Derived::new(move || {
-        adapt::harness_usage(&model.snapshot.get(), &model.harnesses.get(), unix_now())
     });
     let open: Rc<dyn Fn(String)> = Rc::new(move |id| {
         if let Some(config) = id.strip_prefix("config:") {
@@ -165,7 +321,8 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
     let focus: Rc<dyn Fn(Option<String>)> = Rc::new(move |id| model.agent_focus.set(id));
     let approve: Rc<dyn Fn(String)> = Rc::new(move |id| respond_first(model, &id, true));
     let review: Rc<dyn Fn(String)> = Rc::new(move |id| model.open_session(id));
-    let new_agent: OnPress = Rc::new(move || model.open_profile(EditTarget::New));
+    let new_agent: OnPress =
+        Rc::new(move || model.open_project_profile(project_id.get_untracked(), EditTarget::New));
     let spawn: Rc<dyn Fn(String)> = Rc::new(move |parent| model.open_new_worker(parent));
     let archive: Rc<dyn Fn(String)> = Rc::new(move |session_id| {
         model.submit(
@@ -200,46 +357,30 @@ pub fn Sidebar(model: Model, viewport: State<f32>) -> Element {
         );
     });
     let roots: relay_ui::Live<Vec<AgentNode>> = roots.into();
-    let focused: relay_ui::Live<Option<String>> =
-        Derived::new(move || model.agent_focus.get()).into();
-    let archive_control = view! {
-        row height:{px(32.0)}px shrink:0
-            stroke:(width:{px(1.0)} color:ground.hairline edges:bottom) {
-            CellButton label:"Show archived chats" selected:(model.show_archived)
-                on-press:(press(move || model.show_archived.set(!model.show_archived.get_untracked()))) {
-                Label
-                    text:(Derived::new(move || if model.show_archived.get() { "✓ Show archived".to_string() } else { "Show archived".to_string() }))
-                    role:(TextRole::Label) tone:(Tone::Muted)
-            }
-        }
-    };
-    let agents = view! {
-        AgentSidebar roots:(roots) width:(width) focus:(focused) root-indent:true framed:false
-            on-edit:(Some(edit)) on-new:(Some(new_agent)) on-spawn:(Some(spawn))
-            on-open:(Some(open)) on-toggle:(Some(toggle)) on-focus:(Some(focus))
-            on-approve:(Some(approve)) on-review:(Some(review))
-            filter-controls:(Some(archive_control)) on-archive:(Some(archive))
-            archivable:(relay_ui::Live::from(archivable)) on-delete:(Some(delete)) {
-            if !usage.get().is_empty() {
-                UsageFoot harnesses:(relay_ui::Live::from(usage))
-            }
-            ServerFoot model:(model)
-        }
-    };
+    let focused: relay_ui::Live<Option<String>> = Derived::new(move || {
+        let id = model.agent_focus.get()?;
+        let snapshot = model.snapshot.get();
+        let belongs = if let Some(config) = id.strip_prefix("config:") {
+            snapshot
+                .agent_configs
+                .iter()
+                .any(|c| c.id == config && c.project_id == project_id.get())
+        } else {
+            snapshot
+                .sessions
+                .iter()
+                .any(|s| s.id == id && s.project_id == project_id.get())
+        };
+        belongs.then_some(id)
+    })
+    .into();
     view! {
-        stack width:{px(width)}px shrink:0 fill:ground.panel clip label:"Sidebar" {
-            col {
-                NavigationHead model:(model) menu:(menu)
-                if menu.get() {
-                    ProjectMenu model:(model) menu:(menu)
-                }
-                col height:1fr min-height:0px {
-                    { parent.adopt(&agents); }
-                }
-            }
-            el width:fill height:fill nohit label:"Sidebar border"
-                stroke:(width:{px(1.0)} color:ground.rule edges:(left right) offset:{px(-1.0)}) {}
-        }
+        AgentSidebar roots:(roots) width:(width) focus:(focused) root-indent:true framed:false
+            embedded:true action-viewport:(Some(action_viewport)) on-edit:(Some(edit))
+            on-new:(Some(new_agent)) on-spawn:(Some(spawn)) on-open:(Some(open))
+            on-toggle:(Some(toggle)) on-focus:(Some(focus)) on-approve:(Some(approve))
+            on-review:(Some(review)) on-archive:(Some(archive))
+            archivable:(relay_ui::Live::from(archivable)) on-delete:(Some(delete))
     }
 }
 

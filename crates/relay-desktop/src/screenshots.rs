@@ -12,7 +12,7 @@ use relay_core::*;
 use relay_ui::tokens::{ThemeVariant, theme};
 use std::time::Duration;
 
-fn render(ui: &Ui, logical: Size, scale: f32, path: &str) {
+pub(crate) fn render(ui: &Ui, logical: Size, scale: f32, path: &str) {
     use mosaic::render::Renderer;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
